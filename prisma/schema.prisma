@@ -1,0 +1,564 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  ADMIN
+  IT_AGENT
+  DEPARTMENT_MANAGER
+  USER
+}
+
+enum TicketSource {
+  WEB
+  EMAIL
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+  INTERNAL_NOTE
+}
+
+enum TicketHistoryType {
+  CREATED
+  STATUS_CHANGE
+  PRIORITY_CHANGE
+  CATEGORY_CHANGE
+  ASSIGNMENT_CHANGE
+  DEPARTMENT_CHANGE
+  CLOSED
+  REOPENED
+  COMMENT_ADDED
+  ATTACHMENT_ADDED
+  CANCEL_REASON_SET
+}
+
+enum AuthProvider {
+  MICROSOFT
+  CREDENTIALS
+}
+
+enum ProjectStatus {
+  PLANNING
+  IN_PROGRESS
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum ActivityStatus {
+  TODO
+  IN_PROGRESS
+  ON_HOLD
+  BLOCKED
+  COMPLETED
+  CANCELLED
+}
+
+enum ActivityPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum GoalStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  ON_TRACK
+  AT_RISK
+  COMPLETED
+  CANCELLED
+}
+
+// ─── Organisation Structure ───────────────────────────────────────────────────
+
+model Company {
+  id            String         @id @default(cuid())
+  name          String
+  domain        String         @unique
+  businessUnits BusinessUnit[]
+  users         User[]
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model BusinessUnit {
+  id          String            @id @default(cuid())
+  name        String
+  company     Company           @relation(fields: [companyId], references: [id])
+  companyId   String
+  departments Department[]
+  users       User[]
+  projects    Project[]
+  activities  ProjectActivity[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+}
+
+model Department {
+  id             String            @id @default(cuid())
+  name           String
+  businessUnit   BusinessUnit?     @relation(fields: [businessUnitId], references: [id])
+  businessUnitId String?
+  subDepartments SubDepartment[]
+  users          User[]
+  tickets        Ticket[]
+  projects       Project[]
+  activities     ProjectActivity[]
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+}
+
+model SubDepartment {
+  id           String     @id @default(cuid())
+  name         String
+  department   Department @relation(fields: [departmentId], references: [id])
+  departmentId String
+  users        User[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+// ─── Users & Auth ─────────────────────────────────────────────────────────────
+
+model User {
+  id                 String         @id @default(cuid())
+  email              String         @unique
+  name               String?
+  image              String?
+  role               Role           @default(USER)
+  isActive           Boolean        @default(true)
+  passwordHash       String?
+  authProvider       AuthProvider   @default(MICROSOFT)
+  mustChangePassword Boolean        @default(false)
+  company            Company?       @relation(fields: [companyId], references: [id])
+  companyId          String?
+  businessUnit       BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
+  businessUnitId     String?
+  department         Department?    @relation(fields: [departmentId], references: [id])
+  departmentId       String?
+  subDepartment      SubDepartment? @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId    String?
+
+  customRole          CustomRole?        @relation("UserCustomRole", fields: [customRoleId], references: [id])
+  customRoleId        String?
+
+  requestedTickets    Ticket[]           @relation("TicketRequester")
+  assignedTickets     Ticket[]           @relation("TicketAgent")
+  ticketMessages      TicketMessage[]
+  ticketAttachments   TicketAttachment[]
+  ticketHistories     TicketHistory[]
+  ownedProjects       Project[]          @relation("ProjectOwner")
+  projectMemberships  Project[]          @relation("ProjectMembers")
+  assignedActivities  ProjectActivity[]  @relation("ActivityAssignee")
+  createdActivities   ProjectActivity[]  @relation("ActivityCreator")
+  ownedGoals          YearlyGoal[]       @relation("GoalOwner")
+  notifications       Notification[]
+  accounts            Account[]
+  sessions            Session[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Ticket Config Tables ─────────────────────────────────────────────────────
+
+model TicketCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  color       String   @default("#6366f1")
+  isActive    Boolean  @default(true)
+  tickets     Ticket[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model TicketPriority {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  level     Int
+  color     String
+  isActive  Boolean  @default(true)
+  tickets   Ticket[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TicketStatus {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  color     String
+  isDefault Boolean  @default(false)
+  isClosed  Boolean  @default(false)
+  isActive  Boolean  @default(true)
+  order     Int      @default(0)
+  tickets   Ticket[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model TicketCancelReason {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  tickets     Ticket[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─── Tickets ──────────────────────────────────────────────────────────────────
+
+model Ticket {
+  id           String       @id @default(cuid())
+  ticketNumber Int          @unique @default(autoincrement())
+  title        String
+  description  String       @db.Text
+  source       TicketSource @default(WEB)
+
+  requester       User            @relation("TicketRequester", fields: [requesterId], references: [id])
+  requesterId     String
+  assignedAgent   User?           @relation("TicketAgent", fields: [assignedAgentId], references: [id])
+  assignedAgentId String?
+  department      Department?     @relation(fields: [departmentId], references: [id])
+  departmentId    String?
+  category        TicketCategory? @relation(fields: [categoryId], references: [id])
+  categoryId      String?
+  priority        TicketPriority? @relation(fields: [priorityId], references: [id])
+  priorityId      String?
+  status          TicketStatus    @relation(fields: [statusId], references: [id])
+  statusId        String
+  cancelReason    TicketCancelReason? @relation(fields: [cancelReasonId], references: [id])
+  cancelReasonId  String?
+
+  emailMessageId String? @unique
+  emailThreadId  String?
+
+  project    Project?         @relation(fields: [projectId], references: [id])
+  projectId  String?
+  activity   ProjectActivity? @relation(fields: [activityId], references: [id])
+  activityId String?
+
+  messages    TicketMessage[]
+  attachments TicketAttachment[]
+  history     TicketHistory[]
+
+  closedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([requesterId])
+  @@index([assignedAgentId])
+  @@index([statusId])
+  @@index([priorityId])
+  @@index([categoryId])
+  @@index([departmentId])
+  @@index([createdAt])
+  @@index([projectId])
+  @@index([activityId])
+}
+
+model TicketMessage {
+  id       String           @id @default(cuid())
+  ticket   Ticket           @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticketId String
+  author   User?            @relation(fields: [authorId], references: [id])
+  authorId String?
+  body     String           @db.Text
+
+  direction  MessageDirection @default(OUTBOUND)
+  isInternal Boolean          @default(false)
+
+  emailMessageId String?
+  fromEmail      String?
+  fromName       String?
+
+  attachments TicketAttachment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ticketId])
+  @@index([emailMessageId])
+}
+
+model TicketAttachment {
+  id           String         @id @default(cuid())
+  ticket       Ticket         @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticketId     String
+  message      TicketMessage? @relation(fields: [messageId], references: [id])
+  messageId    String?
+  uploadedBy   User?          @relation(fields: [uploadedById], references: [id])
+  uploadedById String?
+  filename     String
+  originalName String
+  mimeType     String
+  size         Int
+  path         String
+  createdAt    DateTime       @default(now())
+
+  @@index([ticketId])
+}
+
+model TicketHistory {
+  id          String            @id @default(cuid())
+  ticket      Ticket            @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticketId    String
+  changedBy   User?             @relation(fields: [changedById], references: [id])
+  changedById String?
+  type        TicketHistoryType
+  oldValue    String?
+  newValue    String?
+  description String?
+  createdAt   DateTime          @default(now())
+
+  @@index([ticketId])
+}
+
+// ─── Projects ─────────────────────────────────────────────────────────────────
+
+model Project {
+  id             String        @id @default(cuid())
+  title          String
+  description    String?       @db.Text
+  status         ProjectStatus @default(PLANNING)
+  priority       Int           @default(2)
+  progress       Int           @default(0)
+  owner          User          @relation("ProjectOwner", fields: [ownerId], references: [id])
+  ownerId        String
+  department     Department?   @relation(fields: [departmentId], references: [id])
+  departmentId   String?
+  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id])
+  businessUnitId String?
+  startDate      DateTime?
+  endDate        DateTime?
+  successTarget  String?       @db.Text
+  failTarget     String?       @db.Text
+
+  members     User[]            @relation("ProjectMembers")
+  activities  ProjectActivity[]
+  tickets     Ticket[]
+  yearlyGoals YearlyGoal[]      @relation("GoalProjects")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId])
+  @@index([status])
+}
+
+model ProjectActivity {
+  id             String           @id @default(cuid())
+  title          String
+  description    String?          @db.Text
+  status         ActivityStatus   @default(TODO)
+  priority       ActivityPriority @default(MEDIUM)
+  project        Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  projectId      String?
+  assignedUser   User?            @relation("ActivityAssignee", fields: [assignedUserId], references: [id])
+  assignedUserId String?
+  createdBy      User?            @relation("ActivityCreator", fields: [createdById], references: [id])
+  createdById    String?
+  department     Department?      @relation(fields: [departmentId], references: [id])
+  departmentId   String?
+  businessUnit   BusinessUnit?    @relation(fields: [businessUnitId], references: [id])
+  businessUnitId String?
+  startDate      DateTime?
+  dueDate        DateTime?
+  progress       Int              @default(0)
+  completedAt    DateTime?
+  isCompleted    Boolean          @default(false)
+  tickets        Ticket[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@index([projectId])
+  @@index([assignedUserId])
+  @@index([createdById])
+  @@index([status])
+}
+
+// ─── Yearly Goals ─────────────────────────────────────────────────────────────
+
+model YearlyGoal {
+  id           String     @id @default(cuid())
+  year         Int
+  title        String
+  description  String?    @db.Text
+  status       GoalStatus @default(NOT_STARTED)
+  targetValue  Float?
+  currentValue Float?
+  unit         String?
+  owner        User       @relation("GoalOwner", fields: [ownerUserId], references: [id])
+  ownerUserId  String
+  projects     Project[]  @relation("GoalProjects")
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([year])
+  @@index([ownerUserId])
+}
+
+// ─── Custom Roles ─────────────────────────────────────────────────────────────
+
+model CustomRole {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  description String?
+  isBuiltIn   Boolean  @default(false)
+  users       User[]   @relation("UserCustomRole")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ─── Permissions ──────────────────────────────────────────────────────────────
+
+model Permission {
+  id          String           @id @default(cuid())
+  key         String           @unique
+  description String?
+  module      String
+  roles       RolePermission[]
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+}
+
+model RolePermission {
+  roleKey      String
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+  permissionId String
+  createdAt    DateTime   @default(now())
+
+  @@id([roleKey, permissionId])
+  @@index([roleKey])
+}
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  title     String
+  body      String
+  link      String?
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([isRead])
+}
+
+// ─── Email Processing ─────────────────────────────────────────────────────────
+
+enum EmailLogAction {
+  CREATED_TICKET
+  APPENDED_REPLY
+  SKIPPED_DUPLICATE
+  SKIPPED_LOOP
+  FAILED
+}
+
+model EmailProcessingLog {
+  id        String         @id @default(cuid())
+  runId     String
+  messageId String?
+  fromEmail String?
+  subject   String?
+  action    EmailLogAction
+  ticketId  String?
+  error     String?        @db.Text
+  createdAt DateTime       @default(now())
+
+  @@index([runId])
+  @@index([createdAt])
+  @@index([action])
+}
+
+model EmailPollRun {
+  id         String    @id @default(cuid())
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  created    Int       @default(0)
+  appended   Int       @default(0)
+  skipped    Int       @default(0)
+  errors     Int       @default(0)
+  lastError  String?   @db.Text
+  succeeded  Boolean   @default(false)
+
+  @@index([startedAt])
+}
+
+// ─── Outbound Notification Log ────────────────────────────────────────────────
+
+enum EmailNotificationType {
+  REPLY
+  CLOSED
+}
+
+enum EmailNotificationStatus {
+  SENT
+  FAILED
+  SKIPPED
+}
+
+model EmailNotificationLog {
+  id             String                  @id @default(cuid())
+  ticketId       String
+  messageId      String?
+  recipientEmail String
+  type           EmailNotificationType
+  status         EmailNotificationStatus
+  error          String?                 @db.Text
+  createdAt      DateTime                @default(now())
+
+  @@index([ticketId])
+  @@index([createdAt])
+  @@index([type])
+  @@index([status])
+}
