@@ -40,6 +40,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [successTarget, setSuccessTarget] = useState("");
+  const [isGoal, setIsGoal] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -56,6 +57,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setStartDate(p.startDate ? p.startDate.split("T")[0] : "");
           setEndDate(p.endDate ? p.endDate.split("T")[0] : "");
           setSuccessTarget(p.successTarget ?? "");
+          setIsGoal(p.isGoal ?? false);
           // Pre-select existing members
           const existingIds = new Set<string>(
             (p.members ?? []).map((m: { id: string }) => m.id)
@@ -96,6 +98,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           endDate: endDate || null,
           successTarget: successTarget || undefined,
           memberIds: Array.from(selectedMemberIds),
+          isGoal,
         }),
       });
       if (!res.ok) {
@@ -220,6 +223,21 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 onChange={(e) => setSuccessTarget(e.target.value)}
                 rows={2}
               />
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded"
+                  checked={isGoal}
+                  onChange={(e) => setIsGoal(e.target.checked)}
+                />
+                <span className="text-sm font-medium">This project is a Goal</span>
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Mark this project as a yearly goal for tracking purposes.
+              </p>
             </div>
 
             {adminUsers.length > 0 && (

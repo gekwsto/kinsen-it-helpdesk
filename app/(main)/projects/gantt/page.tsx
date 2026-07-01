@@ -57,7 +57,7 @@ export default async function ProjectGanttPage({
       activities: {
         orderBy: { startDate: "asc" },
         include: {
-          assignedUser: { select: { id: true, name: true, image: true } },
+          assignedUsers: { select: { id: true, name: true, image: true } },
         },
         ...(params.projectId ? { where: { projectId: params.projectId } } : {}),
       },
@@ -83,8 +83,8 @@ export default async function ProjectGanttPage({
       endDate: a.dueDate?.toISOString() ?? null,
       progress: a.progress,
       href: `/activities/${a.id}`,
-      assigneeName: a.assignedUser?.name ?? null,
-      assigneeImage: a.assignedUser?.image ?? null,
+      assigneeName: a.assignedUsers[0]?.name ?? null,
+      assigneeImage: a.assignedUsers[0]?.image ?? null,
       type: "activity" as const,
     })),
   }));

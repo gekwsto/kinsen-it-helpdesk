@@ -6,7 +6,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { formatDateTime, getInitials } from "@/lib/utils";
+import { formatDateTime, formatBytes, getInitials } from "@/lib/utils";
+import { Paperclip } from "lucide-react";
 import Link from "next/link";
 import { formatTicketNumber } from "@/lib/utils";
 import { StatusBadge, PriorityBadge, ColorBadge, SourceBadge } from "@/components/tickets/ticket-badge";
@@ -55,6 +56,17 @@ interface HistoryEntry {
   changedBy?: { id: string; name?: string | null; image?: string | null } | null;
 }
 
+interface TicketAttachment {
+  id: string;
+  filename: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  path: string;
+  createdAt: string;
+  uploadedBy: { id: string; name: string | null; email: string } | null;
+}
+
 export interface TicketDetailClientProps {
   ticketId: string;
   ticketNumber: number;
@@ -71,6 +83,7 @@ export interface TicketDetailClientProps {
   initialAssignedAgent: TicketAgent | null;
   initialClosedAt: string | null;
   initialMessages: ThreadMessage[];
+  ticketAttachments: TicketAttachment[];
   initialHistory: HistoryEntry[];
   currentUserId: string;
   userRole: Role;
@@ -102,6 +115,7 @@ export function TicketDetailClient({
   initialAssignedAgent,
   initialClosedAt,
   initialMessages,
+  ticketAttachments,
   initialHistory,
   currentUserId,
   userRole,
@@ -279,6 +293,43 @@ export function TicketDetailClient({
             canChangeStatus={canChangeStatus}
             canAssign={canAssign}
           />
+        )}
+
+        {/* Ticket-level attachments (not linked to a specific message) */}
+        {ticketAttachments.length > 0 && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Paperclip className="h-3.5 w-3.5" />
+                Attachments ({ticketAttachments.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {ticketAttachments.map((att) => (
+                <a
+                  key={att.id}
+                  href={att.path}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs hover:bg-muted transition-colors"
+                >
+                  <Paperclip className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium truncate">{att.originalName}</p>
+                    <p className="text-muted-foreground mt-0.5">
+                      {formatBytes(att.size)} · {att.mimeType}
+                    </p>
+                    <p className="text-muted-foreground">
+                      {formatDateTime(att.createdAt)}
+                      {att.uploadedBy && (
+                        <> · {att.uploadedBy.name ?? att.uploadedBy.email}</>
+                      )}
+                    </p>
+                  </div>
+                </a>
+              ))}
+            </CardContent>
+          </Card>
         )}
 
         {/* Details card — reflects real-time state */}

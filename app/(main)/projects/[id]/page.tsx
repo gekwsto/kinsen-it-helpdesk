@@ -10,7 +10,7 @@ import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target, Plus, Ticket, Pencil } from "lucide-react";
-import { ProjectStatus, ActivityStatus } from "@prisma/client";
+import { ProjectStatus, ActivityStatus, GoalStatus } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
@@ -51,9 +51,10 @@ export default async function ProjectDetailPage({
       activities: {
         orderBy: { createdAt: "desc" },
         include: {
-          assignedUser: { select: { id: true, name: true, image: true } },
+          assignedUsers: { select: { id: true, name: true, image: true } },
         },
       },
+      yearlyGoals: { select: { id: true, year: true, status: true, targetValue: true, currentValue: true, unit: true } },
     },
   });
 
@@ -102,6 +103,11 @@ export default async function ProjectDetailPage({
             >
               {project.status.replace("_", " ")}
             </span>
+            {project.isGoal && (
+              <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-purple-100 text-purple-700">
+                Goal
+              </span>
+            )}
           </div>
           {project.description && (
             <p className="text-muted-foreground">{project.description}</p>
@@ -187,14 +193,14 @@ export default async function ProjectDetailPage({
                         </div>
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
-                        {activity.assignedUser && (
-                          <Avatar className="h-6 w-6">
-                            <AvatarImage src={activity.assignedUser.image ?? undefined} />
+                        {activity.assignedUsers.slice(0, 2).map((u) => (
+                          <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
+                            <AvatarImage src={u.image ?? undefined} />
                             <AvatarFallback className="text-[9px]">
-                              {getInitials(activity.assignedUser.name)}
+                              {getInitials(u.name)}
                             </AvatarFallback>
                           </Avatar>
-                        )}
+                        ))}
                         <span
                           className={`text-xs font-medium px-2 py-0.5 rounded-full ${ACTIVITY_STATUS_COLORS[activity.status]}`}
                         >
@@ -337,6 +343,41 @@ export default async function ProjectDetailPage({
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
                 <p className="text-muted-foreground">{project.successTarget}</p>
+              </CardContent>
+            </Card>
+          )}
+
+          {project.yearlyGoals.length > 0 && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm flex items-center gap-2">
+                  <Target className="h-4 w-4" />
+                  Linked Goals ({project.yearlyGoals.length})
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {project.yearlyGoals.map((goal) => {
+                  const GOAL_STATUS_COLORS: Record<GoalStatus, string> = {
+                    NOT_STARTED: "bg-gray-100 text-gray-700",
+                    IN_PROGRESS: "bg-blue-100 text-blue-700",
+                    ON_TRACK: "bg-green-100 text-green-700",
+                    AT_RISK: "bg-orange-100 text-orange-700",
+                    COMPLETED: "bg-emerald-100 text-emerald-700",
+                    CANCELLED: "bg-gray-100 text-gray-500",
+                  };
+                  return (
+                    <Link
+                      key={goal.id}
+                      href={`/goals/${goal.id}`}
+                      className="flex items-center justify-between p-2 rounded-lg border hover:bg-muted/50 transition-colors"
+                    >
+                      <span className="text-sm font-medium">{goal.year}</span>
+                      <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${GOAL_STATUS_COLORS[goal.status]}`}>
+                        {goal.status.replace(/_/g, " ")}
+                      </span>
+                    </Link>
+                  );
+                })}
               </CardContent>
             </Card>
           )}

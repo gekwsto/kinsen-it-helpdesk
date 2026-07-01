@@ -17,8 +17,10 @@ import {
   ChevronDown,
   Headset,
   Target,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface NavItem {
   label: string;
@@ -34,12 +36,29 @@ interface SidebarProps {
 }
 
 export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [expandedItems, setExpandedItems] = useState<string[]>(["Tickets"]);
+
+  useEffect(() => {
+    const stored = localStorage.getItem("sidebar-collapsed");
+    if (stored === "true") setCollapsed(true);
+  }, []);
+
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
+    localStorage.setItem("sidebar-collapsed", String(next));
+  };
+
   const ticketChildren = [
     ...(["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"].includes(userRole)
       ? [{ label: "All Tickets", href: "/tickets" }]
       : []),
     { label: "My Tickets", href: "/my-tickets" },
     ...(canCreateTicket ? [{ label: "Create Ticket", href: "/tickets/new" }] : []),
+    ...(userRole === "ADMIN"
+      ? [{ label: "Closed Tickets", href: "/tickets/closed", roles: ["ADMIN"] as Role[] }]
+      : []),
   ];
 
   const navItems: NavItem[] = [
@@ -61,6 +80,8 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[],
       children: [
         { label: "All Projects", href: "/projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
+        { label: "My Projects", href: "/my-projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
+        { label: "New Project", href: "/projects/new", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
         { label: "Project Gantt", href: "/projects/gantt", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
       ],
     },
@@ -68,8 +89,10 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       label: "Activities",
       href: "/activities",
       icon: CheckSquare,
+      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[],
       children: [
         { label: "All Activities", href: "/activities" },
+        { label: "My Activities", href: "/my-activities" },
         { label: "Activity Gantt", href: "/activities/gantt" },
         { label: "New Activity", href: "/activities/new" },
       ],
@@ -96,8 +119,8 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       ],
     },
   ];
+
   const pathname = usePathname();
-  const [expandedItems, setExpandedItems] = useState<string[]>(["Tickets"]);
 
   const toggleExpand = (label: string) => {
     setExpandedItems((prev) =>
@@ -111,32 +134,76 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
   };
 
   const isActive = (href: string) => {
-    if (href === "/tickets" && pathname === "/tickets") return true;
-    if (href === "/dashboard") return pathname === "/dashboard";
-    return pathname.startsWith(href) && href !== "/";
+    if (pathname === href) return true;
+    return pathname.startsWith(href + "/");
   };
 
   return (
-    <aside className="w-64 min-h-screen flex flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border">
-      {/* Logo */}
-      <div className="h-16 flex items-center gap-3 px-5 border-b border-sidebar-border">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-primary">
-          <Headset className="h-4 w-4 text-sidebar-primary-foreground" />
+    <aside
+      className={cn(
+        "min-h-screen flex flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border transition-all duration-200 flex-shrink-0",
+        collapsed ? "w-16" : "w-64"
+      )}
+    >
+      {/* Logo / Header */}
+      {collapsed ? (
+        <div className="h-16 flex flex-col items-center justify-center gap-1 border-b border-sidebar-border">
+          <button
+            onClick={toggleCollapsed}
+            aria-label="Expand sidebar"
+            aria-expanded={false}
+            className="rounded-lg p-1.5 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+          >
+            <PanelLeftOpen className="h-5 w-5" />
+          </button>
         </div>
-        <div>
-          <p className="text-sm font-semibold text-white">Kinsen IT</p>
-          <p className="text-xs text-sidebar-foreground/60">Helpdesk</p>
+      ) : (
+        <div className="h-16 flex items-center gap-3 px-4 border-b border-sidebar-border">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-primary flex-shrink-0">
+            <Headset className="h-4 w-4 text-sidebar-primary-foreground" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-semibold text-white">Kinsen IT</p>
+            <p className="text-xs text-sidebar-foreground/60">Helpdesk</p>
+          </div>
+          <button
+            onClick={toggleCollapsed}
+            aria-label="Collapse sidebar"
+            aria-expanded={true}
+            className="rounded-lg p-1.5 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors flex-shrink-0"
+          >
+            <PanelLeftClose className="h-4 w-4" />
+          </button>
         </div>
-      </div>
+      )}
 
       {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto py-4 px-3 space-y-1">
+      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-1">
         {navItems.map((item) => {
           if (!canAccess(item.roles)) return null;
 
           const hasChildren = item.children && item.children.length > 0;
           const isExpanded = expandedItems.includes(item.label);
           const active = isActive(item.href);
+
+          // Collapsed mode: all items are direct icon links
+          if (collapsed) {
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                title={item.label}
+                className={cn(
+                  "flex items-center justify-center p-2.5 rounded-lg transition-colors",
+                  active
+                    ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                )}
+              >
+                <item.icon className="h-5 w-5" />
+              </Link>
+            );
+          }
 
           if (hasChildren) {
             const visibleChildren = item.children!.filter((c) => canAccess(c.roles));
@@ -206,14 +273,24 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       </nav>
 
       {/* Footer */}
-      <div className="p-3 border-t border-sidebar-border">
-        <Link
-          href="/settings"
-          className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-        >
-          <Settings className="h-4 w-4" />
-          Settings
-        </Link>
+      <div className="p-2 border-t border-sidebar-border">
+        {collapsed ? (
+          <Link
+            href="/settings"
+            title="Settings"
+            className="flex items-center justify-center p-2.5 rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+          >
+            <Settings className="h-5 w-5" />
+          </Link>
+        ) : (
+          <Link
+            href="/settings"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+          >
+            <Settings className="h-4 w-4" />
+            Settings
+          </Link>
+        )}
       </div>
     </aside>
   );

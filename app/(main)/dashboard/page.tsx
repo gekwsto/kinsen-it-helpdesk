@@ -19,7 +19,9 @@ export default async function DashboardPage() {
 
   const userId = session.user.id;
   const role = session.user.role;
-  const ticketWhere = canViewAllTickets(role) ? {} : { requesterId: userId };
+  const isPersonalView = !canViewAllTickets(role);
+  const ticketWhere = isPersonalView ? { requesterId: userId } : {};
+  const recentActivityWhere = isPersonalView ? { ticket: { requesterId: userId } } : {};
 
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const timelineStart = new Date(Date.now() - TIMELINE_DAYS * 24 * 60 * 60 * 1000);
@@ -106,8 +108,9 @@ export default async function DashboardPage() {
       },
     }),
 
-    // Recent activity
+    // Recent activity (scoped to own tickets for non-admin users)
     prisma.ticketHistory.findMany({
+      where: recentActivityWhere,
       take: 6,
       orderBy: { createdAt: "desc" },
       include: {
@@ -152,9 +155,13 @@ export default async function DashboardPage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold">Dashboard</h1>
+        <h1 className="text-2xl font-bold">
+          {isPersonalView ? "My Dashboard" : "Dashboard"}
+        </h1>
         <p className="text-muted-foreground mt-1">
-          Welcome back, {session.user.name?.split(" ")[0]}
+          {isPersonalView
+            ? "Your personal ticket overview"
+            : `Welcome back, ${session.user.name?.split(" ")[0]}`}
         </p>
       </div>
 

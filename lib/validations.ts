@@ -61,6 +61,7 @@ export const createProjectSchema = z.object({
   endDate: z.string().optional(),
   successTarget: z.string().optional(),
   memberIds: z.array(z.string()).default([]),
+  isGoal: z.boolean().default(false),
 });
 
 export const updateProjectSchema = createProjectSchema.partial();
@@ -70,10 +71,10 @@ export const updateProjectSchema = createProjectSchema.partial();
 export const createActivitySchema = z.object({
   title: z.string().min(3, "Title must be at least 3 characters").max(200),
   description: z.string().optional(),
-  projectId: z.string().optional(), // optional — activities can be standalone
+  projectId: z.string().optional(),
   status: z.nativeEnum(ActivityStatus).default(ActivityStatus.TODO),
   priority: z.nativeEnum(ActivityPriority).default(ActivityPriority.MEDIUM),
-  assignedUserId: z.string().optional(),
+  assignedUserIds: z.array(z.string()).default([]),
   departmentId: z.string().optional(),
   businessUnitId: z.string().optional(),
   startDate: z.string().optional(),
@@ -88,8 +89,6 @@ export const updateActivitySchema = createActivitySchema.partial();
 
 export const createGoalSchema = z.object({
   year: z.number().int().min(2020).max(2100),
-  title: z.string().min(3, "Title must be at least 3 characters").max(200),
-  description: z.string().optional(),
   status: z.nativeEnum(GoalStatus).default(GoalStatus.NOT_STARTED),
   targetValue: z.number().optional(),
   currentValue: z.number().optional(),

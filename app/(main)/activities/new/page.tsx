@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -18,38 +18,42 @@ import {
 } from "@/components/ui/select";
 import { ChevronRight, Loader2 } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
-import { useEffect } from "react";
 
 interface Project { id: string; title: string }
-interface User { id: string; name?: string | null; email: string }
+interface AdminUser { id: string; name: string | null; email: string }
 
 export default function NewActivityPage() {
   const router = useRouter();
   const [saving, setSaving] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [projectId, setProjectId] = useState("");
   const [status, setStatus] = useState<ActivityStatus>(ActivityStatus.TODO);
   const [priority, setPriority] = useState<ActivityPriority>(ActivityPriority.MEDIUM);
-  const [assignedUserId, setAssignedUserId] = useState("");
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState("");
   const [dueDate, setDueDate] = useState("");
 
   useEffect(() => {
     Promise.all([
       fetch("/api/projects?limit=100").then((r) => r.json()),
-      fetch("/api/admin/users").then((r) => r.json()),
+      fetch("/api/users?role=ADMIN").then((r) => r.ok ? r.json() : []),
     ])
       .then(([p, u]) => {
-        // Projects API returns { projects: [...], total, ... }
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
-        setUsers(Array.isArray(u) ? u : []);
+        setAdminUsers(Array.isArray(u) ? u : []);
       })
       .catch(() => {});
   }, []);
+
+  const toggleUser = (userId: string) => {
+    setSelectedUserIds((prev) =>
+      prev.includes(userId) ? prev.filter((x) => x !== userId) : [...prev, userId]
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -68,7 +72,7 @@ export default function NewActivityPage() {
           projectId: projectId || undefined,
           status,
           priority,
-          assignedUserId: assignedUserId || undefined,
+          assignedUserIds: selectedUserIds,
           startDate: startDate || undefined,
           dueDate: dueDate || undefined,
         }),
@@ -169,22 +173,30 @@ export default function NewActivityPage() {
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label>Assigned To (optional)</Label>
-              <Select value={assignedUserId} onValueChange={setAssignedUserId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Unassigned" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">Unassigned</SelectItem>
-                  {users.map((u) => (
-                    <SelectItem key={u.id} value={u.id}>
-                      {u.name ?? u.email}
-                    </SelectItem>
+            {adminUsers.length > 0 && (
+              <div className="space-y-2">
+                <Label>Assigned Administrators</Label>
+                <p className="text-xs text-muted-foreground">
+                  Only system administrators can be assigned to activities.
+                </p>
+                <div className="border rounded-md divide-y max-h-40 overflow-y-auto">
+                  {adminUsers.map((u) => (
+                    <label
+                      key={u.id}
+                      className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded"
+                        checked={selectedUserIds.includes(u.id)}
+                        onChange={() => toggleUser(u.id)}
+                      />
+                      <span className="text-sm">{u.name ?? u.email}</span>
+                    </label>
                   ))}
-                </SelectContent>
-              </Select>
-            </div>
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

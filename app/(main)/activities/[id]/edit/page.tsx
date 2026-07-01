@@ -20,7 +20,7 @@ import { ChevronRight, Loader2 } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 
 interface Project { id: string; title: string }
-interface User { id: string; name?: string | null; email: string }
+interface AdminUser { id: string; name: string | null; email: string }
 
 export default function EditActivityPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -28,44 +28,47 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
-  const [users, setUsers] = useState<User[]>([]);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [projectId, setProjectId] = useState("");
   const [status, setStatus] = useState<ActivityStatus>(ActivityStatus.TODO);
   const [priority, setPriority] = useState<ActivityPriority>(ActivityPriority.MEDIUM);
-  const [assignedUserId, setAssignedUserId] = useState("");
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState("");
   const [dueDate, setDueDate] = useState("");
+  const [progress, setProgress] = useState("0");
 
   useEffect(() => {
     Promise.all([
       fetch(`/api/activities/${id}`).then((r) => r.json()),
       fetch("/api/projects?limit=100").then((r) => r.json()),
-      fetch("/api/admin/users").then((r) => (r.ok ? r.json() : [])),
+      fetch("/api/users?role=ADMIN").then((r) => r.ok ? r.json() : []),
     ])
       .then(([activity, p, u]) => {
-        if (activity && activity.title) {
-          setTitle(activity.title);
+        if (activity && !activity.error) {
+          setTitle(activity.title ?? "");
           setDescription(activity.description ?? "");
           setProjectId(activity.projectId ?? "");
-          setStatus(activity.status);
+          setStatus(activity.status ?? ActivityStatus.TODO);
           setPriority(activity.priority ?? ActivityPriority.MEDIUM);
-          setAssignedUserId(activity.assignedUserId ?? "");
-          setStartDate(
-            activity.startDate ? activity.startDate.split("T")[0] : ""
-          );
-          setDueDate(
-            activity.dueDate ? activity.dueDate.split("T")[0] : ""
-          );
+          setSelectedUserIds((activity.assignedUsers ?? []).map((usr: any) => usr.id));
+          setStartDate(activity.startDate ? activity.startDate.substring(0, 10) : "");
+          setDueDate(activity.dueDate ? activity.dueDate.substring(0, 10) : "");
+          setProgress(String(activity.progress ?? 0));
         }
-        // Projects API returns { projects: [...], total, ... }
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
-        setUsers(Array.isArray(u) ? u : []);
+        setAdminUsers(Array.isArray(u) ? u : []);
       })
       .finally(() => setLoading(false));
   }, [id]);
+
+  const toggleUser = (userId: string) => {
+    setSelectedUserIds((prev) =>
+      prev.includes(userId) ? prev.filter((x) => x !== userId) : [...prev, userId]
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -81,12 +84,13 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
         body: JSON.stringify({
           title,
           description: description || undefined,
-          projectId: projectId || null,
+          projectId: projectId || undefined,
           status,
           priority,
-          assignedUserId: assignedUserId || null,
-          startDate: startDate || null,
-          dueDate: dueDate || null,
+          assignedUserIds: selectedUserIds,
+          startDate: startDate || undefined,
+          dueDate: dueDate || undefined,
+          progress: progress !== "" ? parseInt(progress) : undefined,
         }),
       });
       if (!res.ok) {
@@ -131,7 +135,6 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
               <Label htmlFor="title">Title *</Label>
               <Input
                 id="title"
-                placeholder="Activity title"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 required
@@ -142,7 +145,6 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
               <Label htmlFor="description">Description</Label>
               <Textarea
                 id="description"
-                placeholder="Describe the activity..."
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 rows={3}
@@ -183,7 +185,7 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
 
             <div className="space-y-2">
               <Label>Project (optional)</Label>
-              <Select value={projectId} onValueChange={setProjectId}>
+              <Select value={projectId || ""} onValueChange={setProjectId}>
                 <SelectTrigger>
                   <SelectValue placeholder="No project (standalone)" />
                 </SelectTrigger>
@@ -196,22 +198,30 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
               </Select>
             </div>
 
-            <div className="space-y-2">
-              <Label>Assigned To (optional)</Label>
-              <Select value={assignedUserId} onValueChange={setAssignedUserId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Unassigned" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">Unassigned</SelectItem>
-                  {users.map((u) => (
-                    <SelectItem key={u.id} value={u.id}>
-                      {u.name ?? u.email}
-                    </SelectItem>
+            {adminUsers.length > 0 && (
+              <div className="space-y-2">
+                <Label>Assigned Administrators</Label>
+                <p className="text-xs text-muted-foreground">
+                  Only system administrators can be assigned to activities.
+                </p>
+                <div className="border rounded-md divide-y max-h-40 overflow-y-auto">
+                  {adminUsers.map((u) => (
+                    <label
+                      key={u.id}
+                      className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded"
+                        checked={selectedUserIds.includes(u.id)}
+                        onChange={() => toggleUser(u.id)}
+                      />
+                      <span className="text-sm">{u.name ?? u.email}</span>
+                    </label>
                   ))}
-                </SelectContent>
-              </Select>
-            </div>
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -232,6 +242,18 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
                   onChange={(e) => setDueDate(e.target.value)}
                 />
               </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="progress">Progress (%)</Label>
+              <Input
+                id="progress"
+                type="number"
+                min={0}
+                max={100}
+                value={progress}
+                onChange={(e) => setProgress(e.target.value)}
+              />
             </div>
 
             <div className="flex gap-3 pt-2">

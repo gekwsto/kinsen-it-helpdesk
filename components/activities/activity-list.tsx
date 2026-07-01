@@ -32,12 +32,12 @@ export interface SerializedActivity {
   isCompleted: boolean;
   dueDate: string | null;
   project: { id: string; title: string } | null;
-  assignedUser: {
+  assignedUsers: {
     id: string;
     name: string | null;
     email: string;
     image: string | null;
-  } | null;
+  }[];
 }
 
 interface ActivityListProps {
@@ -113,17 +113,21 @@ export function ActivityList({ activities }: ActivityListProps) {
                   >
                     {activity.priority}
                   </span>
-                  {activity.assignedUser && (
-                    <div className="flex items-center gap-1.5">
-                      <Avatar className="h-6 w-6">
-                        <AvatarImage src={activity.assignedUser.image ?? undefined} />
-                        <AvatarFallback className="text-[9px]">
-                          {getInitials(activity.assignedUser.name)}
-                        </AvatarFallback>
-                      </Avatar>
-                      <span className="text-xs text-muted-foreground hidden sm:block">
-                        {activity.assignedUser.name}
-                      </span>
+                  {activity.assignedUsers.length > 0 && (
+                    <div className="flex items-center gap-1">
+                      {activity.assignedUsers.slice(0, 3).map((u) => (
+                        <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
+                          <AvatarImage src={u.image ?? undefined} />
+                          <AvatarFallback className="text-[9px]">
+                            {getInitials(u.name)}
+                          </AvatarFallback>
+                        </Avatar>
+                      ))}
+                      {activity.assignedUsers.length > 3 && (
+                        <span className="text-xs text-muted-foreground ml-1">
+                          +{activity.assignedUsers.length - 3}
+                        </span>
+                      )}
                     </div>
                   )}
                   <span

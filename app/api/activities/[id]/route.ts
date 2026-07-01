@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import { updateActivitySchema } from "@/lib/validations";
 import { recalculateProjectRollup, calculateActivityProgress } from "@/lib/projects/progress-rollup";
+import { Role } from "@prisma/client";
 
 export async function GET(
   _req: NextRequest,
@@ -15,7 +16,7 @@ export async function GET(
       where: { id },
       include: {
         project: { select: { id: true, title: true } },
-        assignedUser: { select: { id: true, name: true, email: true, image: true } },
+        assignedUsers: { select: { id: true, name: true, email: true, image: true } },
         department: { select: { id: true, name: true } },
         businessUnit: { select: { id: true, name: true } },
       },
@@ -42,7 +43,19 @@ export async function PATCH(
 
     const body = await req.json();
     const data = updateActivitySchema.parse(body);
-    const { dueDate, startDate, isCompleted, ...rest } = data;
+    const { dueDate, startDate, isCompleted, assignedUserIds, ...rest } = data;
+
+    if (assignedUserIds && assignedUserIds.length > 0) {
+      const adminCount = await prisma.user.count({
+        where: { id: { in: assignedUserIds }, role: Role.ADMIN },
+      });
+      if (adminCount !== assignedUserIds.length) {
+        return NextResponse.json(
+          { error: "Activities can only be assigned to administrators" },
+          { status: 400 }
+        );
+      }
+    }
 
     const activity = await prisma.projectActivity.update({
       where: { id },
@@ -52,14 +65,16 @@ export async function PATCH(
         dueDate: dueDate ? new Date(dueDate) : dueDate === null ? null : undefined,
         isCompleted: isCompleted ?? undefined,
         completedAt: isCompleted ? new Date() : isCompleted === false ? null : undefined,
+        ...(assignedUserIds !== undefined && {
+          assignedUsers: { set: assignedUserIds.map((uid) => ({ id: uid })) },
+        }),
       },
       include: {
         project: { select: { id: true, title: true } },
-        assignedUser: { select: { id: true, name: true, email: true, image: true } },
+        assignedUsers: { select: { id: true, name: true, email: true, image: true } },
       },
     });
 
-    // Recalculate progress rollup when activity progress or status changes
     const progressOrStatusChanged = data.progress !== undefined || data.status !== undefined;
     if (progressOrStatusChanged) {
       if (activity.project?.id) {
@@ -67,7 +82,6 @@ export async function PATCH(
           console.error("[progress-rollup] activity change recalculation failed:", err);
         });
       } else {
-        // Standalone activity: recalculate its own progress from linked tickets
         calculateActivityProgress(id).then((prog) => {
           if (prog !== null) {
             return prisma.projectActivity.update({ where: { id }, data: { progress: prog } });

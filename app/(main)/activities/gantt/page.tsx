@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
+import { hasPermission, canManageProjects } from "@/lib/permissions";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,8 @@ export default async function ActivityGanttPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
+  if (!canManageProjects(session.user.role)) redirect("/dashboard");
+
   const canView = await hasPermission(
     session.user.role,
     "activity.view",
@@ -36,7 +38,7 @@ export default async function ActivityGanttPage({
   const where: any = {};
   if (params.status) where.status = params.status;
   if (params.projectId) where.projectId = params.projectId;
-  if (params.userId) where.assignedUserId = params.userId;
+  if (params.userId) where.assignedUsers = { some: { id: params.userId } };
   if (params.departmentId) where.departmentId = params.departmentId;
   if (params.from || params.to) {
     where.OR = [
@@ -60,7 +62,7 @@ export default async function ActivityGanttPage({
     orderBy: { startDate: "asc" },
     include: {
       project: { select: { id: true, title: true, status: true, startDate: true, endDate: true, progress: true, owner: { select: { id: true, name: true, image: true } } } },
-      assignedUser: { select: { id: true, name: true, image: true } },
+      assignedUsers: { select: { id: true, name: true, image: true } },
     },
   });
 
@@ -87,8 +89,8 @@ export default async function ActivityGanttPage({
       endDate: a.dueDate?.toISOString() ?? null,
       progress: a.progress,
       href: `/activities/${a.id}`,
-      assigneeName: a.assignedUser?.name ?? null,
-      assigneeImage: a.assignedUser?.image ?? null,
+      assigneeName: a.assignedUsers[0]?.name ?? null,
+      assigneeImage: a.assignedUsers[0]?.image ?? null,
       type: "activity" as const,
     };
 

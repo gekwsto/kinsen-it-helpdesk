@@ -39,6 +39,13 @@ export default async function TicketDetailPage({
           attachments: true,
         },
       },
+      attachments: {
+        where: { messageId: null },
+        orderBy: { createdAt: "asc" },
+        include: {
+          uploadedBy: { select: { id: true, name: true, email: true } },
+        },
+      },
       history: {
         orderBy: { createdAt: "desc" },
         include: {
@@ -175,6 +182,18 @@ export default async function TicketDetailPage({
         size: a.size,
         path: a.path,
       })),
+    })),
+    ticketAttachments: ticket.attachments.map((a) => ({
+      id: a.id,
+      filename: a.filename,
+      originalName: a.originalName,
+      mimeType: a.mimeType,
+      size: a.size,
+      path: a.path,
+      createdAt: a.createdAt.toISOString(),
+      uploadedBy: a.uploadedBy
+        ? { id: a.uploadedBy.id, name: a.uploadedBy.name, email: a.uploadedBy.email }
+        : null,
     })),
     initialHistory: ticket.history.map((h) => ({
       id: h.id,

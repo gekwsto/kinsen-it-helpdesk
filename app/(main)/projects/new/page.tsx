@@ -48,7 +48,7 @@ export default function NewProjectPage() {
     formState: { errors },
   } = useForm<CreateProjectInput>({
     resolver: zodResolver(createProjectSchema),
-    defaultValues: { status: ProjectStatus.PLANNING, priority: 2, memberIds: [] },
+    defaultValues: { status: ProjectStatus.PLANNING, priority: 2, memberIds: [], isGoal: false },
   });
 
   const toggleMember = (userId: string) => {
@@ -177,6 +177,20 @@ export default function NewProjectPage() {
                 placeholder="What does success look like?"
                 className="min-h-[80px]"
               />
+            </div>
+
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded"
+                  {...register("isGoal")}
+                />
+                <span className="text-sm font-medium">This project is a Goal</span>
+              </label>
+              <p className="text-xs text-muted-foreground">
+                Mark this project as a yearly goal for tracking purposes.
+              </p>
             </div>
 
             {adminUsers.length > 0 && (

@@ -6,8 +6,6 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getInitials } from "@/lib/utils";
 import { ChevronRight, Target, FolderKanban, Pencil } from "lucide-react";
 import { GoalStatus, ProjectStatus } from "@prisma/client";
 
@@ -45,7 +43,6 @@ export default async function GoalDetailPage({
   const goal = await prisma.yearlyGoal.findUnique({
     where: { id },
     include: {
-      owner: { select: { id: true, name: true, email: true, image: true } },
       projects: {
         select: {
           id: true,
@@ -58,6 +55,7 @@ export default async function GoalDetailPage({
   });
 
   if (!goal) notFound();
+  if (goal.ownerUserId !== session.user.id) redirect("/goals");
 
   const progress =
     goal.targetValue && goal.currentValue !== null && goal.currentValue !== undefined
@@ -69,22 +67,21 @@ export default async function GoalDetailPage({
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/goals" className="hover:text-foreground">Goals</Link>
         <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground font-medium">{goal.title}</span>
+        <span className="text-foreground font-medium">Goal · {goal.year}</span>
       </div>
 
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <span className="text-sm font-semibold text-muted-foreground">{goal.year}</span>
-            <h1 className="text-2xl font-bold">{goal.title}</h1>
             <span
               className={`text-xs font-medium px-2.5 py-1 rounded-full ${GOAL_STATUS_COLORS[goal.status]}`}
             >
               {goal.status.replace(/_/g, " ")}
             </span>
           </div>
-          {goal.description && (
-            <p className="text-muted-foreground">{goal.description}</p>
+          {goal.unit && goal.targetValue && (
+            <p className="text-muted-foreground">Target: {goal.targetValue} {goal.unit}</p>
           )}
         </div>
         {canEdit && (
@@ -99,7 +96,6 @@ export default async function GoalDetailPage({
 
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="lg:col-span-2 space-y-4">
-          {/* Linked Projects */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-base flex items-center gap-2">
@@ -140,7 +136,6 @@ export default async function GoalDetailPage({
         </div>
 
         <div className="space-y-4">
-          {/* Progress */}
           {progress !== null && (
             <Card>
               <CardHeader className="pb-3">
@@ -169,25 +164,11 @@ export default async function GoalDetailPage({
             </Card>
           )}
 
-          {/* Details */}
           <Card>
             <CardHeader className="pb-3">
               <CardTitle className="text-sm">Details</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Owner</p>
-                <div className="flex items-center gap-2">
-                  <Avatar className="h-6 w-6">
-                    <AvatarImage src={goal.owner.image ?? undefined} />
-                    <AvatarFallback className="text-[9px]">
-                      {getInitials(goal.owner.name)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="font-medium">{goal.owner.name ?? goal.owner.email}</span>
-                </div>
-              </div>
-              <Separator />
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Year</p>
                 <p className="font-medium">{goal.year}</p>

@@ -256,6 +256,25 @@ async function main() {
   });
   console.log("✓ Demo user seeded (user@kinsen.gr)");
 
+  const user2PasswordHash = await bcrypt.hash(
+    process.env.DEMO_USER2_PASSWORD || "User2@123456",
+    12
+  );
+  await prisma.user.upsert({
+    where: { email: "user2@kinsen.gr" },
+    update: {},
+    create: {
+      email: "user2@kinsen.gr",
+      name: "Demo User 2",
+      role: Role.USER,
+      isActive: true,
+      passwordHash: user2PasswordHash,
+      authProvider: AuthProvider.CREDENTIALS,
+      mustChangePassword: false,
+    },
+  });
+  console.log("✓ Demo user 2 seeded (user2@kinsen.gr)");
+
   // ─── Permissions ──────────────────────────────────────────────────────────────
 
   for (const perm of PERMISSIONS) {
@@ -922,7 +941,8 @@ async function main() {
   console.log("  admin@kinsen.gr       / Admin@123456   (Administrator)");
   console.log("  agent@kinsen.gr       / Agent@123456   (IT Agent)");
   console.log("  manager@kinsen.gr     / Manager@123456 (Dept. Manager)");
-  console.log("  user@kinsen.gr        / User@123456    (User)");
+  console.log("  user@kinsen.gr        / User@123456    (User — has tickets)");
+  console.log("  user2@kinsen.gr       / User2@123456   (User — no tickets)");
 }
 
 main()

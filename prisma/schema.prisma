@@ -159,8 +159,9 @@ model User {
   ticketHistories     TicketHistory[]
   ownedProjects       Project[]          @relation("ProjectOwner")
   projectMemberships  Project[]          @relation("ProjectMembers")
-  assignedActivities  ProjectActivity[]  @relation("ActivityAssignee")
-  createdActivities   ProjectActivity[]  @relation("ActivityCreator")
+  assignedActivities   ProjectActivity[]  @relation("ActivityAssignee")
+  activityAssignments  ProjectActivity[]  @relation("ActivityAssignees")
+  createdActivities    ProjectActivity[]  @relation("ActivityCreator")
   ownedGoals          YearlyGoal[]       @relation("GoalOwner")
   notifications       Notification[]
   accounts            Account[]
@@ -377,6 +378,7 @@ model Project {
   startDate      DateTime?
   endDate        DateTime?
   successTarget  String?       @db.Text
+  isGoal         Boolean       @default(false)
 
   members     User[]            @relation("ProjectMembers")
   activities  ProjectActivity[]
@@ -400,6 +402,7 @@ model ProjectActivity {
   projectId      String?
   assignedUser   User?            @relation("ActivityAssignee", fields: [assignedUserId], references: [id])
   assignedUserId String?
+  assignedUsers  User[]           @relation("ActivityAssignees")
   createdBy      User?            @relation("ActivityCreator", fields: [createdById], references: [id])
   createdById    String?
   department     Department?      @relation(fields: [departmentId], references: [id])
@@ -426,8 +429,6 @@ model ProjectActivity {
 model YearlyGoal {
   id           String     @id @default(cuid())
   year         Int
-  title        String
-  description  String?    @db.Text
   status       GoalStatus @default(NOT_STARTED)
   targetValue  Float?
   currentValue Float?

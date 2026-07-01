@@ -29,6 +29,11 @@ export async function GET(
     });
 
     if (!goal) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    if (goal.ownerUserId !== session.user.id) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     return NextResponse.json(goal);
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -44,6 +49,12 @@ export async function PATCH(
     const session = await requireAuth();
     const allowed = await hasPermission(session.user.role, "goal.edit");
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+    const existing = await prisma.yearlyGoal.findUnique({ where: { id }, select: { ownerUserId: true } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (existing.ownerUserId !== session.user.id) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
     const body = await req.json();
     const data = updateGoalSchema.parse(body);
@@ -81,6 +92,12 @@ export async function DELETE(
     const session = await requireAuth();
     const allowed = await hasPermission(session.user.role, "goal.delete");
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+    const existing = await prisma.yearlyGoal.findUnique({ where: { id }, select: { ownerUserId: true } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    if (existing.ownerUserId !== session.user.id) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
 
     await prisma.yearlyGoal.delete({ where: { id } });
     return new NextResponse(null, { status: 204 });

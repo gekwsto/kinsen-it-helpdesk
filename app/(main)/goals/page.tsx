@@ -5,8 +5,6 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getInitials } from "@/lib/utils";
 import { GoalStatus } from "@prisma/client";
 import { Target, Plus, TrendingUp } from "lucide-react";
 
@@ -35,7 +33,7 @@ export default async function GoalsPage({
   const canCreate = await hasPermission(session.user.role, "goal.create", session.user.customRoleId);
 
   const params = await searchParams;
-  const where: any = {};
+  const where: any = { ownerUserId: session.user.id };
   if (params.year) where.year = parseInt(params.year);
   if (params.status) where.status = params.status;
 
@@ -43,20 +41,17 @@ export default async function GoalsPage({
     where,
     orderBy: [{ year: "desc" }, { createdAt: "desc" }],
     include: {
-      owner: { select: { id: true, name: true, email: true, image: true } },
       projects: { select: { id: true, title: true } },
     },
   });
-
-  const currentYear = new Date().getFullYear();
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Yearly Goals</h1>
+          <h1 className="text-2xl font-bold">My Goals</h1>
           <p className="text-muted-foreground mt-1">
-            Strategic goals and objectives
+            Your personal yearly goals and objectives
           </p>
         </div>
         {canCreate && (
@@ -103,10 +98,9 @@ export default async function GoalsPage({
                             {goal.status.replace(/_/g, " ")}
                           </span>
                         </div>
-                        <p className="font-medium truncate">{goal.title}</p>
-                        {goal.description && (
-                          <p className="text-sm text-muted-foreground mt-0.5 truncate">
-                            {goal.description}
+                        {goal.unit && goal.targetValue && (
+                          <p className="text-sm text-muted-foreground">
+                            Target: {goal.targetValue} {goal.unit}
                           </p>
                         )}
                         {progress !== null && (
@@ -139,12 +133,6 @@ export default async function GoalsPage({
                         {progress !== null && (
                           <TrendingUp className="h-4 w-4 text-primary" />
                         )}
-                        <Avatar className="h-7 w-7">
-                          <AvatarImage src={goal.owner.image ?? undefined} />
-                          <AvatarFallback className="text-[9px]">
-                            {getInitials(goal.owner.name)}
-                          </AvatarFallback>
-                        </Avatar>
                       </div>
                     </div>
                   </CardContent>

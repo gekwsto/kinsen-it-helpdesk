@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -29,8 +28,6 @@ export default function EditGoalPage({ params }: { params: Promise<{ id: string 
   const [projects, setProjects] = useState<Project[]>([]);
 
   const [year, setYear] = useState(new Date().getFullYear());
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [status, setStatus] = useState<GoalStatus>(GoalStatus.NOT_STARTED);
   const [targetValue, setTargetValue] = useState("");
   const [currentValue, setCurrentValue] = useState("");
@@ -40,20 +37,18 @@ export default function EditGoalPage({ params }: { params: Promise<{ id: string 
   useEffect(() => {
     Promise.all([
       fetch(`/api/goals/${id}`).then((r) => r.json()),
-      fetch("/api/projects").then((r) => r.json()),
+      fetch("/api/projects?limit=100").then((r) => r.json()),
     ])
-      .then(([goal, p]) => {
-        if (goal && goal.title) {
+      .then(([goal, d]) => {
+        if (goal && !goal.error) {
           setYear(goal.year);
-          setTitle(goal.title);
-          setDescription(goal.description ?? "");
           setStatus(goal.status);
           setTargetValue(goal.targetValue !== null && goal.targetValue !== undefined ? String(goal.targetValue) : "");
           setCurrentValue(goal.currentValue !== null && goal.currentValue !== undefined ? String(goal.currentValue) : "");
           setUnit(goal.unit ?? "");
           setSelectedProjectIds((goal.projects ?? []).map((p: any) => p.id));
         }
-        setProjects(Array.isArray(p) ? p : []);
+        setProjects(Array.isArray(d?.projects) ? d.projects : []);
       })
       .finally(() => setLoading(false));
   }, [id]);
@@ -66,10 +61,6 @@ export default function EditGoalPage({ params }: { params: Promise<{ id: string 
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) {
-      toast.error("Title is required");
-      return;
-    }
     setSaving(true);
     try {
       const res = await fetch(`/api/goals/${id}`, {
@@ -77,8 +68,6 @@ export default function EditGoalPage({ params }: { params: Promise<{ id: string 
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           year,
-          title,
-          description: description || undefined,
           status,
           targetValue: targetValue ? parseFloat(targetValue) : undefined,
           currentValue: currentValue ? parseFloat(currentValue) : undefined,
@@ -114,9 +103,7 @@ export default function EditGoalPage({ params }: { params: Promise<{ id: string 
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/goals" className="hover:text-foreground">Goals</Link>
         <ChevronRight className="h-4 w-4" />
-        <Link href={`/goals/${id}`} className="hover:text-foreground truncate max-w-[200px]">
-          {title}
-        </Link>
+        <Link href={`/goals/${id}`} className="hover:text-foreground">Goal · {year}</Link>
         <ChevronRight className="h-4 w-4" />
         <span className="text-foreground font-medium">Edit</span>
       </div>
@@ -155,26 +142,6 @@ export default function EditGoalPage({ params }: { params: Promise<{ id: string 
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="title">Title *</Label>
-              <Input
-                id="title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                required
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={3}
-              />
             </div>
 
             <div className="grid grid-cols-3 gap-4">

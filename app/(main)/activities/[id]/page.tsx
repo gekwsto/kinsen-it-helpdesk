@@ -42,7 +42,7 @@ interface Activity {
   dueDate?: string | null;
   createdAt: string;
   project?: { id: string; title: string } | null;
-  assignedUser?: { id: string; name?: string | null; email: string; image?: string | null } | null;
+  assignedUsers: { id: string; name?: string | null; email: string; image?: string | null }[];
   department?: { id: string; name: string } | null;
 }
 
@@ -218,17 +218,21 @@ export default function ActivityDetailPage({ params }: { params: Promise<{ id: s
                 <span className="text-muted-foreground italic">Standalone</span>
               )}
             </div>
-            {activity.assignedUser && (
+            {activity.assignedUsers.length > 0 && (
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Assigned To</p>
-                <div className="flex items-center gap-2">
-                  <Avatar className="h-5 w-5">
-                    <AvatarImage src={activity.assignedUser.image ?? undefined} />
-                    <AvatarFallback className="text-[9px]">
-                      {getInitials(activity.assignedUser.name)}
-                    </AvatarFallback>
-                  </Avatar>
-                  <span className="font-medium">{activity.assignedUser.name}</span>
+                <div className="flex flex-wrap gap-2">
+                  {activity.assignedUsers.map((u) => (
+                    <div key={u.id} className="flex items-center gap-1.5">
+                      <Avatar className="h-5 w-5">
+                        <AvatarImage src={u.image ?? undefined} />
+                        <AvatarFallback className="text-[9px]">
+                          {getInitials(u.name)}
+                        </AvatarFallback>
+                      </Avatar>
+                      <span className="font-medium text-sm">{u.name ?? u.email}</span>
+                    </div>
+                  ))}
                 </div>
               </div>
             )}

@@ -1,0 +1,30 @@
+{
+  "startedAt": "2026-07-01T10:44:56.729Z",
+  "users": {
+    "seen": 0,
+    "createdOrUpdated": 0,
+    "skippedNoEmail": 0
+  },
+  "tickets": {
+    "seen": 0,
+    "created": 0,
+    "updated": 0,
+    "skipped": 0,
+    "missingRequester": 0,
+    "missingAssignedAgent": 0
+  },
+  "comments": {
+    "seen": 0,
+    "created": 0,
+    "skippedNoTicket": 0,
+    "skippedEmptyBody": 0,
+    "missingAuthor": 0
+  },
+  "categories": {
+    "createdOrFound": 0
+  },
+  "warnings": [
+    "Fatal error: Failed to connect to 193.84.251.76:1433 in 15000ms"
+  ],
+  "finishedAt": "2026-07-01T10:45:11.754Z"
+}

@@ -6,7 +6,6 @@ import { toast } from "sonner";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -27,8 +26,6 @@ export default function NewGoalPage() {
   const [projects, setProjects] = useState<Project[]>([]);
 
   const [year, setYear] = useState(new Date().getFullYear());
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [status, setStatus] = useState<GoalStatus>(GoalStatus.NOT_STARTED);
   const [targetValue, setTargetValue] = useState("");
   const [currentValue, setCurrentValue] = useState("");
@@ -36,9 +33,9 @@ export default function NewGoalPage() {
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
 
   useEffect(() => {
-    fetch("/api/projects")
+    fetch("/api/projects?limit=100")
       .then((r) => r.json())
-      .then((p) => setProjects(Array.isArray(p) ? p : []))
+      .then((d) => setProjects(Array.isArray(d?.projects) ? d.projects : []))
       .catch(() => {});
   }, []);
 
@@ -50,10 +47,6 @@ export default function NewGoalPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) {
-      toast.error("Title is required");
-      return;
-    }
     setSaving(true);
     try {
       const res = await fetch("/api/goals", {
@@ -61,8 +54,6 @@ export default function NewGoalPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           year,
-          title,
-          description: description || undefined,
           status,
           targetValue: targetValue ? parseFloat(targetValue) : undefined,
           currentValue: currentValue ? parseFloat(currentValue) : undefined,
@@ -128,28 +119,6 @@ export default function NewGoalPage() {
                   </SelectContent>
                 </Select>
               </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="title">Title *</Label>
-              <Input
-                id="title"
-                placeholder="Goal title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                required
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                placeholder="Describe the goal..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                rows={3}
-              />
             </div>
 
             <div className="grid grid-cols-3 gap-4">

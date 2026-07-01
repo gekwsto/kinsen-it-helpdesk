@@ -13,7 +13,9 @@ export async function GET(req: NextRequest) {
     const year = searchParams.get("year");
     const status = searchParams.get("status");
 
-    const where: any = {};
+    const where: any = {
+      ownerUserId: session.user.id,
+    };
     if (year) where.year = parseInt(year);
     if (status) where.status = status;
 
