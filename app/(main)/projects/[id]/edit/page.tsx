@@ -19,11 +19,19 @@ import {
 import { ChevronRight, Loader2 } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 
+interface AdminUser {
+  id: string;
+  name: string | null;
+  email: string;
+}
+
 export default function EditProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -32,25 +40,41 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
   const [successTarget, setSuccessTarget] = useState("");
-  const [failTarget, setFailTarget] = useState("");
 
   useEffect(() => {
-    fetch(`/api/projects/${id}`)
-      .then((r) => r.json())
-      .then((p) => {
+    Promise.all([
+      fetch(`/api/projects/${id}`).then((r) => r.json()),
+      fetch("/api/users?role=ADMIN").then((r) => (r.ok ? r.json() : [])),
+    ])
+      .then(([p, admins]) => {
         if (p?.title) {
           setTitle(p.title);
           setDescription(p.description ?? "");
           setStatus(p.status);
-          setPriority(String(p.priority ?? 2));
+          // Clamp to max priority 3 (High) in case legacy value of 4 exists
+          setPriority(String(Math.min(p.priority ?? 2, 3)));
           setStartDate(p.startDate ? p.startDate.split("T")[0] : "");
           setEndDate(p.endDate ? p.endDate.split("T")[0] : "");
           setSuccessTarget(p.successTarget ?? "");
-          setFailTarget(p.failTarget ?? "");
+          // Pre-select existing members
+          const existingIds = new Set<string>(
+            (p.members ?? []).map((m: { id: string }) => m.id)
+          );
+          setSelectedMemberIds(existingIds);
         }
+        setAdminUsers(Array.isArray(admins) ? admins : []);
       })
       .finally(() => setLoading(false));
   }, [id]);
+
+  const toggleMember = (userId: string) => {
+    setSelectedMemberIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,7 +95,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           startDate: startDate || null,
           endDate: endDate || null,
           successTarget: successTarget || undefined,
-          failTarget: failTarget || undefined,
+          memberIds: Array.from(selectedMemberIds),
         }),
       });
       if (!res.ok) {
@@ -158,7 +182,6 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="4">Critical</SelectItem>
                     <SelectItem value="3">High</SelectItem>
                     <SelectItem value="2">Medium</SelectItem>
                     <SelectItem value="1">Low</SelectItem>
@@ -199,16 +222,30 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               />
             </div>
 
-            <div className="space-y-2">
-              <Label htmlFor="failTarget">Fail Criteria</Label>
-              <Textarea
-                id="failTarget"
-                placeholder="What would constitute failure?"
-                value={failTarget}
-                onChange={(e) => setFailTarget(e.target.value)}
-                rows={2}
-              />
-            </div>
+            {adminUsers.length > 0 && (
+              <div className="space-y-2">
+                <Label>Assigned Administrators</Label>
+                <p className="text-xs text-muted-foreground">
+                  Only administrators can be assigned to projects.
+                </p>
+                <div className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                  {adminUsers.map((u) => (
+                    <label
+                      key={u.id}
+                      className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded"
+                        checked={selectedMemberIds.has(u.id)}
+                        onChange={() => toggleMember(u.id)}
+                      />
+                      <span className="text-sm">{u.name ?? u.email}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>

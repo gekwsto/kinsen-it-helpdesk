@@ -327,27 +327,16 @@ export default async function ProjectDetailPage({
             </CardContent>
           </Card>
 
-          {(project.successTarget || project.failTarget) && (
+          {project.successTarget && (
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-sm flex items-center gap-2">
                   <Target className="h-4 w-4" />
-                  Targets
+                  Success Target
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3 text-sm">
-                {project.successTarget && (
-                  <div>
-                    <p className="text-xs text-green-700 font-medium mb-1">Success</p>
-                    <p className="text-muted-foreground">{project.successTarget}</p>
-                  </div>
-                )}
-                {project.failTarget && (
-                  <div>
-                    <p className="text-xs text-red-700 font-medium mb-1">Failure</p>
-                    <p className="text-muted-foreground">{project.failTarget}</p>
-                  </div>
-                )}
+                <p className="text-muted-foreground">{project.successTarget}</p>
               </CardContent>
             </Card>
           )}

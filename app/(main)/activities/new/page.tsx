@@ -40,11 +40,12 @@ export default function NewActivityPage() {
 
   useEffect(() => {
     Promise.all([
-      fetch("/api/projects").then((r) => r.json()),
+      fetch("/api/projects?limit=100").then((r) => r.json()),
       fetch("/api/admin/users").then((r) => r.json()),
     ])
       .then(([p, u]) => {
-        setProjects(Array.isArray(p) ? p : []);
+        // Projects API returns { projects: [...], total, ... }
+        setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setUsers(Array.isArray(u) ? u : []);
       })
       .catch(() => {});

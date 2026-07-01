@@ -42,7 +42,7 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
   useEffect(() => {
     Promise.all([
       fetch(`/api/activities/${id}`).then((r) => r.json()),
-      fetch("/api/projects").then((r) => r.json()),
+      fetch("/api/projects?limit=100").then((r) => r.json()),
       fetch("/api/admin/users").then((r) => (r.ok ? r.json() : [])),
     ])
       .then(([activity, p, u]) => {
@@ -60,7 +60,8 @@ export default function EditActivityPage({ params }: { params: Promise<{ id: str
             activity.dueDate ? activity.dueDate.split("T")[0] : ""
           );
         }
-        setProjects(Array.isArray(p) ? p : []);
+        // Projects API returns { projects: [...], total, ... }
+        setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setUsers(Array.isArray(u) ? u : []);
       })
       .finally(() => setLoading(false));

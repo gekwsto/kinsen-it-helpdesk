@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, canViewAllTickets, hasPermission } from "@/lib/permissions";
 import { createTicketSchema } from "@/lib/validations";
+import { Role } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
   try {
@@ -114,6 +115,14 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const data = createTicketSchema.parse(body);
+
+    // Only administrators can link a ticket to a project or activity
+    if ((data.projectId || data.activityId) && session.user.role !== Role.ADMIN) {
+      return NextResponse.json(
+        { error: "Only administrators can link tickets to projects or activities" },
+        { status: 403 }
+      );
+    }
 
     const defaultStatus = await prisma.ticketStatus.findFirst({
       where: { isDefault: true },

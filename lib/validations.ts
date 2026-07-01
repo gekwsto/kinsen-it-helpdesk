@@ -54,13 +54,12 @@ export const createProjectSchema = z.object({
   title: z.string().min(3, "Title must be at least 3 characters").max(200),
   description: z.string().optional(),
   status: z.nativeEnum(ProjectStatus).default(ProjectStatus.PLANNING),
-  priority: z.number().int().min(1).max(4).default(2),
+  priority: z.number().int().min(1).max(3).default(2),
   departmentId: z.string().optional(),
   businessUnitId: z.string().optional(),
   startDate: z.string().optional(),
   endDate: z.string().optional(),
   successTarget: z.string().optional(),
-  failTarget: z.string().optional(),
   memberIds: z.array(z.string()).default([]),
 });
 

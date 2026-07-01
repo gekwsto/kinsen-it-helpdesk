@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, canManageTickets, canViewAllTickets, hasPermission } from "@/lib/permissions";
 import { updateTicketSchema } from "@/lib/validations";
+import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { recalculateFromTicket, recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 
@@ -88,6 +89,16 @@ export async function PATCH(
 
     const body = await req.json();
     const data = updateTicketSchema.parse(body);
+
+    // Only administrators can change a ticket's project or activity link
+    const projectChanging = data.projectId !== undefined && data.projectId !== ticket.projectId;
+    const activityChanging = data.activityId !== undefined && data.activityId !== ticket.activityId;
+    if ((projectChanging || activityChanging) && session.user.role !== Role.ADMIN) {
+      return NextResponse.json(
+        { error: "Only administrators can link tickets to projects or activities" },
+        { status: 403 }
+      );
+    }
 
     const oldProjectId = ticket.projectId;
     const oldActivityId = ticket.activityId;

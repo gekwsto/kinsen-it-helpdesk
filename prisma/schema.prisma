@@ -377,7 +377,6 @@ model Project {
   startDate      DateTime?
   endDate        DateTime?
   successTarget  String?       @db.Text
-  failTarget     String?       @db.Text
 
   members     User[]            @relation("ProjectMembers")
   activities  ProjectActivity[]

@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
+import { hasPermission, isAdmin } from "@/lib/permissions";
 import { Role } from "@prisma/client";
 import { CreateTicketForm } from "@/components/tickets/ticket-form";
 import { redirect } from "next/navigation";
@@ -33,6 +33,8 @@ export default async function NewTicketPage() {
     );
   }
 
+  const userIsAdmin = isAdmin(session.user.role);
+
   const [categories, priorities, departments, itAgents, projects, activities] =
     await Promise.all([
       prisma.ticketCategory.findMany({
@@ -55,15 +57,20 @@ export default async function NewTicketPage() {
         select: { id: true, name: true, image: true },
         take: 6,
       }),
-      prisma.project.findMany({
-        orderBy: { title: "asc" },
-        select: { id: true, title: true },
-      }),
-      prisma.projectActivity.findMany({
-        where: { isCompleted: false },
-        orderBy: { title: "asc" },
-        select: { id: true, title: true, projectId: true },
-      }),
+      // Only load projects and activities for admin users (non-admins cannot link tickets)
+      userIsAdmin
+        ? prisma.project.findMany({
+            orderBy: { title: "asc" },
+            select: { id: true, title: true },
+          })
+        : Promise.resolve([]),
+      userIsAdmin
+        ? prisma.projectActivity.findMany({
+            where: { isCompleted: false },
+            orderBy: { title: "asc" },
+            select: { id: true, title: true, projectId: true },
+          })
+        : Promise.resolve([]),
     ]);
 
   return (

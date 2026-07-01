@@ -78,9 +78,8 @@ async function main() {
   }
   console.log("✓ Ticket statuses seeded");
 
-  // Ticket Priorities
+  // Ticket Priorities (Critical removed — mapped to High for existing data)
   const priorities = [
-    { name: "Critical", level: 4, color: "#dc2626" },
     { name: "High", level: 3, color: "#f97316" },
     { name: "Medium", level: 2, color: "#f59e0b" },
     { name: "Low", level: 1, color: "#22c55e" },
@@ -306,7 +305,7 @@ async function main() {
   const [
     adminUser, agentUser, managerUser, demoUser,
     openStatus, inProgressStatus, pendingStatus, resolvedStatus, closedStatus,
-    criticalPri, highPri, mediumPri, lowPri,
+    highPri, mediumPri, lowPri,
     hardwareCat, softwareCat, networkCat, accessCat, emailCat, printingCat, securityCat,
   ] = await Promise.all([
     prisma.user.findUnique({ where: { email: "admin@kinsen.gr" } }),
@@ -318,7 +317,6 @@ async function main() {
     prisma.ticketStatus.findFirst({ where: { name: "Pending User" } }),
     prisma.ticketStatus.findFirst({ where: { name: "Resolved" } }),
     prisma.ticketStatus.findFirst({ where: { name: "Closed" } }),
-    prisma.ticketPriority.findFirst({ where: { name: "Critical" } }),
     prisma.ticketPriority.findFirst({ where: { name: "High" } }),
     prisma.ticketPriority.findFirst({ where: { name: "Medium" } }),
     prisma.ticketPriority.findFirst({ where: { name: "Low" } }),
@@ -339,7 +337,7 @@ async function main() {
     console.error("Statuses not found — skipping mock data");
     return;
   }
-  if (!criticalPri || !highPri || !mediumPri || !lowPri) {
+  if (!highPri || !mediumPri || !lowPri) {
     console.error("Priorities not found — skipping mock data");
     return;
   }
@@ -353,15 +351,14 @@ async function main() {
       title: "IT Infrastructure Upgrade",
       description: "Complete overhaul of network switches, servers, and UPS systems across all floors.",
       status: ProjectStatus.IN_PROGRESS,
-      priority: 4,
+      priority: 3,
       ownerId: adminUser.id,
       departmentId: "dept-it",
       businessUnitId: "bu-default",
       startDate: new Date("2026-03-01"),
       endDate: new Date("2026-09-30"),
       successTarget: "All network switches replaced, server room reorganised, 99.9% uptime maintained.",
-      failTarget: "Downtime exceeding 4 hours or budget overrun by more than 20%.",
-      members: { connect: [{ id: agentUser.id }] },
+      members: { connect: [{ id: adminUser.id }] },
     },
   });
 
@@ -374,11 +371,11 @@ async function main() {
       description: "Migrate all on-premises Exchange mailboxes and SharePoint data to Office 365.",
       status: ProjectStatus.PLANNING,
       priority: 3,
-      ownerId: agentUser.id,
+      ownerId: adminUser.id,
       departmentId: "dept-it",
       startDate: new Date("2026-07-01"),
       endDate: new Date("2026-12-31"),
-      members: { connect: [{ id: adminUser.id }, { id: managerUser.id }] },
+      members: { connect: [{ id: adminUser.id }] },
     },
   });
 
@@ -390,7 +387,7 @@ async function main() {
       title: "Security Audit 2026",
       description: "Annual comprehensive security audit covering vulnerabilities, password policies, and access reviews.",
       status: ProjectStatus.IN_PROGRESS,
-      priority: 4,
+      priority: 3,
       ownerId: adminUser.id,
       departmentId: "dept-it",
       startDate: new Date("2026-05-01"),
@@ -408,11 +405,10 @@ async function main() {
       description: "Build a self-service portal for IT onboarding — account creation, hardware requests, software provisioning.",
       status: ProjectStatus.COMPLETED,
       priority: 2,
-      ownerId: managerUser.id,
+      ownerId: adminUser.id,
       departmentId: "dept-hr",
       startDate: new Date("2026-01-01"),
       endDate: new Date("2026-04-30"),
-      members: { connect: [{ id: agentUser.id }] },
     },
   });
 
@@ -644,7 +640,7 @@ async function main() {
     statusId: openStatus.id,
     requesterId: demoUser.id,
     categoryId: hardwareCat?.id,
-    priorityId: criticalPri.id,
+    priorityId: highPri.id,
     departmentId: "dept-finance",
     messages: [
       { body: "I've tried holding the power button for 10 seconds. Still no display. Power LED is on.", authorId: demoUser.id },
@@ -776,7 +772,7 @@ async function main() {
     statusId: inProgressStatus.id,
     requesterId: adminUser.id,
     categoryId: networkCat?.id,
-    priorityId: criticalPri.id,
+    priorityId: highPri.id,
     assignedAgentId: agentUser.id,
     projectId: proj1.id,
     messages: [
@@ -805,7 +801,7 @@ async function main() {
     statusId: inProgressStatus.id,
     requesterId: managerUser.id,
     categoryId: securityCat?.id,
-    priorityId: criticalPri.id,
+    priorityId: highPri.id,
     assignedAgentId: adminUser.id,
     departmentId: "dept-finance",
     projectId: proj3.id,
@@ -822,7 +818,7 @@ async function main() {
     statusId: inProgressStatus.id,
     requesterId: demoUser.id,
     categoryId: networkCat?.id,
-    priorityId: criticalPri.id,
+    priorityId: highPri.id,
     assignedAgentId: agentUser.id,
     activityId: act1.id, // activity belongs to proj1 — should appear in proj1 related tickets
     messages: [
@@ -872,7 +868,7 @@ async function main() {
     statusId: openStatus.id,
     requesterId: adminUser.id,
     categoryId: securityCat?.id,
-    priorityId: criticalPri.id,
+    priorityId: highPri.id,
     assignedAgentId: agentUser.id,
     activityId: act6.id, // activity belongs to proj3
     messages: [

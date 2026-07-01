@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import { createActivitySchema } from "@/lib/validations";
+import { ActivityStatus } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,7 +15,9 @@ export async function GET(req: NextRequest) {
 
     const where: any = {};
     if (projectId) where.projectId = projectId;
-    if (status) where.status = status;
+    // Validate status against the ActivityStatus enum before using in Prisma query
+    const validStatuses = Object.values(ActivityStatus) as string[];
+    if (status && validStatuses.includes(status)) where.status = status as ActivityStatus;
     if (assignedUserId) where.assignedUserId = assignedUserId;
 
     const activities = await prisma.projectActivity.findMany({

@@ -22,7 +22,6 @@ const PRIORITY_LABELS: Record<number, string> = {
   1: "Low",
   2: "Medium",
   3: "High",
-  4: "Critical",
 };
 
 export default async function ProjectsPage() {

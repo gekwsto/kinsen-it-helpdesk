@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import { updateProjectSchema } from "@/lib/validations";
+import { Role } from "@prisma/client";
 
 const PROJECT_INCLUDE = {
   owner: { select: { id: true, name: true, email: true, image: true } },
@@ -53,6 +54,19 @@ export async function PATCH(
     const body = await req.json();
     const data = updateProjectSchema.parse(body);
     const { memberIds, startDate, endDate, ...rest } = data;
+
+    // Validate that all assigned members are ADMIN users
+    if (memberIds && memberIds.length > 0) {
+      const adminCount = await prisma.user.count({
+        where: { id: { in: memberIds }, role: Role.ADMIN },
+      });
+      if (adminCount !== memberIds.length) {
+        return NextResponse.json(
+          { error: "Project members must be administrators" },
+          { status: 400 }
+        );
+      }
+    }
 
     const project = await prisma.project.update({
       where: { id },
