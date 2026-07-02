@@ -1,9 +1,9 @@
 import { redirect } from "next/navigation";
 import { auth, signIn } from "@/lib/auth";
+import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { Headset } from "lucide-react";
 import { CredentialsLoginForm } from "@/components/auth/credentials-login-form";
 
 export default async function LoginPage({
@@ -20,9 +20,15 @@ export default async function LoginPage({
     <div className="w-full max-w-md px-4">
       {/* Logo/Brand */}
       <div className="text-center mb-8">
-        <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl mb-4 shadow-[0_0_0_1px_rgba(57,191,194,0.3),0_0_32px_rgba(57,191,194,0.15)]"
-          style={{ backgroundColor: "#032e47" }}>
-          <Headset className="h-8 w-8" style={{ color: "#39bfc2" }} />
+        <div className="flex justify-center mb-4">
+          <Image
+            src="/kinsen_vertical.webp"
+            alt="Kinsen logo"
+            width={120}
+            height={120}
+            className="rounded-2xl"
+            priority
+          />
         </div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Kinsen IT Helpdesk</h1>
         <p className="text-slate-400 mt-1 text-sm">Internal IT Support System</p>

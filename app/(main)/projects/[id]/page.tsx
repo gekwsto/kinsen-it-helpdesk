@@ -10,8 +10,9 @@ import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target, Plus, Ticket, Pencil } from "lucide-react";
-import { ProjectStatus, ActivityStatus, GoalStatus } from "@prisma/client";
+import { ProjectStatus, ActivityStatus, GoalStatus, Role } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
+import { ProjectDeleteButton } from "@/components/projects/project-delete-button";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -60,6 +61,7 @@ export default async function ProjectDetailPage({
 
   if (!project) notFound();
 
+  const isAdmin = session.user.role === Role.ADMIN;
   const activityIds = project.activities.map((a) => a.id);
 
   const relatedTickets = await prisma.ticket.findMany({
@@ -126,6 +128,12 @@ export default async function ProjectDetailPage({
               Add Activity
             </Link>
           </Button>
+          {isAdmin && (
+            <ProjectDeleteButton
+              projectId={project.id}
+              projectTitle={project.title}
+            />
+          )}
         </div>
       </div>
 

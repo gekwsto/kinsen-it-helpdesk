@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasPermission } from "@/lib/permissions";
+import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
 import { updateProjectSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -96,16 +96,30 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const session = await requireAuth();
+    await requireAdmin();
 
-    const canDelete = await hasPermission(session.user.role, "project.delete", session.user.customRoleId);
-    if (!canDelete) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    const project = await prisma.project.findUnique({
+      where: { id },
+      select: { id: true },
+    });
+    if (!project) {
+      return NextResponse.json({ error: "Project not found" }, { status: 404 });
     }
 
+    // Safe cascade behaviour (no migration needed):
+    //   Ticket.projectId        → nullable, DB SetNull default
+    //   ProjectActivity.projectId → onDelete: SetNull (explicit in schema)
+    //   _ProjectMembers join rows → DB CASCADE (implicit M2M)
+    //   _GoalProjects join rows   → DB CASCADE (implicit M2M)
     await prisma.project.delete({ where: { id } });
     return new NextResponse(null, { status: 204 });
-  } catch {
+  } catch (error: any) {
+    if (error.message === "Unauthorized") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (error.message === "Forbidden") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }
