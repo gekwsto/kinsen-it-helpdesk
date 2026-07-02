@@ -1,6 +1,5 @@
 import { redirect } from "next/navigation";
 import { auth, signIn } from "@/lib/auth";
-import Image from "next/image";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -21,13 +20,10 @@ export default async function LoginPage({
       {/* Logo/Brand */}
       <div className="text-center mb-8">
         <div className="flex justify-center mb-4">
-          <Image
+          <img
             src="/kinsen_vertical.webp"
             alt="Kinsen logo"
-            width={120}
-            height={120}
-            className="rounded-2xl"
-            priority
+            className="h-32 w-32 object-contain"
           />
         </div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Kinsen IT Helpdesk</h1>
