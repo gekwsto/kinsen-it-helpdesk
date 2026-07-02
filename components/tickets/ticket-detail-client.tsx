@@ -71,6 +71,7 @@ export interface TicketDetailClientProps {
   ticketId: string;
   ticketNumber: number;
   ticketTitle: string;
+  ticketDescription: string;
   ticketSource: string;
   ticketCreatedAt: string;
   requester: { id: string; name: string | null; email: string; image: string | null };
@@ -103,6 +104,7 @@ export function TicketDetailClient({
   ticketId,
   ticketNumber,
   ticketTitle,
+  ticketDescription,
   ticketSource,
   ticketCreatedAt,
   requester,
@@ -223,6 +225,11 @@ export function TicketDetailClient({
                 <h1 className="text-xl font-bold">{ticketTitle}</h1>
               </div>
             </div>
+            {ticketDescription && (
+              <p className="text-sm text-foreground/80 whitespace-pre-wrap mb-4 leading-relaxed">
+                {ticketDescription}
+              </p>
+            )}
             <div className="flex items-center gap-3 text-sm text-muted-foreground">
               <div className="flex items-center gap-2">
                 <Avatar className="h-5 w-5">

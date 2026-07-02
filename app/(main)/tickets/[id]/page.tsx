@@ -110,6 +110,7 @@ export default async function TicketDetailPage({
     ticketId: ticket.id,
     ticketNumber: ticket.ticketNumber,
     ticketTitle: ticket.title,
+    ticketDescription: ticket.description,
     ticketSource: ticket.source,
     ticketCreatedAt: ticket.createdAt.toISOString(),
     requester: {
