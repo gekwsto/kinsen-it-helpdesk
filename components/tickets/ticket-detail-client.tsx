@@ -6,9 +6,28 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { formatDateTime, formatBytes, getInitials } from "@/lib/utils";
-import { Paperclip } from "lucide-react";
+import { Paperclip, Trash2, Loader2, XCircle } from "lucide-react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import { formatTicketNumber } from "@/lib/utils";
 import { StatusBadge, PriorityBadge, ColorBadge, SourceBadge } from "@/components/tickets/ticket-badge";
 import { TicketThread, type ThreadMessage } from "@/components/tickets/ticket-thread";
@@ -88,6 +107,9 @@ export interface TicketDetailClientProps {
   initialHistory: HistoryEntry[];
   currentUserId: string;
   userRole: Role;
+  isAdmin: boolean;
+  initialCancelReasonId: string | null;
+  cancelReasons: Array<{ id: string; name: string }>;
   // Fine-grained permission flags (derived server-side via hasPermission)
   canReply: boolean;
   canInternalNote: boolean;
@@ -121,6 +143,9 @@ export function TicketDetailClient({
   initialHistory,
   currentUserId,
   userRole,
+  isAdmin,
+  initialCancelReasonId,
+  cancelReasons,
   canReply,
   canInternalNote,
   canChangeStatus,
@@ -131,6 +156,7 @@ export function TicketDetailClient({
   categories,
   agents,
 }: TicketDetailClientProps) {
+  const router = useRouter();
   const canManageAny = canChangeStatus || canAssign;
   const [messages, setMessages] = useState<ThreadMessage[]>(initialMessages);
   const [status, setStatus] = useState<TicketStatus>(initialStatus);
@@ -138,6 +164,17 @@ export function TicketDetailClient({
   const [category, setCategory] = useState<TicketCategory | null>(initialCategory);
   const [assignedAgent, setAssignedAgent] = useState<TicketAgent | null>(initialAssignedAgent);
   const [closedAt, setClosedAt] = useState<string | null>(initialClosedAt);
+  const [cancelReasonId, setCancelReasonId] = useState<string | null>(initialCancelReasonId);
+
+  // Delete ticket dialog
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Cancel ticket dialog
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [selectedCancelReasonId, setSelectedCancelReasonId] = useState("");
+  const [cancelNote, setCancelNote] = useState("");
 
   const handleEvent = useCallback(
     (event: TicketRealtimeEvent) => {
@@ -189,6 +226,50 @@ export function TicketDetailClient({
       return [...prev, message];
     });
   }, []);
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error ?? "Failed to delete ticket");
+      }
+      toast.success("Ticket deleted");
+      router.push("/tickets");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to delete ticket");
+      setDeleting(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!selectedCancelReasonId) return;
+    setCancelling(true);
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cancelReasonId: selectedCancelReasonId, note: cancelNote || undefined }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error ?? "Failed to cancel ticket");
+      }
+      const data = await res.json();
+      setStatus(data.status);
+      setClosedAt(data.closedAt);
+      setCancelReasonId(data.cancelReasonId);
+      setCancelOpen(false);
+      setSelectedCancelReasonId("");
+      setCancelNote("");
+      toast.success("Ticket cancelled");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to cancel ticket");
+    } finally {
+      setCancelling(false);
+    }
+  };
 
   // Build the ticket object TicketActions expects (synced to live state)
   const ticketForActions = {
@@ -288,6 +369,93 @@ export function TicketDetailClient({
         </Tabs>
       </div>
 
+      {/* Delete confirmation dialog */}
+      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Ticket</DialogTitle>
+          </DialogHeader>
+          <div className="py-2 space-y-2">
+            <p className="text-sm text-muted-foreground">
+              Are you sure you want to permanently delete ticket{" "}
+              <strong className="text-foreground font-mono">{formatTicketNumber(ticketNumber)}</strong>?
+            </p>
+            <p className="text-sm font-medium text-destructive">
+              This will delete all messages, attachments, and history. This action cannot be undone.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+              {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Delete Permanently
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Cancel ticket dialog */}
+      <Dialog
+        open={cancelOpen}
+        onOpenChange={(o) => {
+          setCancelOpen(o);
+          if (!o) { setSelectedCancelReasonId(""); setCancelNote(""); }
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Cancel Ticket</DialogTitle>
+          </DialogHeader>
+          <div className="py-2 space-y-4">
+            <p className="text-sm text-muted-foreground">
+              Cancelling this ticket will close it and remove it from the open queue. The ticket
+              will be preserved in the closed/cancelled list.
+            </p>
+            <div className="space-y-2">
+              <Label htmlFor="cancel-reason">Cancel Reason *</Label>
+              <Select value={selectedCancelReasonId} onValueChange={setSelectedCancelReasonId}>
+                <SelectTrigger id="cancel-reason">
+                  <SelectValue placeholder="Select a reason…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {cancelReasons.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>
+                      {r.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="cancel-note">Note (optional)</Label>
+              <Textarea
+                id="cancel-note"
+                placeholder="Additional context for this cancellation…"
+                value={cancelNote}
+                onChange={(e) => setCancelNote(e.target.value)}
+                rows={3}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCancelOpen(false)} disabled={cancelling}>
+              Back
+            </Button>
+            <Button
+              variant="default"
+              onClick={handleCancel}
+              disabled={cancelling || !selectedCancelReasonId}
+              className="bg-orange-600 hover:bg-orange-700 text-white"
+            >
+              {cancelling && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Cancel Ticket
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Sidebar — 1 column */}
       <div className="space-y-4">
         {canManageAny && (
@@ -335,6 +503,37 @@ export function TicketDetailClient({
                   </div>
                 </a>
               ))}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Admin destructive actions */}
+        {isAdmin && (
+          <Card className="border-destructive/30">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm text-destructive">Admin Actions</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {!cancelReasonId && !status.isClosed && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 hover:text-orange-800"
+                  onClick={() => setCancelOpen(true)}
+                >
+                  <XCircle className="h-3.5 w-3.5 mr-1.5" />
+                  Cancel Ticket
+                </Button>
+              )}
+              <Button
+                variant="destructive"
+                size="sm"
+                className="w-full"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                Delete Ticket
+              </Button>
             </CardContent>
           </Card>
         )}

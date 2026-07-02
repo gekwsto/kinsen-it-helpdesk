@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, canManageTickets, canViewAllTickets, hasPermission } from "@/lib/permissions";
+import { requireAuth, requireAdmin, canManageTickets, canViewAllTickets, hasPermission } from "@/lib/permissions";
 import { updateTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { recalculateFromTicket, recalculateProjectRollup } from "@/lib/projects/progress-rollup";
+import path from "path";
+import fs from "fs/promises";
 
 const TICKET_INCLUDE = {
   requester: { select: { id: true, name: true, email: true, image: true } },
@@ -217,6 +219,49 @@ export async function PATCH(
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
+    }
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const session = await requireAdmin();
+
+    const ticket = await prisma.ticket.findUnique({
+      where: { id },
+      select: { id: true, ticketNumber: true },
+    });
+
+    if (!ticket) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
+    // Remove physical attachment files stored under UPLOAD_DIR/{ticketId}/
+    const uploadDir = process.env.UPLOAD_DIR || "./public/uploads";
+    const ticketDir = path.join(uploadDir, id);
+    try {
+      await fs.rm(ticketDir, { recursive: true, force: true });
+    } catch {
+      // Directory may not exist — safe to ignore
+    }
+
+    // Cascade in schema: TicketMessage, TicketAttachment, TicketHistory all have onDelete: Cascade
+    await prisma.ticket.delete({ where: { id } });
+
+    console.log(`[ticket-delete] #${ticket.ticketNumber} (${id}) deleted by ${session.user.email}`);
+
+    return new NextResponse(null, { status: 204 });
+  } catch (error: any) {
+    if (error.message === "Unauthorized") {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    if (error.message === "Forbidden") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

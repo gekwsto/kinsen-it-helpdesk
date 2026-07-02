@@ -51,13 +51,19 @@ export async function DELETE(
     if (!role) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     if (role.isBuiltIn) {
-      return NextResponse.json({ error: "Built-in roles cannot be deleted" }, { status: 400 });
+      return NextResponse.json({ error: "Built-in roles cannot be deleted" }, { status: 409 });
     }
 
-    // Remove all permission assignments for this role
+    const usersWithRole = await prisma.user.count({ where: { customRoleId: id } });
+    if (usersWithRole > 0) {
+      return NextResponse.json(
+        { error: `This role is assigned to ${usersWithRole} user${usersWithRole > 1 ? "s" : ""} and cannot be deleted. Reassign them first.` },
+        { status: 409 }
+      );
+    }
+
+    // Remove all permission assignments for this role before deleting
     await prisma.rolePermission.deleteMany({ where: { roleKey: role.key } });
-    // Unassign users from this role
-    await prisma.user.updateMany({ where: { customRoleId: id }, data: { customRoleId: null } });
     await prisma.customRole.delete({ where: { id } });
 
     return new NextResponse(null, { status: 204 });
