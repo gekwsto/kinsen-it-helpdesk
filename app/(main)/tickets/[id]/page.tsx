@@ -86,29 +86,32 @@ export default async function TicketDetailPage({
     : ticket.messages.filter((m) => !m.isInternal);
 
   // Fetch option lists only for users who can act on them
-  const [statuses, priorities, categories, agents, cancelReasons] = needsAdminData
-    ? await Promise.all([
-        canChangeStatus
-          ? prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" } })
-          : Promise.resolve([]),
-        canChangeStatus
-          ? prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" } })
-          : Promise.resolve([]),
-        canChangeStatus
-          ? prisma.ticketCategory.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
-          : Promise.resolve([]),
-        canAssign
-          ? prisma.user.findMany({
-              where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
-              select: { id: true, name: true, email: true, image: true },
-              orderBy: { name: "asc" },
-            })
-          : Promise.resolve([]),
-        isAdminUser
-          ? prisma.ticketCancelReason.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
-          : Promise.resolve([]),
-      ])
-    : [[], [], [], [], []];
+  const [[statuses, priorities, categories, agents], cancelReasons] = await Promise.all([
+    needsAdminData
+      ? Promise.all([
+          canChangeStatus
+            ? prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" } })
+            : Promise.resolve([]),
+          canChangeStatus
+            ? prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" } })
+            : Promise.resolve([]),
+          canChangeStatus
+            ? prisma.ticketCategory.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
+            : Promise.resolve([]),
+          canAssign
+            ? prisma.user.findMany({
+                where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
+                select: { id: true, name: true, email: true, image: true },
+                orderBy: { name: "asc" },
+              })
+            : Promise.resolve([]),
+        ])
+      : Promise.resolve([[], [], [], []]),
+    // Cancel reasons needed by both admins and requesters (who can cancel their own tickets)
+    isAdminUser || isRequester
+      ? prisma.ticketCancelReason.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
+      : Promise.resolve([]),
+  ]);
 
   const props: TicketDetailClientProps = {
     ticketId: ticket.id,
@@ -117,6 +120,7 @@ export default async function TicketDetailPage({
     ticketDescription: ticket.description,
     ticketSource: ticket.source,
     isAdmin: isAdminUser,
+    isRequester,
     initialCancelReasonId: ticket.cancelReasonId,
     cancelReasons: (cancelReasons as Array<{ id: string; name: string }>).map((r) => ({ id: r.id, name: r.name })),
     ticketCreatedAt: ticket.createdAt.toISOString(),

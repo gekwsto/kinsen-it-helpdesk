@@ -128,6 +128,8 @@ async function main() {
   // Cancel Reasons
   const cancelReasons = [
     { name: "Duplicate", description: "Ticket is a duplicate of another" },
+    { name: "Already Resolved", description: "The issue was already resolved before this ticket was processed" },
+    { name: "Void Ticket", description: "Ticket is invalid or should not have been created" },
     { name: "User Request", description: "User requested cancellation" },
     { name: "Not an IT Issue", description: "Issue is outside IT scope" },
     { name: "Resolved by User", description: "User resolved the issue themselves" },

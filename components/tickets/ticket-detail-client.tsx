@@ -108,6 +108,7 @@ export interface TicketDetailClientProps {
   currentUserId: string;
   userRole: Role;
   isAdmin: boolean;
+  isRequester: boolean;
   initialCancelReasonId: string | null;
   cancelReasons: Array<{ id: string; name: string }>;
   // Fine-grained permission flags (derived server-side via hasPermission)
@@ -144,6 +145,7 @@ export function TicketDetailClient({
   currentUserId,
   userRole,
   isAdmin,
+  isRequester,
   initialCancelReasonId,
   cancelReasons,
   canReply,
@@ -270,6 +272,9 @@ export function TicketDetailClient({
       setCancelling(false);
     }
   };
+
+  // True when this user is allowed to cancel and the ticket is still open
+  const canCancelNow = (isAdmin || isRequester) && !cancelReasonId && !status.isClosed;
 
   // Build the ticket object TicketActions expects (synced to live state)
   const ticketForActions = {
@@ -406,12 +411,13 @@ export function TicketDetailClient({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Cancel Ticket</DialogTitle>
+            <DialogTitle>{isAdmin ? "Cancel Ticket" : "Cancel My Request"}</DialogTitle>
           </DialogHeader>
           <div className="py-2 space-y-4">
             <p className="text-sm text-muted-foreground">
-              Cancelling this ticket will close it and remove it from the open queue. The ticket
-              will be preserved in the closed/cancelled list.
+              {isAdmin
+                ? "Cancelling this ticket will close it and remove it from the open queue. The ticket will be preserved in the closed/cancelled list."
+                : "Cancelling your request will close this ticket. You will no longer receive updates on it. The record will be preserved in the closed/cancelled list."}
             </p>
             <div className="space-y-2">
               <Label htmlFor="cancel-reason">Cancel Reason *</Label>
@@ -514,12 +520,14 @@ export function TicketDetailClient({
               <CardTitle className="text-sm text-destructive">Admin Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
-              {!cancelReasonId && !status.isClosed && (
+              {canCancelNow && (
                 <Button
                   variant="outline"
                   size="sm"
                   className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 hover:text-orange-800"
                   onClick={() => setCancelOpen(true)}
+                  disabled={cancelReasons.length === 0}
+                  title={cancelReasons.length === 0 ? "No active cancel reasons available" : undefined}
                 >
                   <XCircle className="h-3.5 w-3.5 mr-1.5" />
                   Cancel Ticket
@@ -534,6 +542,32 @@ export function TicketDetailClient({
                 <Trash2 className="h-3.5 w-3.5 mr-1.5" />
                 Delete Ticket
               </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Requester cancel — only visible to the ticket owner, not admins */}
+        {!isAdmin && isRequester && canCancelNow && (
+          <Card className="border-orange-200">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm text-orange-700">My Request</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {cancelReasons.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No active cancel reasons are available. Contact support if you need this ticket cancelled.
+                </p>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 hover:text-orange-800"
+                  onClick={() => setCancelOpen(true)}
+                >
+                  <XCircle className="h-3.5 w-3.5 mr-1.5" />
+                  Cancel My Request
+                </Button>
+              )}
             </CardContent>
           </Card>
         )}

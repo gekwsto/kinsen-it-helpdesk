@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAdmin } from "@/lib/permissions";
+import { requireAuth, isAdmin } from "@/lib/permissions";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { z } from "zod";
 
@@ -15,7 +15,7 @@ export async function POST(
 ) {
   try {
     const { id } = await params;
-    const session = await requireAdmin();
+    const session = await requireAuth();
 
     const ticket = await prisma.ticket.findUnique({
       where: { id },
@@ -24,6 +24,13 @@ export async function POST(
 
     if (!ticket) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+
+    const actorIsAdmin = isAdmin(session.user.role);
+    const actorIsRequester = ticket.requesterId === session.user.id;
+
+    if (!actorIsAdmin && !actorIsRequester) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     if (ticket.cancelReasonId !== null) {
@@ -37,11 +44,12 @@ export async function POST(
     const body = await req.json();
     const data = cancelSchema.parse(body);
 
-    const cancelReason = await prisma.ticketCancelReason.findUnique({
-      where: { id: data.cancelReasonId },
+    // Only active cancel reasons are valid
+    const cancelReason = await prisma.ticketCancelReason.findFirst({
+      where: { id: data.cancelReasonId, isActive: true },
     });
     if (!cancelReason) {
-      return NextResponse.json({ error: "Cancel reason not found" }, { status: 404 });
+      return NextResponse.json({ error: "Cancel reason not found or inactive" }, { status: 422 });
     }
 
     // Find a closed status to move the ticket into, if one exists
@@ -61,17 +69,21 @@ export async function POST(
         include: { status: true },
       });
 
+      const actor = actorIsAdmin ? "admin" : "requester";
+      const noteText = data.note?.trim() ? ` — ${data.note.trim()}` : "";
+
       await tx.ticketHistory.create({
         data: {
           ticketId: id,
           changedById: session.user.id,
           type: "CANCEL_REASON_SET",
           newValue: cancelReason.name,
-          description: `Cancelled: ${cancelReason.name}${data.note ? ` — ${data.note}` : ""}`,
+          description: `Cancelled by ${actor}: ${cancelReason.name}${noteText}`,
         },
       });
 
-      if (data.note?.trim()) {
+      // Admin notes become internal messages; requester notes stay in history only
+      if (actorIsAdmin && data.note?.trim()) {
         await tx.ticketMessage.create({
           data: {
             ticketId: id,
@@ -86,7 +98,6 @@ export async function POST(
       return updated;
     });
 
-    // Notify other connected clients of the status change
     publishTicketEvent("TICKET_STATUS_CHANGED", id, session.user.id, {
       status: result.status,
       closedAt: result.closedAt?.toISOString() ?? null,

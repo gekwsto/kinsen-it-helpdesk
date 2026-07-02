@@ -163,12 +163,15 @@ export function AdminConfigTable({
     setDeleting(id);
     try {
       const res = await fetch(`${apiEndpoint}?id=${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete");
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error ?? "Failed to delete");
+      }
       setItems((prev) => prev.filter((i) => i.id !== id));
       toast.success(`${title} removed`);
       router.refresh();
-    } catch {
-      toast.error("Failed to delete");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to delete");
     } finally {
       setDeleting(null);
     }

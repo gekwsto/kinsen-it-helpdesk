@@ -223,7 +223,9 @@ export default function RolesAdminPage() {
       const res = await fetch(`/api/admin/roles/${deleteTarget.id}`, { method: "DELETE" });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error ?? "Failed to delete role");
+        toast.error(err.error ?? "Failed to delete role");
+        if (res.status === 409) return; // keep dialog open so user reads the message
+        return;
       }
       const remaining = roles.filter((r) => r.id !== deleteTarget.id);
       setRoles(remaining);
@@ -233,8 +235,8 @@ export default function RolesAdminPage() {
       setDeleteOpen(false);
       setDeleteTarget(null);
       toast.success("Role deleted");
-    } catch (e: any) {
-      toast.error(e.message ?? "Failed to delete role");
+    } catch {
+      toast.error("Failed to delete role");
     } finally {
       setDeleting(false);
     }
@@ -304,12 +306,10 @@ export default function RolesAdminPage() {
                 >
                   <Pencil className="h-3.5 w-3.5" />
                 </button>
-                {!role.isBuiltIn && (
+                {role.key !== "ADMIN" && (
                   <button
                     onClick={(e) => { e.stopPropagation(); setDeleteTarget(role); setDeleteOpen(true); }}
-                    className={cn(
-                      "p-1 rounded hover:bg-red-100 text-red-500 transition-colors",
-                    )}
+                    className="p-1 rounded hover:bg-red-100 text-red-500 transition-colors"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
