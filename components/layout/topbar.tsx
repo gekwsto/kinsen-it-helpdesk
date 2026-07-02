@@ -1,7 +1,7 @@
 "use client";
 
 import { signOut } from "next-auth/react";
-import { Bell, LogOut, User, ChevronDown } from "lucide-react";
+import { LogOut, User, ChevronDown } from "lucide-react";
 import { getInitials } from "@/lib/utils";
 import { Role } from "@prisma/client";
 import {
@@ -16,6 +16,7 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
+import { NotificationDropdown } from "@/components/notifications/notification-dropdown";
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
@@ -51,11 +52,7 @@ export function Topbar({ user }: TopbarProps) {
 
       <div className="flex items-center gap-3">
         {/* Notifications */}
-        <Button variant="ghost" size="icon" className="relative" asChild>
-          <Link href="/notifications">
-            <Bell className="h-4 w-4" />
-          </Link>
-        </Button>
+        <NotificationDropdown />
 
         {/* User menu */}
         <DropdownMenu>

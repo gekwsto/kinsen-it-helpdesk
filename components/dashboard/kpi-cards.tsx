@@ -3,7 +3,6 @@ import {
   Ticket,
   Clock,
   CheckCircle2,
-  AlertTriangle,
   Mail,
   LayoutList,
 } from "lucide-react";
@@ -13,7 +12,6 @@ interface KpiCardsProps {
   open: number;
   inProgress: number;
   closed: number;
-  overdue: number;
   emailCreated: number;
 }
 
@@ -51,14 +49,6 @@ const CARDS = [
     sub: "Resolved & closed",
   },
   {
-    key: "overdue" as const,
-    title: "Overdue",
-    icon: AlertTriangle,
-    iconClass: "text-red-600",
-    bgClass: "bg-red-50",
-    sub: "Open > 7 days",
-  },
-  {
     key: "emailCreated" as const,
     title: "From Email",
     icon: Mail,
@@ -70,7 +60,7 @@ const CARDS = [
 
 export function KpiCards(props: KpiCardsProps) {
   return (
-    <div className="grid gap-4 grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
+    <div className="grid gap-4 grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
       {CARDS.map((card) => (
         <Card key={card.key}>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">

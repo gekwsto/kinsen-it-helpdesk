@@ -115,6 +115,7 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
         { label: "Categories", href: "/admin/categories" },
         { label: "Priorities", href: "/admin/priorities" },
         { label: "Statuses", href: "/admin/statuses" },
+        { label: "SLA", href: "/admin/sla" },
         { label: "Email Settings", href: "/admin/email" },
       ],
     },

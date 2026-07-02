@@ -23,7 +23,6 @@ export default async function DashboardPage() {
   const ticketWhere = isPersonalView ? { requesterId: userId } : {};
   const recentActivityWhere = isPersonalView ? { ticket: { requesterId: userId } } : {};
 
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const timelineStart = new Date(Date.now() - TIMELINE_DAYS * 24 * 60 * 60 * 1000);
 
   const [
@@ -31,7 +30,6 @@ export default async function DashboardPage() {
     openCount,
     inProgressCount,
     closedCount,
-    overdueCount,
     emailCount,
     byStatus,
     byPriority,
@@ -47,9 +45,6 @@ export default async function DashboardPage() {
       where: { ...ticketWhere, status: { name: { contains: "Progress", mode: "insensitive" } } },
     }),
     prisma.ticket.count({ where: { ...ticketWhere, status: { isClosed: true } } }),
-    prisma.ticket.count({
-      where: { ...ticketWhere, status: { isClosed: false }, createdAt: { lt: sevenDaysAgo } },
-    }),
     prisma.ticket.count({ where: { ...ticketWhere, source: "EMAIL" } }),
 
     // Chart: by status
@@ -171,7 +166,6 @@ export default async function DashboardPage() {
         open={openCount}
         inProgress={inProgressCount}
         closed={closedCount}
-        overdue={overdueCount}
         emailCreated={emailCount}
       />
 

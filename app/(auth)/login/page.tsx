@@ -20,23 +20,35 @@ export default async function LoginPage({
     <div className="w-full max-w-md px-4">
       {/* Logo/Brand */}
       <div className="text-center mb-8">
-        <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary mb-4">
-          <Headset className="h-8 w-8 text-white" />
+        <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl mb-4 shadow-[0_0_0_1px_rgba(57,191,194,0.3),0_0_32px_rgba(57,191,194,0.15)]"
+          style={{ backgroundColor: "#032e47" }}>
+          <Headset className="h-8 w-8" style={{ color: "#39bfc2" }} />
         </div>
-        <h1 className="text-2xl font-bold text-white">Kinsen IT Helpdesk</h1>
-        <p className="text-slate-400 mt-1">Internal IT Support System</p>
+        <h1 className="text-2xl font-bold text-white tracking-tight">Kinsen IT Helpdesk</h1>
+        <p className="text-slate-400 mt-1 text-sm">Internal IT Support System</p>
       </div>
 
-      <Card className="border-0 shadow-2xl">
+      {/* Glass card */}
+      <Card
+        className="border rounded-2xl"
+        style={{
+          backgroundColor: "rgba(7, 25, 41, 0.75)",
+          backdropFilter: "blur(24px)",
+          WebkitBackdropFilter: "blur(24px)",
+          borderColor: "rgba(57, 191, 194, 0.15)",
+          boxShadow:
+            "0 0 0 1px rgba(255,255,255,0.05), 0 24px 64px -12px rgba(0,0,0,0.7), 0 0 40px rgba(57,191,194,0.06)",
+        }}
+      >
         <CardHeader className="text-center pb-4">
-          <CardTitle className="text-xl">Welcome back</CardTitle>
-          <CardDescription>
+          <CardTitle className="text-xl text-white">Welcome back</CardTitle>
+          <CardDescription className="text-slate-400">
             Sign in with your Kinsen Microsoft account to continue.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           {message === "password_changed" && (
-            <div className="rounded-md border border-green-200 bg-green-50 px-3 py-2.5 text-sm text-green-700">
+            <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2.5 text-sm text-green-400">
               Password changed. Please sign in with your new password.
             </div>
           )}
@@ -59,16 +71,16 @@ export default async function LoginPage({
             </Button>
           </form>
 
-          <p className="text-center text-xs text-muted-foreground">
+          <p className="text-center text-xs text-slate-500">
             Access is restricted to{" "}
-            <span className="font-medium text-foreground">@kinsen.gr</span> accounts only.
+            <span className="font-medium text-slate-300">@kinsen.gr</span> accounts only.
           </p>
 
           {/* Divider */}
           <div className="flex items-center gap-3">
-            <Separator className="flex-1" />
-            <span className="text-xs text-muted-foreground">admin access</span>
-            <Separator className="flex-1" />
+            <Separator className="flex-1 bg-white/10" />
+            <span className="text-xs text-slate-500">admin access</span>
+            <Separator className="flex-1 bg-white/10" />
           </div>
 
           {/* Secondary: Credentials for ADMIN only */}
@@ -76,7 +88,7 @@ export default async function LoginPage({
         </CardContent>
       </Card>
 
-      <p className="text-center text-xs text-slate-500 mt-6">
+      <p className="text-center text-xs text-slate-600 mt-6">
         © {new Date().getFullYear()} Kinsen. All rights reserved.
       </p>
     </div>

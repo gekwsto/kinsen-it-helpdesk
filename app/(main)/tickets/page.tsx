@@ -72,7 +72,11 @@ export default async function AllTicketsPage({
       ? { status: { order: sortDir } }
       : { [sortBy]: sortDir };
 
-  const where: any = {};
+  // Base filter: only open (non-closed, non-cancelled) tickets
+  const where: any = {
+    status: { isClosed: false },
+    cancelReasonId: null,
+  };
 
   if (params.myOnly === "true") {
     where.requesterId = session.user.id;

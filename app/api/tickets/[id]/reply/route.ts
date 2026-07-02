@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, canManageTickets, canViewAllTickets, hasPermission } from "@/lib/permissions";
+import { requireAuth, canManageTickets, hasPermission } from "@/lib/permissions";
 import { replyTicketSchema } from "@/lib/validations";
 import { notifyRequesterReply } from "@/lib/ticket-notification-service";
+import { sendPushNotificationsToUser } from "@/lib/web-push";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
+import { Role } from "@prisma/client";
 
 export async function POST(
   req: NextRequest,
@@ -63,19 +65,45 @@ export async function POST(
       },
     });
 
-    // Notify requester when agent posts a public reply
+    // Notify requester when agent posts a public reply (skip if requester is an admin)
     if (
       !data.isInternal &&
       canManageTickets(session.user.role) &&
-      ticket.requesterId !== session.user.id
+      ticket.requesterId !== session.user.id &&
+      ticket.requester.role !== Role.ADMIN
     ) {
+      const agentName = session.user.name ?? "IT Support";
+      const ticketLink = `/tickets/${id}`;
+
+      // Email notification (fire-and-forget)
       notifyRequesterReply({
         ticketId: id,
         messageId: message.id,
-        agentName: session.user.name ?? "IT Support",
+        agentName,
         replyBody: data.body,
       }).catch((err) => {
-        console.error("[notification] Failed to send reply notification:", err);
+        console.error("[notification] Failed to send reply email:", err);
+      });
+
+      // In-app notification + web push (fire-and-forget)
+      Promise.resolve().then(async () => {
+        try {
+          await prisma.notification.create({
+            data: {
+              userId: ticket.requesterId,
+              title: `New reply on your ticket`,
+              body: `${agentName} replied: ${data.body.slice(0, 120)}${data.body.length > 120 ? "…" : ""}`,
+              link: ticketLink,
+            },
+          });
+          await sendPushNotificationsToUser(ticket.requesterId, {
+            title: `New reply on your ticket`,
+            body: `${agentName}: ${data.body.slice(0, 100)}${data.body.length > 100 ? "…" : ""}`,
+            link: ticketLink,
+          });
+        } catch (err) {
+          console.error("[notification] Failed to send in-app/push notification:", err);
+        }
       });
     }
 

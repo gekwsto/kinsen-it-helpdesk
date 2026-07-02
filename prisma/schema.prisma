@@ -164,6 +164,7 @@ model User {
   createdActivities    ProjectActivity[]  @relation("ActivityCreator")
   ownedGoals          YearlyGoal[]       @relation("GoalOwner")
   notifications       Notification[]
+  pushSubscriptions   PushSubscription[]
   accounts            Account[]
   sessions            Session[]
 
@@ -219,14 +220,15 @@ model TicketCategory {
 }
 
 model TicketPriority {
-  id        String   @id @default(cuid())
-  name      String   @unique
+  id        String      @id @default(cuid())
+  name      String      @unique
   level     Int
   color     String
-  isActive  Boolean  @default(true)
+  isActive  Boolean     @default(true)
   tickets   Ticket[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  slaPolicy SlaPolicy?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
 }
 
 model TicketStatus {
@@ -478,6 +480,23 @@ model RolePermission {
   @@index([roleKey])
 }
 
+// ─── SLA ──────────────────────────────────────────────────────────────────────
+
+model SlaSettings {
+  id        String   @id @default(cuid())
+  isEnabled Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+model SlaPolicy {
+  id                 String         @id @default(cuid())
+  priority           TicketPriority @relation(fields: [priorityId], references: [id], onDelete: Cascade)
+  priorityId         String         @unique
+  firstResponseHours Int            @default(8)
+  resolutionHours    Int            @default(48)
+  updatedAt          DateTime       @updatedAt
+}
+
 // ─── Notifications ────────────────────────────────────────────────────────────
 
 model Notification {
@@ -492,6 +511,18 @@ model Notification {
 
   @@index([userId])
   @@index([isRead])
+}
+
+model PushSubscription {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 // ─── Email Processing ─────────────────────────────────────────────────────────

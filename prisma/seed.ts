@@ -35,7 +35,6 @@ const PERMISSIONS = [
   { key: "role.manage", description: "Manage roles and permissions", module: "admin" },
 ];
 
-// Permissions per role (ADMIN gets all via code shortcut)
 const ROLE_PERMISSIONS: Record<string, string[]> = {
   IT_AGENT: [
     "activity.view", "activity.create", "activity.edit", "activity.assign",
@@ -57,7 +56,18 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
 };
 
 async function main() {
-  console.log("Seeding database...");
+  // ─── Environment guards ────────────────────────────────────────────────────
+  // ALLOW_MOCK_SEED=true  → allow mock/demo data even in production (explicit opt-in)
+  const isProduction = process.env.NODE_ENV === "production";
+  const allowMockSeed = process.env.ALLOW_MOCK_SEED === "true";
+
+  console.log(`Seeding database... [env: ${process.env.NODE_ENV ?? "development"}]`);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BOOTSTRAP DATA — always runs in every environment including production.
+  // This section contains ONLY required system/configuration records.
+  // No fake users, no mock tickets, no demo projects.
+  // ═══════════════════════════════════════════════════════════════════════════
 
   // Ticket Statuses
   const statuses = [
@@ -78,7 +88,7 @@ async function main() {
   }
   console.log("✓ Ticket statuses seeded");
 
-  // Ticket Priorities (Critical removed — mapped to High for existing data)
+  // Ticket Priorities
   const priorities = [
     { name: "High", level: 3, color: "#f97316" },
     { name: "Medium", level: 2, color: "#f59e0b" },
@@ -137,10 +147,7 @@ async function main() {
   const company = await prisma.company.upsert({
     where: { domain: "kinsen.gr" },
     update: {},
-    create: {
-      name: "Kinsen",
-      domain: "kinsen.gr",
-    },
+    create: { name: "Kinsen", domain: "kinsen.gr" },
   });
   console.log("✓ Company seeded");
 
@@ -148,11 +155,7 @@ async function main() {
   const defaultBU = await prisma.businessUnit.upsert({
     where: { id: "bu-default" },
     update: {},
-    create: {
-      id: "bu-default",
-      name: "Information Technology",
-      companyId: company.id,
-    },
+    create: { id: "bu-default", name: "Information Technology", companyId: company.id },
   });
 
   // Default Departments
@@ -168,16 +171,12 @@ async function main() {
     await prisma.department.upsert({
       where: { id: dept.id },
       update: {},
-      create: {
-        ...dept,
-        businessUnitId: defaultBU.id,
-      },
+      create: { ...dept, businessUnitId: defaultBU.id },
     });
   }
   console.log("✓ Departments seeded");
 
-  // ─── Users ────────────────────────────────────────────────────────────────────
-
+  // System admin user — required bootstrap record (safe to run in production)
   const adminPasswordHash = await bcrypt.hash(
     process.env.ADMIN_PASSWORD || "Kinsen123!",
     12
@@ -197,6 +196,63 @@ async function main() {
   });
   console.log("✓ Admin user seeded (admin@kinsen.gr)");
 
+  // Permissions
+  for (const perm of PERMISSIONS) {
+    await prisma.permission.upsert({
+      where: { key: perm.key },
+      update: { description: perm.description, module: perm.module },
+      create: perm,
+    });
+  }
+  console.log("✓ Permissions seeded");
+
+  // Role-Permission Mappings
+  for (const [roleKey, permKeys] of Object.entries(ROLE_PERMISSIONS)) {
+    for (const permKey of permKeys) {
+      const perm = await prisma.permission.findUnique({ where: { key: permKey } });
+      if (!perm) continue;
+      await prisma.rolePermission.upsert({
+        where: { roleKey_permissionId: { roleKey, permissionId: perm.id } },
+        update: {},
+        create: { roleKey, permissionId: perm.id },
+      });
+    }
+  }
+  console.log("✓ Role-permission mappings seeded");
+
+  // Built-in Custom Roles
+  const builtInRoles = [
+    { key: "ADMIN", name: "Administrator", description: "Full access to all features", isBuiltIn: true },
+    { key: "IT_AGENT", name: "IT Agent", description: "Manage tickets, projects and activities", isBuiltIn: true },
+    { key: "DEPARTMENT_MANAGER", name: "Department Manager", description: "Manage department projects and goals", isBuiltIn: true },
+    { key: "USER", name: "User", description: "Submit and view own tickets", isBuiltIn: true },
+  ];
+
+  for (const role of builtInRoles) {
+    await prisma.customRole.upsert({
+      where: { key: role.key },
+      update: { name: role.name, description: role.description },
+      create: role,
+    });
+  }
+  console.log("✓ Built-in custom roles seeded");
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MOCK / DEMO DATA — development only.
+  // Never runs automatically in production.
+  // Set ALLOW_MOCK_SEED=true to allow in production explicitly (use with care).
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  if (isProduction && !allowMockSeed) {
+    console.log("\nSkipping mock seed data in production.");
+    console.log("→ Set ALLOW_MOCK_SEED=true to seed mock/demo data explicitly.\n");
+    console.log("✅ Bootstrap seed completed successfully!");
+    return;
+  }
+
+  console.log("Running development mock seed data...");
+
+  // Demo users — not for production
   const agentPasswordHash = await bcrypt.hash(
     process.env.DEMO_AGENT_PASSWORD || "Agent@123456",
     12
@@ -215,7 +271,6 @@ async function main() {
       departmentId: "dept-it",
     },
   });
-  console.log("✓ IT Agent seeded (agent@kinsen.gr)");
 
   const managerPasswordHash = await bcrypt.hash(
     process.env.DEMO_MANAGER_PASSWORD || "Manager@123456",
@@ -235,7 +290,6 @@ async function main() {
       departmentId: "dept-hr",
     },
   });
-  console.log("✓ Manager seeded (manager@kinsen.gr)");
 
   const userPasswordHash = await bcrypt.hash(
     process.env.DEMO_USER_PASSWORD || "User@123456",
@@ -254,7 +308,6 @@ async function main() {
       mustChangePassword: false,
     },
   });
-  console.log("✓ Demo user seeded (user@kinsen.gr)");
 
   const user2PasswordHash = await bcrypt.hash(
     process.env.DEMO_USER2_PASSWORD || "User2@123456",
@@ -273,53 +326,8 @@ async function main() {
       mustChangePassword: false,
     },
   });
-  console.log("✓ Demo user 2 seeded (user2@kinsen.gr)");
 
-  // ─── Permissions ──────────────────────────────────────────────────────────────
-
-  for (const perm of PERMISSIONS) {
-    await prisma.permission.upsert({
-      where: { key: perm.key },
-      update: { description: perm.description, module: perm.module },
-      create: perm,
-    });
-  }
-  console.log("✓ Permissions seeded");
-
-  // ─── Role-Permission Mappings ─────────────────────────────────────────────────
-
-  for (const [roleKey, permKeys] of Object.entries(ROLE_PERMISSIONS)) {
-    for (const permKey of permKeys) {
-      const perm = await prisma.permission.findUnique({ where: { key: permKey } });
-      if (!perm) continue;
-      await prisma.rolePermission.upsert({
-        where: { roleKey_permissionId: { roleKey, permissionId: perm.id } },
-        update: {},
-        create: { roleKey, permissionId: perm.id },
-      });
-    }
-  }
-  console.log("✓ Role-permission mappings seeded");
-
-  // ─── Built-in Custom Roles ────────────────────────────────────────────────────
-
-  const builtInRoles = [
-    { key: "ADMIN", name: "Administrator", description: "Full access to all features", isBuiltIn: true },
-    { key: "IT_AGENT", name: "IT Agent", description: "Manage tickets, projects and activities", isBuiltIn: true },
-    { key: "DEPARTMENT_MANAGER", name: "Department Manager", description: "Manage department projects and goals", isBuiltIn: true },
-    { key: "USER", name: "User", description: "Submit and view own tickets", isBuiltIn: true },
-  ];
-
-  for (const role of builtInRoles) {
-    await prisma.customRole.upsert({
-      where: { key: role.key },
-      update: { name: role.name, description: role.description },
-      create: role,
-    });
-  }
-  console.log("✓ Built-in custom roles seeded");
-
-  // ─── Mock Data ────────────────────────────────────────────────────────────────
+  console.log("✓ Demo users seeded");
 
   const [
     adminUser, agentUser, managerUser, demoUser,
@@ -349,7 +357,7 @@ async function main() {
   ]);
 
   if (!adminUser || !agentUser || !managerUser || !demoUser) {
-    console.error("Users not found — skipping mock data");
+    console.error("Demo users not found — skipping mock data");
     return;
   }
   if (!openStatus || !inProgressStatus || !pendingStatus || !resolvedStatus || !closedStatus) {
@@ -568,7 +576,6 @@ async function main() {
     },
   });
 
-  // Standalone activities (no project)
   await prisma.projectActivity.upsert({
     where: { id: "mock-act-009" },
     update: {},
@@ -600,7 +607,6 @@ async function main() {
 
   console.log("✓ Activities seeded");
 
-  // Helper function: upsert ticket
   async function upsertTicket(id: string, data: {
     title: string;
     description: string;
@@ -635,7 +641,9 @@ async function main() {
     });
     if (data.messages) {
       for (const msg of data.messages) {
-        const existing = await prisma.ticketMessage.count({ where: { ticketId: ticket.id, authorId: msg.authorId, body: msg.body } });
+        const existing = await prisma.ticketMessage.count({
+          where: { ticketId: ticket.id, authorId: msg.authorId, body: msg.body },
+        });
         if (!existing) {
           await prisma.ticketMessage.create({
             data: {
@@ -652,7 +660,6 @@ async function main() {
     return ticket;
   }
 
-  // Tickets — standalone (no project/activity)
   await upsertTicket("mock-tkt-001", {
     title: "Laptop won't start after Windows update",
     description: "My laptop stopped booting after the latest Windows update was applied. Stuck on a black screen with spinning dots. This is my primary work machine.",
@@ -697,6 +704,85 @@ async function main() {
     ],
   });
 
+  await upsertTicket("mock-tkt-004", {
+    title: "Switch port configuration error on Floor 1",
+    description: "After the new switch was installed on Floor 1, ports 12–16 are not passing traffic. Devices connected to these ports show link-up but no connectivity.",
+    statusId: inProgressStatus.id,
+    requesterId: demoUser.id,
+    categoryId: networkCat?.id,
+    priorityId: highPri.id,
+    assignedAgentId: agentUser.id,
+    activityId: act1.id,
+    messages: [
+      { body: "Ports 12–16 are missing the VLAN tag for the production network. Reconfiguring now.", authorId: agentUser.id },
+    ],
+  });
+
+  await upsertTicket("mock-tkt-005", {
+    title: "Old rack unit disposal — asbestos concern",
+    description: "During the server room cleanup pre-work, a white fibrous material was found around one of the 1998-era rack units. Unsure if it's hazardous. Work has been paused.",
+    statusId: openStatus.id,
+    requesterId: agentUser.id,
+    categoryId: hardwareCat?.id,
+    priorityId: highPri.id,
+    departmentId: "dept-it",
+    activityId: act2.id,
+  });
+
+  await upsertTicket("mock-tkt-006", {
+    title: "O365 license count mismatch in admin portal",
+    description: "The Office 365 admin portal shows 147 assigned licenses but our HR system shows only 131 active employees. The audit needs to resolve 16 unaccounted licenses.",
+    statusId: openStatus.id,
+    requesterId: managerUser.id,
+    categoryId: softwareCat?.id,
+    priorityId: mediumPri.id,
+    assignedAgentId: agentUser.id,
+    activityId: act4.id,
+  });
+
+  await upsertTicket("mock-tkt-007", {
+    title: "Test mailbox migration failed for user.test@kinsen.gr",
+    description: "The pilot migration of the test mailbox failed at 67% with error: MigrationPermanentException — mailbox size limit exceeded. Blocking the planning activity.",
+    statusId: inProgressStatus.id,
+    requesterId: agentUser.id,
+    categoryId: emailCat?.id,
+    priorityId: highPri.id,
+    assignedAgentId: adminUser.id,
+    activityId: act5.id,
+    messages: [
+      { body: "The source mailbox is 48GB, exceeding the 50GB limit with archive included. We'll need to archive old items first. ETA 2 days.", authorId: adminUser.id },
+    ],
+  });
+
+  await upsertTicket("mock-tkt-008", {
+    title: "Nessus scan blocking production traffic",
+    description: "The vulnerability scan started this morning is causing packet loss on the production VLAN. Three critical business applications are affected. Need immediate decision on pause/continue.",
+    statusId: openStatus.id,
+    requesterId: adminUser.id,
+    categoryId: securityCat?.id,
+    priorityId: highPri.id,
+    assignedAgentId: agentUser.id,
+    activityId: act6.id,
+    messages: [
+      { body: "Paused the scan on production VLAN. Continuing on DMZ only until off-hours.", authorId: agentUser.id },
+    ],
+  });
+
+  await upsertTicket("mock-tkt-009", {
+    title: "Password complexity policy blocking shared service accounts",
+    description: "Applying the new password complexity policy via GPO is forcing service accounts to change their passwords at next login. This breaks 4 automated processes. Need an exclusion.",
+    statusId: inProgressStatus.id,
+    requesterId: agentUser.id,
+    categoryId: accessCat?.id,
+    priorityId: highPri.id,
+    assignedAgentId: adminUser.id,
+    activityId: act7.id,
+    messages: [
+      { body: "Created a separate OU for service accounts with a password-never-expires exception. Moving accounts now.", authorId: adminUser.id },
+      { body: "INTERNAL: Service accounts excluded from the policy GPO. Activity can proceed.", authorId: adminUser.id, isInternal: true },
+    ],
+  });
+
   await upsertTicket("mock-tkt-010", {
     title: "HP printer on Finance floor not printing",
     description: "The HP LaserJet on the 2nd floor Finance area is showing 'Paper Jam' but the paper tray is clear. Colleagues can't print urgent documents.",
@@ -735,6 +821,36 @@ async function main() {
     ],
   });
 
+  await upsertTicket("mock-tkt-013", {
+    title: "New workstation needed for infrastructure team",
+    description: "The infrastructure upgrade project requires two additional workstations with 32GB RAM for the team members running the switch management software.",
+    statusId: openStatus.id,
+    requesterId: adminUser.id,
+    categoryId: hardwareCat?.id,
+    priorityId: mediumPri.id,
+    assignedAgentId: agentUser.id,
+    projectId: proj1.id,
+    messages: [
+      { body: "Checking stock and procurement timeline. Will confirm by EOD.", authorId: agentUser.id },
+      { body: "Ordered. ETA 5–7 business days. Ticket → [Infrastructure Upgrade].", authorId: agentUser.id, isInternal: true },
+    ],
+  });
+
+  await upsertTicket("mock-tkt-014", {
+    title: "Onboarding portal login broken for new hires",
+    description: "New employees onboarded since April 25 cannot log into the onboarding portal. The SSO callback URL appears to be pointing at the old dev server.",
+    statusId: inProgressStatus.id,
+    requesterId: managerUser.id,
+    categoryId: softwareCat?.id,
+    priorityId: highPri.id,
+    assignedAgentId: agentUser.id,
+    projectId: proj4.id,
+    messages: [
+      { body: "Reproduced. The production redirect URI was overwritten during the April 28 deploy. Rolling back the OAuth app config now.", authorId: agentUser.id },
+      { body: "Fixed in production. Please have one of the affected users retry.", authorId: agentUser.id },
+    ],
+  });
+
   await upsertTicket("mock-tkt-015", {
     title: "USB mouse and keyboard not recognised",
     description: "After logging in this morning, neither my USB mouse nor keyboard respond. Tried different USB ports. Works fine on another PC.",
@@ -769,22 +885,6 @@ async function main() {
     departmentId: "dept-operations",
   });
 
-  // Tickets linked directly to a project (no activity)
-  await upsertTicket("mock-tkt-013", {
-    title: "New workstation needed for infrastructure team",
-    description: "The infrastructure upgrade project requires two additional workstations with 32GB RAM for the team members running the switch management software.",
-    statusId: openStatus.id,
-    requesterId: adminUser.id,
-    categoryId: hardwareCat?.id,
-    priorityId: mediumPri.id,
-    assignedAgentId: agentUser.id,
-    projectId: proj1.id,
-    messages: [
-      { body: "Checking stock and procurement timeline. Will confirm by EOD.", authorId: agentUser.id },
-      { body: "Ordered. ETA 5–7 business days. Ticket → [Infrastructure Upgrade].", authorId: agentUser.id, isInternal: true },
-    ],
-  });
-
   await upsertTicket("mock-tkt-018", {
     title: "Network performance degradation on 3rd floor",
     description: "Since we started the switch replacement work, the 3rd floor is experiencing intermittent packet loss (>5%). Affects the call centre team.",
@@ -796,21 +896,6 @@ async function main() {
     projectId: proj1.id,
     messages: [
       { body: "Isolated to the temporary VLAN trunk during migration. Adjusting trunk settings now.", authorId: agentUser.id },
-    ],
-  });
-
-  await upsertTicket("mock-tkt-014", {
-    title: "Onboarding portal login broken for new hires",
-    description: "New employees onboarded since April 25 cannot log into the onboarding portal. The SSO callback URL appears to be pointing at the old dev server.",
-    statusId: inProgressStatus.id,
-    requesterId: managerUser.id,
-    categoryId: softwareCat?.id,
-    priorityId: highPri.id,
-    assignedAgentId: agentUser.id,
-    projectId: proj4.id,
-    messages: [
-      { body: "Reproduced. The production redirect URI was overwritten during the April 28 deploy. Rolling back the OAuth app config now.", authorId: agentUser.id },
-      { body: "Fixed in production. Please have one of the affected users retry.", authorId: agentUser.id },
     ],
   });
 
@@ -830,86 +915,6 @@ async function main() {
     ],
   });
 
-  // Tickets linked via activities (no direct projectId — tests the OR query)
-  await upsertTicket("mock-tkt-004", {
-    title: "Switch port configuration error on Floor 1",
-    description: "After the new switch was installed on Floor 1, ports 12–16 are not passing traffic. Devices connected to these ports show link-up but no connectivity.",
-    statusId: inProgressStatus.id,
-    requesterId: demoUser.id,
-    categoryId: networkCat?.id,
-    priorityId: highPri.id,
-    assignedAgentId: agentUser.id,
-    activityId: act1.id, // activity belongs to proj1 — should appear in proj1 related tickets
-    messages: [
-      { body: "Ports 12–16 are missing the VLAN tag for the production network. Reconfiguring now.", authorId: agentUser.id },
-    ],
-  });
-
-  await upsertTicket("mock-tkt-005", {
-    title: "Old rack unit disposal — asbestos concern",
-    description: "During the server room cleanup pre-work, a white fibrous material was found around one of the 1998-era rack units. Unsure if it's hazardous. Work has been paused.",
-    statusId: openStatus.id,
-    requesterId: agentUser.id,
-    categoryId: hardwareCat?.id,
-    priorityId: highPri.id,
-    departmentId: "dept-it",
-    activityId: act2.id, // activity belongs to proj1
-  });
-
-  await upsertTicket("mock-tkt-006", {
-    title: "O365 license count mismatch in admin portal",
-    description: "The Office 365 admin portal shows 147 assigned licenses but our HR system shows only 131 active employees. The audit needs to resolve 16 unaccounted licenses.",
-    statusId: openStatus.id,
-    requesterId: managerUser.id,
-    categoryId: softwareCat?.id,
-    priorityId: mediumPri.id,
-    assignedAgentId: agentUser.id,
-    activityId: act4.id, // activity belongs to proj2
-  });
-
-  await upsertTicket("mock-tkt-007", {
-    title: "Test mailbox migration failed for user.test@kinsen.gr",
-    description: "The pilot migration of the test mailbox failed at 67% with error: MigrationPermanentException — mailbox size limit exceeded. Blocking the planning activity.",
-    statusId: inProgressStatus.id,
-    requesterId: agentUser.id,
-    categoryId: emailCat?.id,
-    priorityId: highPri.id,
-    assignedAgentId: adminUser.id,
-    activityId: act5.id, // activity belongs to proj2
-    messages: [
-      { body: "The source mailbox is 48GB, exceeding the 50GB limit with archive included. We'll need to archive old items first. ETA 2 days.", authorId: adminUser.id },
-    ],
-  });
-
-  await upsertTicket("mock-tkt-008", {
-    title: "Nessus scan blocking production traffic",
-    description: "The vulnerability scan started this morning is causing packet loss on the production VLAN. Three critical business applications are affected. Need immediate decision on pause/continue.",
-    statusId: openStatus.id,
-    requesterId: adminUser.id,
-    categoryId: securityCat?.id,
-    priorityId: highPri.id,
-    assignedAgentId: agentUser.id,
-    activityId: act6.id, // activity belongs to proj3
-    messages: [
-      { body: "Paused the scan on production VLAN. Continuing on DMZ only until off-hours.", authorId: agentUser.id },
-    ],
-  });
-
-  await upsertTicket("mock-tkt-009", {
-    title: "Password complexity policy blocking shared service accounts",
-    description: "Applying the new password complexity policy via GPO is forcing service accounts to change their passwords at next login. This breaks 4 automated processes. Need an exclusion.",
-    statusId: inProgressStatus.id,
-    requesterId: agentUser.id,
-    categoryId: accessCat?.id,
-    priorityId: highPri.id,
-    assignedAgentId: adminUser.id,
-    activityId: act7.id, // activity belongs to proj3
-    messages: [
-      { body: "Created a separate OU for service accounts with a password-never-expires exception. Moving accounts now.", authorId: adminUser.id },
-      { body: "INTERNAL: Service accounts excluded from the policy GPO. Activity can proceed.", authorId: adminUser.id, isInternal: true },
-    ],
-  });
-
   await upsertTicket("mock-tkt-020", {
     title: "License audit: Adobe licenses not reflected in O365 portal",
     description: "During the license audit, we found that 8 Adobe Creative Cloud licenses purchased via the O365 agreement do not appear in the M365 admin portal. Need to reconcile.",
@@ -918,10 +923,9 @@ async function main() {
     categoryId: softwareCat?.id,
     priorityId: mediumPri.id,
     assignedAgentId: agentUser.id,
-    activityId: act4.id, // same activity as tkt-006, also belongs to proj2
+    activityId: act4.id,
   });
 
-  // Email-sourced ticket
   await upsertTicket("mock-tkt-email-001", {
     title: "Request for laptop replacement — sent via email",
     description: "My current laptop (HP EliteBook 840 G5, 2018) is running very slowly. I've submitted this request via email as per the IT instructions on the intranet.",
@@ -936,13 +940,14 @@ async function main() {
   });
 
   console.log("✓ Mock tickets and messages seeded");
+
   console.log("\n✅ Database seeded successfully!");
   console.log("\nDemo accounts:");
-  console.log("  admin@kinsen.gr       / Admin@123456   (Administrator)");
-  console.log("  agent@kinsen.gr       / Agent@123456   (IT Agent)");
-  console.log("  manager@kinsen.gr     / Manager@123456 (Dept. Manager)");
-  console.log("  user@kinsen.gr        / User@123456    (User — has tickets)");
-  console.log("  user2@kinsen.gr       / User2@123456   (User — no tickets)");
+  console.log("  admin@kinsen.gr       (Administrator)");
+  console.log("  agent@kinsen.gr       (IT Agent)");
+  console.log("  manager@kinsen.gr     (Dept. Manager)");
+  console.log("  user@kinsen.gr        (User — has tickets)");
+  console.log("  user2@kinsen.gr       (User — no tickets)");
 }
 
 main()

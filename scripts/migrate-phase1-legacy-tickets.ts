@@ -6,6 +6,8 @@ import "dotenv/config";
 
 const prisma = new PrismaClient();
 
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 type LegacyUserRow = {
   UserName: string;
   OldUserId: number | null;
@@ -18,9 +20,13 @@ type LegacyUserRow = {
 };
 
 type LegacyTicketRow = {
-  Id: number;
-  Title: string | null;
-  Description: string | null;
+  // Explicit aliases set in the SQL query — these names are intentional.
+  // legacyTicketId = t.Id (column 1 of legacy source)
+  // legacyTitle    = t.Title (column 3 of legacy source)
+  // legacyDescription = t.Description (column 4 of legacy source — the original ticket description)
+  legacyTicketId: number;
+  legacyTitle: string | null;
+  legacyDescription: string | null;
   Priority: number | null;
   OpenDate: Date | null;
   LastUpdatedOn: Date | null;
@@ -62,9 +68,20 @@ type LegacyCommentRow = {
   Ticket_Messages: number | null;
 };
 
+// ─── Report ───────────────────────────────────────────────────────────────────
+
+type DescriptionSample = {
+  ticketNumber: number;
+  titlePreview: string;
+  legacyDescriptionLength: number;
+  targetDescriptionLength: number;
+  usedFallback: boolean;
+};
+
 type MigrationReport = {
   startedAt: string;
   finishedAt?: string;
+  cleanedBeforeImport: boolean;
   users: {
     seen: number;
     createdOrUpdated: number;
@@ -77,6 +94,12 @@ type MigrationReport = {
     skipped: number;
     missingRequester: number;
     missingAssignedAgent: number;
+  };
+  descriptions: {
+    legacyNonEmpty: number;
+    usedFallback: number;
+    legacyExistedButTargetEmpty: number;
+    samples: DescriptionSample[];
   };
   comments: {
     seen: number;
@@ -93,31 +116,16 @@ type MigrationReport = {
 
 const report: MigrationReport = {
   startedAt: new Date().toISOString(),
-  users: {
-    seen: 0,
-    createdOrUpdated: 0,
-    skippedNoEmail: 0,
-  },
-  tickets: {
-    seen: 0,
-    created: 0,
-    updated: 0,
-    skipped: 0,
-    missingRequester: 0,
-    missingAssignedAgent: 0,
-  },
-  comments: {
-    seen: 0,
-    created: 0,
-    skippedNoTicket: 0,
-    skippedEmptyBody: 0,
-    missingAuthor: 0,
-  },
-  categories: {
-    createdOrFound: 0,
-  },
+  cleanedBeforeImport: false,
+  users: { seen: 0, createdOrUpdated: 0, skippedNoEmail: 0 },
+  tickets: { seen: 0, created: 0, updated: 0, skipped: 0, missingRequester: 0, missingAssignedAgent: 0 },
+  descriptions: { legacyNonEmpty: 0, usedFallback: 0, legacyExistedButTargetEmpty: 0, samples: [] },
+  comments: { seen: 0, created: 0, skippedNoTicket: 0, skippedEmptyBody: 0, missingAuthor: 0 },
+  categories: { createdOrFound: 0 },
   warnings: [],
 };
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -150,16 +158,11 @@ function fallbackEmailFromUsername(username: string): string {
 
 function statusNameFromLegacy(status: number | null): string {
   switch (status) {
-    case 0:
-      return "Open";
-    case 1:
-      return "In Progress";
-    case 2:
-      return "On Hold";
-    case 3:
-      return "Closed";
-    default:
-      return "Open";
+    case 0: return "Open";
+    case 1: return "In Progress";
+    case 2: return "On Hold";
+    case 3: return "Closed";
+    default: return "Open";
   }
 }
 
@@ -169,19 +172,72 @@ function statusIsClosedFromLegacy(status: number | null): boolean {
 
 function priorityFromLegacy(priority: number | null): { name: string; level: number; color: string } {
   switch (priority) {
-    case 0:
-      return { name: "Low", level: 1, color: "#22c55e" };
-    case 2:
-      return { name: "High", level: 3, color: "#f97316" };
+    case 0: return { name: "Low", level: 1, color: "#22c55e" };
+    case 2: return { name: "High", level: 3, color: "#f97316" };
     case 1:
-    default:
-      return { name: "Medium", level: 2, color: "#eab308" };
+    default: return { name: "Medium", level: 2, color: "#eab308" };
   }
 }
 
 function safeDate(value: Date | null | undefined, fallback = new Date()): Date {
   return value ?? fallback;
 }
+
+// ─── Database cleanup ─────────────────────────────────────────────────────────
+// Controlled by:
+//   MIGRATION_CLEAN_BEFORE_IMPORT=true  → enable cleanup
+//   MIGRATION_ALLOW_DB_CLEAN=true       → required in production to allow cleanup
+
+async function cleanDatabase() {
+  const isProduction = process.env.NODE_ENV === "production";
+  const allowClean = process.env.MIGRATION_ALLOW_DB_CLEAN === "true";
+
+  if (isProduction && !allowClean) {
+    throw new Error(
+      "\n[SAFETY] Database cleanup is blocked in production.\n" +
+      "Set MIGRATION_ALLOW_DB_CLEAN=true to explicitly allow cleanup in production.\n" +
+      "WARNING: This will permanently delete all helpdesk/ticket data.\n"
+    );
+  }
+
+  console.log("Cleaning target database before migration...");
+  console.log("  NOTE: Users, Roles, Permissions, and SLA settings are preserved.");
+  console.log("  NOTE: SlaPolicy records will be cascade-deleted with TicketPriority.");
+
+  console.log("  Deleting TicketAttachment...");
+  await prisma.ticketAttachment.deleteMany({});
+
+  console.log("  Deleting TicketMessage...");
+  await prisma.ticketMessage.deleteMany({});
+
+  console.log("  Deleting TicketHistory...");
+  await prisma.ticketHistory.deleteMany({});
+
+  console.log("  Deleting Notification...");
+  await prisma.notification.deleteMany({});
+
+  console.log("  Deleting Ticket...");
+  await prisma.ticket.deleteMany({});
+
+  console.log("  Deleting TicketCategory...");
+  await prisma.ticketCategory.deleteMany({});
+
+  // Deleting TicketPriority cascades SlaPolicy (FK onDelete: Cascade).
+  // SlaSettings (the enabled/disabled flag) is preserved.
+  console.log("  Deleting TicketPriority (cascades SlaPolicy)...");
+  await prisma.ticketPriority.deleteMany({});
+
+  console.log("  Deleting TicketStatus...");
+  await prisma.ticketStatus.deleteMany({});
+
+  console.log("  Deleting TicketCancelReason...");
+  await prisma.ticketCancelReason.deleteMany({});
+
+  report.cleanedBeforeImport = true;
+  console.log("Database cleanup complete.\n");
+}
+
+// ─── SQL Server connection ────────────────────────────────────────────────────
 
 async function getSqlServerPool() {
   return sql.connect({
@@ -197,6 +253,8 @@ async function getSqlServerPool() {
   });
 }
 
+// ─── Org bootstrap ────────────────────────────────────────────────────────────
+
 async function ensureDefaultOrg() {
   const companyDomain = process.env.MIGRATION_COMPANY_DOMAIN || "kinsen.gr";
   const companyName = process.env.MIGRATION_COMPANY_NAME || "Kinsen Hellas";
@@ -205,26 +263,17 @@ async function ensureDefaultOrg() {
   const company = await prisma.company.upsert({
     where: { domain: companyDomain },
     update: { name: companyName },
-    create: {
-      name: companyName,
-      domain: companyDomain,
-    },
+    create: { name: companyName, domain: companyDomain },
   });
 
   const existingBusinessUnit = await prisma.businessUnit.findFirst({
-    where: {
-      companyId: company.id,
-      name: businessUnitName,
-    },
+    where: { companyId: company.id, name: businessUnitName },
   });
 
   const businessUnit =
     existingBusinessUnit ??
     (await prisma.businessUnit.create({
-      data: {
-        companyId: company.id,
-        name: businessUnitName,
-      },
+      data: { companyId: company.id, name: businessUnitName },
     }));
 
   return { company, businessUnit };
@@ -250,6 +299,8 @@ async function ensureFallbackRequester(companyId: string, businessUnitId: string
   });
 }
 
+// ─── Users ────────────────────────────────────────────────────────────────────
+
 async function loadLegacyUsers(pool: sql.ConnectionPool): Promise<LegacyUserRow[]> {
   const result = await pool.request().query<LegacyUserRow>(`
     SELECT
@@ -266,7 +317,6 @@ async function loadLegacyUsers(pool: sql.ConnectionPool): Promise<LegacyUserRow[
       ON au.UserName = u.UserName
     ORDER BY u.UserName
   `);
-
   return result.recordset;
 }
 
@@ -292,22 +342,8 @@ async function migrateUsers(pool: sql.ConnectionPool, companyId: string, busines
 
     const user = await prisma.user.upsert({
       where: { email },
-      update: {
-        name,
-        isActive: true,
-        authProvider: AuthProvider.MICROSOFT,
-        companyId,
-        businessUnitId,
-      },
-      create: {
-        email,
-        name,
-        role: Role.USER,
-        isActive: true,
-        authProvider: AuthProvider.MICROSOFT,
-        companyId,
-        businessUnitId,
-      },
+      update: { name, isActive: true, authProvider: AuthProvider.MICROSOFT, companyId, businessUnitId },
+      create: { email, name, role: Role.USER, isActive: true, authProvider: AuthProvider.MICROSOFT, companyId, businessUnitId },
     });
 
     usernameToUserId.set(username, user.id);
@@ -317,6 +353,8 @@ async function migrateUsers(pool: sql.ConnectionPool, companyId: string, busines
 
   return { usernameToUserId, usernameToEmail };
 }
+
+// ─── Statuses & Priorities ────────────────────────────────────────────────────
 
 async function ensureTicketStatuses() {
   const statuses = [0, 1, 2, 3];
@@ -328,11 +366,7 @@ async function ensureTicketStatuses() {
 
     const status = await prisma.ticketStatus.upsert({
       where: { name },
-      update: {
-        isClosed,
-        isActive: true,
-        order: legacyStatus,
-      },
+      update: { isClosed, isActive: true, order: legacyStatus },
       create: {
         name,
         color: isClosed ? "#22c55e" : legacyStatus === 1 ? "#3b82f6" : legacyStatus === 2 ? "#f97316" : "#6366f1",
@@ -358,17 +392,8 @@ async function ensureTicketPriorities() {
 
     const priority = await prisma.ticketPriority.upsert({
       where: { name: p.name },
-      update: {
-        level: p.level,
-        color: p.color,
-        isActive: true,
-      },
-      create: {
-        name: p.name,
-        level: p.level,
-        color: p.color,
-        isActive: true,
-      },
+      update: { level: p.level, color: p.color, isActive: true },
+      create: { name: p.name, level: p.level, color: p.color, isActive: true },
     });
 
     map.set(legacyPriority, priority.id);
@@ -377,15 +402,15 @@ async function ensureTicketPriorities() {
   return map;
 }
 
+// ─── Categories ───────────────────────────────────────────────────────────────
+
 async function loadLegacyCategoryMaps(pool: sql.ConnectionPool) {
   const categoryRows = await pool.request().query<LegacyCategoryRow>(`
-    SELECT Id, Description
-    FROM dbo.Categories
+    SELECT Id, Description FROM dbo.Categories
   `);
 
   const subCategoryRows = await pool.request().query<LegacySubCategoryRow>(`
-    SELECT Id, Description, Category
-    FROM dbo.SubCategories
+    SELECT Id, Description, Category FROM dbo.SubCategories
   `);
 
   const categoryIdToName = new Map<number, string>();
@@ -410,11 +435,7 @@ async function ensureCategory(name: string) {
   const category = await prisma.ticketCategory.upsert({
     where: { name: cleanedName },
     update: { isActive: true },
-    create: {
-      name: cleanedName,
-      color: "#6366f1",
-      isActive: true,
-    },
+    create: { name: cleanedName, color: "#6366f1", isActive: true },
   });
 
   return category.id;
@@ -444,32 +465,41 @@ async function resolveCategoryId(
   return id;
 }
 
+// ─── Tickets ──────────────────────────────────────────────────────────────────
+
 async function loadLegacyTickets(pool: sql.ConnectionPool): Promise<LegacyTicketRow[]> {
+  // IMPORTANT: explicit aliases ensure correct field mapping regardless of
+  // physical column order in the legacy SQL Server table.
+  //   legacyTicketId  = column 1 of legacy source (dbo.Tickets.Id)
+  //   legacyTitle     = column 3 of legacy source (dbo.Tickets.Title)
+  //   legacyDescription = column 4 of legacy source (dbo.Tickets.Description)
+  //                       — this is the ORIGINAL initial ticket description,
+  //                         NOT CancelText, NOT comment replies, NOT closing text.
   const result = await pool.request().query<LegacyTicketRow>(`
     SELECT
-      Id,
-      Title,
-      Description,
-      Priority,
-      OpenDate,
-      LastUpdatedOn,
-      CancelDate,
-      CloseDate,
-      reopenDate,
-      Status,
-      SubCategory,
-      Categories,
-      IsHiddenComments,
-      CancelledReason,
-      CancelText,
-      CancelledBy,
-      Platform,
-      ticketUser,
-      Developer,
-      [User],
-      Category
-    FROM dbo.Tickets
-    ORDER BY Id
+      t.Id          AS legacyTicketId,
+      t.Title       AS legacyTitle,
+      t.Description AS legacyDescription,
+      t.Priority,
+      t.OpenDate,
+      t.LastUpdatedOn,
+      t.CancelDate,
+      t.CloseDate,
+      t.reopenDate,
+      t.Status,
+      t.SubCategory,
+      t.Categories,
+      t.IsHiddenComments,
+      t.CancelledReason,
+      t.CancelText,
+      t.CancelledBy,
+      t.Platform,
+      t.ticketUser,
+      t.Developer,
+      t.[User],
+      t.Category
+    FROM dbo.Tickets t
+    ORDER BY t.Id
   `);
 
   return result.recordset;
@@ -489,6 +519,7 @@ async function migrateTickets(
 
   const ticketNumberToNewId = new Map<number, string>();
   const categoryCache = new Map<string, string>();
+  const MAX_DESCRIPTION_SAMPLES = 15;
 
   for (const row of rows) {
     try {
@@ -499,14 +530,14 @@ async function migrateTickets(
       if (!finalRequesterId) {
         finalRequesterId = fallbackRequesterId;
         report.tickets.missingRequester += 1;
-        report.warnings.push(`Ticket ${row.Id}: requester '${requesterUsername ?? "NULL"}' not found. Used fallback requester.`);
+        report.warnings.push(`Ticket ${row.legacyTicketId}: requester '${requesterUsername ?? "NULL"}' not found. Used fallback requester.`);
       }
 
       const developerUsername = normalizeUsername(row.Developer);
       const assignedAgentId = developerUsername ? usernameToUserId.get(developerUsername) ?? null : null;
       if (developerUsername && !assignedAgentId) {
         report.tickets.missingAssignedAgent += 1;
-        report.warnings.push(`Ticket ${row.Id}: assigned agent '${developerUsername}' not found. Left unassigned.`);
+        report.warnings.push(`Ticket ${row.legacyTicketId}: assigned agent '${developerUsername}' not found. Left unassigned.`);
       }
 
       const legacyStatus = row.Status ?? 0;
@@ -519,12 +550,35 @@ async function migrateTickets(
       const updatedAt = safeDate(row.LastUpdatedOn, createdAt);
       const closedAt = row.CloseDate ?? row.CancelDate ?? null;
 
-      const title = cleanText(row.Title) ?? `Migrated ticket ${row.Id}`;
-      const description = cleanText(row.Description) ?? "Migrated legacy ticket with no description.";
+      const title = cleanText(row.legacyTitle) ?? `Migrated ticket ${row.legacyTicketId}`;
+
+      // Description comes from t.Description (column 4 of the legacy source).
+      // Do NOT use CancelText, comment replies, or closing text here.
+      const rawLegacyDescription = cleanText(row.legacyDescription);
+      const usedFallback = !rawLegacyDescription;
+      const description = rawLegacyDescription ?? "No description provided.";
+
+      // Track description migration stats
+      if (rawLegacyDescription) {
+        report.descriptions.legacyNonEmpty += 1;
+      } else {
+        report.descriptions.usedFallback += 1;
+      }
+
+      // Collect samples for verification (first N tickets)
+      if (report.descriptions.samples.length < MAX_DESCRIPTION_SAMPLES) {
+        report.descriptions.samples.push({
+          ticketNumber: row.legacyTicketId,
+          titlePreview: title.slice(0, 60),
+          legacyDescriptionLength: rawLegacyDescription?.length ?? 0,
+          targetDescriptionLength: description.length,
+          usedFallback,
+        });
+      }
 
       const existing = await prisma.ticket.findUnique({
-        where: { ticketNumber: row.Id },
-        select: { id: true },
+        where: { ticketNumber: row.legacyTicketId },
+        select: { id: true, description: true },
       });
 
       const data = {
@@ -545,18 +599,17 @@ async function migrateTickets(
       };
 
       const ticket = existing
-        ? await prisma.ticket.update({
-            where: { id: existing.id },
-            data,
-          })
-        : await prisma.ticket.create({
-            data: {
-              ...data,
-              ticketNumber: row.Id,
-            },
-          });
+        ? await prisma.ticket.update({ where: { id: existing.id }, data })
+        : await prisma.ticket.create({ data: { ...data, ticketNumber: row.legacyTicketId } });
 
-      ticketNumberToNewId.set(row.Id, ticket.id);
+      // Verify: if legacy had a description but the target description ended up
+      // empty or fallback after update, flag it.
+      if (rawLegacyDescription && ticket.description === "No description provided.") {
+        report.descriptions.legacyExistedButTargetEmpty += 1;
+        report.warnings.push(`Ticket ${row.legacyTicketId}: legacy description existed but target has fallback value.`);
+      }
+
+      ticketNumberToNewId.set(row.legacyTicketId, ticket.id);
 
       if (existing) {
         report.tickets.updated += 1;
@@ -568,7 +621,9 @@ async function migrateTickets(
         await prisma.ticketHistory.create({
           data: {
             ticketId: ticket.id,
-            changedById: row.CancelledBy ? usernameToUserId.get(normalizeUsername(row.CancelledBy) ?? "") ?? null : null,
+            changedById: row.CancelledBy
+              ? usernameToUserId.get(normalizeUsername(row.CancelledBy) ?? "") ?? null
+              : null,
             type: TicketHistoryType.CANCEL_REASON_SET,
             oldValue: null,
             newValue: row.CancelText ?? String(row.CancelledReason ?? ""),
@@ -579,12 +634,16 @@ async function migrateTickets(
       }
     } catch (error) {
       report.tickets.skipped += 1;
-      report.warnings.push(`Ticket ${row.Id}: skipped due to error: ${error instanceof Error ? error.message : String(error)}`);
+      report.warnings.push(
+        `Ticket ${row.legacyTicketId}: skipped due to error: ${error instanceof Error ? error.message : String(error)}`
+      );
     }
   }
 
   return ticketNumberToNewId;
 }
+
+// ─── Comments ─────────────────────────────────────────────────────────────────
 
 async function loadLegacyComments(pool: sql.ConnectionPool): Promise<LegacyCommentRow[]> {
   const result = await pool.request().query<LegacyCommentRow>(`
@@ -599,7 +658,6 @@ async function loadLegacyComments(pool: sql.ConnectionPool): Promise<LegacyComme
     FROM dbo.CommentsTbl
     ORDER BY Id
   `);
-
   return result.recordset;
 }
 
@@ -641,14 +699,11 @@ async function migrateComments(
     const isInternal = row.isHidden === true || row.isPublic === false;
     const direction = isInternal ? MessageDirection.INTERNAL_NOTE : MessageDirection.OUTBOUND;
 
+    // Idempotency: use a legacy marker embedded in the body.
+    // Comments that were migrated in a previous run will be skipped.
     const legacyMarker = `[legacy-comment-id:${row.Id}]`;
     const existing = await prisma.ticketMessage.findFirst({
-      where: {
-        ticketId,
-        body: {
-          contains: legacyMarker,
-        },
-      },
+      where: { ticketId, body: { contains: legacyMarker } },
       select: { id: true },
     });
 
@@ -680,6 +735,8 @@ async function migrateComments(
   }
 }
 
+// ─── Report ───────────────────────────────────────────────────────────────────
+
 function writeReport() {
   report.finishedAt = new Date().toISOString();
   const reportsDir = path.join(process.cwd(), "reports");
@@ -690,7 +747,21 @@ function writeReport() {
   console.log(`Migration report written to: ${reportPath}`);
 }
 
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
 async function main() {
+  // ─── Environment variables ──────────────────────────────────────────────────
+  // MIGRATION_CLEAN_BEFORE_IMPORT=true  → clean the target DB before importing
+  // MIGRATION_ALLOW_DB_CLEAN=true       → required in production to allow cleanup
+  const cleanBeforeImport = process.env.MIGRATION_CLEAN_BEFORE_IMPORT === "true";
+
+  // ─── Optional cleanup ───────────────────────────────────────────────────────
+  if (cleanBeforeImport) {
+    await cleanDatabase();
+  } else {
+    console.log("Skipping database cleanup. Set MIGRATION_CLEAN_BEFORE_IMPORT=true to enable.");
+  }
+
   console.log("Connecting to old SQL Server...");
   const pool = await getSqlServerPool();
 
@@ -723,8 +794,25 @@ async function main() {
     console.log("Migrating comments...");
     await migrateComments(pool, usernameToUserId, ticketNumberToNewId);
 
-    console.log("Phase 1 migration completed.");
-    console.log(JSON.stringify(report, null, 2));
+    console.log("\nPhase 1 migration completed.");
+    console.log(JSON.stringify({
+      ...report,
+      "descriptions.samples": `${report.descriptions.samples.length} samples — see report file`,
+    }, null, 2));
+
+    // Description summary
+    console.log("\n─── Description Migration Summary ───");
+    console.log(`  Legacy tickets with non-empty description : ${report.descriptions.legacyNonEmpty}`);
+    console.log(`  Tickets using fallback description        : ${report.descriptions.usedFallback}`);
+    console.log(`  Legacy had desc but target is fallback    : ${report.descriptions.legacyExistedButTargetEmpty}`);
+    console.log(`  Sample checks (first ${report.descriptions.samples.length} tickets):`);
+    for (const s of report.descriptions.samples) {
+      console.log(
+        `    #${s.ticketNumber} "${s.titlePreview}" — ` +
+        `legacy len=${s.legacyDescriptionLength} target len=${s.targetDescriptionLength}` +
+        (s.usedFallback ? " [FALLBACK]" : "")
+      );
+    }
   } finally {
     await pool.close();
     await prisma.$disconnect();

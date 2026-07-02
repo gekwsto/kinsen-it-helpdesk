@@ -71,6 +71,11 @@ export default function RolesAdminPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // Remove permission confirm
+  const [removePermTarget, setRemovePermTarget] = useState<Permission | null>(null);
+  const [removePermOpen, setRemovePermOpen] = useState(false);
+  const [removingPerm, setRemovingPerm] = useState(false);
+
   const load = useCallback(async () => {
     try {
       const res = await fetch("/api/admin/roles");
@@ -96,26 +101,61 @@ export default function RolesAdminPage() {
   const isAssigned = (role: CustomRole, permId: string) =>
     rolePerms.has(`${role.key}:${permId}`);
 
-  const togglePerm = async (perm: Permission) => {
+  const togglePerm = (perm: Permission) => {
     if (!selectedRole) return;
     const assigned = isAssigned(selectedRole, perm.id);
+    if (assigned) {
+      setRemovePermTarget(perm);
+      setRemovePermOpen(true);
+    } else {
+      addPerm(perm);
+    }
+  };
+
+  const addPerm = async (perm: Permission) => {
+    if (!selectedRole) return;
     const key = `${selectedRole.key}:${perm.id}`;
     setToggling(key);
     try {
-      const method = assigned ? "DELETE" : "POST";
       const res = await fetch(`/api/admin/roles/${selectedRole.id}/permissions/${perm.id}`, {
-        method,
+        method: "POST",
       });
       if (!res.ok) throw new Error();
       setRolePerms((prev) => {
         const next = new Set(prev);
-        if (assigned) next.delete(key);
-        else next.add(key);
+        next.add(key);
         return next;
       });
     } catch {
       toast.error("Failed to update permission");
     } finally {
+      setToggling(null);
+    }
+  };
+
+  const handleRemovePerm = async () => {
+    if (!selectedRole || !removePermTarget) return;
+    const key = `${selectedRole.key}:${removePermTarget.id}`;
+    setRemovingPerm(true);
+    setToggling(key);
+    try {
+      const res = await fetch(
+        `/api/admin/roles/${selectedRole.id}/permissions/${removePermTarget.id}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error();
+      setRolePerms((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+      setRemovePermOpen(false);
+      setRemovePermTarget(null);
+      toast.success("Permission removed");
+    } catch {
+      toast.error("Failed to remove permission");
+    } finally {
+      setRemovingPerm(false);
       setToggling(null);
     }
   };
@@ -464,6 +504,40 @@ export default function RolesAdminPage() {
             <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
               {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Delete Role
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove Permission Confirm Dialog */}
+      <Dialog
+        open={removePermOpen}
+        onOpenChange={(o) => {
+          setRemovePermOpen(o);
+          if (!o) setRemovePermTarget(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove Permission</DialogTitle>
+          </DialogHeader>
+          <div className="py-2 space-y-2">
+            <p className="text-sm text-muted-foreground">
+              You are about to remove the permission{" "}
+              <strong className="text-foreground">{removePermTarget?.key}</strong> from the role{" "}
+              <strong className="text-foreground">{selectedRole?.name}</strong>.
+            </p>
+            <p className="text-sm text-muted-foreground">
+              Users with this role will lose access to this action immediately.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemovePermOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={handleRemovePerm} disabled={removingPerm}>
+              {removingPerm && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Remove Permission
             </Button>
           </DialogFooter>
         </DialogContent>
