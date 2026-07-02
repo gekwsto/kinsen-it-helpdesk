@@ -59,6 +59,7 @@ export default async function TicketDetailPage({
 
   const role = session.user.role;
   const customRoleId = session.user.customRoleId;
+  const isAdminUser = role === Role.ADMIN;
   const isRequester = ticket.requesterId === session.user.id;
 
   // Gate: can view this specific ticket
@@ -85,7 +86,7 @@ export default async function TicketDetailPage({
     : ticket.messages.filter((m) => !m.isInternal);
 
   // Fetch option lists only for users who can act on them
-  const [statuses, priorities, categories, agents] = needsAdminData
+  const [statuses, priorities, categories, agents, cancelReasons] = needsAdminData
     ? await Promise.all([
         canChangeStatus
           ? prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" } })
@@ -103,8 +104,11 @@ export default async function TicketDetailPage({
               orderBy: { name: "asc" },
             })
           : Promise.resolve([]),
+        isAdminUser
+          ? prisma.ticketCancelReason.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
+          : Promise.resolve([]),
       ])
-    : [[], [], [], []];
+    : [[], [], [], [], []];
 
   const props: TicketDetailClientProps = {
     ticketId: ticket.id,
@@ -112,6 +116,9 @@ export default async function TicketDetailPage({
     ticketTitle: ticket.title,
     ticketDescription: ticket.description,
     ticketSource: ticket.source,
+    isAdmin: isAdminUser,
+    initialCancelReasonId: ticket.cancelReasonId,
+    cancelReasons: (cancelReasons as Array<{ id: string; name: string }>).map((r) => ({ id: r.id, name: r.name })),
     ticketCreatedAt: ticket.createdAt.toISOString(),
     requester: {
       id: ticket.requester.id,
