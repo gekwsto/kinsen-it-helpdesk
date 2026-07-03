@@ -21,9 +21,9 @@ export default async function LoginPage({
       <div className="text-center mb-8">
         <div className="flex justify-center mb-4">
           <img
-            src="/kinsen_vertical.webp"
+            src="/kinsen_logo_white.webp"
             alt="Kinsen logo"
-            className="h-32 w-32 object-contain"
+            className="h-36 w-auto object-contain"
           />
         </div>
         <h1 className="text-2xl font-bold text-white tracking-tight">Kinsen IT Helpdesk</h1>

@@ -31,7 +31,7 @@ import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials, formatDateTime } from "@/lib/utils";
 import { Role } from "@prisma/client";
-import { Search, Pencil, Loader2, UserCheck, UserX, Plus } from "lucide-react";
+import { Search, Pencil, Loader2, UserCheck, UserX, Plus, Ban, ShieldCheck, Trash2 } from "lucide-react";
 
 interface CustomRole { id: string; key: string; name: string; isBuiltIn: boolean }
 
@@ -55,6 +55,7 @@ interface UserManagementProps {
   users: User[];
   departments: Department[];
   businessUnits: BusinessUnit[];
+  currentUserId: string;
 }
 
 const ROLE_LABELS: Record<Role, string> = {
@@ -80,7 +81,7 @@ interface RoleOption {
   enumRole: Role;      // the enum role to store (USER as base for custom roles)
 }
 
-export function UserManagement({ users: initialUsers, departments, businessUnits }: UserManagementProps) {
+export function UserManagement({ users: initialUsers, departments, businessUnits, currentUserId }: UserManagementProps) {
   const router = useRouter();
   const [users, setUsers] = useState(initialUsers);
   const [search, setSearch] = useState("");
@@ -93,6 +94,10 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
   const [editDept, setEditDept] = useState("");
   const [editBU, setEditBU] = useState("");
   const [editActive, setEditActive] = useState(true);
+
+  const [blockingId, setBlockingId] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Create user state
   const [createOpen, setCreateOpen] = useState(false);
@@ -186,6 +191,47 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
     }
   };
 
+  const handleQuickBlock = async (user: User) => {
+    setBlockingId(user.id);
+    try {
+      const res = await fetch(`/api/admin/users/${user.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: user.role, isActive: !user.isActive }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to update");
+      }
+      const updated = await res.json();
+      setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, ...updated } : u)));
+      toast.success(user.isActive ? "User blocked" : "User unblocked");
+    } catch (error: any) {
+      toast.error(error.message ?? "Failed to update user");
+    } finally {
+      setBlockingId(null);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!editUser) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/admin/users/${editUser.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to delete user");
+      }
+      setUsers((prev) => prev.filter((u) => u.id !== editUser.id));
+      toast.success("User deleted");
+      setEditOpen(false);
+      setDeleteConfirm(false);
+    } catch (error: any) {
+      toast.error(error.message ?? "Failed to delete user");
+      setDeleting(false);
+    }
+  };
+
   const openEdit = (user: User) => {
     setEditUser(user);
     // Determine current role value
@@ -197,6 +243,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
     setEditDept(user.department?.id ?? "");
     setEditBU(user.businessUnit?.id ?? "");
     setEditActive(user.isActive);
+    setDeleteConfirm(false);
     setEditOpen(true);
   };
 
@@ -266,7 +313,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
               <TableHead>Department</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Joined</TableHead>
-              <TableHead className="w-16"></TableHead>
+              <TableHead className="w-24"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -315,9 +362,29 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                     </span>
                   </TableCell>
                   <TableCell>
-                    <Button size="sm" variant="ghost" onClick={() => openEdit(user)}>
-                      <Pencil className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex items-center gap-0.5">
+                      {user.id !== currentUserId && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title={user.isActive ? "Block user" : "Unblock user"}
+                          onClick={() => handleQuickBlock(user)}
+                          disabled={blockingId === user.id}
+                          className={user.isActive ? "text-orange-500 hover:text-orange-600 hover:bg-orange-50" : "text-green-600 hover:text-green-700 hover:bg-green-50"}
+                        >
+                          {blockingId === user.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : user.isActive ? (
+                            <Ban className="h-3.5 w-3.5" />
+                          ) : (
+                            <ShieldCheck className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                      )}
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(user)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   </TableCell>
                 </TableRow>
               );
@@ -465,10 +532,38 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="active">Active</SelectItem>
-                    <SelectItem value="inactive">Inactive</SelectItem>
+                    <SelectItem value="inactive">Inactive (blocked)</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
+
+              {editUser.id !== currentUserId && (
+                <div className="pt-3 border-t space-y-2">
+                  <p className="text-xs font-medium text-destructive">Danger Zone</p>
+                  {!deleteConfirm ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-destructive/40 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                      onClick={() => setDeleteConfirm(true)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                      Delete User
+                    </Button>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted-foreground">Are you sure?</span>
+                      <Button size="sm" variant="destructive" onClick={handleDelete} disabled={deleting}>
+                        {deleting && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
+                        Delete
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => setDeleteConfirm(false)}>
+                        Cancel
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
           <DialogFooter>

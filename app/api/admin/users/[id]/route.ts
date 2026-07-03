@@ -13,7 +13,7 @@ export async function PATCH(
 
     if (id === session.user.id) {
       return NextResponse.json(
-        { error: "You cannot modify your own role" },
+        { error: "You cannot modify your own account" },
         { status: 400 }
       );
     }
@@ -42,6 +42,36 @@ export async function PATCH(
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
     }
+    if (error.message === "Forbidden" || error.message === "Unauthorized") {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    return NextResponse.json({ error: "Internal error" }, { status: 500 });
+  }
+}
+
+export async function DELETE(
+  _req: NextRequest,
+  { params }: { params: Promise<{ id: string }> }
+) {
+  try {
+    const { id } = await params;
+    const session = await requireAdmin();
+
+    if (id === session.user.id) {
+      return NextResponse.json({ error: "You cannot delete your own account" }, { status: 400 });
+    }
+
+    const ticketCount = await prisma.ticket.count({ where: { requesterId: id } });
+    if (ticketCount > 0) {
+      return NextResponse.json(
+        { error: `This user has ${ticketCount} ticket(s). Deactivate them instead of deleting.` },
+        { status: 409 }
+      );
+    }
+
+    await prisma.user.delete({ where: { id } });
+    return new NextResponse(null, { status: 204 });
+  } catch (error: any) {
     if (error.message === "Forbidden" || error.message === "Unauthorized") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }

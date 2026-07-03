@@ -35,7 +35,12 @@ export default async function UsersAdminPage() {
           Manage user roles and permissions
         </p>
       </div>
-      <UserManagement users={users as any} departments={departments} businessUnits={businessUnits} />
+      <UserManagement
+        users={users as any}
+        departments={departments}
+        businessUnits={businessUnits}
+        currentUserId={session.user.id}
+      />
     </div>
   );
 }
