@@ -6,6 +6,7 @@ import {
   ActivityPriority,
   GoalStatus,
   Role,
+  DependencyType,
 } from "@prisma/client";
 
 // ─── Ticket Schemas ────────────────────────────────────────────────────────────
@@ -81,9 +82,16 @@ export const createActivitySchema = z.object({
   dueDate: z.string().optional(),
   isCompleted: z.boolean().default(false),
   progress: z.number().int().min(0).max(100).optional(),
+  isMilestone: z.boolean().optional(),
 });
 
 export const updateActivitySchema = createActivitySchema.partial();
+
+export const createDependencySchema = z.object({
+  predecessorId: z.string().min(1),
+  successorId: z.string().min(1),
+  type: z.nativeEnum(DependencyType).default(DependencyType.FINISH_TO_START),
+});
 
 // ─── Goal Schemas ──────────────────────────────────────────────────────────────
 

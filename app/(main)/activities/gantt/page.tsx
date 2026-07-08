@@ -1,11 +1,11 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, canManageProjects } from "@/lib/permissions";
+import { hasPermission, canManageProjects, isAdmin } from "@/lib/permissions";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, GanttChartSquare } from "lucide-react";
-import { GanttChart, GanttGroup } from "@/components/gantt/gantt-chart";
+import { GanttChart, GanttGroup, GanttDependency } from "@/components/gantt/gantt-chart";
 
 interface SearchParams {
   status?: string;
@@ -85,13 +85,16 @@ export default async function ActivityGanttPage({
       id: a.id,
       title: a.title,
       status: a.status,
-      startDate: a.startDate?.toISOString() ?? null,
+      startDate: a.isMilestone
+        ? (a.dueDate?.toISOString() ?? null)
+        : (a.startDate?.toISOString() ?? null),
       endDate: a.dueDate?.toISOString() ?? null,
       progress: a.progress,
       href: `/activities/${a.id}`,
+      priority: a.priority,
       assigneeName: a.assignedUsers[0]?.name ?? null,
       assigneeImage: a.assignedUsers[0]?.image ?? null,
-      type: "activity" as const,
+      type: (a.isMilestone ? "milestone" : "activity") as "milestone" | "activity",
     };
 
     if (!a.project) {
@@ -121,6 +124,20 @@ export default async function ActivityGanttPage({
     ...(standaloneGroup.children.length > 0 ? [standaloneGroup] : []),
   ];
 
+  const activityIds = activities.map((a) => a.id);
+  const rawDeps = activityIds.length > 0
+    ? await prisma.activityDependency.findMany({
+        where: { OR: [{ predecessorId: { in: activityIds } }, { successorId: { in: activityIds } }] },
+        select: { id: true, predecessorId: true, successorId: true, type: true },
+      })
+    : [];
+  const dependencies: GanttDependency[] = rawDeps.map((d) => ({
+    id: d.id,
+    predecessorId: d.predecessorId,
+    successorId:   d.successorId,
+    type: d.type as GanttDependency["type"],
+  }));
+
   const totalActivities = activities.length;
 
   return (
@@ -145,7 +162,7 @@ export default async function ActivityGanttPage({
         </div>
       </div>
 
-      <GanttChart groups={groups} />
+      <GanttChart groups={groups} canEdit={isAdmin(session.user.role)} dependencies={dependencies} />
     </div>
   );
 }

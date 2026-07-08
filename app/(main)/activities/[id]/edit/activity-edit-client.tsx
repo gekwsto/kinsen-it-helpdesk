@@ -44,10 +44,11 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [startDate, setStartDate] = useState("");
   const [dueDate, setDueDate] = useState("");
   const [progress, setProgress] = useState("0");
+  const [isMilestone, setIsMilestone] = useState(false);
 
   useEffect(() => {
     Promise.all([
-      fetch(`/api/activities/${id}`).then((r) => r.json()),
+      fetch(`/api/activities/${id}`).then((r) => (r.ok ? r.json() : null)),
       fetch("/api/projects?limit=100").then((r) => r.json()),
       fetch("/api/users?role=ADMIN").then((r) => r.ok ? r.json() : []),
     ])
@@ -62,6 +63,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           setStartDate(activity.startDate ? activity.startDate.substring(0, 10) : "");
           setDueDate(activity.dueDate ? activity.dueDate.substring(0, 10) : "");
           setProgress(String(activity.progress ?? 0));
+          setIsMilestone(activity.isMilestone ?? false);
         }
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setAdminUsers(Array.isArray(u) ? u : []);
@@ -93,9 +95,10 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           status,
           priority,
           assignedUserIds: selectedUserIds,
-          startDate: startDate || undefined,
+          startDate: isMilestone ? (dueDate || undefined) : (startDate || undefined),
           dueDate: dueDate || undefined,
-          progress: progress !== "" ? parseInt(progress) : undefined,
+          progress: isMilestone ? 0 : (progress !== "" ? parseInt(progress) : undefined),
+          isMilestone,
         }),
       });
       if (!res.ok) {
@@ -228,18 +231,25 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="startDate">Start Date</Label>
-                <Input
-                  id="startDate"
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
-                />
+            <div className="flex items-start gap-3 p-3 rounded-md border bg-muted/30">
+              <input
+                type="checkbox"
+                id="isMilestone"
+                className="h-4 w-4 mt-0.5 rounded"
+                checked={isMilestone}
+                onChange={(e) => setIsMilestone(e.target.checked)}
+              />
+              <div>
+                <Label htmlFor="isMilestone" className="cursor-pointer font-medium">Mark as Milestone</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Milestones appear as a diamond marker on the Gantt timeline at a single date.
+                </p>
               </div>
+            </div>
+
+            {isMilestone ? (
               <div className="space-y-2">
-                <Label htmlFor="dueDate">Due Date</Label>
+                <Label htmlFor="dueDate">Milestone Date</Label>
                 <Input
                   id="dueDate"
                   type="date"
@@ -247,19 +257,42 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
                   onChange={(e) => setDueDate(e.target.value)}
                 />
               </div>
-            </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="startDate">Start Date</Label>
+                  <Input
+                    id="startDate"
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="dueDate">Due Date</Label>
+                  <Input
+                    id="dueDate"
+                    type="date"
+                    value={dueDate}
+                    onChange={(e) => setDueDate(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
 
-            <div className="space-y-2">
-              <Label htmlFor="progress">Progress (%)</Label>
-              <Input
-                id="progress"
-                type="number"
-                min={0}
-                max={100}
-                value={progress}
-                onChange={(e) => setProgress(e.target.value)}
-              />
-            </div>
+            {!isMilestone && (
+              <div className="space-y-2">
+                <Label htmlFor="progress">Progress (%)</Label>
+                <Input
+                  id="progress"
+                  type="number"
+                  min={0}
+                  max={100}
+                  value={progress}
+                  onChange={(e) => setProgress(e.target.value)}
+                />
+              </div>
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>
