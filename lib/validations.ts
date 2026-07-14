@@ -114,11 +114,18 @@ export const updateUserRoleSchema = z.object({
   departmentId: z.string().nullable().optional(),
   businessUnitId: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(1, "Email is required")
+    .email("Invalid email address")
+    .optional(),
 });
 
 export const createUserSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
-  email: z.string().email("Invalid email address"),
+  email: z.string().trim().toLowerCase().email("Invalid email address"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   role: z.nativeEnum(Role).default(Role.USER),
   departmentId: z.string().optional(),

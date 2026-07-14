@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/permissions";
 import { updateUserRoleSchema } from "@/lib/validations";
@@ -11,15 +12,39 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAdmin();
 
-    if (id === session.user.id) {
+    const body = await req.json();
+    const data = updateUserRoleSchema.parse(body);
+
+    const target = await prisma.user.findUnique({ where: { id } });
+    if (!target) {
+      return NextResponse.json({ error: "User not found" }, { status: 404 });
+    }
+
+    // Admins may edit their own email/department/etc., but changing your own
+    // role or active status could lock you out of the admin panel entirely.
+    const isSelf = id === session.user.id;
+    if (
+      isSelf &&
+      (data.role !== target.role || (data.isActive !== undefined && data.isActive !== target.isActive))
+    ) {
       return NextResponse.json(
-        { error: "You cannot modify your own account" },
+        { error: "You cannot change your own role or active status" },
         { status: 400 }
       );
     }
 
-    const body = await req.json();
-    const data = updateUserRoleSchema.parse(body);
+    if (data.email !== undefined) {
+      const existing = await prisma.user.findFirst({
+        where: { email: data.email, NOT: { id } },
+        select: { id: true },
+      });
+      if (existing) {
+        return NextResponse.json(
+          { error: "A user with this email already exists." },
+          { status: 409 }
+        );
+      }
+    }
 
     const user = await prisma.user.update({
       where: { id },
@@ -29,6 +54,7 @@ export async function PATCH(
         departmentId: data.departmentId,
         businessUnitId: data.businessUnitId,
         customRoleId: data.customRoleId !== undefined ? data.customRoleId : undefined,
+        email: data.email,
       },
       include: {
         department: { select: { id: true, name: true } },
@@ -44,6 +70,14 @@ export async function PATCH(
     }
     if (error.message === "Forbidden" || error.message === "Unauthorized") {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    // Race-condition fallback: two concurrent requests could both pass the
+    // pre-check above before either write commits.
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return NextResponse.json(
+        { error: "A user with this email already exists." },
+        { status: 409 }
+      );
     }
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }

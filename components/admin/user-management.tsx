@@ -65,6 +65,8 @@ const ROLE_LABELS: Record<Role, string> = {
   USER: "User",
 };
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const ROLE_COLORS: Record<Role, string> = {
   ADMIN: "bg-red-100 text-red-700",
   IT_AGENT: "bg-blue-100 text-blue-700",
@@ -91,6 +93,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
   const [editOpen, setEditOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editRoleValue, setEditRoleValue] = useState<string>("");
+  const [editEmail, setEditEmail] = useState("");
   const [editDept, setEditDept] = useState("");
   const [editBU, setEditBU] = useState("");
   const [editActive, setEditActive] = useState(true);
@@ -240,6 +243,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
     } else {
       setEditRoleValue(user.role);
     }
+    setEditEmail(user.email);
     setEditDept(user.department?.id ?? "");
     setEditBU(user.businessUnit?.id ?? "");
     setEditActive(user.isActive);
@@ -247,8 +251,10 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
     setEditOpen(true);
   };
 
+  const isEditEmailValid = EMAIL_REGEX.test(editEmail.trim());
+
   const handleSave = async () => {
-    if (!editUser) return;
+    if (!editUser || !isEditEmailValid) return;
     setSaving(true);
     try {
       // Resolve role option
@@ -262,6 +268,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
         body: JSON.stringify({
           role,
           customRoleId,
+          email: editEmail.trim(),
           departmentId: editDept || null,
           businessUnitId: editBU || null,
           isActive: editActive,
@@ -462,15 +469,32 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                   <AvatarImage src={editUser.image ?? undefined} />
                   <AvatarFallback>{getInitials(editUser.name)}</AvatarFallback>
                 </Avatar>
-                <div>
-                  <p className="font-medium">{editUser.name}</p>
-                  <p className="text-sm text-muted-foreground">{editUser.email}</p>
-                </div>
+                <p className="font-medium">{editUser.name}</p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>Email</Label>
+                <Input
+                  type="email"
+                  value={editEmail}
+                  onChange={(e) => setEditEmail(e.target.value)}
+                  aria-invalid={editEmail.length > 0 && !isEditEmailValid}
+                />
+                {editEmail.length > 0 && !isEditEmailValid && (
+                  <p className="text-xs text-destructive">Enter a valid email address.</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  This email is used for login and Microsoft account matching.
+                </p>
               </div>
 
               <div className="space-y-2">
                 <Label>Role</Label>
-                <Select value={editRoleValue} onValueChange={setEditRoleValue}>
+                <Select
+                  value={editRoleValue}
+                  onValueChange={setEditRoleValue}
+                  disabled={editUser.id === currentUserId}
+                >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="" disabled className="text-muted-foreground text-xs font-semibold">
@@ -495,6 +519,9 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                     )}
                   </SelectContent>
                 </Select>
+                {editUser.id === currentUserId && (
+                  <p className="text-xs text-muted-foreground">You cannot change your own role.</p>
+                )}
               </div>
 
               <div className="space-y-2">
@@ -528,6 +555,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                 <Select
                   value={editActive ? "active" : "inactive"}
                   onValueChange={(v) => setEditActive(v === "active")}
+                  disabled={editUser.id === currentUserId}
                 >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
@@ -568,7 +596,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
           )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button onClick={handleSave} disabled={saving}>
+            <Button onClick={handleSave} disabled={saving || !isEditEmailValid}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Save Changes
             </Button>
