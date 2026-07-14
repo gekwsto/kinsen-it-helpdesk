@@ -1,6 +1,13 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, canViewAllTickets } from "@/lib/permissions";
+import { hasPermission } from "@/lib/permissions";
+import {
+  buildTicketListWhere,
+  hasAnyFullTicketView,
+  getAccessibleDepartmentSummaries,
+} from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
 import { Button } from "@/components/ui/button";
@@ -54,7 +61,7 @@ export default async function AllTicketsPage({
     );
   }
 
-  if (!canViewAllTickets(role)) {
+  if (!(await hasAnyFullTicketView(session.user.id, role))) {
     redirect("/my-tickets");
   }
 
@@ -72,42 +79,73 @@ export default async function AllTicketsPage({
       ? { status: { order: sortDir } }
       : { [sortBy]: sortDir };
 
+  // Active workspace is the default scope now (Phase 2B) — an explicit
+  // ?departmentId= still wins as an "explicit scoped view," but omitting it
+  // no longer falls back to a union of every accessible department.
+  const activeWorkspace = await getActiveWorkspace(session.user.id, role);
+  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+
+  if (!effectiveDepartmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
+  }
+
+  // Department-scoped visibility — validated against real membership, never
+  // trusted from the URL. AND-ed alongside every other filter (not merged
+  // into one object) so a search/status filter can never clobber the
+  // scope's own OR clause (own-tickets-only vs full department view).
+  const scope = await buildTicketListWhere(session.user.id, role, effectiveDepartmentId);
+  if ("denied" in scope) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] text-center gap-4">
+        <Ticket className="h-12 w-12 text-muted-foreground" />
+        <h1 className="text-xl font-semibold">Access denied</h1>
+        <p className="text-muted-foreground text-sm max-w-sm">You don&apos;t have access to that department.</p>
+      </div>
+    );
+  }
+
   // Base filter: only open (non-closed, non-cancelled) tickets
-  const where: any = {
-    status: { isClosed: false },
-    cancelReasonId: null,
-  };
+  const andConditions: any[] = [scope, { status: { isClosed: false } }, { cancelReasonId: null }];
 
   if (params.myOnly === "true") {
-    where.requesterId = session.user.id;
+    andConditions.push({ requesterId: session.user.id });
   }
 
   if (params.search) {
     const numSearch = parseInt(params.search);
-    where.OR = [
-      { title: { contains: params.search, mode: "insensitive" } },
-      { description: { contains: params.search, mode: "insensitive" } },
-      { requester: { name: { contains: params.search, mode: "insensitive" } } },
-      { requester: { email: { contains: params.search, mode: "insensitive" } } },
-      ...(!isNaN(numSearch) ? [{ ticketNumber: numSearch }] : []),
-    ];
+    andConditions.push({
+      OR: [
+        { title: { contains: params.search, mode: "insensitive" } },
+        { description: { contains: params.search, mode: "insensitive" } },
+        { requester: { name: { contains: params.search, mode: "insensitive" } } },
+        { requester: { email: { contains: params.search, mode: "insensitive" } } },
+        ...(!isNaN(numSearch) ? [{ ticketNumber: numSearch }] : []),
+      ],
+    });
   }
-  if (params.statusId) where.statusId = params.statusId;
-  if (params.priorityId) where.priorityId = params.priorityId;
-  if (params.categoryId) where.categoryId = params.categoryId;
-  if (params.departmentId) where.departmentId = params.departmentId;
-  if (params.source) where.source = params.source;
+  if (params.statusId) andConditions.push({ statusId: params.statusId });
+  if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
+  if (params.categoryId) andConditions.push({ categoryId: params.categoryId });
+  if (params.source) andConditions.push({ source: params.source });
   if (params.unassigned === "true") {
-    where.assignedAgentId = null;
+    andConditions.push({ assignedAgentId: null });
   } else if (params.assignedAgentId) {
-    where.assignedAgentId = params.assignedAgentId;
+    andConditions.push({ assignedAgentId: params.assignedAgentId });
   }
   if (params.createdAfter || params.createdBefore) {
-    where.createdAt = {
-      ...(params.createdAfter ? { gte: new Date(params.createdAfter) } : {}),
-      ...(params.createdBefore ? { lte: new Date(params.createdBefore) } : {}),
-    };
+    andConditions.push({
+      createdAt: {
+        ...(params.createdAfter ? { gte: new Date(params.createdAfter) } : {}),
+        ...(params.createdBefore ? { lte: new Date(params.createdBefore) } : {}),
+      },
+    });
   }
+
+  const where: any = { AND: andConditions };
 
   const [tickets, total, statuses, priorities, categories, departments, agents] =
     await Promise.all([
@@ -131,7 +169,9 @@ export default async function AllTicketsPage({
       prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" }, select: { id: true, name: true, color: true } }),
       prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" }, select: { id: true, name: true, color: true, level: true } }),
       prisma.ticketCategory.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
-      prisma.department.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
+      // Only departments the caller can actually filter to — never one that
+      // would just 403 if picked.
+      getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
       prisma.user.findMany({ where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
     ]);
 

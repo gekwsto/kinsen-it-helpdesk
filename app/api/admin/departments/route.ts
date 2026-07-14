@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin } from "@/lib/permissions";
 import { createDepartmentSchema } from "@/lib/validations";
+import { createDepartment } from "@/lib/services/department-service";
 
 export async function GET() {
   try {
@@ -24,11 +25,14 @@ export async function POST(req: NextRequest) {
     await requireAdmin();
     const body = await req.json();
     const data = createDepartmentSchema.parse(body);
-    const department = await prisma.department.create({
-      data,
+    // Slug is auto-generated from name (collision-checked) — the request
+    // shape is unchanged, this is purely an internal addition.
+    const department = await createDepartment(data);
+    const withRelations = await prisma.department.findUnique({
+      where: { id: department.id },
       include: { businessUnit: { select: { id: true, name: true } } },
     });
-    return NextResponse.json(department, { status: 201 });
+    return NextResponse.json(withRelations, { status: 201 });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
@@ -37,15 +41,5 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function DELETE(req: NextRequest) {
-  try {
-    await requireAdmin();
-    const { searchParams } = new URL(req.url);
-    const id = searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "ID required" }, { status: 400 });
-    await prisma.department.delete({ where: { id } });
-    return new NextResponse(null, { status: 204 });
-  } catch {
-    return NextResponse.json({ error: "Internal error" }, { status: 500 });
-  }
-}
+// DELETE moved to [id]/route.ts (Phase 3) — now guarded by a dependents
+// check (users/memberships/tickets/projects/etc.) before allowing removal.

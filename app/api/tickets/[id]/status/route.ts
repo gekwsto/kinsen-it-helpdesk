@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasPermission } from "@/lib/permissions";
+import { requireAuth } from "@/lib/permissions";
+import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { changeStatusSchema } from "@/lib/validations";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
@@ -17,9 +18,15 @@ export async function PATCH(
     const ticket = await prisma.ticket.findUnique({ where: { id } });
     if (!ticket) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    // Users can close/cancel their own tickets; those with ticket.changeStatus can change any
-    const hasChangeStatus = await hasPermission(session.user.role, "ticket.changeStatus", session.user.customRoleId);
-    const canChange = hasChangeStatus || ticket.requesterId === session.user.id;
+    // Users can close/cancel their own tickets; those with department-scoped
+    // ticket.changeStatus can change any ticket in their department.
+    const canChange = await canActOnEntity(
+      session.user.id,
+      session.user.role,
+      ticket.departmentId,
+      "ticket.changeStatus",
+      ticket.requesterId === session.user.id
+    );
 
     if (!canChange) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 

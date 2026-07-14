@@ -46,6 +46,36 @@ enum AuthProvider {
   CREDENTIALS
 }
 
+// Standing within a single department — distinct from the global `Role` enum,
+// which governs cross-cutting/system concerns (admin panel, credentials login).
+// System Admin is represented by the global `Role.ADMIN` and bypasses these
+// entirely rather than being a value here (see lib/permissions.ts).
+enum DepartmentRole {
+  DEPARTMENT_ADMIN
+  DEPARTMENT_MANAGER
+  PROJECT_MANAGER
+  AGENT_ASSIGNEE
+  REQUESTER
+  VIEWER
+}
+
+// How a DepartmentMembership row was established. MANUAL rows are admin
+// overrides and must never be modified by the Microsoft login-sync process.
+enum MembershipSource {
+  MICROSOFT_DEPARTMENT
+  MICROSOFT_GROUP
+  MICROSOFT_APP_ROLE
+  MANUAL
+}
+
+// Which kind of Microsoft/Entra signal a MicrosoftDepartmentMapping row
+// matches against.
+enum MicrosoftMappingSourceType {
+  PROFILE_DEPARTMENT
+  ENTRA_GROUP
+  ENTRA_APP_ROLE
+}
+
 enum ProjectStatus {
   PLANNING
   IN_PROGRESS
@@ -112,17 +142,62 @@ model BusinessUnit {
 }
 
 model Department {
-  id             String            @id @default(cuid())
-  name           String
-  businessUnit   BusinessUnit?     @relation(fields: [businessUnitId], references: [id])
-  businessUnitId String?
-  subDepartments SubDepartment[]
-  users          User[]
-  tickets        Ticket[]
-  projects       Project[]
-  activities     ProjectActivity[]
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  id                String                       @id @default(cuid())
+  name              String
+  slug              String                       @unique
+  description       String?
+  isActive          Boolean                      @default(true)
+  businessUnit      BusinessUnit?                @relation(fields: [businessUnitId], references: [id])
+  businessUnitId    String?
+  subDepartments    SubDepartment[]
+  users             User[]
+  memberships       DepartmentMembership[]
+  microsoftMappings MicrosoftDepartmentMapping[]
+  tickets           Ticket[]
+  projects          Project[]
+  activities        ProjectActivity[]
+  categories        TicketCategory[]
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+}
+
+// Per-user, per-department standing. Decoupled from User.departmentId (which
+// remains the legacy "home department" FK, unchanged) — a user may hold
+// memberships in multiple departments; at most one is flagged isPrimary.
+model DepartmentMembership {
+  id           String           @id @default(cuid())
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId       String
+  department   Department       @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String
+  role         DepartmentRole
+  source       MembershipSource
+  isPrimary    Boolean          @default(false)
+  isActive     Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@unique([userId, departmentId])
+  @@index([departmentId])
+  @@index([userId])
+}
+
+// Pure data table: maps a Microsoft/Entra signal (profile department string,
+// group name/id, or app role value) to an internal department + role, so the
+// login-sync logic never hardcodes a department name in code.
+model MicrosoftDepartmentMapping {
+  id             String                     @id @default(cuid())
+  sourceType     MicrosoftMappingSourceType
+  microsoftValue String
+  department     Department                 @relation(fields: [departmentId], references: [id])
+  departmentId   String
+  role           DepartmentRole             @default(REQUESTER)
+  isActive       Boolean                    @default(true)
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+
+  @@unique([sourceType, microsoftValue])
+  @@index([departmentId])
 }
 
 model SubDepartment {
@@ -148,6 +223,9 @@ model User {
   passwordHash       String?
   authProvider       AuthProvider   @default(MICROSOFT)
   mustChangePassword Boolean        @default(false)
+  // Entra ID `oid` claim — stable identity anchor independent of email, so a
+  // user's Microsoft identity survives an email change (see admin email edit).
+  microsoftUserId    String?        @unique
   company            Company?       @relation(fields: [companyId], references: [id])
   companyId          String?
   businessUnit       BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
@@ -157,21 +235,23 @@ model User {
   subDepartment      SubDepartment? @relation(fields: [subDepartmentId], references: [id])
   subDepartmentId    String?
 
-  customRole          CustomRole?        @relation("UserCustomRole", fields: [customRoleId], references: [id])
-  customRoleId        String?
+  customRole   CustomRole? @relation("UserCustomRole", fields: [customRoleId], references: [id])
+  customRoleId String?
 
-  requestedTickets    Ticket[]           @relation("TicketRequester")
-  assignedTickets     Ticket[]           @relation("TicketAgent")
+  departmentMemberships DepartmentMembership[]
+
+  requestedTickets    Ticket[]             @relation("TicketRequester")
+  assignedTickets     Ticket[]             @relation("TicketAgent")
   ticketMessages      TicketMessage[]
   ticketAttachments   TicketAttachment[]
   ticketHistories     TicketHistory[]
-  ownedProjects       Project[]          @relation("ProjectOwner")
-  projectMemberships  Project[]          @relation("ProjectMembers")
-  assignedActivities   ProjectActivity[]  @relation("ActivityAssignee")
-  activityAssignments  ProjectActivity[]  @relation("ActivityAssignees")
-  createdActivities    ProjectActivity[]  @relation("ActivityCreator")
-  createdDependencies  ActivityDependency[] @relation("ActivityDependenciesCreatedBy")
-  ownedGoals          YearlyGoal[]       @relation("GoalOwner")
+  ownedProjects       Project[]            @relation("ProjectOwner")
+  projectMemberships  Project[]            @relation("ProjectMembers")
+  assignedActivities  ProjectActivity[]    @relation("ActivityAssignee")
+  activityAssignments ProjectActivity[]    @relation("ActivityAssignees")
+  createdActivities   ProjectActivity[]    @relation("ActivityCreator")
+  createdDependencies ActivityDependency[] @relation("ActivityDependenciesCreatedBy")
+  ownedGoals          YearlyGoal[]         @relation("GoalOwner")
   notifications       Notification[]
   pushSubscriptions   PushSubscription[]
   accounts            Account[]
@@ -218,26 +298,34 @@ model VerificationToken {
 // ─── Ticket Config Tables ─────────────────────────────────────────────────────
 
 model TicketCategory {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
-  color       String   @default("#6366f1")
-  isActive    Boolean  @default(true)
-  tickets     Ticket[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id           String      @id @default(cuid())
+  name         String
+  description  String?
+  color        String      @default("#6366f1")
+  isActive     Boolean     @default(true)
+  // Nullable = global/shared category visible to every department (e.g. an
+  // existing category migrated as-is); non-null = owned by one department.
+  department   Department? @relation(fields: [departmentId], references: [id])
+  departmentId String?
+  tickets      Ticket[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  // Replaces the flat `name @unique` — Postgres treats NULL departmentId as
+  // distinct per row, so this does not collapse existing global categories.
+  @@unique([departmentId, name])
 }
 
 model TicketPriority {
-  id        String      @id @default(cuid())
-  name      String      @unique
+  id        String     @id @default(cuid())
+  name      String     @unique
   level     Int
   color     String
-  isActive  Boolean     @default(true)
+  isActive  Boolean    @default(true)
   tickets   Ticket[]
   slaPolicy SlaPolicy?
-  createdAt DateTime    @default(now())
-  updatedAt DateTime    @updatedAt
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
 }
 
 model TicketStatus {
@@ -272,17 +360,17 @@ model Ticket {
   description  String       @db.Text
   source       TicketSource @default(WEB)
 
-  requester       User            @relation("TicketRequester", fields: [requesterId], references: [id])
+  requester       User                @relation("TicketRequester", fields: [requesterId], references: [id])
   requesterId     String
-  assignedAgent   User?           @relation("TicketAgent", fields: [assignedAgentId], references: [id])
+  assignedAgent   User?               @relation("TicketAgent", fields: [assignedAgentId], references: [id])
   assignedAgentId String?
-  department      Department?     @relation(fields: [departmentId], references: [id])
+  department      Department?         @relation(fields: [departmentId], references: [id])
   departmentId    String?
-  category        TicketCategory? @relation(fields: [categoryId], references: [id])
+  category        TicketCategory?     @relation(fields: [categoryId], references: [id])
   categoryId      String?
-  priority        TicketPriority? @relation(fields: [priorityId], references: [id])
+  priority        TicketPriority?     @relation(fields: [priorityId], references: [id])
   priorityId      String?
-  status          TicketStatus    @relation(fields: [statusId], references: [id])
+  status          TicketStatus        @relation(fields: [statusId], references: [id])
   statusId        String
   cancelReason    TicketCancelReason? @relation(fields: [cancelReasonId], references: [id])
   cancelReasonId  String?
@@ -315,12 +403,12 @@ model Ticket {
 }
 
 model TicketMessage {
-  id       String           @id @default(cuid())
-  ticket   Ticket           @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  id       String  @id @default(cuid())
+  ticket   Ticket  @relation(fields: [ticketId], references: [id], onDelete: Cascade)
   ticketId String
-  author   User?            @relation(fields: [authorId], references: [id])
+  author   User?   @relation(fields: [authorId], references: [id])
   authorId String?
-  body     String           @db.Text
+  body     String  @db.Text
 
   direction  MessageDirection @default(OUTBOUND)
   isInternal Boolean          @default(false)
@@ -401,41 +489,43 @@ model Project {
 
   @@index([ownerId])
   @@index([status])
+  @@index([departmentId])
 }
 
 model ProjectActivity {
-  id             String           @id @default(cuid())
-  title          String
-  description    String?          @db.Text
-  status         ActivityStatus   @default(TODO)
-  priority       ActivityPriority @default(MEDIUM)
-  project        Project?         @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  projectId      String?
-  assignedUser   User?            @relation("ActivityAssignee", fields: [assignedUserId], references: [id])
-  assignedUserId String?
-  assignedUsers  User[]           @relation("ActivityAssignees")
-  createdBy      User?            @relation("ActivityCreator", fields: [createdById], references: [id])
-  createdById    String?
-  department     Department?      @relation(fields: [departmentId], references: [id])
-  departmentId   String?
-  businessUnit   BusinessUnit?    @relation(fields: [businessUnitId], references: [id])
-  businessUnitId String?
-  startDate      DateTime?
-  dueDate        DateTime?
-  progress       Int              @default(0)
-  isMilestone    Boolean          @default(false)
-  completedAt    DateTime?
-  isCompleted    Boolean          @default(false)
-  tickets        Ticket[]
+  id              String               @id @default(cuid())
+  title           String
+  description     String?              @db.Text
+  status          ActivityStatus       @default(TODO)
+  priority        ActivityPriority     @default(MEDIUM)
+  project         Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  projectId       String?
+  assignedUser    User?                @relation("ActivityAssignee", fields: [assignedUserId], references: [id])
+  assignedUserId  String?
+  assignedUsers   User[]               @relation("ActivityAssignees")
+  createdBy       User?                @relation("ActivityCreator", fields: [createdById], references: [id])
+  createdById     String?
+  department      Department?          @relation(fields: [departmentId], references: [id])
+  departmentId    String?
+  businessUnit    BusinessUnit?        @relation(fields: [businessUnitId], references: [id])
+  businessUnitId  String?
+  startDate       DateTime?
+  dueDate         DateTime?
+  progress        Int                  @default(0)
+  isMilestone     Boolean              @default(false)
+  completedAt     DateTime?
+  isCompleted     Boolean              @default(false)
+  tickets         Ticket[]
   predecessorDeps ActivityDependency[] @relation("ActivityDependencyPredecessor")
   successorDeps   ActivityDependency[] @relation("ActivityDependencySuccessor")
-  createdAt      DateTime         @default(now())
-  updatedAt      DateTime         @updatedAt
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
 
   @@index([projectId])
   @@index([assignedUserId])
   @@index([createdById])
   @@index([status])
+  @@index([departmentId])
 }
 
 model ActivityDependency {

@@ -7,6 +7,8 @@ import {
   GoalStatus,
   Role,
   DependencyType,
+  DepartmentRole,
+  MicrosoftMappingSourceType,
 } from "@prisma/client";
 
 // ─── Ticket Schemas ────────────────────────────────────────────────────────────
@@ -139,13 +141,53 @@ export const resetPasswordSchema = z.object({
 
 export const createDepartmentSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
+  description: z.string().trim().min(1).optional(),
   businessUnitId: z.string().optional(),
+});
+
+export const updateDepartmentSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters").optional(),
+  slug: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .min(1, "Slug is required")
+    .regex(/^[a-z0-9-]+$/, "Slug may only contain lowercase letters, numbers and hyphens")
+    .optional(),
+  description: z.string().trim().nullable().optional(),
+  businessUnitId: z.string().nullable().optional(),
+  isActive: z.boolean().optional(),
 });
 
 export const createCategorySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   description: z.string().optional(),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color").default("#6366f1"),
+  // Nullable/omitted = global/shared category. Only System Admin may create
+  // one without a departmentId — enforced in the route, not here.
+  departmentId: z.string().nullable().optional(),
+});
+
+// ─── Department Membership Schemas (Phase 3) ────────────────────────────────────
+
+export const grantMembershipSchema = z.object({
+  userId: z.string().min(1, "User is required"),
+  role: z.nativeEnum(DepartmentRole),
+});
+
+// ─── Microsoft Mapping Schemas (Phase 3) ─────────────────────────────────────────
+
+export const createMicrosoftMappingSchema = z.object({
+  sourceType: z.nativeEnum(MicrosoftMappingSourceType),
+  microsoftValue: z.string().trim().min(1, "Value is required"),
+  departmentId: z.string().min(1, "Department is required"),
+  role: z.nativeEnum(DepartmentRole).default(DepartmentRole.REQUESTER),
+});
+
+export const updateMicrosoftMappingSchema = z.object({
+  departmentId: z.string().min(1).optional(),
+  role: z.nativeEnum(DepartmentRole).optional(),
+  isActive: z.boolean().optional(),
 });
 
 export const createPrioritySchema = z.object({

@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, canViewAllTickets } from "@/lib/permissions";
+import { hasPermission } from "@/lib/permissions";
+import { canActOnEntity, buildCategoryWhere } from "@/lib/services/department-scope-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
@@ -62,17 +63,23 @@ export default async function TicketDetailPage({
   const isAdminUser = role === Role.ADMIN;
   const isRequester = ticket.requesterId === session.user.id;
 
-  // Gate: can view this specific ticket
-  const canViewAll = canViewAllTickets(role);
-  if (!canViewAll && !isRequester) redirect("/dashboard");
+  // Gate: can view this specific ticket — department-scoped, not a global
+  // "sees every department's tickets" role check.
+  const canView = await canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.view", isRequester);
+  if (!canView) redirect("/dashboard");
 
-  // Resolve fine-grained permissions in parallel
+  // Resolve fine-grained permissions in parallel. ticket.reply/internalNote
+  // stay global (not department-scoped in Phase 2A — they gate what a
+  // viewer of this ticket can additionally do, not whether they can view
+  // it at all); changeStatus/assign are department-scoped to match the
+  // actual backend gate on the PATCH/assign/status routes, so the UI never
+  // shows a button that would just 403.
   const [canReplyPerm, canInternalNote, canChangeStatus, canAssign] =
     await Promise.all([
       hasPermission(role, "ticket.reply", customRoleId),
       hasPermission(role, "ticket.internalNote", customRoleId),
-      hasPermission(role, "ticket.changeStatus", customRoleId),
-      hasPermission(role, "ticket.assign", customRoleId),
+      canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.changeStatus", isRequester),
+      canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.assign"),
     ]);
 
   // Requesters can always reply to their own ticket (even without ticket.reply perm)
@@ -96,7 +103,10 @@ export default async function TicketDetailPage({
             ? prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" } })
             : Promise.resolve([]),
           canChangeStatus
-            ? prisma.ticketCategory.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
+            ? prisma.ticketCategory.findMany({
+                where: { AND: [{ isActive: true }, buildCategoryWhere(ticket.departmentId)] },
+                orderBy: { name: "asc" },
+              })
             : Promise.resolve([]),
           canAssign
             ? prisma.user.findMany({

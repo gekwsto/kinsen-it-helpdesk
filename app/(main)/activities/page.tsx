@@ -1,6 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission, canManageProjects } from "@/lib/permissions";
+import { buildActivityListWhere } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -29,14 +32,26 @@ export default async function ActivitiesPage({
   const canCreate = await hasPermission(session.user.role, "activity.create", session.user.customRoleId);
 
   const params = await searchParams;
-  const where: any = {};
-  if (params.projectId) where.projectId = params.projectId;
+
+  const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+  if (!activeWorkspace.departmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
+  }
+
+  const scope = await buildActivityListWhere(session.user.id, session.user.role, activeWorkspace.departmentId);
+  const andConditions: any[] = ["denied" in scope ? { id: { in: [] as string[] } } : scope];
+  if (params.projectId) andConditions.push({ projectId: params.projectId });
 
   // Validate status against enum before passing to Prisma
   const validStatuses = Object.values(ActivityStatus) as string[];
   if (params.status && validStatuses.includes(params.status)) {
-    where.status = params.status as ActivityStatus;
+    andConditions.push({ status: params.status as ActivityStatus });
   }
+  const where: any = { AND: andConditions };
 
   const activities = await prisma.projectActivity.findMany({
     where,

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
-import { canViewAllTickets } from "@/lib/permissions";
+import { buildTicketListWhere } from "@/lib/services/department-scope-service";
 
 export async function GET() {
   try {
@@ -9,9 +9,10 @@ export async function GET() {
     const userId = session.user.id;
     const role = session.user.role;
 
-    const ticketWhere = canViewAllTickets(role)
-      ? {}
-      : { requesterId: userId };
+    const scope = await buildTicketListWhere(userId, role);
+    // No explicit departmentId is ever passed here, so buildTicketListWhere
+    // can't return a denial — it only denies an out-of-scope *requested* id.
+    const ticketWhere = "denied" in scope ? { id: { in: [] as string[] } } : scope;
 
     const [
       totalOpen,
@@ -70,8 +71,10 @@ export async function GET() {
         },
       }),
 
-      // Recent history activity
+      // Recent history activity — was previously unfiltered (every
+      // department's ticket history to any authenticated user).
       prisma.ticketHistory.findMany({
+        where: { ticket: ticketWhere },
         take: 10,
         orderBy: { createdAt: "desc" },
         include: {

@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
+import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permissions";
+import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { getMembership } from "@/lib/services/department-membership-service";
 import { updateProjectSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -23,7 +25,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    await requireAuth();
+    const session = await requireAuth();
     const project = await prisma.project.findUnique({
       where: { id },
       include: PROJECT_INCLUDE,
@@ -32,6 +34,12 @@ export async function GET(
     if (!project) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
+
+    const canView = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.view");
+    if (!canView) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     return NextResponse.json(project);
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -46,13 +54,30 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAuth();
 
-    const canEdit = await hasPermission(session.user.role, "project.edit", session.user.customRoleId);
+    const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    const canEdit = await canActOnEntity(session.user.id, session.user.role, existing.departmentId, "project.edit");
     if (!canEdit) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     const body = await req.json();
     const data = updateProjectSchema.parse(body);
+
+    // Moving a project into a different department requires standing there too.
+    if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== existing.departmentId) {
+      if (session.user.role !== Role.ADMIN) {
+        const targetMembership = await getMembership(session.user.id, data.departmentId);
+        const allowed = targetMembership
+          ? await hasDepartmentPermission(targetMembership.role, "project.create")
+          : false;
+        if (!allowed) {
+          return NextResponse.json({ error: "You don't have access to the target department" }, { status: 403 });
+        }
+      }
+    }
+
     const { memberIds, startDate, endDate, ...rest } = data;
 
     // Validate that all assigned members are ADMIN users

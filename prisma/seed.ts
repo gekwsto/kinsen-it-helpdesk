@@ -33,6 +33,10 @@ const PERMISSIONS = [
   { key: "admin.access", description: "Access admin panel", module: "admin" },
   { key: "user.manage", description: "Manage users", module: "admin" },
   { key: "role.manage", description: "Manage roles and permissions", module: "admin" },
+  // Department (Phase 3) — department-scoped admin capabilities, granted via
+  // DepartmentRole membership rather than the global Role/CustomRole system.
+  { key: "department.manageSettings", description: "Edit department settings and categories", module: "department" },
+  { key: "department.manageMembers", description: "Manage department memberships", module: "department" },
 ];
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
@@ -43,6 +47,10 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus",
   ],
+  // Shared roleKey: both the global Role.DEPARTMENT_MANAGER enum value and
+  // the new DepartmentRole.DEPARTMENT_MANAGER value resolve permissions via
+  // this same "DEPARTMENT_MANAGER" key (see hasDepartmentPermission in
+  // lib/permissions.ts) — they mean the same thing, one set is enough.
   DEPARTMENT_MANAGER: [
     "activity.view", "activity.create", "activity.edit", "activity.assign",
     "project.view", "project.create", "project.edit",
@@ -52,6 +60,40 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   USER: [
     "activity.view",
     "ticket.view", "ticket.create", "ticket.reply",
+  ],
+  // ─── DepartmentRole keys (Phase 1 multi-department RBAC) ──────────────────
+  // Full control of one department's projects/tickets/activities/goals.
+  DEPARTMENT_ADMIN: [
+    "activity.view", "activity.create", "activity.edit", "activity.delete", "activity.assign",
+    "project.view", "project.create", "project.edit", "project.delete",
+    "goal.view", "goal.create", "goal.edit", "goal.delete",
+    "ticket.view", "ticket.create", "ticket.reply",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus",
+    "department.manageSettings", "department.manageMembers",
+  ],
+  // Owns projects/Gantt within the department, not ticket triage or membership.
+  PROJECT_MANAGER: [
+    "activity.view", "activity.create", "activity.edit", "activity.assign",
+    "project.view", "project.create", "project.edit",
+    "goal.view",
+  ],
+  // Works assigned tickets/activities — the department-scoped analog of the
+  // global IT_AGENT role, so retrofitting department scoping onto ticket
+  // actions doesn't regress what an agent can do (full ticket handling).
+  AGENT_ASSIGNEE: [
+    "activity.view", "activity.edit",
+    "project.view",
+    "ticket.view", "ticket.create", "ticket.reply",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus",
+  ],
+  // Creates and tracks own tickets within the department.
+  REQUESTER: [
+    "activity.view",
+    "ticket.view", "ticket.create", "ticket.reply",
+  ],
+  // Read-only.
+  VIEWER: [
+    "activity.view", "project.view", "goal.view", "ticket.view",
   ],
 };
 
@@ -104,27 +146,6 @@ async function main() {
   }
   console.log("✓ Ticket priorities seeded");
 
-  // Ticket Categories
-  const categories = [
-    { name: "Hardware", description: "Physical device issues", color: "#6366f1" },
-    { name: "Software", description: "Application or OS issues", color: "#8b5cf6" },
-    { name: "Network", description: "Connectivity and network issues", color: "#06b6d4" },
-    { name: "Access & Permissions", description: "Login, permissions, account issues", color: "#14b8a6" },
-    { name: "Email", description: "Email client and server issues", color: "#f59e0b" },
-    { name: "Printing", description: "Printer and printing issues", color: "#f97316" },
-    { name: "Security", description: "Security incidents and concerns", color: "#ef4444" },
-    { name: "General IT", description: "General IT support requests", color: "#6b7280" },
-  ];
-
-  for (const category of categories) {
-    await prisma.ticketCategory.upsert({
-      where: { name: category.name },
-      update: {},
-      create: category,
-    });
-  }
-  console.log("✓ Ticket categories seeded");
-
   // Cancel Reasons
   const cancelReasons = [
     { name: "Duplicate", description: "Ticket is a duplicate of another" },
@@ -162,21 +183,70 @@ async function main() {
 
   // Default Departments
   const departments = [
-    { id: "dept-it", name: "IT Department" },
-    { id: "dept-hr", name: "Human Resources" },
-    { id: "dept-finance", name: "Finance" },
-    { id: "dept-sales", name: "Sales" },
-    { id: "dept-operations", name: "Operations" },
+    { id: "dept-it", name: "IT Department", slug: "it" },
+    { id: "dept-hr", name: "Human Resources", slug: "hr" },
+    { id: "dept-finance", name: "Finance", slug: "finance" },
+    { id: "dept-sales", name: "Sales", slug: "sales" },
+    { id: "dept-operations", name: "Operations", slug: "operations" },
   ];
 
   for (const dept of departments) {
     await prisma.department.upsert({
       where: { id: dept.id },
-      update: {},
+      update: { slug: dept.slug },
       create: { ...dept, businessUnitId: defaultBU.id },
     });
   }
   console.log("✓ Departments seeded");
+
+  // Ticket Categories — department-owned (Phase 1 of the multi-department
+  // architecture). All existing categories are IT-flavored, so they're
+  // seeded under the IT department rather than left global/shared; the
+  // schema still supports a global category (departmentId: null) for cases
+  // that genuinely apply to every department — none exist yet.
+  const categories = [
+    { name: "Hardware", description: "Physical device issues", color: "#6366f1" },
+    { name: "Software", description: "Application or OS issues", color: "#8b5cf6" },
+    { name: "Network", description: "Connectivity and network issues", color: "#06b6d4" },
+    { name: "Access & Permissions", description: "Login, permissions, account issues", color: "#14b8a6" },
+    { name: "Email", description: "Email client and server issues", color: "#f59e0b" },
+    { name: "Printing", description: "Printer and printing issues", color: "#f97316" },
+    { name: "Security", description: "Security incidents and concerns", color: "#ef4444" },
+    { name: "General IT", description: "General IT support requests", color: "#6b7280" },
+  ];
+
+  for (const category of categories) {
+    await prisma.ticketCategory.upsert({
+      where: { departmentId_name: { departmentId: "dept-it", name: category.name } },
+      update: {},
+      create: { ...category, departmentId: "dept-it" },
+    });
+  }
+  console.log("✓ Ticket categories seeded");
+
+  // Microsoft Entra mapping examples — pure data, no code branches. These
+  // are real, usable templates (not placeholders) demonstrating all three
+  // mapping source types; add more via this table, never via new code.
+  const microsoftMappings: {
+    sourceType: "PROFILE_DEPARTMENT" | "ENTRA_GROUP" | "ENTRA_APP_ROLE";
+    microsoftValue: string;
+    departmentId: string;
+    role: "DEPARTMENT_ADMIN" | "DEPARTMENT_MANAGER" | "PROJECT_MANAGER" | "AGENT_ASSIGNEE" | "REQUESTER" | "VIEWER";
+  }[] = [
+    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - IT", departmentId: "dept-it", role: "DEPARTMENT_MANAGER" },
+    { sourceType: "ENTRA_APP_ROLE", microsoftValue: "TicketApp.IT.Manager", departmentId: "dept-it", role: "DEPARTMENT_MANAGER" },
+    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - Finance", departmentId: "dept-finance", role: "REQUESTER" },
+    { sourceType: "PROFILE_DEPARTMENT", microsoftValue: "Human Resources", departmentId: "dept-hr", role: "REQUESTER" },
+  ];
+
+  for (const mapping of microsoftMappings) {
+    await prisma.microsoftDepartmentMapping.upsert({
+      where: { sourceType_microsoftValue: { sourceType: mapping.sourceType, microsoftValue: mapping.microsoftValue } },
+      update: { departmentId: mapping.departmentId, role: mapping.role },
+      create: mapping,
+    });
+  }
+  console.log("✓ Microsoft department mapping examples seeded");
 
   // System admin user — required bootstrap record (safe to run in production)
   const adminPasswordHash = await bcrypt.hash(
@@ -330,6 +400,35 @@ async function main() {
   });
 
   console.log("✓ Demo users seeded");
+
+  // Department memberships for demo users with a home department — mirrors
+  // what backfill.sql does for real existing users on migration cutover, so
+  // a fresh dev seed already has usable membership data for Phase 2 to
+  // authorize against. Demo users intentionally left without a department
+  // (user@kinsen.gr, user2@kinsen.gr) get no membership row — this doubles
+  // as a local test case for the "no department mapped yet" pending-setup
+  // state. The system admin (Role.ADMIN) never needs one — it bypasses
+  // department checks entirely (see requireDepartmentAccess).
+  const demoMemberships = [
+    { email: "agent@kinsen.gr", departmentId: "dept-it", role: "AGENT_ASSIGNEE" as const },
+    { email: "manager@kinsen.gr", departmentId: "dept-hr", role: "DEPARTMENT_MANAGER" as const },
+  ];
+  for (const m of demoMemberships) {
+    const demoUserRow = await prisma.user.findUnique({ where: { email: m.email } });
+    if (!demoUserRow) continue;
+    await prisma.departmentMembership.upsert({
+      where: { userId_departmentId: { userId: demoUserRow.id, departmentId: m.departmentId } },
+      update: {},
+      create: {
+        userId: demoUserRow.id,
+        departmentId: m.departmentId,
+        role: m.role,
+        source: "MANUAL",
+        isPrimary: true,
+      },
+    });
+  }
+  console.log("✓ Demo department memberships seeded");
 
   const [
     adminUser, agentUser, managerUser, demoUser,

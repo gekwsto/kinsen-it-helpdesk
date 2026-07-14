@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasPermission } from "@/lib/permissions";
+import { requireAuth } from "@/lib/permissions";
+import {
+  buildProjectListWhere,
+  resolveDepartmentForCreate,
+  departmentDenialMessage,
+  departmentDenialStatus,
+} from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { createProjectSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -13,17 +20,27 @@ export async function GET(req: NextRequest) {
     const limit = parseInt(searchParams.get("limit") ?? "20");
     const search = searchParams.get("search") ?? "";
     const status = searchParams.get("status");
+    const departmentId = searchParams.get("departmentId");
 
     const skip = (page - 1) * limit;
 
-    const where: any = {};
-    if (search) {
-      where.OR = [
-        { title: { contains: search, mode: "insensitive" } },
-        { description: { contains: search, mode: "insensitive" } },
-      ];
+    const scope = await buildProjectListWhere(session.user.id, session.user.role, departmentId);
+    if ("denied" in scope) {
+      return NextResponse.json({ error: "You don't have access to this department" }, { status: 403 });
     }
-    if (status) where.status = status;
+
+    const andConditions: any[] = [scope];
+    if (search) {
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: "insensitive" } },
+          { description: { contains: search, mode: "insensitive" } },
+        ],
+      });
+    }
+    if (status) andConditions.push({ status });
+
+    const where: any = { AND: andConditions };
 
     const [projects, total] = await Promise.all([
       prisma.project.findMany({
@@ -57,15 +74,32 @@ export async function POST(req: NextRequest) {
   try {
     const session = await requireAuth();
 
-    const canCreate = await hasPermission(session.user.role, "project.create", session.user.customRoleId);
-    if (!canCreate) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    }
-
     const body = await req.json();
     const data = createProjectSchema.parse(body);
 
-    const { memberIds, startDate, endDate, ...rest } = data;
+    // No explicit departmentId in the body — fall back to the caller's
+    // active workspace (Phase 2B) before resolveDepartmentForCreate's own
+    // primary/sole-membership fallback.
+    let effectiveRequestedDepartmentId = data.departmentId;
+    if (!effectiveRequestedDepartmentId) {
+      const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+      effectiveRequestedDepartmentId = activeWorkspace.departmentId ?? undefined;
+    }
+
+    const deptResolution = await resolveDepartmentForCreate(
+      session.user.id,
+      session.user.role,
+      effectiveRequestedDepartmentId,
+      "project.create"
+    );
+    if ("denied" in deptResolution) {
+      return NextResponse.json(
+        { error: departmentDenialMessage(deptResolution.denied) },
+        { status: departmentDenialStatus(deptResolution.denied) }
+      );
+    }
+
+    const { memberIds, startDate, endDate, departmentId: _ignoredDepartmentId, ...rest } = data;
 
     // Validate that all assigned members are ADMIN users
     if (memberIds.length > 0) {
@@ -83,6 +117,7 @@ export async function POST(req: NextRequest) {
     const project = await prisma.project.create({
       data: {
         ...rest,
+        departmentId: deptResolution.departmentId,
         ownerId: session.user.id,
         startDate: startDate ? new Date(startDate) : undefined,
         endDate: endDate ? new Date(endDate) : undefined,

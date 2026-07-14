@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { isAdmin } from "@/lib/permissions";
+import { buildActivityListWhere, canActOnEntity } from "@/lib/services/department-scope-service";
 import { createDependencySchema } from "@/lib/validations";
 
 // GET /api/dependencies?activityId=xxx
@@ -12,9 +13,28 @@ export async function GET(req: NextRequest) {
 
   const activityId = req.nextUrl.searchParams.get("activityId");
 
-  const where = activityId
-    ? { OR: [{ predecessorId: activityId }, { successorId: activityId }] }
-    : {};
+  let where: any;
+  if (activityId) {
+    const activity = await prisma.projectActivity.findUnique({
+      where: { id: activityId },
+      select: { departmentId: true },
+    });
+    if (!activity) return NextResponse.json({ error: "Activity not found" }, { status: 404 });
+    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    where = { OR: [{ predecessorId: activityId }, { successorId: activityId }] };
+  } else {
+    // No activityId — this previously returned every dependency in the
+    // system to any authenticated user. Scope to deps where at least one
+    // endpoint is in an accessible department instead of trusting nothing.
+    const scope = await buildActivityListWhere(session.user.id, session.user.role);
+    if ("denied" in scope) {
+      // buildActivityListWhere only denies for an explicit (here, absent)
+      // requestedDepartmentId — unreachable, but fail closed regardless.
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+    where = { OR: [{ predecessor: scope }, { successor: scope }] };
+  }
 
   const deps = await prisma.activityDependency.findMany({
     where,

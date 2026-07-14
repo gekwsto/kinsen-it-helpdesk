@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasPermission } from "@/lib/permissions";
+import { requireAuth } from "@/lib/permissions";
+import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { assignTicketSchema } from "@/lib/validations";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 
@@ -12,13 +13,19 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAuth();
 
-    const canAssign = await hasPermission(session.user.role, "ticket.assign", session.user.customRoleId);
-    if (!canAssign) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    const body = await req.json();
-    const { assignedAgentId } = assignTicketSchema.parse(body);
-
     const ticket = await prisma.ticket.findUnique({ where: { id } });
     if (!ticket) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    const canAssign = await canActOnEntity(
+      session.user.id,
+      session.user.role,
+      ticket.departmentId,
+      "ticket.assign"
+    );
+    if (!canAssign) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+    const body = await req.json();
+    const { assignedAgentId } = assignTicketSchema.parse(body);
 
     const [oldAgent, newAgent] = await Promise.all([
       ticket.assignedAgentId

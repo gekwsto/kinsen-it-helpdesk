@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
+import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permissions";
+import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { getMembership } from "@/lib/services/department-membership-service";
 import { updateActivitySchema } from "@/lib/validations";
 import { recalculateProjectRollup, calculateActivityProgress } from "@/lib/projects/progress-rollup";
 import { Role } from "@prisma/client";
@@ -11,7 +13,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    await requireAuth();
+    const session = await requireAuth();
     const activity = await prisma.projectActivity.findUnique({
       where: { id },
       include: {
@@ -23,6 +25,12 @@ export async function GET(
     });
 
     if (!activity) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    if (!canView) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     return NextResponse.json(activity);
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
@@ -36,13 +44,30 @@ export async function PATCH(
   try {
     const { id } = await params;
     const session = await requireAuth();
-    const canEdit = await hasPermission(session.user.role, "activity.edit", session.user.customRoleId);
+
+    const existing = await prisma.projectActivity.findUnique({ where: { id }, select: { departmentId: true } });
+    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+    const canEdit = await canActOnEntity(session.user.id, session.user.role, existing.departmentId, "activity.edit");
     if (!canEdit) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     const body = await req.json();
     const data = updateActivitySchema.parse(body);
+
+    if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== existing.departmentId) {
+      if (session.user.role !== Role.ADMIN) {
+        const targetMembership = await getMembership(session.user.id, data.departmentId);
+        const allowed = targetMembership
+          ? await hasDepartmentPermission(targetMembership.role, "activity.create")
+          : false;
+        if (!allowed) {
+          return NextResponse.json({ error: "You don't have access to the target department" }, { status: 403 });
+        }
+      }
+    }
+
     const { dueDate, startDate, isCompleted, assignedUserIds, ...rest } = data;
 
     if (assignedUserIds && assignedUserIds.length > 0) {

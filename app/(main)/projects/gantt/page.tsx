@@ -1,10 +1,13 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission, isAdmin } from "@/lib/permissions";
+import { buildProjectListWhere } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, GanttChartSquare } from "lucide-react";
+import { ArrowLeft, GanttChartSquare, ShieldOff } from "lucide-react";
 import { GanttChart, GanttGroup, GanttDependency } from "@/components/gantt/gantt-chart";
 
 interface SearchParams {
@@ -28,26 +31,62 @@ export default async function ProjectGanttPage({
 
   const params = await searchParams;
 
-  const where: any = {};
-  if (params.status) where.status = params.status;
-  if (params.departmentId) where.departmentId = params.departmentId;
-  if (params.userId) where.ownerId = params.userId;
-  if (params.from || params.to) {
-    where.OR = [
-      {
-        startDate: {
-          ...(params.from ? { gte: new Date(params.from) } : {}),
-          ...(params.to ? { lte: new Date(params.to) } : {}),
-        },
-      },
-      {
-        endDate: {
-          ...(params.from ? { gte: new Date(params.from) } : {}),
-          ...(params.to ? { lte: new Date(params.to) } : {}),
-        },
-      },
-    ];
+  // Active workspace is the default scope (Phase 2B); an explicit
+  // ?departmentId= is still honored as a one-off "explicit scoped view" but
+  // never persisted as the active workspace itself — switching workspace is
+  // exclusively done via the selector/gate, which call the workspace API.
+  const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+
+  if (!effectiveDepartmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
   }
+
+  // Department scoping is validated server-side here, not trusted from the
+  // URL — an out-of-scope ?departmentId= renders an access-denied message
+  // below rather than leaking that department's projects.
+  const scope = await buildProjectListWhere(session.user.id, session.user.role, effectiveDepartmentId);
+  if ("denied" in scope) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[60vh] text-center gap-4">
+        <ShieldOff className="h-12 w-12 text-muted-foreground" />
+        <h1 className="text-xl font-semibold">Access denied</h1>
+        <p className="text-muted-foreground text-sm max-w-sm">
+          You don&apos;t have access to that department.
+        </p>
+        <Button asChild variant="outline" size="sm">
+          <Link href="/projects/gantt">View my Gantt</Link>
+        </Button>
+      </div>
+    );
+  }
+
+  const andConditions: any[] = [scope];
+  if (params.status) andConditions.push({ status: params.status });
+  if (params.userId) andConditions.push({ ownerId: params.userId });
+  if (params.from || params.to) {
+    andConditions.push({
+      OR: [
+        {
+          startDate: {
+            ...(params.from ? { gte: new Date(params.from) } : {}),
+            ...(params.to ? { lte: new Date(params.to) } : {}),
+          },
+        },
+        {
+          endDate: {
+            ...(params.from ? { gte: new Date(params.from) } : {}),
+            ...(params.to ? { lte: new Date(params.to) } : {}),
+          },
+        },
+      ],
+    });
+  }
+  const where: any = { AND: andConditions };
 
   const projects = await prisma.project.findMany({
     where,

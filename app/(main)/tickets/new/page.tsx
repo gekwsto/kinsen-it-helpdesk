@@ -1,6 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission, isAdmin } from "@/lib/permissions";
+import { getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { Role } from "@prisma/client";
 import { CreateTicketForm } from "@/components/tickets/ticket-form";
 import { redirect } from "next/navigation";
@@ -35,10 +38,39 @@ export default async function NewTicketPage() {
 
   const userIsAdmin = isAdmin(session.user.role);
 
-  const [categories, priorities, departments, itAgents, projects, activities] =
+  // Active workspace decides the default department (Phase 2B) — a plain
+  // member with exactly one accessible department never sees a picker at
+  // all (handled in the form component); an ambiguous/missing workspace
+  // stops here rather than rendering a form that would just fail to submit.
+  const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+  if (!activeWorkspace.departmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
+  }
+
+  // Scope the department + category choices to what the backend will
+  // actually accept — showing a department/category the create call would
+  // just reject is confusing, and the underlying query never needs to load
+  // rows the user isn't allowed to pick anyway.
+  const accessibleDepartments = await getAccessibleDepartmentSummaries(
+    session.user.id,
+    session.user.role,
+    "ticket.create"
+  );
+  const accessibleDepartmentIds = accessibleDepartments.map((d) => d.id);
+
+  const categoryWhere = {
+    isActive: true,
+    OR: [{ departmentId: null }, { departmentId: { in: accessibleDepartmentIds } }],
+  };
+
+  const [categories, priorities, itAgents, projects, activities] =
     await Promise.all([
       prisma.ticketCategory.findMany({
-        where: { isActive: true },
+        where: categoryWhere,
         orderBy: { name: "asc" },
         select: { id: true, name: true },
       }),
@@ -46,10 +78,6 @@ export default async function NewTicketPage() {
         where: { isActive: true },
         orderBy: { level: "desc" },
         select: { id: true, name: true, color: true, level: true },
-      }),
-      prisma.department.findMany({
-        orderBy: { name: "asc" },
-        select: { id: true, name: true },
       }),
       prisma.user.findMany({
         where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
@@ -100,7 +128,8 @@ export default async function NewTicketPage() {
       <CreateTicketForm
         categories={categories}
         priorities={priorities}
-        departments={departments}
+        departments={accessibleDepartments}
+        defaultDepartmentId={activeWorkspace.departmentId}
         itAgents={itAgents}
         projects={projects}
         activities={activities}

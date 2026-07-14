@@ -17,6 +17,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { NotificationDropdown } from "@/components/notifications/notification-dropdown";
+import { WorkspaceSelector } from "@/components/workspace/workspace-selector";
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
@@ -45,9 +46,7 @@ export function Topbar({ user }: TopbarProps) {
   return (
     <header className="h-16 border-b bg-white flex items-center justify-between px-6 sticky top-0 z-30">
       <div className="flex items-center gap-2">
-        <h2 className="text-sm font-medium text-muted-foreground">
-          Kinsen IT Helpdesk
-        </h2>
+        <WorkspaceSelector />
       </div>
 
       <div className="flex items-center gap-3">

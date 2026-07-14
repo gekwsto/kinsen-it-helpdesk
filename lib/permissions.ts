@@ -1,7 +1,9 @@
-import { Role } from "@prisma/client";
+import { DepartmentRole, Role } from "@prisma/client";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { cache } from "react";
+import { getMembership } from "@/lib/services/department-membership-service";
+import type { DepartmentAccessResult } from "@/types/department";
 
 export const ROLES = {
   ADMIN: "ADMIN" as Role,
@@ -30,6 +32,14 @@ export function canManageTickets(role: Role): boolean {
   return hasRole(role, Role.ADMIN, Role.IT_AGENT);
 }
 
+/**
+ * @deprecated Global, not department-scoped — a true regardless of role
+ * would let e.g. an IT_AGENT see every department's tickets, not just their
+ * own. Use `buildTicketListWhere` (lib/services/department-scope-service.ts)
+ * for ticket list/dashboard scoping instead. Left in place (unused by the
+ * department-aware call sites) rather than deleted, in case something this
+ * pass didn't find still depends on it.
+ */
 export function canViewAllTickets(role: Role): boolean {
   return hasRole(role, Role.ADMIN, Role.IT_AGENT, Role.DEPARTMENT_MANAGER);
 }
@@ -133,4 +143,53 @@ export async function requireAdmin() {
 
 export async function requireITAgent() {
   return requireRole(Role.ADMIN, Role.IT_AGENT);
+}
+
+// ─── Department-scoped authorization (Phase 1 foundation) ─────────────────────
+//
+// A thin composable layer over the permission system above, not a parallel
+// one: DepartmentRole values are just another roleKey string in the same
+// RolePermission table CustomRole.key already uses, so hasDepartmentPermission
+// needs no new caching/DB-access code — it's the same getPermissionsForRole().
+//
+// None of these are called from any existing route yet. Wiring them into
+// the tickets/projects/activities endpoints (and fixing canViewAllTickets
+// above, which currently lets IT_AGENT/DEPARTMENT_MANAGER see every
+// department's tickets) is explicitly Phase 2 — see the architecture plan.
+
+export async function hasDepartmentPermission(
+  role: DepartmentRole,
+  permissionKey: string
+): Promise<boolean> {
+  const keys = await getPermissionsForRole(role);
+  return keys.includes(permissionKey);
+}
+
+/**
+ * Confirms the current user can act within `departmentId` at all: either as
+ * a System Admin (global Role.ADMIN bypasses membership entirely, mirroring
+ * the ADMIN special-case in hasPermission above), or via an active
+ * DepartmentMembership in an active Department. A disabled department, a
+ * revoked/missing membership, and "never had one" all resolve to the same
+ * clean "Forbidden" rejection — never a crash.
+ */
+export async function requireDepartmentAccess(departmentId: string): Promise<DepartmentAccessResult> {
+  const session = await requireAuth();
+  if (isAdmin(session.user.role)) {
+    return { isSystemAdmin: true, membership: null };
+  }
+  const membership = await getMembership(session.user.id, departmentId);
+  if (!membership) throw new Error("Forbidden");
+  return { isSystemAdmin: false, membership };
+}
+
+export async function requireDepartmentPermission(
+  departmentId: string,
+  permissionKey: string
+): Promise<DepartmentAccessResult> {
+  const result = await requireDepartmentAccess(departmentId);
+  if (result.isSystemAdmin) return result;
+  const allowed = await hasDepartmentPermission(result.membership!.role, permissionKey);
+  if (!allowed) throw new Error("Forbidden");
+  return result;
 }

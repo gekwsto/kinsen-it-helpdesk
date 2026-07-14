@@ -33,6 +33,8 @@ interface CreateTicketFormProps {
   categories: Array<{ id: string; name: string }>;
   priorities: Array<{ id: string; name: string; color: string; level: number }>;
   departments: Array<{ id: string; name: string }>;
+  /** Active workspace's department — pre-selected, and the only choice shown when there's nothing to pick between. */
+  defaultDepartmentId?: string | null;
   itAgents: Agent[];
   projects?: Array<{ id: string; title: string }>;
   activities?: Array<{ id: string; title: string; projectId: string | null }>;
@@ -42,6 +44,7 @@ export function CreateTicketForm({
   categories,
   priorities,
   departments,
+  defaultDepartmentId,
   itAgents,
   projects = [],
   activities = [],
@@ -59,6 +62,7 @@ export function CreateTicketForm({
     formState: { errors },
   } = useForm<CreateTicketInput>({
     resolver: zodResolver(createTicketSchema),
+    defaultValues: { departmentId: defaultDepartmentId ?? undefined },
   });
 
   const uploadAttachment = async (ticketId: string, file: File) => {
@@ -245,21 +249,26 @@ export function CreateTicketForm({
                 </Select>
               </div>
 
-              <div className="space-y-1.5">
-                <Label>Department</Label>
-                <Select onValueChange={(v) => setValue("departmentId", v)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select department…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {departments.map((d) => (
-                      <SelectItem key={d.id} value={d.id}>
-                        {d.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
+              {departments.length > 1 && (
+                <div className="space-y-1.5">
+                  <Label>Department</Label>
+                  <Select
+                    defaultValue={defaultDepartmentId ?? undefined}
+                    onValueChange={(v) => setValue("departmentId", v)}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select department…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {departments.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>
+                          {d.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
               {projects.length > 0 && (
                 <div className="space-y-1.5">

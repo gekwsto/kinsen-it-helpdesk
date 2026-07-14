@@ -1,6 +1,8 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { canViewAllTickets } from "@/lib/permissions";
+import { buildTicketListWhere, hasAnyFullTicketView } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { KpiCards } from "@/components/dashboard/kpi-cards";
 import { RecentTickets } from "@/components/dashboard/recent-tickets";
 import { TicketsByStatusChart } from "@/components/dashboard/tickets-by-status-chart";
@@ -19,9 +21,20 @@ export default async function DashboardPage() {
 
   const userId = session.user.id;
   const role = session.user.role;
-  const isPersonalView = !canViewAllTickets(role);
-  const ticketWhere = isPersonalView ? { requesterId: userId } : {};
-  const recentActivityWhere = isPersonalView ? { ticket: { requesterId: userId } } : {};
+  const isPersonalView = !(await hasAnyFullTicketView(userId, role));
+
+  const activeWorkspace = await getActiveWorkspace(userId, role);
+  if (!activeWorkspace.departmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
+  }
+
+  const scope = await buildTicketListWhere(userId, role, activeWorkspace.departmentId);
+  const ticketWhere = "denied" in scope ? { id: { in: [] as string[] } } : scope;
+  const recentActivityWhere = { ticket: ticketWhere };
 
   const timelineStart = new Date(Date.now() - TIMELINE_DAYS * 24 * 60 * 60 * 1000);
 

@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
+import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -39,8 +39,6 @@ export default async function ProjectDetailPage({
   const { id } = await params;
   const session = await auth();
   if (!session?.user) redirect("/login");
-  const canView = await hasPermission(session.user.role, "project.view", session.user.customRoleId);
-  if (!canView) redirect("/dashboard");
 
   const project = await prisma.project.findUnique({
     where: { id },
@@ -60,6 +58,11 @@ export default async function ProjectDetailPage({
   });
 
   if (!project) notFound();
+
+  // Department-scoped, not just "can this role ever view projects" — this
+  // page previously had no per-project check at all beyond that global gate.
+  const canView = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.view");
+  if (!canView) redirect("/dashboard");
 
   const isAdmin = session.user.role === Role.ADMIN;
   const activityIds = project.activities.map((a) => a.id);

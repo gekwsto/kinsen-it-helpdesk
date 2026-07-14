@@ -1,6 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
+import { buildProjectListWhere } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -33,7 +36,20 @@ export default async function ProjectsPage() {
     redirect("/dashboard");
   }
 
+  const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+  if (!activeWorkspace.departmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
+  }
+
+  const scope = await buildProjectListWhere(session.user.id, session.user.role, activeWorkspace.departmentId);
+  const where = "denied" in scope ? { id: { in: [] as string[] } } : scope;
+
   const projects = await prisma.project.findMany({
+    where,
     orderBy: { createdAt: "desc" },
     include: {
       owner: { select: { id: true, name: true, image: true } },

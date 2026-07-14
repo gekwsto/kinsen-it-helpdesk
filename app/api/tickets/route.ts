@@ -1,6 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, canViewAllTickets, hasPermission } from "@/lib/permissions";
+import { requireAuth, hasPermission } from "@/lib/permissions";
+import {
+  buildTicketListWhere,
+  resolveDepartmentForCreate,
+  departmentDenialMessage,
+  departmentDenialStatus,
+} from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { createTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -33,40 +40,53 @@ export async function GET(req: NextRequest) {
 
     const skip = (page - 1) * limit;
 
-    let where: any = {};
-
-    if (!canViewAllTickets(session.user.role) || myOnly) {
-      where.requesterId = session.user.id;
+    // Department-scoped visibility — never trust a client-supplied
+    // departmentId; buildTicketListWhere validates it against real
+    // membership, or unions the caller's accessible departments if omitted.
+    // Every other filter below is AND-ed alongside it (not merged into the
+    // same object) so it can never accidentally clobber the scope's own OR
+    // clause (own-tickets-only vs full department view).
+    const scope = await buildTicketListWhere(session.user.id, session.user.role, departmentId);
+    if ("denied" in scope) {
+      return NextResponse.json({ error: "You don't have access to this department" }, { status: 403 });
     }
+
+    const andConditions: any[] = [scope];
+    if (myOnly) andConditions.push({ requesterId: session.user.id });
 
     if (search) {
       const numSearch = parseInt(search);
-      where.OR = [
-        { title: { contains: search, mode: "insensitive" } },
-        { description: { contains: search, mode: "insensitive" } },
-        { requester: { name: { contains: search, mode: "insensitive" } } },
-        { requester: { email: { contains: search, mode: "insensitive" } } },
-        ...(!isNaN(numSearch) ? [{ ticketNumber: numSearch }] : []),
-      ];
+      andConditions.push({
+        OR: [
+          { title: { contains: search, mode: "insensitive" } },
+          { description: { contains: search, mode: "insensitive" } },
+          { requester: { name: { contains: search, mode: "insensitive" } } },
+          { requester: { email: { contains: search, mode: "insensitive" } } },
+          ...(!isNaN(numSearch) ? [{ ticketNumber: numSearch }] : []),
+        ],
+      });
     }
-    if (statusId) where.statusId = statusId;
-    if (priorityId) where.priorityId = priorityId;
-    if (categoryId) where.categoryId = categoryId;
-    if (departmentId) where.departmentId = departmentId;
-    if (source) where.source = source;
+    if (statusId) andConditions.push({ statusId });
+    if (priorityId) andConditions.push({ priorityId });
+    if (categoryId) andConditions.push({ categoryId });
+    if (source) andConditions.push({ source });
     if (unassigned) {
-      where.assignedAgentId = null;
+      andConditions.push({ assignedAgentId: null });
     } else if (assignedAgentId) {
-      where.assignedAgentId = assignedAgentId;
+      andConditions.push({ assignedAgentId });
     }
     if (createdAfter || createdBefore) {
-      where.createdAt = {
-        ...(createdAfter ? { gte: new Date(createdAfter) } : {}),
-        ...(createdBefore ? { lte: new Date(createdBefore) } : {}),
-      };
+      andConditions.push({
+        createdAt: {
+          ...(createdAfter ? { gte: new Date(createdAfter) } : {}),
+          ...(createdBefore ? { lte: new Date(createdBefore) } : {}),
+        },
+      });
     }
-    if (projectId) where.projectId = projectId;
-    if (activityId) where.activityId = activityId;
+    if (projectId) andConditions.push({ projectId });
+    if (activityId) andConditions.push({ activityId });
+
+    const where: any = { AND: andConditions };
 
     const orderBy: any =
       sortBy === "priority"
@@ -124,6 +144,50 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // A ticket attached to a project must live in that project's department
+    // — inherit it if the caller didn't specify one, reject a mismatch if
+    // they did. Fetched before department resolution so resolveDepartmentForCreate
+    // validates the department the ticket will actually end up in.
+    let effectiveRequestedDepartmentId = data.departmentId;
+    if (data.projectId) {
+      const project = await prisma.project.findUnique({
+        where: { id: data.projectId },
+        select: { departmentId: true },
+      });
+      if (!project) {
+        return NextResponse.json({ error: "Project not found" }, { status: 404 });
+      }
+      if (data.departmentId && project.departmentId && data.departmentId !== project.departmentId) {
+        return NextResponse.json(
+          { error: "A ticket cannot be attached to a project from a different department" },
+          { status: 400 }
+        );
+      }
+      effectiveRequestedDepartmentId = data.departmentId ?? project.departmentId ?? undefined;
+    }
+
+    // Still nothing explicit (no body departmentId, no linked project) —
+    // fall back to the caller's active workspace (Phase 2B) instead of
+    // resolveDepartmentForCreate's own primary/sole-membership fallback,
+    // so creation respects a workspace the user explicitly switched to.
+    if (!effectiveRequestedDepartmentId) {
+      const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+      effectiveRequestedDepartmentId = activeWorkspace.departmentId ?? undefined;
+    }
+
+    const deptResolution = await resolveDepartmentForCreate(
+      session.user.id,
+      session.user.role,
+      effectiveRequestedDepartmentId,
+      "ticket.create"
+    );
+    if ("denied" in deptResolution) {
+      return NextResponse.json(
+        { error: departmentDenialMessage(deptResolution.denied) },
+        { status: departmentDenialStatus(deptResolution.denied) }
+      );
+    }
+
     const defaultStatus = await prisma.ticketStatus.findFirst({
       where: { isDefault: true },
     });
@@ -144,7 +208,7 @@ export async function POST(req: NextRequest) {
         statusId: defaultStatus.id,
         categoryId: data.categoryId,
         priorityId: data.priorityId,
-        departmentId: data.departmentId,
+        departmentId: deptResolution.departmentId,
         projectId: data.projectId,
         activityId: data.activityId,
       },

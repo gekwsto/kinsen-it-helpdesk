@@ -1,6 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { isAdmin } from "@/lib/permissions";
+import { buildTicketListWhere } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
 import { redirect } from "next/navigation";
@@ -43,33 +46,48 @@ export default async function ClosedTicketsPage({
       ? { status: { order: sortDir } }
       : { [sortBy]: sortDir };
 
+  // Admin's default is now their active workspace too (Phase 2B decision:
+  // keep department-specific selection rather than an unscoped "all
+  // departments" default — an explicit all-departments admin mode is
+  // deferred). An explicit ?departmentId= still overrides for this request.
+  const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+
+  if (!effectiveDepartmentId) {
+    return activeWorkspace.departments.length === 0 ? (
+      <NoWorkspaceState />
+    ) : (
+      <ChooseWorkspaceState departments={activeWorkspace.departments} />
+    );
+  }
+
+  const scope = await buildTicketListWhere(session.user.id, session.user.role, effectiveDepartmentId);
+  if ("denied" in scope) redirect("/dashboard");
+
   // Base filter: all tickets with a closed status OR with a cancel reason
-  const where: any = {
-    OR: [
-      { status: { isClosed: true } },
-      { cancelReasonId: { not: null } },
-    ],
-  };
+  const andConditions: any[] = [
+    scope,
+    { OR: [{ status: { isClosed: true } }, { cancelReasonId: { not: null } }] },
+  ];
 
   if (params.search) {
     const numSearch = parseInt(params.search);
-    where.AND = [
-      {
-        OR: [
-          { title: { contains: params.search, mode: "insensitive" } },
-          { description: { contains: params.search, mode: "insensitive" } },
-          { requester: { name: { contains: params.search, mode: "insensitive" } } },
-          { requester: { email: { contains: params.search, mode: "insensitive" } } },
-          ...(!isNaN(numSearch) ? [{ ticketNumber: numSearch }] : []),
-        ],
-      },
-    ];
+    andConditions.push({
+      OR: [
+        { title: { contains: params.search, mode: "insensitive" } },
+        { description: { contains: params.search, mode: "insensitive" } },
+        { requester: { name: { contains: params.search, mode: "insensitive" } } },
+        { requester: { email: { contains: params.search, mode: "insensitive" } } },
+        ...(!isNaN(numSearch) ? [{ ticketNumber: numSearch }] : []),
+      ],
+    });
   }
-  if (params.statusId) where.statusId = params.statusId;
-  if (params.priorityId) where.priorityId = params.priorityId;
-  if (params.categoryId) where.categoryId = params.categoryId;
-  if (params.departmentId) where.departmentId = params.departmentId;
-  if (params.assignedAgentId) where.assignedAgentId = params.assignedAgentId;
+  if (params.statusId) andConditions.push({ statusId: params.statusId });
+  if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
+  if (params.categoryId) andConditions.push({ categoryId: params.categoryId });
+  if (params.assignedAgentId) andConditions.push({ assignedAgentId: params.assignedAgentId });
+
+  const where: any = { AND: andConditions };
 
   const [tickets, total, statuses, priorities, categories, departments, agents] =
     await Promise.all([

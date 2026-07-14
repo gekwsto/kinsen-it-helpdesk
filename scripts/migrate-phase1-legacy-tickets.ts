@@ -432,10 +432,15 @@ async function loadLegacyCategoryMaps(pool: sql.ConnectionPool) {
 async function ensureCategory(name: string) {
   const cleanedName = cleanText(name) ?? "General";
 
+  // Categories are now department-owned (multi-department architecture,
+  // Phase 1). This script imports historical tickets from the legacy
+  // IT-only system, so its categories are assigned to the IT department,
+  // consistent with how existing NULL-department rows are backfilled
+  // elsewhere (see prisma/migrations/20260714120000_.../backfill.sql).
   const category = await prisma.ticketCategory.upsert({
-    where: { name: cleanedName },
+    where: { departmentId_name: { departmentId: "dept-it", name: cleanedName } },
     update: { isActive: true },
-    create: { name: cleanedName, color: "#6366f1", isActive: true },
+    create: { name: cleanedName, color: "#6366f1", isActive: true, departmentId: "dept-it" },
   });
 
   return category.id;

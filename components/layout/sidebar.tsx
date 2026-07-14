@@ -112,6 +112,7 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
         { label: "Users", href: "/admin/users" },
         { label: "Role Permissions", href: "/admin/roles" },
         { label: "Departments", href: "/admin/departments" },
+        { label: "Microsoft Mappings", href: "/admin/microsoft-mappings" },
         { label: "Categories", href: "/admin/categories" },
         { label: "Priorities", href: "/admin/priorities" },
         { label: "Statuses", href: "/admin/statuses" },

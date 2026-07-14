@@ -6,6 +6,9 @@ import { Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { authConfig } from "@/lib/auth.config";
 import { adminLoginSchema as credentialsLoginSchema } from "@/lib/validations";
+import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
+import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
+import type { MicrosoftIdentityClaims } from "@/types/department";
 
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 const isDev = process.env.NODE_ENV === "development";
@@ -88,7 +91,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       return true;
     },
 
-    async jwt({ token, user }) {
+    async jwt({ token, user, account, profile }) {
       // Runs only on first sign-in; subsequent requests reuse the existing token
       if (user?.email) {
         const dbUser = await prisma.user.findUnique({
@@ -101,6 +104,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             departmentId: true,
             businessUnitId: true,
             customRoleId: true,
+            microsoftUserId: true,
+            name: true,
+            image: true,
           },
         });
         if (dbUser) {
@@ -111,6 +117,63 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           token.departmentId = dbUser.departmentId;
           token.businessUnitId = dbUser.businessUnitId;
           token.customRoleId = dbUser.customRoleId;
+          token.microsoftUserId = dbUser.microsoftUserId;
+
+          // Microsoft login sync (Phase 2B). Real, wired code — not a
+          // placeholder — but a safe no-op with today's claims: the
+          // provider (lib/auth.config.ts) only requests
+          // "openid profile email User.Read", so profile.department/
+          // groups/roles are never actually present yet, meaning
+          // resolveDepartmentMemberships always resolves to [] and
+          // syncDepartmentMemberships only ever soft-revokes non-MANUAL
+          // memberships (there are none yet — Phase 1's backfill seeded
+          // everything as MANUAL, which this never touches). The moment
+          // Azure AD is configured to emit those claims (see below), this
+          // same code starts actually syncing with no further changes.
+          //
+          // Azure/Entra configuration still needed for each signal:
+          // - profile department string: a "department" optional claim on
+          //   the app registration.
+          // - Entra groups: a "groups" claim configured on the app
+          //   registration (or, if the tenant has too many groups for a
+          //   direct claim, GroupMember.Read.All + a live Graph lookup —
+          //   deliberately NOT done here, since that would be a Graph call
+          //   on every login; a periodic/manual resync job would be the
+          //   place for that, not this hook).
+          // - App roles: App Roles defined on the registration, assigned to
+          //   users/groups, with the token configured to emit a "roles"
+          //   claim.
+          if (account?.provider === "microsoft-entra-id") {
+            const msProfile = profile as
+              | { oid?: string; department?: string; groups?: string[]; roles?: string[] }
+              | undefined;
+            const oid = msProfile?.oid;
+
+            const profileUpdate: { microsoftUserId?: string; name?: string; image?: string } = {};
+            if (oid && dbUser.microsoftUserId !== oid) {
+              profileUpdate.microsoftUserId = oid;
+              token.microsoftUserId = oid;
+            }
+            // Backfill only — never overwrite an existing (possibly
+            // admin-set) name/image.
+            if (!dbUser.name && user.name) profileUpdate.name = user.name;
+            if (!dbUser.image && user.image) profileUpdate.image = user.image;
+
+            if (Object.keys(profileUpdate).length > 0) {
+              await prisma.user.update({ where: { id: dbUser.id }, data: profileUpdate });
+            }
+
+            const claims: MicrosoftIdentityClaims = {
+              oid: oid ?? account.providerAccountId,
+              email: user.email,
+              name: user.name,
+              department: msProfile?.department ?? null,
+              groups: msProfile?.groups,
+              roles: msProfile?.roles,
+            };
+            const resolved = await resolveDepartmentMemberships(claims);
+            await syncDepartmentMemberships(dbUser.id, resolved);
+          }
         }
       }
       return token;
@@ -126,6 +189,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         session.user.departmentId = (token.departmentId as string | null) ?? undefined;
         session.user.businessUnitId = (token.businessUnitId as string | null) ?? undefined;
         session.user.customRoleId = (token.customRoleId as string | null) ?? undefined;
+        session.user.microsoftUserId = (token.microsoftUserId as string | null) ?? undefined;
       }
       return session;
     },

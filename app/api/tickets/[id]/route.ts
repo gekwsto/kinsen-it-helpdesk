@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireAdmin, canManageTickets, canViewAllTickets, hasPermission } from "@/lib/permissions";
+import { requireAuth, requireAdmin, canManageTickets, hasPermission, hasDepartmentPermission } from "@/lib/permissions";
+import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { getMembership } from "@/lib/services/department-membership-service";
 import { updateTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
@@ -53,9 +55,13 @@ export async function GET(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const canView =
-      canViewAllTickets(session.user.role) ||
-      ticket.requesterId === session.user.id;
+    const canView = await canActOnEntity(
+      session.user.id,
+      session.user.role,
+      ticket.departmentId,
+      "ticket.view",
+      ticket.requesterId === session.user.id
+    );
 
     if (!canView) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -84,8 +90,14 @@ export async function PATCH(
     const ticket = await prisma.ticket.findUnique({ where: { id } });
     if (!ticket) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canManage = await hasPermission(session.user.role, "ticket.changeStatus", session.user.customRoleId);
-    const canEdit = canManage || ticket.requesterId === session.user.id;
+    const isOwner = ticket.requesterId === session.user.id;
+    const canEdit = await canActOnEntity(
+      session.user.id,
+      session.user.role,
+      ticket.departmentId,
+      "ticket.changeStatus",
+      isOwner
+    );
 
     if (!canEdit) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
@@ -100,6 +112,24 @@ export async function PATCH(
         { error: "Only administrators can link tickets to projects or activities" },
         { status: 403 }
       );
+    }
+
+    // Moving a ticket into a different department requires standing in that
+    // NEW department too — otherwise a member of dept A could "launder" a
+    // ticket into dept B they have no access to just by editing this field.
+    if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== ticket.departmentId) {
+      if (session.user.role !== Role.ADMIN) {
+        const targetMembership = await getMembership(session.user.id, data.departmentId);
+        const allowed = targetMembership
+          ? await hasDepartmentPermission(targetMembership.role, "ticket.create")
+          : false;
+        if (!allowed) {
+          return NextResponse.json(
+            { error: "You don't have access to the target department" },
+            { status: 403 }
+          );
+        }
+      }
     }
 
     const oldProjectId = ticket.projectId;
