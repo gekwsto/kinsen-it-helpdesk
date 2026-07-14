@@ -1,0 +1,39 @@
+services:
+  kinsen-helpdesk-db:
+    image: postgres:16
+    container_name: kinsen-helpdesk-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kinsen_helpdesk
+      POSTGRES_USER: kinsen_user
+      POSTGRES_PASSWORD: StrongPassword123
+    volumes:
+      - kinsen_helpdesk_db_data:/var/lib/postgresql/data
+    networks:
+      - kinsen-helpdesk-net
+
+  kinsen-helpdesk:
+    build: .
+    container_name: kinsen-helpdesk
+    restart: unless-stopped
+    depends_on:
+      - kinsen-helpdesk-db
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://kinsen_user:StrongPassword123@kinsen-helpdesk-db:5432/kinsen_helpdesk
+      NODE_ENV: production
+      PORT: 3000
+    ports:
+      - "3009:3000"
+    volumes:
+      - ./uploads:/app/public/uploads
+    networks:
+      - kinsen-helpdesk-net
+
+volumes:
+  kinsen_helpdesk_db_data:
+
+networks:
+  kinsen-helpdesk-net:
+    driver: bridge

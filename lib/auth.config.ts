@@ -3,7 +3,12 @@ import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 
-const PUBLIC_PATHS = ["/login", "/unauthorized", "/api/auth", "/api/email/inbound"];
+const PUBLIC_PATHS = [
+  "/login",
+  "/unauthorized",
+  "/api/auth",
+  "/api/email/inbound",
+];
 
 const TENANT_ID = process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID;
 
@@ -16,13 +21,16 @@ const microsoftIssuer = TENANT_ID
   : undefined;
 
 export const authConfig = {
+  trustHost: true,
   providers: [
     MicrosoftEntraID({
       clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_ID!,
       clientSecret: process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET!,
       issuer: microsoftIssuer,
       authorization: {
-        params: { scope: "openid profile email User.Read" },
+        params: {
+          scope: "openid profile email User.Read",
+        },
       },
       // Auto-link a Microsoft sign-in to an existing User row with the same
       // email (e.g. one created via credentials/admin) instead of erroring
@@ -39,11 +47,18 @@ export const authConfig = {
   callbacks: {
     authorized({ auth, request: { nextUrl } }) {
       const isLoggedIn = !!auth?.user;
-      const isPublic = PUBLIC_PATHS.some((p) => nextUrl.pathname.startsWith(p));
-
+      const isPublic = PUBLIC_PATHS.some((p) =>
+        nextUrl.pathname.startsWith(p)
+      );
       if (isPublic) return true;
       if (!isLoggedIn) return false;
-
+      const email = auth?.user?.email;
+      if (
+        email &&
+        !email.toLowerCase().endsWith(`@${ALLOWED_DOMAIN}`)
+      ) {
+        return false;
+      }
       return true;
     },
   },
@@ -51,5 +66,7 @@ export const authConfig = {
     signIn: "/login",
     error: "/unauthorized",
   },
-  session: { strategy: "jwt" as const },
+  session: {
+    strategy: "jwt",
+  },
 } satisfies NextAuthConfig;
