@@ -181,14 +181,17 @@ export const createMicrosoftMappingSchema = z.object({
   sourceType: z.nativeEnum(MicrosoftMappingSourceType),
   microsoftValue: z.string().trim().min(1, "Value is required"),
   departmentId: z.string().min(1, "Department is required"),
-  role: z.nativeEnum(DepartmentRole).default(DepartmentRole.REQUESTER),
+  // Global Role (matches /admin/roles), not DepartmentRole — a stale client
+  // sending an old DepartmentRole string (e.g. "AGENT_ASSIGNEE") is rejected
+  // here automatically, since it isn't a member of Role.
+  role: z.nativeEnum(Role).default(Role.USER),
 });
 
 export const updateMicrosoftMappingSchema = z.object({
   sourceType: z.nativeEnum(MicrosoftMappingSourceType).optional(),
   microsoftValue: z.string().trim().min(1, "Value is required").optional(),
   departmentId: z.string().min(1).optional(),
-  role: z.nativeEnum(DepartmentRole).optional(),
+  role: z.nativeEnum(Role).optional(),
   isActive: z.boolean().optional(),
 });
 

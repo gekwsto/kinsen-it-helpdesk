@@ -85,18 +85,23 @@ async function main() {
     department = await prisma.department.create({
       data: { name: `Test IT Dept ${RUN_ID}`, slug: TEST_DEPT_SLUG },
     });
+    // MicrosoftDepartmentMapping.role is the GLOBAL Role now (matches
+    // /admin/roles) — Role.DEPARTMENT_MANAGER here, translated via
+    // translateGlobalRoleToDepartmentRole for the resulting
+    // DepartmentMembership, same expected end values as before this change.
     const mapping = await prisma.microsoftDepartmentMapping.create({
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
         microsoftValue: TEST_MAPPING_VALUE,
         departmentId: department.id,
-        role: DepartmentRole.DEPARTMENT_MANAGER,
+        role: Role.DEPARTMENT_MANAGER,
       },
     });
     mappingIds.push(mapping.id);
 
-    // A second, distinct department-value mapping (role: Requester) + two
-    // job-title mappings pointing at the SAME department, for the
+    // A second, distinct department-value mapping (global role: USER,
+    // translates to DepartmentRole.REQUESTER) + two job-title mappings
+    // pointing at the SAME department, for the
     // job-title-overrides-department priority scenarios (§9 Cases 1-3) —
     // kept separate from `mapping` above so those scenarios don't disturb
     // the already-asserted behavior in Scenarios 1-8.
@@ -105,7 +110,7 @@ async function main() {
         sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
         microsoftValue: TEST_LOW_PRIORITY_DEPT_VALUE,
         departmentId: department.id,
-        role: DepartmentRole.REQUESTER,
+        role: Role.USER,
       },
     });
     mappingIds.push(lowPriorityDeptMapping.id);
@@ -114,7 +119,7 @@ async function main() {
         sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
         microsoftValue: TEST_JOB_TITLE_MANAGER_VALUE,
         departmentId: department.id,
-        role: DepartmentRole.DEPARTMENT_MANAGER,
+        role: Role.DEPARTMENT_MANAGER,
       },
     });
     mappingIds.push(jobTitleManagerMapping.id);
@@ -123,7 +128,7 @@ async function main() {
         sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
         microsoftValue: TEST_JOB_TITLE_ASSISTANT_VALUE,
         departmentId: department.id,
-        role: DepartmentRole.AGENT_ASSIGNEE,
+        role: Role.IT_AGENT,
       },
     });
     mappingIds.push(jobTitleAssistantMapping.id);

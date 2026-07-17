@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { DepartmentRole, MicrosoftMappingSourceType } from "@prisma/client";
+import { MicrosoftMappingSourceType, Role } from "@prisma/client";
 import {
   Table,
   TableBody,
@@ -32,22 +32,26 @@ import {
 import { Plus, Loader2, Trash2, Pencil, RefreshCw } from "lucide-react";
 import { formatDateTime } from "@/lib/utils";
 import {
-  DEPARTMENT_ROLE_LABELS,
-  DEPARTMENT_ROLE_DESCRIPTIONS,
-  DEPARTMENT_ROLE_OPTIONS,
+  GLOBAL_ROLE_LABELS,
   MAPPING_SOURCE_TYPE_LABELS,
   MAPPING_SOURCE_TYPE_HELP,
   MAPPING_SOURCE_TYPE_OPTIONS,
-  GLOBAL_ROLE_LABELS,
 } from "@/components/admin/department-role-info";
-import { translateDepartmentRoleToGlobalRole } from "@/lib/services/department-role-translation";
+import { getMicrosoftMappingRoleOptions } from "@/lib/services/department-role-translation";
+
+// The actual, centrally-validated set of GLOBAL roles a Microsoft mapping
+// can grant — the same roles shown on /admin/roles, minus Administrator.
+// See lib/services/department-role-translation.ts. Computed once; pure
+// function, no props/state dependency. Administrator is simply absent from
+// this list, not shown disabled — see the persistent note near the field.
+const ROLE_OPTIONS = getMicrosoftMappingRoleOptions();
 
 interface Mapping {
   id: string;
   sourceType: MicrosoftMappingSourceType;
   microsoftValue: string;
   departmentId: string;
-  role: DepartmentRole;
+  role: Role;
   isActive: boolean;
   department: { id: string; name: string; slug: string };
 }
@@ -97,20 +101,21 @@ export function MicrosoftMappingManagement({
   const [sourceType, setSourceType] = useState<MicrosoftMappingSourceType>(MicrosoftMappingSourceType.ENTRA_GROUP);
   const [value, setValue] = useState("");
   const [departmentId, setDepartmentId] = useState(departments[0]?.id ?? "");
-  const [role, setRole] = useState<DepartmentRole>(DepartmentRole.REQUESTER);
+  const [role, setRole] = useState<Role>(Role.USER);
 
   const isDirectoryBacked = DIRECTORY_BACKED_SOURCE_TYPES.includes(sourceType);
   const isProfileDepartment = sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT;
   const isProfileJobTitle = sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE;
   const activeDirectory = isProfileDepartment ? departmentDirectory : isProfileJobTitle ? jobTitleDirectory : null;
   const showDropdown = isDirectoryBacked && !manualEntry;
+  const selectedRoleOption = ROLE_OPTIONS.find((opt) => opt.value === role);
 
   const resetForm = () => {
     setEditingMapping(null);
     setSourceType(MicrosoftMappingSourceType.ENTRA_GROUP);
     setValue("");
     setDepartmentId(departments[0]?.id ?? "");
-    setRole(DepartmentRole.REQUESTER);
+    setRole(Role.USER);
     setManualEntry(false);
   };
 
@@ -276,7 +281,7 @@ export function MicrosoftMappingManagement({
                 </TableCell>
                 <TableCell>
                   <span className="text-sm">
-                    {m.department.name} <span className="text-muted-foreground">— {DEPARTMENT_ROLE_LABELS[m.role]}</span>
+                    {m.department.name} <span className="text-muted-foreground">— {GLOBAL_ROLE_LABELS[m.role]}</span>
                   </span>
                 </TableCell>
                 <TableCell>
@@ -440,25 +445,36 @@ export function MicrosoftMappingManagement({
 
             <div className="space-y-2">
               <Label>Role granted</Label>
-              <Select value={role} onValueChange={(v) => setRole(v as DepartmentRole)}>
+              <Select value={role} onValueChange={(v) => setRole(v as Role)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {DEPARTMENT_ROLE_OPTIONS.map((r) => (
-                    <SelectItem key={r} value={r}>{DEPARTMENT_ROLE_LABELS[r]}</SelectItem>
+                  {ROLE_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">{DEPARTMENT_ROLE_DESCRIPTIONS[role]}</p>
-              <p className="text-xs text-muted-foreground">
-                Global Role granted: <span className="font-medium text-foreground">{GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}</span>
-                {" "}— unless manually overridden.
-              </p>
-              {(role === "DEPARTMENT_ADMIN" || role === "DEPARTMENT_MANAGER") && (
-                <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
-                  Grants elevated global access ({GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}) to every
-                  matching user, not just department-scoped access — review before saving.
-                </p>
+              {selectedRoleOption && (
+                <>
+                  <p className="text-xs text-muted-foreground">{selectedRoleOption.description}</p>
+                  <p className="text-xs text-muted-foreground">
+                    Global Role granted: <span className="font-medium text-foreground">{selectedRoleOption.label}</span>
+                    {" "}— unless manually overridden.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Department membership role granted: <span className="font-medium text-foreground">{selectedRoleOption.departmentRolePreview}</span>
+                  </p>
+                  {role === "DEPARTMENT_MANAGER" && (
+                    <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
+                      Grants elevated global access ({selectedRoleOption.label}) to every matching user, not just
+                      department-scoped access — review before saving.
+                    </p>
+                  )}
+                </>
               )}
+              <p className="text-[11px] text-muted-foreground">
+                Administrator cannot be granted automatically by Microsoft mappings. Assign Administrator manually
+                from Roles &amp; Permissions or User Management.
+              </p>
             </div>
 
             <details className="rounded-md border px-3 py-2 text-xs text-muted-foreground">

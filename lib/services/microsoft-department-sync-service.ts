@@ -19,7 +19,7 @@ import {
 import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
-import { translateDepartmentRoleToGlobalRole, shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
+import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
@@ -134,7 +134,12 @@ export async function syncMicrosoftUserDepartment(
       select: { role: true, globalRoleSource: true },
     });
     if (dbUser && shouldSyncGlobalRole(dbUser)) {
-      globalRoleUpdate.role = translateDepartmentRoleToGlobalRole(primaryMapping.role);
+      // primaryMapping.role IS the global Role directly now (a previous
+      // phase moved MicrosoftDepartmentMapping.role from DepartmentRole to
+      // Role) — no translation needed here, unlike DepartmentMembership's
+      // role below in resolveDepartmentMemberships, which still needs the
+      // reverse translation since DepartmentMembership.role stays DepartmentRole.
+      globalRoleUpdate.role = primaryMapping.role;
       globalRoleUpdate.department = { connect: { id: primaryMapping.departmentId } };
       globalRoleUpdate.globalRoleSource = "MICROSOFT_DEPARTMENT";
       globalRoleUpdate.globalRoleUpdatedAt = new Date();

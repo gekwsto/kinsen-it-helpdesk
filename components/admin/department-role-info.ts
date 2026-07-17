@@ -1,33 +1,17 @@
-import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Role } from "@prisma/client";
+import { MembershipSource, MicrosoftMappingSourceType } from "@prisma/client";
 
-/** Global Role display labels — matching component-local copies (e.g. user-management.tsx) but kept here too for reuse where a shared source avoids duplication. */
-export const GLOBAL_ROLE_LABELS: Record<Role, string> = {
-  ADMIN: "Administrator",
-  IT_AGENT: "IT Agent",
-  DEPARTMENT_MANAGER: "Dept. Manager",
-  USER: "User",
-};
-
-/** Shared between the members page and the Microsoft mapping page — one definition of what each DepartmentRole means. */
-export const DEPARTMENT_ROLE_LABELS: Record<DepartmentRole, string> = {
-  DEPARTMENT_ADMIN: "Department Admin",
-  DEPARTMENT_MANAGER: "Department Manager",
-  PROJECT_MANAGER: "Project Manager",
-  AGENT_ASSIGNEE: "Agent / Assignee",
-  REQUESTER: "Requester",
-  VIEWER: "Viewer",
-};
-
-export const DEPARTMENT_ROLE_DESCRIPTIONS: Record<DepartmentRole, string> = {
-  DEPARTMENT_ADMIN: "Full control of this department — projects, tickets, activities, goals, members and settings.",
-  DEPARTMENT_MANAGER: "Manages projects, activities and goals; sees all department tickets, but not member/settings management.",
-  PROJECT_MANAGER: "Creates and edits projects and Gantt schedules for this department only.",
-  AGENT_ASSIGNEE: "Handles assigned tickets and activities; sees every ticket in this department.",
-  REQUESTER: "Creates and tracks their own tickets in this department only.",
-  VIEWER: "Read-only access to this department's projects, tickets and activities.",
-};
-
-export const DEPARTMENT_ROLE_OPTIONS = Object.values(DepartmentRole);
+// GLOBAL_ROLE_LABELS / DEPARTMENT_ROLE_LABELS / DEPARTMENT_ROLE_DESCRIPTIONS /
+// DEPARTMENT_ROLE_OPTIONS now live in lib/services/department-role-translation.ts
+// (the server-and-client-safe home, since API routes need them too for
+// Microsoft-mapping role validation) — re-exported here so this file's
+// existing consumers don't need to change their import path.
+export {
+  GLOBAL_ROLE_LABELS,
+  GLOBAL_ROLE_DESCRIPTIONS,
+  DEPARTMENT_ROLE_LABELS,
+  DEPARTMENT_ROLE_DESCRIPTIONS,
+  DEPARTMENT_ROLE_OPTIONS,
+} from "@/lib/services/department-role-translation";
 
 export const MEMBERSHIP_SOURCE_LABELS: Record<MembershipSource, string> = {
   MANUAL: "Manual",

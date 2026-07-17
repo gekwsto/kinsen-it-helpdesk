@@ -12,7 +12,7 @@
  * the value — explicit mappings must always win and are never reconsidered
  * here.
  */
-import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Prisma } from "@prisma/client";
+import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Prisma, Role } from "@prisma/client";
 import { createDepartment, getDepartmentBySlug, slugify } from "@/lib/services/department-service";
 import { createMapping } from "@/lib/services/microsoft-mapping-service";
 import type { ResolvedMembership } from "@/types/department";
@@ -63,7 +63,11 @@ export async function maybeAutoCreateDepartmentForGraphValue(
       sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
       microsoftValue: trimmed,
       departmentId: department.id,
-      role: DepartmentRole.REQUESTER,
+      // Global Role now (MicrosoftDepartmentMapping.role changed type) —
+      // Role.USER is the auto-create default, translating to
+      // DepartmentRole.REQUESTER below for the actual membership, same as
+      // before this change.
+      role: Role.USER,
     });
     console.log("[microsoft-directory] Auto-created default mapping", {
       microsoftValue: trimmed,

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import type { MicrosoftDepartmentMapping } from "@prisma/client";
-import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType } from "@prisma/client";
+import { MembershipSource, MicrosoftMappingSourceType, Role } from "@prisma/client";
+import { isGlobalRoleAllowedForMicrosoftMapping, translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
 import type {
   MicrosoftIdentityClaims,
   MicrosoftMappingView,
@@ -82,6 +83,11 @@ async function findActiveMappingsForClaims(claims: MicrosoftIdentityClaims): Pro
  * MicrosoftIdentityClaims) simply contribute nothing; this resolves to an
  * empty array today until the provider requests those claims, which is a
  * safe no-op, not an error.
+ *
+ * MicrosoftDepartmentMapping.role is the GLOBAL Role (matches /admin/roles)
+ * — translateGlobalRoleToDepartmentRole converts it to the DepartmentRole
+ * ResolvedMembership/DepartmentMembership actually need, so the single Role
+ * an admin picks in the mapping form drives both consistently.
  */
 export async function resolveDepartmentMemberships(
   claims: MicrosoftIdentityClaims
@@ -99,7 +105,7 @@ export async function resolveDepartmentMemberships(
 
   return Array.from(bestByDepartment.values()).map((m) => ({
     departmentId: m.departmentId,
-    role: m.role,
+    role: translateGlobalRoleToDepartmentRole(m.role),
     source: SOURCE_TYPE_TO_MEMBERSHIP_SOURCE[m.sourceType],
   }));
 }
@@ -174,16 +180,21 @@ export interface CreateMappingInput {
   sourceType: MicrosoftMappingSourceType;
   microsoftValue: string;
   departmentId: string;
-  role?: DepartmentRole;
+  /** Global Role (matches /admin/roles) — never DepartmentRole. See department-role-translation.ts. */
+  role?: Role;
 }
 
 export async function createMapping(input: CreateMappingInput): Promise<MicrosoftDepartmentMapping> {
+  const role = input.role ?? Role.USER;
+  if (!isGlobalRoleAllowedForMicrosoftMapping(role)) {
+    throw new Error("ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
+  }
   return prisma.microsoftDepartmentMapping.create({
     data: {
       sourceType: input.sourceType,
       microsoftValue: input.microsoftValue,
       departmentId: input.departmentId,
-      role: input.role ?? DepartmentRole.REQUESTER,
+      role,
     },
   });
 }
@@ -192,11 +203,15 @@ export interface UpdateMappingInput {
   sourceType?: MicrosoftMappingSourceType;
   microsoftValue?: string;
   departmentId?: string;
-  role?: DepartmentRole;
+  /** Global Role (matches /admin/roles) — never DepartmentRole. See department-role-translation.ts. */
+  role?: Role;
   isActive?: boolean;
 }
 
 export async function updateMapping(id: string, patch: UpdateMappingInput): Promise<MicrosoftDepartmentMapping> {
+  if (patch.role !== undefined && !isGlobalRoleAllowedForMicrosoftMapping(patch.role)) {
+    throw new Error("ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
+  }
   return prisma.microsoftDepartmentMapping.update({ where: { id }, data: patch });
 }
 

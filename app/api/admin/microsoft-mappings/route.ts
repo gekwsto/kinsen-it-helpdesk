@@ -28,6 +28,12 @@ export async function POST(req: NextRequest) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
     }
+    if (error.message === "ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING") {
+      return NextResponse.json(
+        { error: "This role cannot be granted via a Microsoft mapping — Microsoft mappings can never grant System Admin.", code: "role_not_allowed" },
+        { status: 400 }
+      );
+    }
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return NextResponse.json({ error: "A mapping for this value already exists." }, { status: 409 });
     }

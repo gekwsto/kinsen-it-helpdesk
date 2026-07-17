@@ -227,16 +227,18 @@ async function main() {
   // Microsoft Entra mapping examples — pure data, no code branches. These
   // are real, usable templates (not placeholders) demonstrating all three
   // mapping source types; add more via this table, never via new code.
+  // `role` is the GLOBAL Role (matches /admin/roles), not DepartmentRole —
+  // see lib/services/department-role-translation.ts.
   const microsoftMappings: {
     sourceType: "PROFILE_DEPARTMENT" | "ENTRA_GROUP" | "ENTRA_APP_ROLE";
     microsoftValue: string;
     departmentId: string;
-    role: "DEPARTMENT_ADMIN" | "DEPARTMENT_MANAGER" | "PROJECT_MANAGER" | "AGENT_ASSIGNEE" | "REQUESTER" | "VIEWER";
+    role: "ADMIN" | "IT_AGENT" | "DEPARTMENT_MANAGER" | "USER";
   }[] = [
     { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - IT", departmentId: "dept-it", role: "DEPARTMENT_MANAGER" },
     { sourceType: "ENTRA_APP_ROLE", microsoftValue: "TicketApp.IT.Manager", departmentId: "dept-it", role: "DEPARTMENT_MANAGER" },
-    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - Finance", departmentId: "dept-finance", role: "REQUESTER" },
-    { sourceType: "PROFILE_DEPARTMENT", microsoftValue: "Human Resources", departmentId: "dept-hr", role: "REQUESTER" },
+    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - Finance", departmentId: "dept-finance", role: "USER" },
+    { sourceType: "PROFILE_DEPARTMENT", microsoftValue: "Human Resources", departmentId: "dept-hr", role: "USER" },
   ];
 
   for (const mapping of microsoftMappings) {

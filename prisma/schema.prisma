@@ -204,7 +204,12 @@ model MicrosoftDepartmentMapping {
   microsoftValue String
   department     Department                 @relation(fields: [departmentId], references: [id])
   departmentId   String
-  role           DepartmentRole             @default(REQUESTER)
+  // The GLOBAL role (matches /admin/roles / User.role), not the
+  // department-scoped DepartmentRole — so this dropdown shows exactly the
+  // same roles as Roles & Permissions. DepartmentMembership.role (still
+  // DepartmentRole) is derived from this at sync time via
+  // translateGlobalRoleToDepartmentRole (lib/services/department-role-translation.ts).
+  role           Role                       @default(USER)
   isActive       Boolean                    @default(true)
   createdAt      DateTime                   @default(now())
   updatedAt      DateTime                   @updatedAt
