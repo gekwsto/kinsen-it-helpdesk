@@ -92,21 +92,42 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async jwt({ token, user, account, profile }) {
       // Runs only on first sign-in; subsequent requests reuse the existing token
       if (user?.email) {
-        const dbUser = await prisma.user.findUnique({
-          where: { email: user.email },
-          select: {
-            id: true,
-            role: true,
-            isActive: true,
-            mustChangePassword: true,
-            departmentId: true,
-            businessUnitId: true,
-            customRoleId: true,
-            microsoftUserId: true,
-            name: true,
-            image: true,
-          },
-        });
+        // Look up by `user.id`, not a fresh findUnique-by-email: on this
+        // exact call, `user` IS the row Auth.js's PrismaAdapter just
+        // created or resolved (confirmed by reading
+        // @auth/core/lib/actions/callback/handle-login.js — `createUser`/
+        // `getUserByAccount`/`getUserByEmail` all run and their result is
+        // what's passed in here as `user`, before jwt() is ever invoked).
+        // Re-deriving the row via a second, independent email lookup was
+        // the cause of a real bug: on a brand-new user's first Microsoft
+        // sign-in, that redundant lookup could miss, silently skipping
+        // Microsoft department/role sync until the user logged in again.
+        // Trusting `user.id` directly removes that indirection entirely.
+        const dbUserSelect = {
+          id: true,
+          role: true,
+          isActive: true,
+          mustChangePassword: true,
+          departmentId: true,
+          businessUnitId: true,
+          customRoleId: true,
+          microsoftUserId: true,
+          name: true,
+          image: true,
+        } as const;
+
+        let dbUser = user.id
+          ? await prisma.user.findUnique({ where: { id: user.id }, select: dbUserSelect })
+          : null;
+
+        if (!dbUser) {
+          // Defensive fallback only — `user.id` should always be present
+          // per the Auth.js flow described above. If it's ever missing,
+          // fall back to the old email lookup rather than silently
+          // skipping sync, and log it so a real occurrence is visible.
+          if (!user.id) console.warn("[auth] jwt callback: user.id missing on sign-in, falling back to email lookup", { email: user.email });
+          dbUser = await prisma.user.findUnique({ where: { email: user.email }, select: dbUserSelect });
+        }
         if (dbUser) {
           token.id = dbUser.id;
           token.role = dbUser.role;

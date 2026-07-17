@@ -2,6 +2,12 @@
  * Orchestrates Microsoft Graph-based department sync during login. Called
  * once, from lib/auth.ts's jwt callback, on Microsoft sign-in only — never
  * on page renders, API requests, or workspace switches.
+ *
+ * Always called with an explicit `userId` resolved fresh by the caller for
+ * *this* sign-in (see lib/auth.ts, which uses the id Auth.js's own adapter
+ * just created/resolved — never a session/token-cached id) — this function
+ * never reads a user id from anywhere else, so it works identically for a
+ * brand-new user's first login and a returning user's Nth login.
  */
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
