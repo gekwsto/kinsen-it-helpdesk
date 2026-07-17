@@ -21,12 +21,44 @@ const SOURCE_TYPE_TO_MEMBERSHIP_SOURCE: Record<MicrosoftMappingSourceType, Membe
 // requires an explicit assignment in Entra, a group is broader/self-service
 // in many tenants, and a free-text profile field is the least trustworthy.
 // This is an adjustable default — change the order here, nowhere else, if
-// that judgment call should go the other way.
+// that judgment call should go the other way. Shared by both
+// resolveDepartmentMemberships (per-department) and
+// resolvePrimaryMicrosoftMapping (single overall winner, for global role).
 const SOURCE_TYPE_PRIORITY: Record<MicrosoftMappingSourceType, number> = {
   [MicrosoftMappingSourceType.ENTRA_APP_ROLE]: 3,
   [MicrosoftMappingSourceType.ENTRA_GROUP]: 2,
   [MicrosoftMappingSourceType.PROFILE_DEPARTMENT]: 1,
 };
+
+function buildCandidates(
+  claims: MicrosoftIdentityClaims
+): { sourceType: MicrosoftMappingSourceType; microsoftValue: string }[] {
+  const candidates: { sourceType: MicrosoftMappingSourceType; microsoftValue: string }[] = [];
+
+  if (claims.department) {
+    candidates.push({ sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT, microsoftValue: claims.department });
+  }
+  for (const group of claims.groups ?? []) {
+    candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_GROUP, microsoftValue: group });
+  }
+  for (const role of claims.roles ?? []) {
+    candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_APP_ROLE, microsoftValue: role });
+  }
+  return candidates;
+}
+
+async function findActiveMappingsForClaims(claims: MicrosoftIdentityClaims): Promise<MicrosoftDepartmentMapping[]> {
+  const candidates = buildCandidates(claims);
+  if (candidates.length === 0) return [];
+
+  return prisma.microsoftDepartmentMapping.findMany({
+    where: {
+      isActive: true,
+      department: { isActive: true },
+      OR: candidates.map((c) => ({ sourceType: c.sourceType, microsoftValue: c.microsoftValue })),
+    },
+  });
+}
 
 /**
  * Turns whatever Microsoft/Entra signals are present on `claims` into a
@@ -41,27 +73,7 @@ const SOURCE_TYPE_PRIORITY: Record<MicrosoftMappingSourceType, number> = {
 export async function resolveDepartmentMemberships(
   claims: MicrosoftIdentityClaims
 ): Promise<ResolvedMembership[]> {
-  const candidates: { sourceType: MicrosoftMappingSourceType; microsoftValue: string }[] = [];
-
-  if (claims.department) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT, microsoftValue: claims.department });
-  }
-  for (const group of claims.groups ?? []) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_GROUP, microsoftValue: group });
-  }
-  for (const role of claims.roles ?? []) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_APP_ROLE, microsoftValue: role });
-  }
-
-  if (candidates.length === 0) return [];
-
-  const matches = await prisma.microsoftDepartmentMapping.findMany({
-    where: {
-      isActive: true,
-      department: { isActive: true },
-      OR: candidates.map((c) => ({ sourceType: c.sourceType, microsoftValue: c.microsoftValue })),
-    },
-  });
+  const matches = await findActiveMappingsForClaims(claims);
 
   // Same department reachable via multiple signals -> keep the highest-priority one.
   const bestByDepartment = new Map<string, MicrosoftDepartmentMapping>();
@@ -77,6 +89,29 @@ export async function resolveDepartmentMemberships(
     role: m.role,
     source: SOURCE_TYPE_TO_MEMBERSHIP_SOURCE[m.sourceType],
   }));
+}
+
+/**
+ * Same candidate lookup as resolveDepartmentMemberships, but returns the
+ * single highest-priority mapping ROW across all matches (not grouped by
+ * department) — used to drive the user's GLOBAL role, which must be one
+ * decision, not one per department. Returns null if no active mapping
+ * matched anything this login. Ties (same priority) break deterministically
+ * on microsoftValue so behavior never depends on DB row ordering.
+ */
+export async function resolvePrimaryMicrosoftMapping(
+  claims: MicrosoftIdentityClaims
+): Promise<MicrosoftDepartmentMapping | null> {
+  const matches = await findActiveMappingsForClaims(claims);
+  if (matches.length === 0) return null;
+
+  return matches.reduce((best, current) => {
+    const bestPriority = SOURCE_TYPE_PRIORITY[best.sourceType];
+    const currentPriority = SOURCE_TYPE_PRIORITY[current.sourceType];
+    if (currentPriority > bestPriority) return current;
+    if (currentPriority < bestPriority) return best;
+    return current.microsoftValue.localeCompare(best.microsoftValue) < 0 ? current : best;
+  });
 }
 
 /**
@@ -98,7 +133,7 @@ export async function hasActiveProfileDepartmentMapping(value: string): Promise<
   return match !== null;
 }
 
-// ─── Admin CRUD (for the Phase 3 admin UI to call — not wired to any route yet) ──
+// ─── Admin CRUD (wired to app/api/admin/microsoft-mappings/**) ──
 
 function toView(
   m: MicrosoftDepartmentMapping & { department: { id: string; name: string; slug: string } }

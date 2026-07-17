@@ -30,6 +30,9 @@ export async function GET(req: NextRequest) {
           include: { department: { select: { id: true, name: true, slug: true } } },
           orderBy: { createdAt: "asc" },
         },
+        globalRoleMicrosoftMapping: {
+          select: { microsoftValue: true, department: { select: { name: true } } },
+        },
       },
     });
 

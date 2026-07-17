@@ -38,7 +38,9 @@ import {
   MAPPING_SOURCE_TYPE_LABELS,
   MAPPING_SOURCE_TYPE_HELP,
   MAPPING_SOURCE_TYPE_OPTIONS,
+  GLOBAL_ROLE_LABELS,
 } from "@/components/admin/department-role-info";
+import { translateDepartmentRoleToGlobalRole } from "@/lib/services/department-role-translation";
 
 interface Mapping {
   id: string;
@@ -412,7 +414,26 @@ export function MicrosoftMappingManagement({
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">{DEPARTMENT_ROLE_DESCRIPTIONS[role]}</p>
+              <p className="text-xs text-muted-foreground">
+                Global Role granted: <span className="font-medium text-foreground">{GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}</span>
+                {" "}— unless the user has a manual global-role override.
+              </p>
+              {(role === "DEPARTMENT_ADMIN" || role === "DEPARTMENT_MANAGER") && (
+                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                  This grants elevated global access ({GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}) to
+                  every matching user, not just department-scoped access — review before saving.
+                </p>
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                Microsoft mappings can never grant System Admin — that always requires a manual admin action.
+              </p>
             </div>
+
+            <p className="text-xs text-muted-foreground border-t pt-3">
+              This mapping controls both: 1) the TicketApp Department assigned from the Microsoft department, and
+              2) the user&apos;s Global Role and Department Membership Role — unless manually overridden. Changes
+              apply on the next Microsoft login/sync for affected users, not immediately.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => { setDialogOpen(false); resetForm(); }}>Cancel</Button>

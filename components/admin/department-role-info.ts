@@ -1,4 +1,12 @@
-import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType } from "@prisma/client";
+import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Role } from "@prisma/client";
+
+/** Global Role display labels — matching component-local copies (e.g. user-management.tsx) but kept here too for reuse where a shared source avoids duplication. */
+export const GLOBAL_ROLE_LABELS: Record<Role, string> = {
+  ADMIN: "Administrator",
+  IT_AGENT: "IT Agent",
+  DEPARTMENT_MANAGER: "Dept. Manager",
+  USER: "User",
+};
 
 /** Shared between the members page and the Microsoft mapping page — one definition of what each DepartmentRole means. */
 export const DEPARTMENT_ROLE_LABELS: Record<DepartmentRole, string> = {

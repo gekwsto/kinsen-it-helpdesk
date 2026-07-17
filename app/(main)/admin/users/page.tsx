@@ -25,6 +25,9 @@ export default async function UsersAdminPage() {
           include: { department: { select: { id: true, name: true, slug: true } } },
           orderBy: { createdAt: "asc" },
         },
+        globalRoleMicrosoftMapping: {
+          select: { microsoftValue: true, department: { select: { name: true } } },
+        },
       },
     }),
     prisma.department.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),

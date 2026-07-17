@@ -51,6 +51,9 @@ interface User {
   microsoftUserId?: string | null;
   lastMicrosoftSyncAt?: string | null;
   departmentMemberships: UserMembership[];
+  globalRoleSource?: "SYSTEM" | "MANUAL" | "MICROSOFT_DEPARTMENT";
+  globalRoleUpdatedAt?: string | null;
+  globalRoleMicrosoftMapping?: { microsoftValue: string; department: { name: string } } | null;
 }
 
 interface Department { id: string; name: string }
@@ -558,8 +561,25 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                     <p className="text-xs text-muted-foreground">You cannot change your own role.</p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
-                      This is the system-wide role, separate from any department role below — a user can be
-                      &quot;User&quot; here and still be a Department Admin inside a specific department.
+                      This is the system-wide role — normally kept aligned with the mapped department role below by
+                      Microsoft sync, unless manually overridden here.
+                    </p>
+                  )}
+                  {editUser.globalRoleSource === "MICROSOFT_DEPARTMENT" && (
+                    <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-1.5">
+                      Source: Microsoft Department Mapping
+                      {editUser.globalRoleMicrosoftMapping && (
+                        <>
+                          {" "}— mapped from <span className="font-medium">{editUser.globalRoleMicrosoftMapping.microsoftValue}</span>
+                          {" "}→ <span className="font-medium">{editUser.globalRoleMicrosoftMapping.department.name}</span>.
+                        </>
+                      )}{" "}
+                      Updates automatically on this user&apos;s next Microsoft login.
+                    </p>
+                  )}
+                  {editUser.globalRoleSource === "MANUAL" && (
+                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                      This global role is manually overridden and will not be changed by Microsoft sync.
                     </p>
                   )}
                 </div>

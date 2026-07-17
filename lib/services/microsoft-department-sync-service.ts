@@ -3,11 +3,17 @@
  * once, from lib/auth.ts's jwt callback, on Microsoft sign-in only — never
  * on page renders, API requests, or workspace switches.
  */
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
-import { resolveDepartmentMemberships, hasActiveProfileDepartmentMapping } from "@/lib/services/microsoft-mapping-service";
+import {
+  resolveDepartmentMemberships,
+  hasActiveProfileDepartmentMapping,
+  resolvePrimaryMicrosoftMapping,
+} from "@/lib/services/microsoft-mapping-service";
 import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
+import { translateDepartmentRoleToGlobalRole, shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -97,12 +103,37 @@ export async function syncMicrosoftUserDepartment(
   }
 
   await syncDepartmentMemberships(userId, resolved);
-  await prisma.user.update({ where: { id: userId }, data: { lastMicrosoftSyncAt: new Date() } });
+
+  // Global role sync: the SAME mapping that resolved a department signal
+  // also decides the user's global Role, unless a manual override or
+  // System Admin status protects them (shouldSyncGlobalRole). This is a
+  // separate lookup from resolveDepartmentMemberships above (which is
+  // per-department and unmodified) because the global role must be one
+  // decision, not one per matched department.
+  const globalRoleUpdate: Prisma.UserUpdateInput = { lastMicrosoftSyncAt: new Date() };
+  const primaryMapping = await resolvePrimaryMicrosoftMapping(claims);
+  let globalRoleSynced = false;
+  if (primaryMapping) {
+    const dbUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { role: true, globalRoleSource: true },
+    });
+    if (dbUser && shouldSyncGlobalRole(dbUser)) {
+      globalRoleUpdate.role = translateDepartmentRoleToGlobalRole(primaryMapping.role);
+      globalRoleUpdate.department = { connect: { id: primaryMapping.departmentId } };
+      globalRoleUpdate.globalRoleSource = "MICROSOFT_DEPARTMENT";
+      globalRoleUpdate.globalRoleUpdatedAt = new Date();
+      globalRoleUpdate.globalRoleMicrosoftMapping = { connect: { id: primaryMapping.id } };
+      globalRoleSynced = true;
+    }
+  }
+  await prisma.user.update({ where: { id: userId }, data: globalRoleUpdate });
 
   console.log("[microsoft-department-sync] Synced department membership from Graph", {
     email,
     userId,
     departmentPresent: claims.department !== null,
     resolvedCount: resolved.length,
+    globalRoleSynced,
   });
 }

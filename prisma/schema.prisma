@@ -68,6 +68,17 @@ enum MembershipSource {
   MANUAL
 }
 
+// How User.role (the GLOBAL role, distinct from DepartmentRole) was last
+// set — mirrors MembershipSource's protection model so the same "never
+// overwrite a manual decision" rule applies to the global role too. SYSTEM
+// (not MANUAL) is the default so fresh/seeded users stay eligible for
+// Microsoft sync until an admin actually makes an explicit choice.
+enum GlobalRoleSource {
+  SYSTEM
+  MANUAL
+  MICROSOFT_DEPARTMENT
+}
+
 // Which kind of Microsoft/Entra signal a MicrosoftDepartmentMapping row
 // matches against.
 enum MicrosoftMappingSourceType {
@@ -196,6 +207,8 @@ model MicrosoftDepartmentMapping {
   createdAt      DateTime                   @default(now())
   updatedAt      DateTime                   @updatedAt
 
+  usersWithGlobalRoleFromThisMapping User[] @relation("UserGlobalRoleMapping")
+
   @@unique([sourceType, microsoftValue])
   @@index([departmentId])
 }
@@ -229,31 +242,37 @@ model SubDepartment {
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
 
 model User {
-  id                  String         @id @default(cuid())
-  email               String         @unique
-  emailVerified       DateTime?
-  name                String?
-  image               String?
-  role                Role           @default(USER)
-  isActive            Boolean        @default(true)
-  passwordHash        String?
-  authProvider        AuthProvider   @default(MICROSOFT)
-  mustChangePassword  Boolean        @default(false)
+  id                           String                      @id @default(cuid())
+  email                        String                      @unique
+  emailVerified                DateTime?
+  name                         String?
+  image                        String?
+  role                         Role                        @default(USER)
+  isActive                     Boolean                     @default(true)
+  passwordHash                 String?
+  authProvider                 AuthProvider                @default(MICROSOFT)
+  mustChangePassword           Boolean                     @default(false)
   // Entra ID `oid` claim — stable identity anchor independent of email, so a
   // user's Microsoft identity survives an email change (see admin email edit).
-  microsoftUserId     String?        @unique
+  microsoftUserId              String?                     @unique
   // Set only on a *successful* Graph-based department sync during Microsoft
   // login (lib/services/microsoft-department-sync-service.ts) — never on a
   // failed fetch, so it always reflects the last time data actually synced.
-  lastMicrosoftSyncAt DateTime?
-  company             Company?       @relation(fields: [companyId], references: [id])
-  companyId           String?
-  businessUnit        BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
-  businessUnitId      String?
-  department          Department?    @relation(fields: [departmentId], references: [id])
-  departmentId        String?
-  subDepartment       SubDepartment? @relation(fields: [subDepartmentId], references: [id])
-  subDepartmentId     String?
+  lastMicrosoftSyncAt          DateTime?
+  // Tracks provenance of the GLOBAL `role` field above, mirroring
+  // DepartmentMembership.source's protection model — see GlobalRoleSource.
+  globalRoleSource             GlobalRoleSource            @default(SYSTEM)
+  globalRoleUpdatedAt          DateTime?
+  globalRoleMicrosoftMapping   MicrosoftDepartmentMapping? @relation("UserGlobalRoleMapping", fields: [globalRoleMicrosoftMappingId], references: [id], onDelete: SetNull)
+  globalRoleMicrosoftMappingId String?
+  company                      Company?                    @relation(fields: [companyId], references: [id])
+  companyId                    String?
+  businessUnit                 BusinessUnit?               @relation(fields: [businessUnitId], references: [id])
+  businessUnitId               String?
+  department                   Department?                 @relation(fields: [departmentId], references: [id])
+  departmentId                 String?
+  subDepartment                SubDepartment?              @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId              String?
 
   customRole   CustomRole? @relation("UserCustomRole", fields: [customRoleId], references: [id])
   customRoleId String?

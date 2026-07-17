@@ -46,6 +46,14 @@ export async function PATCH(
       }
     }
 
+    // An actual role change from this dialog is a deliberate admin decision
+    // — mark it as a manual override so the next Microsoft login sync
+    // leaves it alone (rule: manual overrides are never overwritten by
+    // sync). Resubmitting the same role unchanged (the form always sends
+    // `role`) does NOT flip this — only a real change counts, so fixing an
+    // unrelated field like email doesn't silently lock out Microsoft sync.
+    const isRoleChange = data.role !== target.role;
+
     const user = await prisma.user.update({
       where: { id },
       data: {
@@ -55,6 +63,9 @@ export async function PATCH(
         businessUnitId: data.businessUnitId,
         customRoleId: data.customRoleId !== undefined ? data.customRoleId : undefined,
         email: data.email,
+        ...(isRoleChange
+          ? { globalRoleSource: "MANUAL", globalRoleUpdatedAt: new Date(), globalRoleMicrosoftMappingId: null }
+          : {}),
       },
       include: {
         department: { select: { id: true, name: true } },
