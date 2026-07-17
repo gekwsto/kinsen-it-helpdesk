@@ -15,7 +15,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { DepartmentRole, GlobalRoleSource, MembershipSource, MicrosoftMappingSourceType, Role, AuthProvider } from "@prisma/client";
-import { syncMicrosoftUserDepartment } from "@/lib/services/microsoft-department-sync-service";
+import { syncMicrosoftUserDepartment, handleMicrosoftJwtSignIn } from "@/lib/services/microsoft-department-sync-service";
 
 let passed = 0;
 let failed = 0;
@@ -200,6 +200,40 @@ async function main() {
     check("globalRoleSource stays SYSTEM (untouched) when no mapping matches", afterUnmapped?.globalRoleSource === GlobalRoleSource.SYSTEM);
     check("no DepartmentMembership created when no mapping matches", unmappedMembershipCount === 0);
     check("lastMicrosoftSyncAt still set (Graph call itself succeeded)", afterUnmapped?.lastMicrosoftSyncAt != null);
+
+    console.log("\nScenario 8: handleMicrosoftJwtSignIn returns FRESH token fields, not the stale pre-sync snapshot\n");
+    // Reproduces the exact live bug: lib/auth.ts used to assign token
+    // fields from the row it fetched BEFORE calling sync, so a brand-new
+    // user's first-login token/session kept role: USER even though the DB
+    // was correctly updated underneath. This calls the exact function
+    // lib/auth.ts now calls, starting from a "pre-sync" snapshot with
+    // role: USER, and asserts the RETURNED object — which lib/auth.ts
+    // assigns directly onto `token` — already has the mapped role.
+    const jwtUser = await createTestUser();
+    const preSyncSnapshot = await prisma.user.findUnique({
+      where: { id: jwtUser.id },
+      select: {
+        id: true, role: true, isActive: true, mustChangePassword: true,
+        departmentId: true, businessUnitId: true, customRoleId: true,
+        microsoftUserId: true, globalRoleSource: true, name: true, image: true,
+      },
+    });
+    if (!preSyncSnapshot) throw new Error("test setup failed: jwtUser not found");
+    check("pre-sync snapshot has the stale default role (sanity check)", preSyncSnapshot.role === Role.USER);
+
+    mockGraphMeOnce(TEST_MAPPING_VALUE, `test-oid-${RUN_ID}-8`);
+    const postSync = await handleMicrosoftJwtSignIn({
+      dbUser: preSyncSnapshot,
+      accessToken: "fake-token",
+      oid: `test-oid-${RUN_ID}-8`,
+      providerAccountId: `test-oid-${RUN_ID}-8`,
+      userEmail: jwtUser.email,
+      userName: "Test User",
+    });
+    check("returned object has the MAPPED role, not the stale pre-sync USER", postSync.role === Role.DEPARTMENT_MANAGER);
+    check("returned object has the mapped departmentId", postSync.departmentId === department.id);
+    check("returned object has globalRoleSource MICROSOFT_DEPARTMENT", postSync.globalRoleSource === GlobalRoleSource.MICROSOFT_DEPARTMENT);
+    check("pre-sync snapshot object itself is untouched (still role USER)", preSyncSnapshot.role === Role.USER);
   } finally {
     await prisma.departmentMembership.deleteMany({ where: { userId: { in: testUserIds } } });
     await prisma.user.deleteMany({ where: { id: { in: testUserIds } } });

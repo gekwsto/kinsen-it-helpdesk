@@ -1,4 +1,4 @@
-import { Role } from "@prisma/client";
+import { GlobalRoleSource, Role } from "@prisma/client";
 import { DefaultSession } from "next-auth";
 
 declare module "next-auth" {
@@ -17,6 +17,11 @@ declare module "next-auth" {
       // instead). Never a raw Microsoft access/refresh token — those aren't
       // stored on the session at all.
       microsoftUserId?: string;
+      // Provenance of `role` above — lets the UI (and future guardrails)
+      // distinguish a Microsoft-mapped role from a manual admin override,
+      // refreshed on every Microsoft sign-in (see
+      // lib/services/microsoft-department-sync-service.ts).
+      globalRoleSource?: GlobalRoleSource;
     } & DefaultSession["user"];
   }
 
@@ -36,5 +41,6 @@ declare module "next-auth/jwt" {
     businessUnitId?: string | null;
     customRoleId?: string | null;
     microsoftUserId?: string | null;
+    globalRoleSource?: GlobalRoleSource | null;
   }
 }

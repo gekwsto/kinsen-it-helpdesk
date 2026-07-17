@@ -2,11 +2,11 @@ import NextAuth, { CredentialsSignin } from "next-auth";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
-import { Role } from "@prisma/client";
+import { GlobalRoleSource, Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { authConfig } from "@/lib/auth.config";
 import { adminLoginSchema as credentialsLoginSchema } from "@/lib/validations";
-import { syncMicrosoftUserDepartment } from "@/lib/services/microsoft-department-sync-service";
+import { handleMicrosoftJwtSignIn, SYNC_ELIGIBLE_USER_SELECT } from "@/lib/services/microsoft-department-sync-service";
 
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 const isDev = process.env.NODE_ENV === "development";
@@ -103,21 +103,8 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // sign-in, that redundant lookup could miss, silently skipping
         // Microsoft department/role sync until the user logged in again.
         // Trusting `user.id` directly removes that indirection entirely.
-        const dbUserSelect = {
-          id: true,
-          role: true,
-          isActive: true,
-          mustChangePassword: true,
-          departmentId: true,
-          businessUnitId: true,
-          customRoleId: true,
-          microsoftUserId: true,
-          name: true,
-          image: true,
-        } as const;
-
         let dbUser = user.id
-          ? await prisma.user.findUnique({ where: { id: user.id }, select: dbUserSelect })
+          ? await prisma.user.findUnique({ where: { id: user.id }, select: SYNC_ELIGIBLE_USER_SELECT })
           : null;
 
         if (!dbUser) {
@@ -126,18 +113,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           // fall back to the old email lookup rather than silently
           // skipping sync, and log it so a real occurrence is visible.
           if (!user.id) console.warn("[auth] jwt callback: user.id missing on sign-in, falling back to email lookup", { email: user.email });
-          dbUser = await prisma.user.findUnique({ where: { email: user.email }, select: dbUserSelect });
+          dbUser = await prisma.user.findUnique({ where: { email: user.email }, select: SYNC_ELIGIBLE_USER_SELECT });
         }
-        if (dbUser) {
-          token.id = dbUser.id;
-          token.role = dbUser.role;
-          token.isActive = dbUser.isActive;
-          token.mustChangePassword = dbUser.mustChangePassword;
-          token.departmentId = dbUser.departmentId;
-          token.businessUnitId = dbUser.businessUnitId;
-          token.customRoleId = dbUser.customRoleId;
-          token.microsoftUserId = dbUser.microsoftUserId;
 
+        if (dbUser) {
           // Microsoft login sync. The `department` signal is fetched live
           // from Microsoft Graph (GET /me) using this sign-in's delegated
           // access token — not from an ID-token claim, since the provider
@@ -146,14 +125,21 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           // that scope. User.Read is exactly what authorizes the Graph
           // GET /me call, so no extra Azure permission is needed.
           //
+          // handleMicrosoftJwtSignIn awaits profile backfill + the sync +
+          // a refetch, and returns the POST-sync row. Token fields below
+          // are assigned from whatever this variable holds at that point —
+          // for Microsoft sign-ins that's the fresh refetched row, not the
+          // pre-sync snapshot fetched above (this is the fix for a real bug:
+          // assigning token fields before the sync ran meant a brand-new
+          // user's first-login token/session kept the stale default role
+          // until a second login re-read the by-then-updated row).
+          //
           // If the Graph call fails for any reason (missing/expired token,
-          // 401/403/429, 5xx, network/timeout, malformed response),
-          // syncMicrosoftUserDepartment logs a safe warning and skips the
-          // sync entirely for this login — it never calls
-          // resolveDepartmentMemberships/syncDepartmentMemberships in that
-          // case, so existing memberships (MANUAL or Microsoft-derived) are
-          // left untouched. Sign-in itself is never blocked by a Graph
-          // failure.
+          // 401/403/429, 5xx, network/timeout, malformed response), the
+          // underlying sync logs a safe warning and skips itself for this
+          // login — existing memberships (MANUAL or Microsoft-derived) are
+          // left untouched and dbUser/token simply keep the pre-sync values.
+          // Sign-in itself is never blocked by a Graph failure.
           //
           // groups/roles still come from the ID token (see msProfile below)
           // and remain empty until Azure AD is configured with a "groups"
@@ -163,32 +149,32 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
             const msProfile = profile as
               | { oid?: string; department?: string; groups?: string[]; roles?: string[] }
               | undefined;
-            const oid = msProfile?.oid;
 
-            const profileUpdate: { microsoftUserId?: string; name?: string; image?: string } = {};
-            if (oid && dbUser.microsoftUserId !== oid) {
-              profileUpdate.microsoftUserId = oid;
-              token.microsoftUserId = oid;
-            }
-            // Backfill only — never overwrite an existing (possibly
-            // admin-set) name/image.
-            if (!dbUser.name && user.name) profileUpdate.name = user.name;
-            if (!dbUser.image && user.image) profileUpdate.image = user.image;
-
-            if (Object.keys(profileUpdate).length > 0) {
-              await prisma.user.update({ where: { id: dbUser.id }, data: profileUpdate });
-            }
-
-            await syncMicrosoftUserDepartment({
+            dbUser = await handleMicrosoftJwtSignIn({
+              dbUser,
               accessToken: account.access_token,
-              userId: dbUser.id,
-              oid: oid ?? account.providerAccountId,
-              email: user.email,
-              name: user.name,
+              oid: msProfile?.oid,
+              providerAccountId: account.providerAccountId,
+              userEmail: user.email,
+              userName: user.name,
+              userImage: user.image,
               fallbackGroups: msProfile?.groups,
               fallbackRoles: msProfile?.roles,
             });
           }
+
+          // Single assignment point — always from whatever `dbUser` holds
+          // right now (post-sync for Microsoft sign-ins, unchanged for
+          // credentials sign-ins).
+          token.id = dbUser.id;
+          token.role = dbUser.role;
+          token.isActive = dbUser.isActive;
+          token.mustChangePassword = dbUser.mustChangePassword;
+          token.departmentId = dbUser.departmentId;
+          token.businessUnitId = dbUser.businessUnitId;
+          token.customRoleId = dbUser.customRoleId;
+          token.microsoftUserId = dbUser.microsoftUserId;
+          token.globalRoleSource = dbUser.globalRoleSource;
         }
       }
       return token;
@@ -205,6 +191,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         session.user.businessUnitId = (token.businessUnitId as string | null) ?? undefined;
         session.user.customRoleId = (token.customRoleId as string | null) ?? undefined;
         session.user.microsoftUserId = (token.microsoftUserId as string | null) ?? undefined;
+        session.user.globalRoleSource = (token.globalRoleSource as GlobalRoleSource) ?? undefined;
       }
       return session;
     },
