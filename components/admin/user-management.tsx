@@ -31,7 +31,9 @@ import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials, formatDateTime } from "@/lib/utils";
 import { Role } from "@prisma/client";
-import { Search, Pencil, Loader2, UserCheck, UserX, Plus, Ban, ShieldCheck, Trash2 } from "lucide-react";
+import { Search, Pencil, Loader2, UserCheck, UserX, Plus, Ban, ShieldCheck, Trash2, Link2 } from "lucide-react";
+import { UserDepartmentMemberships, type UserMembership } from "@/components/admin/user-department-memberships";
+import { MEMBERSHIP_SOURCE_COLORS } from "@/components/admin/department-role-info";
 
 interface CustomRole { id: string; key: string; name: string; isBuiltIn: boolean }
 
@@ -46,6 +48,9 @@ interface User {
   department?: { id: string; name: string } | null;
   businessUnit?: { id: string; name: string } | null;
   customRole?: { id: string; key: string; name: string } | null;
+  microsoftUserId?: string | null;
+  lastMicrosoftSyncAt?: string | null;
+  departmentMemberships: UserMembership[];
 }
 
 interface Department { id: string; name: string }
@@ -97,6 +102,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
   const [editDept, setEditDept] = useState("");
   const [editBU, setEditBU] = useState("");
   const [editActive, setEditActive] = useState(true);
+  const [editMemberships, setEditMemberships] = useState<UserMembership[]>([]);
 
   const [blockingId, setBlockingId] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState(false);
@@ -247,6 +253,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
     setEditDept(user.department?.id ?? "");
     setEditBU(user.businessUnit?.id ?? "");
     setEditActive(user.isActive);
+    setEditMemberships(user.departmentMemberships ?? []);
     setDeleteConfirm(false);
     setEditOpen(true);
   };
@@ -317,7 +324,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
             <TableRow className="bg-muted/50">
               <TableHead>User</TableHead>
               <TableHead>Role</TableHead>
-              <TableHead>Department</TableHead>
+              <TableHead>Departments</TableHead>
               <TableHead>Status</TableHead>
               <TableHead>Joined</TableHead>
               <TableHead className="w-24"></TableHead>
@@ -337,7 +344,12 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                         </AvatarFallback>
                       </Avatar>
                       <div>
-                        <p className="text-sm font-medium">{user.name ?? "—"}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-sm font-medium">{user.name ?? "—"}</p>
+                          {user.microsoftUserId && (
+                            <Link2 className="h-3 w-3 text-blue-600" aria-label="Microsoft-linked" />
+                          )}
+                        </div>
                         <p className="text-xs text-muted-foreground">{user.email}</p>
                       </div>
                     </div>
@@ -348,9 +360,29 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                     </span>
                   </TableCell>
                   <TableCell>
-                    <span className="text-sm text-muted-foreground">
-                      {user.department?.name ?? "—"}
-                    </span>
+                    {(() => {
+                      const active = (user.departmentMemberships ?? []).filter((m) => m.isActive);
+                      if (active.length === 0) {
+                        return <span className="text-sm text-muted-foreground">—</span>;
+                      }
+                      const shown = active.slice(0, 3);
+                      const extra = active.length - shown.length;
+                      return (
+                        <div className="flex flex-wrap items-center gap-1">
+                          {shown.map((m) => (
+                            <span
+                              key={m.id}
+                              className={`text-[11px] font-medium px-1.5 py-0.5 rounded-full border ${MEMBERSHIP_SOURCE_COLORS[m.source]}`}
+                            >
+                              {m.department.name}
+                            </span>
+                          ))}
+                          {extra > 0 && (
+                            <span className="text-[11px] text-muted-foreground">+{extra} more</span>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </TableCell>
                   <TableCell>
                     {user.isActive ? (
@@ -458,12 +490,12 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
 
       {/* Edit Dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit User</DialogTitle>
           </DialogHeader>
           {editUser && (
-            <div className="space-y-4 py-2">
+            <div className="space-y-6 py-2">
               <div className="flex items-center gap-3 pb-2 border-b">
                 <Avatar className="h-10 w-10">
                   <AvatarImage src={editUser.image ?? undefined} />
@@ -472,97 +504,167 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
                 <p className="font-medium">{editUser.name}</p>
               </div>
 
-              <div className="space-y-2">
-                <Label>Email</Label>
-                <Input
-                  type="email"
-                  value={editEmail}
-                  onChange={(e) => setEditEmail(e.target.value)}
-                  aria-invalid={editEmail.length > 0 && !isEditEmailValid}
+              <div className="space-y-4">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Global Account</p>
+
+                <div className="space-y-2">
+                  <Label>Email</Label>
+                  <Input
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    aria-invalid={editEmail.length > 0 && !isEditEmailValid}
+                  />
+                  {editEmail.length > 0 && !isEditEmailValid && (
+                    <p className="text-xs text-destructive">Enter a valid email address.</p>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    This email is used for login and Microsoft account matching.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Global Role</Label>
+                  <Select
+                    value={editRoleValue}
+                    onValueChange={setEditRoleValue}
+                    disabled={editUser.id === currentUserId}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="" disabled className="text-muted-foreground text-xs font-semibold">
+                        — Built-in Roles —
+                      </SelectItem>
+                      {Object.entries(ROLE_LABELS).map(([value, label]) => (
+                        <SelectItem key={value} value={value}>{label}</SelectItem>
+                      ))}
+                      {customRoles.filter((cr) => !cr.isBuiltIn).length > 0 && (
+                        <>
+                          <SelectItem value="__sep__" disabled className="text-muted-foreground text-xs font-semibold">
+                            — Custom Roles —
+                          </SelectItem>
+                          {customRoles
+                            .filter((cr) => !cr.isBuiltIn)
+                            .map((cr) => (
+                              <SelectItem key={cr.id} value={`custom:${cr.id}`}>
+                                {cr.name}
+                              </SelectItem>
+                            ))}
+                        </>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {editUser.id === currentUserId ? (
+                    <p className="text-xs text-muted-foreground">You cannot change your own role.</p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      This is the system-wide role, separate from any department role below — a user can be
+                      &quot;User&quot; here and still be a Department Admin inside a specific department.
+                    </p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Account Status</Label>
+                  <Select
+                    value={editActive ? "active" : "inactive"}
+                    onValueChange={(v) => setEditActive(v === "active")}
+                    disabled={editUser.id === currentUserId}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="active">Active</SelectItem>
+                      <SelectItem value="inactive">Inactive (blocked)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="rounded-lg border p-3 space-y-1.5 bg-muted/30">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">Microsoft linked</span>
+                    <span className="font-medium">
+                      {editUser.microsoftUserId ? (
+                        <span className="flex items-center gap-1 text-blue-700"><Link2 className="h-3 w-3" /> Yes</span>
+                      ) : (
+                        "No"
+                      )}
+                    </span>
+                  </div>
+                  {editUser.microsoftUserId && (
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-muted-foreground">Microsoft User ID</span>
+                      <code className="text-[11px] bg-background px-1.5 py-0.5 rounded border">{editUser.microsoftUserId}</code>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-muted-foreground">Last Microsoft sync</span>
+                    <span className="font-medium">
+                      {editUser.lastMicrosoftSyncAt ? formatDateTime(editUser.lastMicrosoftSyncAt) : "Never"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4 pt-2 border-t">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                    Legacy / Primary Department
+                  </p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    This is a legacy/default field. Real department access is controlled by Department Memberships below.
+                  </p>
+                </div>
+
+                {editMemberships.filter((m) => m.isActive).length === 1 && (
+                  <p className="text-xs text-muted-foreground">
+                    Primary active workspace: <span className="font-medium text-foreground">{editMemberships.find((m) => m.isActive)?.department.name}</span>
+                  </p>
+                )}
+
+                <div className="space-y-2">
+                  <Label>Department</Label>
+                  <Select value={editDept} onValueChange={setEditDept}>
+                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">None</SelectItem>
+                      {departments.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-2">
+                  <Label>Business Unit</Label>
+                  <Select value={editBU} onValueChange={setEditBU}>
+                    <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">None</SelectItem>
+                      {businessUnits.map((b) => (
+                        <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="space-y-3 pt-2 border-t">
+                <div>
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Department Memberships</p>
+                  <p className="text-xs text-muted-foreground mt-1">
+                    The actual source of truth for department access — including memberships synced automatically from Microsoft.
+                  </p>
+                </div>
+                <UserDepartmentMemberships
+                  userId={editUser.id}
+                  memberships={editMemberships}
+                  onChange={(updated) => {
+                    setEditMemberships(updated);
+                    setUsers((prev) =>
+                      prev.map((u) => (u.id === editUser.id ? { ...u, departmentMemberships: updated } : u))
+                    );
+                  }}
                 />
-                {editEmail.length > 0 && !isEditEmailValid && (
-                  <p className="text-xs text-destructive">Enter a valid email address.</p>
-                )}
-                <p className="text-xs text-muted-foreground">
-                  This email is used for login and Microsoft account matching.
-                </p>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Role</Label>
-                <Select
-                  value={editRoleValue}
-                  onValueChange={setEditRoleValue}
-                  disabled={editUser.id === currentUserId}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="" disabled className="text-muted-foreground text-xs font-semibold">
-                      — Built-in Roles —
-                    </SelectItem>
-                    {Object.entries(ROLE_LABELS).map(([value, label]) => (
-                      <SelectItem key={value} value={value}>{label}</SelectItem>
-                    ))}
-                    {customRoles.filter((cr) => !cr.isBuiltIn).length > 0 && (
-                      <>
-                        <SelectItem value="__sep__" disabled className="text-muted-foreground text-xs font-semibold">
-                          — Custom Roles —
-                        </SelectItem>
-                        {customRoles
-                          .filter((cr) => !cr.isBuiltIn)
-                          .map((cr) => (
-                            <SelectItem key={cr.id} value={`custom:${cr.id}`}>
-                              {cr.name}
-                            </SelectItem>
-                          ))}
-                      </>
-                    )}
-                  </SelectContent>
-                </Select>
-                {editUser.id === currentUserId && (
-                  <p className="text-xs text-muted-foreground">You cannot change your own role.</p>
-                )}
-              </div>
-
-              <div className="space-y-2">
-                <Label>Department</Label>
-                <Select value={editDept} onValueChange={setEditDept}>
-                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">None</SelectItem>
-                    {departments.map((d) => (
-                      <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Business Unit</Label>
-                <Select value={editBU} onValueChange={setEditBU}>
-                  <SelectTrigger><SelectValue placeholder="None" /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">None</SelectItem>
-                    {businessUnits.map((b) => (
-                      <SelectItem key={b.id} value={b.id}>{b.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Account Status</Label>
-                <Select
-                  value={editActive ? "active" : "inactive"}
-                  onValueChange={(v) => setEditActive(v === "active")}
-                  disabled={editUser.id === currentUserId}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="active">Active</SelectItem>
-                    <SelectItem value="inactive">Inactive (blocked)</SelectItem>
-                  </SelectContent>
-                </Select>
               </div>
 
               {editUser.id !== currentUserId && (

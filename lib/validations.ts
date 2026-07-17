@@ -185,6 +185,8 @@ export const createMicrosoftMappingSchema = z.object({
 });
 
 export const updateMicrosoftMappingSchema = z.object({
+  sourceType: z.nativeEnum(MicrosoftMappingSourceType).optional(),
+  microsoftValue: z.string().trim().min(1, "Value is required").optional(),
   departmentId: z.string().min(1).optional(),
   role: z.nativeEnum(DepartmentRole).optional(),
   isActive: z.boolean().optional(),

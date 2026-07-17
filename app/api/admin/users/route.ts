@@ -26,6 +26,10 @@ export async function GET(req: NextRequest) {
         department: { select: { id: true, name: true } },
         businessUnit: { select: { id: true, name: true } },
         customRole: { select: { id: true, key: true, name: true } },
+        departmentMemberships: {
+          include: { department: { select: { id: true, name: true, slug: true } } },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
 

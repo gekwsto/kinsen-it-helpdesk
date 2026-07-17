@@ -21,6 +21,10 @@ export default async function UsersAdminPage() {
         department: { select: { id: true, name: true } },
         businessUnit: { select: { id: true, name: true } },
         customRole: { select: { id: true, key: true, name: true } },
+        departmentMemberships: {
+          include: { department: { select: { id: true, name: true, slug: true } } },
+          orderBy: { createdAt: "asc" },
+        },
       },
     }),
     prisma.department.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),

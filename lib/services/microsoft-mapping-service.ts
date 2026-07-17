@@ -79,6 +79,25 @@ export async function resolveDepartmentMemberships(
   }));
 }
 
+/**
+ * Used by microsoft-department-sync-service.ts to decide whether the
+ * auto-create-department path should even be considered — an explicit,
+ * active PROFILE_DEPARTMENT mapping for this exact value always wins and
+ * must be checked first.
+ */
+export async function hasActiveProfileDepartmentMapping(value: string): Promise<boolean> {
+  const match = await prisma.microsoftDepartmentMapping.findFirst({
+    where: {
+      sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
+      microsoftValue: value,
+      isActive: true,
+      department: { isActive: true },
+    },
+    select: { id: true },
+  });
+  return match !== null;
+}
+
 // ─── Admin CRUD (for the Phase 3 admin UI to call — not wired to any route yet) ──
 
 function toView(
@@ -122,6 +141,8 @@ export async function createMapping(input: CreateMappingInput): Promise<Microsof
 }
 
 export interface UpdateMappingInput {
+  sourceType?: MicrosoftMappingSourceType;
+  microsoftValue?: string;
   departmentId?: string;
   role?: DepartmentRole;
   isActive?: boolean;

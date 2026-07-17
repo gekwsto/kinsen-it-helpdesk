@@ -3,9 +3,11 @@
  * once, from lib/auth.ts's jwt callback, on Microsoft sign-in only — never
  * on page renders, API requests, or workspace switches.
  */
-import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
+import { prisma } from "@/lib/prisma";
+import { resolveDepartmentMemberships, hasActiveProfileDepartmentMapping } from "@/lib/services/microsoft-mapping-service";
 import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
+import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -59,6 +61,12 @@ export function buildClaimsFromGraphProfile(
  * the normal sync (which correctly drops a department membership whose
  * source signal disappeared) — collapsing those two cases would let a
  * transient Graph outage wipe out real memberships, which must never happen.
+ *
+ * If the Graph department has no active PROFILE_DEPARTMENT mapping, and
+ * AUTO_CREATE_GRAPH_DEPARTMENTS=true, a Department + default mapping is
+ * created on the fly (see microsoft-department-autocreate-service.ts) — an
+ * explicit mapping, when one exists, is always checked first and always
+ * wins; auto-create is never even considered otherwise.
  */
 export async function syncMicrosoftUserDepartment(
   params: SyncMicrosoftUserDepartmentParams
@@ -78,8 +86,18 @@ export async function syncMicrosoftUserDepartment(
   }
 
   const claims = buildClaimsFromGraphProfile({ oid, email, name, fallbackGroups, fallbackRoles }, result.profile);
-  const resolved = await resolveDepartmentMemberships(claims);
+  let resolved = await resolveDepartmentMemberships(claims);
+
+  if (claims.department) {
+    const hasMapping = await hasActiveProfileDepartmentMapping(claims.department);
+    if (!hasMapping) {
+      const autoCreated = await maybeAutoCreateDepartmentForGraphValue(claims.department);
+      if (autoCreated) resolved = [...resolved, autoCreated];
+    }
+  }
+
   await syncDepartmentMemberships(userId, resolved);
+  await prisma.user.update({ where: { id: userId }, data: { lastMicrosoftSyncAt: new Date() } });
 
   console.log("[microsoft-department-sync] Synced department membership from Graph", {
     email,

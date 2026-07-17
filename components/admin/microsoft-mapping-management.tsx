@@ -29,7 +29,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Loader2, Trash2 } from "lucide-react";
+import { Plus, Loader2, Trash2, Pencil, RefreshCw } from "lucide-react";
+import { formatDateTime } from "@/lib/utils";
 import {
   DEPARTMENT_ROLE_LABELS,
   DEPARTMENT_ROLE_DESCRIPTIONS,
@@ -57,49 +58,118 @@ interface DepartmentOption {
 interface MicrosoftMappingManagementProps {
   mappings: Mapping[];
   departments: DepartmentOption[];
+  directoryValues: string[];
+  directoryLastSyncedAt: string | null;
 }
 
-export function MicrosoftMappingManagement({ mappings: initialMappings, departments }: MicrosoftMappingManagementProps) {
+export function MicrosoftMappingManagement({
+  mappings: initialMappings,
+  departments,
+  directoryValues: initialDirectoryValues,
+  directoryLastSyncedAt: initialLastSyncedAt,
+}: MicrosoftMappingManagementProps) {
   const [mappings, setMappings] = useState(initialMappings);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const [createOpen, setCreateOpen] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [directoryValues, setDirectoryValues] = useState(initialDirectoryValues);
+  const [directoryLastSyncedAt, setDirectoryLastSyncedAt] = useState(initialLastSyncedAt);
+  const [syncing, setSyncing] = useState(false);
+
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingMapping, setEditingMapping] = useState<Mapping | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [manualEntry, setManualEntry] = useState(false);
   const [sourceType, setSourceType] = useState<MicrosoftMappingSourceType>(MicrosoftMappingSourceType.ENTRA_GROUP);
   const [value, setValue] = useState("");
   const [departmentId, setDepartmentId] = useState(departments[0]?.id ?? "");
   const [role, setRole] = useState<DepartmentRole>(DepartmentRole.REQUESTER);
 
-  const resetCreate = () => {
+  const resetForm = () => {
+    setEditingMapping(null);
     setSourceType(MicrosoftMappingSourceType.ENTRA_GROUP);
     setValue("");
     setDepartmentId(departments[0]?.id ?? "");
     setRole(DepartmentRole.REQUESTER);
+    setManualEntry(false);
   };
 
-  const handleCreate = async () => {
-    if (!value.trim() || !departmentId) return;
-    setCreating(true);
+  const openCreate = () => {
+    resetForm();
+    setDialogOpen(true);
+  };
+
+  const openEdit = (mapping: Mapping) => {
+    setEditingMapping(mapping);
+    setSourceType(mapping.sourceType);
+    setValue(mapping.microsoftValue);
+    setDepartmentId(mapping.departmentId);
+    setRole(mapping.role);
+    // If the mapping's current value isn't in the cached directory list,
+    // default to manual entry so the admin sees the real stored value
+    // instead of an empty/mismatched dropdown.
+    setManualEntry(
+      mapping.sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT &&
+        !directoryValues.includes(mapping.microsoftValue)
+    );
+    setDialogOpen(true);
+  };
+
+  const handleSync = async () => {
+    setSyncing(true);
     try {
-      const res = await fetch("/api/admin/microsoft-mappings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sourceType, microsoftValue: value.trim(), departmentId, role }),
-      });
+      const res = await fetch("/api/admin/microsoft-directory/departments/sync", { method: "POST" });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error ?? "Failed to create mapping");
+        throw new Error(err.error ?? "Sync failed");
       }
-      const created = await res.json();
-      const dept = departments.find((d) => d.id === departmentId);
-      setMappings((prev) => [...prev, { ...created, department: { id: departmentId, name: dept?.name ?? "", slug: "" } }]);
-      toast.success("Mapping created");
-      setCreateOpen(false);
-      resetCreate();
+      const listRes = await fetch("/api/admin/microsoft-directory/departments");
+      if (listRes.ok) {
+        const data = await listRes.json();
+        setDirectoryValues(data.values ?? []);
+        setDirectoryLastSyncedAt(data.lastSyncedAt ?? null);
+      }
+      toast.success("Directory departments synced from Microsoft");
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to create mapping");
+      toast.error(error.message ?? "Failed to sync directory departments");
     } finally {
-      setCreating(false);
+      setSyncing(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!value.trim() || !departmentId) return;
+    setSaving(true);
+    try {
+      const payload = { sourceType, microsoftValue: value.trim(), departmentId, role };
+      const res = await fetch(
+        editingMapping ? `/api/admin/microsoft-mappings/${editingMapping.id}` : "/api/admin/microsoft-mappings",
+        {
+          method: editingMapping ? "PATCH" : "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }
+      );
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to save mapping");
+      }
+      const saved = await res.json();
+      const dept = departments.find((d) => d.id === departmentId);
+      const view: Mapping = { ...saved, department: { id: departmentId, name: dept?.name ?? "", slug: "" } };
+
+      if (editingMapping) {
+        setMappings((prev) => prev.map((m) => (m.id === editingMapping.id ? { ...m, ...view } : m)));
+        toast.success("Mapping updated");
+      } else {
+        setMappings((prev) => [...prev, view]);
+        toast.success("Mapping created");
+      }
+      setDialogOpen(false);
+      resetForm();
+    } catch (error: any) {
+      toast.error(error.message ?? "Failed to save mapping");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -141,13 +211,17 @@ export function MicrosoftMappingManagement({ mappings: initialMappings, departme
     }
   };
 
+  const isProfileDepartment = sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT;
+  const showDropdown = isProfileDepartment && !manualEntry;
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {mappings.length} mapping{mappings.length !== 1 ? "s" : ""} — inactive mappings are ignored by login sync.
+          Changes apply on the next Microsoft login/sync, not immediately.
         </p>
-        <Button onClick={() => setCreateOpen(true)} size="sm" disabled={departments.length === 0}>
+        <Button onClick={openCreate} size="sm" disabled={departments.length === 0}>
           <Plus className="h-4 w-4 mr-1.5" />
           Add Mapping
         </Button>
@@ -161,7 +235,7 @@ export function MicrosoftMappingManagement({ mappings: initialMappings, departme
               <TableHead>Microsoft Value</TableHead>
               <TableHead>Maps To</TableHead>
               <TableHead>Active</TableHead>
-              <TableHead className="w-16"></TableHead>
+              <TableHead className="w-24"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -191,14 +265,19 @@ export function MicrosoftMappingManagement({ mappings: initialMappings, departme
                   {busyId === m.id ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                   ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-destructive hover:bg-destructive/10"
-                      onClick={() => handleDelete(m)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
+                    <div className="flex items-center gap-0.5">
+                      <Button size="sm" variant="ghost" onClick={() => openEdit(m)}>
+                        <Pencil className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive hover:bg-destructive/10"
+                        onClick={() => handleDelete(m)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
                   )}
                 </TableCell>
               </TableRow>
@@ -214,10 +293,10 @@ export function MicrosoftMappingManagement({ mappings: initialMappings, departme
         </Table>
       </div>
 
-      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreate(); }}>
+      <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Add Microsoft Mapping</DialogTitle>
+            <DialogTitle>{editingMapping ? "Edit Microsoft Mapping" : "Add Microsoft Mapping"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="space-y-2">
@@ -231,15 +310,83 @@ export function MicrosoftMappingManagement({ mappings: initialMappings, departme
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">{MAPPING_SOURCE_TYPE_HELP[sourceType]}</p>
+              {sourceType !== MicrosoftMappingSourceType.PROFILE_DEPARTMENT && (
+                <p className="text-xs text-amber-700">
+                  Directory discovery isn&apos;t implemented for this source type yet — enter the exact
+                  {sourceType === MicrosoftMappingSourceType.ENTRA_GROUP ? " group name or object id" : " app role value"} manually.
+                </p>
+              )}
             </div>
 
             <div className="space-y-2">
-              <Label>Microsoft Value</Label>
-              <Input
-                placeholder='e.g. "TicketApp - Procurement"'
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-              />
+              <div className="flex items-center justify-between">
+                <Label>Microsoft Value</Label>
+                {isProfileDepartment && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] text-muted-foreground">
+                      {directoryLastSyncedAt ? `Synced ${formatDateTime(directoryLastSyncedAt)}` : "Never synced"}
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-1.5"
+                      onClick={handleSync}
+                      disabled={syncing}
+                      title="Sync department values from Microsoft"
+                    >
+                      {syncing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              {showDropdown ? (
+                directoryValues.length > 0 ? (
+                  <Select value={value} onValueChange={setValue}>
+                    <SelectTrigger><SelectValue placeholder="Select a department value" /></SelectTrigger>
+                    <SelectContent>
+                      {directoryValues.map((v) => (
+                        <SelectItem key={v} value={v}>{v}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <p className="text-xs text-muted-foreground border rounded-md p-2">
+                    No cached values yet — click the sync button above, or use manual entry below. Syncing requires
+                    the Microsoft Graph <code className="text-[11px] bg-muted px-1 rounded">Directory.Read.All</code>{" "}
+                    Application permission, admin-consented in Microsoft Entra admin center on the app registration
+                    used by GRAPH_CLIENT_ID. This is a different operation from the per-user login sync
+                    (which uses User.Read and is unaffected) — login keeps working even if this hasn&apos;t been granted yet.
+                  </p>
+                )
+              ) : (
+                <Input
+                  placeholder='e.g. "Systems Operations"'
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                />
+              )}
+
+              {isProfileDepartment && (
+                <>
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="h-3.5 w-3.5 rounded border-input"
+                      checked={manualEntry}
+                      onChange={(e) => setManualEntry(e.target.checked)}
+                    />
+                    Enter value manually (fallback only — prefer syncing from Microsoft Graph above)
+                  </label>
+                  {manualEntry && (
+                    <p className="text-[11px] text-amber-700">
+                      Must be an exact match (including casing and spacing) with Microsoft Graph&apos;s{" "}
+                      <code className="bg-muted px-1 rounded">user.department</code> value for this to work at login.
+                    </p>
+                  )}
+                </>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -268,10 +415,10 @@ export function MicrosoftMappingManagement({ mappings: initialMappings, departme
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setCreateOpen(false); resetCreate(); }}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={creating || !value.trim() || !departmentId}>
-              {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Create Mapping
+            <Button variant="outline" onClick={() => { setDialogOpen(false); resetForm(); }}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving || !value.trim() || !departmentId}>
+              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              {editingMapping ? "Save Changes" : "Create Mapping"}
             </Button>
           </DialogFooter>
         </DialogContent>

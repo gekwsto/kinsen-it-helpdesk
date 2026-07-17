@@ -15,7 +15,11 @@ const DEFAULT_LEGACY_DEPARTMENT_SLUG = process.env.DEFAULT_DEPARTMENT_SLUG || "i
 // create/update/setActive) — this module has no permission checks baked in,
 // matching the rest of this codebase's service-layer convention.
 
-function slugify(name: string): string {
+// Exported so other callers that need to derive the same slug a department
+// would get (e.g. microsoft-department-autocreate-service.ts, checking for
+// an existing department before creating a new one) use the identical
+// algorithm rather than a second, potentially-diverging copy.
+export function slugify(name: string): string {
   return name
     .trim()
     .toLowerCase()

@@ -48,6 +48,29 @@ interface SendMailPayload {
   saveToSentItems?: boolean;
 }
 
+/**
+ * Exported so other app-only (client-credentials) Graph consumers — e.g.
+ * lib/services/microsoft-directory-service.ts — can reuse this exact token
+ * flow instead of duplicating it. Still the same app registration/tenant as
+ * the mailbox polling below (GRAPH_TENANT_ID / GRAPH_CLIENT_ID /
+ * GRAPH_CLIENT_SECRET); callers needing directory-wide reads (e.g.
+ * `GET /users`, used by microsoft-directory-service.ts to discover company-
+ * wide department values) require that same registration to additionally
+ * have the `Directory.Read.All` Application permission, admin-consented in
+ * Azure — see docs/microsoft-graph-directory-sync.md, which documents both
+ * as the two Graph operations of one Microsoft Directory Sync module. This
+ * is a *different* permission/token type than the delegated `User.Read`
+ * used by the signed-in user's own `/me` call at login
+ * (lib/services/microsoft-graph-profile-service.ts) — granting or missing
+ * one has no effect on the other. This function itself doesn't request or
+ * know about scopes beyond `.default` (whatever's been consented in Azure is
+ * what's usable), so a missing permission surfaces as a 403 from Graph on
+ * the actual call, not here.
+ */
+export async function getAppOnlyGraphAccessToken(): Promise<string> {
+  return getAccessToken();
+}
+
 async function getAccessToken(): Promise<string> {
   const tenantId = process.env.GRAPH_TENANT_ID!;
   const clientId = process.env.GRAPH_CLIENT_ID!;

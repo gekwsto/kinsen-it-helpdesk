@@ -200,6 +200,22 @@ model MicrosoftDepartmentMapping {
   @@index([departmentId])
 }
 
+// Local cache of distinct `department` profile values seen across the
+// Microsoft/Entra directory, discovered via an admin-triggered sync (never
+// on page render/login) — backs the Microsoft Value dropdown on
+// MicrosoftDepartmentMapping so admins select an exact value instead of
+// hand-typing it. Rows are never deleted, only marked inactive if a later
+// sync no longer sees them, so history isn't lost.
+model MicrosoftDirectoryDepartmentValue {
+  id          String   @id @default(cuid())
+  value       String   @unique
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 model SubDepartment {
   id           String     @id @default(cuid())
   name         String
@@ -213,27 +229,31 @@ model SubDepartment {
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
 
 model User {
-  id                 String         @id @default(cuid())
-  email              String         @unique
-  emailVerified      DateTime?
-  name               String?
-  image              String?
-  role               Role           @default(USER)
-  isActive           Boolean        @default(true)
-  passwordHash       String?
-  authProvider       AuthProvider   @default(MICROSOFT)
-  mustChangePassword Boolean        @default(false)
+  id                  String         @id @default(cuid())
+  email               String         @unique
+  emailVerified       DateTime?
+  name                String?
+  image               String?
+  role                Role           @default(USER)
+  isActive            Boolean        @default(true)
+  passwordHash        String?
+  authProvider        AuthProvider   @default(MICROSOFT)
+  mustChangePassword  Boolean        @default(false)
   // Entra ID `oid` claim — stable identity anchor independent of email, so a
   // user's Microsoft identity survives an email change (see admin email edit).
-  microsoftUserId    String?        @unique
-  company            Company?       @relation(fields: [companyId], references: [id])
-  companyId          String?
-  businessUnit       BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
-  businessUnitId     String?
-  department         Department?    @relation(fields: [departmentId], references: [id])
-  departmentId       String?
-  subDepartment      SubDepartment? @relation(fields: [subDepartmentId], references: [id])
-  subDepartmentId    String?
+  microsoftUserId     String?        @unique
+  // Set only on a *successful* Graph-based department sync during Microsoft
+  // login (lib/services/microsoft-department-sync-service.ts) — never on a
+  // failed fetch, so it always reflects the last time data actually synced.
+  lastMicrosoftSyncAt DateTime?
+  company             Company?       @relation(fields: [companyId], references: [id])
+  companyId           String?
+  businessUnit        BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
+  businessUnitId      String?
+  department          Department?    @relation(fields: [departmentId], references: [id])
+  departmentId        String?
+  subDepartment       SubDepartment? @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId     String?
 
   customRole   CustomRole? @relation("UserCustomRole", fields: [customRoleId], references: [id])
   customRoleId String?
