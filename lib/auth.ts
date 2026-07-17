@@ -6,9 +6,7 @@ import { Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { authConfig } from "@/lib/auth.config";
 import { adminLoginSchema as credentialsLoginSchema } from "@/lib/validations";
-import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
-import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
-import type { MicrosoftIdentityClaims } from "@/types/department";
+import { syncMicrosoftUserDepartment } from "@/lib/services/microsoft-department-sync-service";
 
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 const isDev = process.env.NODE_ENV === "development";
@@ -119,30 +117,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           token.customRoleId = dbUser.customRoleId;
           token.microsoftUserId = dbUser.microsoftUserId;
 
-          // Microsoft login sync (Phase 2B). Real, wired code — not a
-          // placeholder — but a safe no-op with today's claims: the
-          // provider (lib/auth.config.ts) only requests
-          // "openid profile email User.Read", so profile.department/
-          // groups/roles are never actually present yet, meaning
-          // resolveDepartmentMemberships always resolves to [] and
-          // syncDepartmentMemberships only ever soft-revokes non-MANUAL
-          // memberships (there are none yet — Phase 1's backfill seeded
-          // everything as MANUAL, which this never touches). The moment
-          // Azure AD is configured to emit those claims (see below), this
-          // same code starts actually syncing with no further changes.
+          // Microsoft login sync. The `department` signal is fetched live
+          // from Microsoft Graph (GET /me) using this sign-in's delegated
+          // access token — not from an ID-token claim, since the provider
+          // (lib/auth.config.ts) only requests "openid profile email
+          // User.Read" and department is never emitted as a claim under
+          // that scope. User.Read is exactly what authorizes the Graph
+          // GET /me call, so no extra Azure permission is needed.
           //
-          // Azure/Entra configuration still needed for each signal:
-          // - profile department string: a "department" optional claim on
-          //   the app registration.
-          // - Entra groups: a "groups" claim configured on the app
-          //   registration (or, if the tenant has too many groups for a
-          //   direct claim, GroupMember.Read.All + a live Graph lookup —
-          //   deliberately NOT done here, since that would be a Graph call
-          //   on every login; a periodic/manual resync job would be the
-          //   place for that, not this hook).
-          // - App roles: App Roles defined on the registration, assigned to
-          //   users/groups, with the token configured to emit a "roles"
-          //   claim.
+          // If the Graph call fails for any reason (missing/expired token,
+          // 401/403/429, 5xx, network/timeout, malformed response),
+          // syncMicrosoftUserDepartment logs a safe warning and skips the
+          // sync entirely for this login — it never calls
+          // resolveDepartmentMemberships/syncDepartmentMemberships in that
+          // case, so existing memberships (MANUAL or Microsoft-derived) are
+          // left untouched. Sign-in itself is never blocked by a Graph
+          // failure.
+          //
+          // groups/roles still come from the ID token (see msProfile below)
+          // and remain empty until Azure AD is configured with a "groups"
+          // claim and/or App Roles + a "roles" claim on the app
+          // registration — Graph is deliberately not queried for those here.
           if (account?.provider === "microsoft-entra-id") {
             const msProfile = profile as
               | { oid?: string; department?: string; groups?: string[]; roles?: string[] }
@@ -163,16 +158,15 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               await prisma.user.update({ where: { id: dbUser.id }, data: profileUpdate });
             }
 
-            const claims: MicrosoftIdentityClaims = {
+            await syncMicrosoftUserDepartment({
+              accessToken: account.access_token,
+              userId: dbUser.id,
               oid: oid ?? account.providerAccountId,
               email: user.email,
               name: user.name,
-              department: msProfile?.department ?? null,
-              groups: msProfile?.groups,
-              roles: msProfile?.roles,
-            };
-            const resolved = await resolveDepartmentMemberships(claims);
-            await syncDepartmentMemberships(dbUser.id, resolved);
+              fallbackGroups: msProfile?.groups,
+              fallbackRoles: msProfile?.roles,
+            });
           }
         }
       }

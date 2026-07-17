@@ -39,15 +39,18 @@ export type ResolvedMembership = {
 
 // ─── Microsoft identity / mapping ───────────────────────────────────────────────
 
-// Fields the current Auth.js Microsoft Entra ID provider config can actually
-// populate today are non-optional; the rest are typed optional because they
-// require Azure AD app-registration changes (optional claims / app roles)
-// that are outside this codebase — see lib/services/microsoft-mapping-service.ts.
+// `oid`/`email`/`name` come from the OIDC ID token. `department` is fetched
+// live from Microsoft Graph (GET /me) during login sync — see
+// lib/services/microsoft-department-sync-service.ts — and is not an ID-token
+// claim. `groups`/`roles` are typed optional because they still require
+// Azure AD app-registration changes (a "groups" claim / App Roles + a
+// "roles" claim) that are outside this codebase — see
+// lib/services/microsoft-mapping-service.ts.
 export interface MicrosoftIdentityClaims {
   oid: string;
   email: string;
   name?: string | null;
-  /** Microsoft Graph profile `department` string — not requested/returned today. */
+  /** Microsoft Graph `user.department` — fetched via GET /me during login sync, not an ID-token claim. */
   department?: string | null;
   /** Entra group display names/ids — requires a groups claim/consent, not configured today. */
   groups?: string[];
