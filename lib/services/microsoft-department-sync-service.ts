@@ -20,6 +20,7 @@ import { syncDepartmentMemberships } from "@/lib/services/department-membership-
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
 import { translateDepartmentRoleToGlobalRole, shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
+import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -54,6 +55,7 @@ export function buildClaimsFromGraphProfile(
     email: base.email,
     name: base.name,
     department: profile.department ?? null,
+    jobTitle: profile.jobTitle ?? null,
     groups: base.fallbackGroups,
     roles: base.fallbackRoles,
   };
@@ -98,6 +100,13 @@ export async function syncMicrosoftUserDepartment(
   }
 
   const claims = buildClaimsFromGraphProfile({ oid, email, name, fallbackGroups, fallbackRoles }, result.profile);
+
+  // Opportunistic cache fill (Operation A side-effect — see
+  // microsoft-directory-service.ts header comment): zero extra Graph calls,
+  // zero extra permissions, independent of whether any mapping matches.
+  if (claims.department) await upsertDiscoveredMicrosoftDirectoryValue("department", claims.department);
+  if (claims.jobTitle) await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", claims.jobTitle);
+
   let resolved = await resolveDepartmentMemberships(claims);
 
   if (claims.department) {

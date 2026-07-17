@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/permissions";
-import { syncMicrosoftDirectoryDepartments } from "@/lib/services/microsoft-directory-service";
+import { syncMicrosoftDirectoryValues } from "@/lib/services/microsoft-directory-service";
 
 // Never a generic "sync failed" — every reason code gets a specific,
 // admin-actionable message. Text, never a stack trace or raw Graph payload.
 const SAFE_ERROR_MESSAGES: Record<string, string> = {
   unauthorized: "Microsoft Graph rejected the app credentials — verify GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET/GRAPH_TENANT_ID.",
   no_permission:
-    "Microsoft Graph Directory.Read.All application permission with admin consent is required to sync tenant department values. Add it in Microsoft Entra admin center on the app registration used by GRAPH_CLIENT_ID, then grant admin consent — see docs/microsoft-graph-directory-sync.md. This does not affect the per-user login sync, which uses a different permission (User.Read).",
+    "Microsoft Graph Directory.Read.All application permission with admin consent is required to sync tenant directory values (departments and job titles). Add it in Microsoft Entra admin center on the app registration used by GRAPH_CLIENT_ID, then grant admin consent — see docs/microsoft-graph-directory-sync.md. This does not affect the per-user login sync, which uses a different permission (User.Read).",
   rate_limited: "Microsoft Graph is throttling requests right now — try again shortly.",
   server_error: "Microsoft Graph returned a server error — try again shortly.",
   network_error: "Could not reach Microsoft Graph — check network connectivity.",
@@ -17,10 +17,10 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
 export async function POST() {
   try {
     await requireAdmin();
-    const result = await syncMicrosoftDirectoryDepartments();
+    const result = await syncMicrosoftDirectoryValues();
     if (!result.ok) {
       return NextResponse.json(
-        { error: SAFE_ERROR_MESSAGES[result.reason] ?? "Directory sync failed." },
+        { error: SAFE_ERROR_MESSAGES[result.reason] ?? "Directory sync failed.", code: result.reason },
         { status: 502 }
       );
     }

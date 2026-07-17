@@ -12,6 +12,7 @@ import type {
 // (not a naming convention) so the two enums can diverge safely later.
 const SOURCE_TYPE_TO_MEMBERSHIP_SOURCE: Record<MicrosoftMappingSourceType, MembershipSource> = {
   [MicrosoftMappingSourceType.PROFILE_DEPARTMENT]: MembershipSource.MICROSOFT_DEPARTMENT,
+  [MicrosoftMappingSourceType.PROFILE_JOB_TITLE]: MembershipSource.MICROSOFT_JOB_TITLE,
   [MicrosoftMappingSourceType.ENTRA_GROUP]: MembershipSource.MICROSOFT_GROUP,
   [MicrosoftMappingSourceType.ENTRA_APP_ROLE]: MembershipSource.MICROSOFT_APP_ROLE,
 };
@@ -19,14 +20,16 @@ const SOURCE_TYPE_TO_MEMBERSHIP_SOURCE: Record<MicrosoftMappingSourceType, Membe
 // When the same department is reachable via more than one signal for the
 // same login, the more administratively-deliberate signal wins: an app role
 // requires an explicit assignment in Entra, a group is broader/self-service
-// in many tenants, and a free-text profile field is the least trustworthy.
-// This is an adjustable default — change the order here, nowhere else, if
-// that judgment call should go the other way. Shared by both
+// in many tenants, a job title is more specific than a bare department, and
+// a free-text department field is the least trustworthy/most generic. This
+// is an adjustable default — change the order here, nowhere else, if that
+// judgment call should go the other way. Shared by both
 // resolveDepartmentMemberships (per-department) and
 // resolvePrimaryMicrosoftMapping (single overall winner, for global role).
 const SOURCE_TYPE_PRIORITY: Record<MicrosoftMappingSourceType, number> = {
-  [MicrosoftMappingSourceType.ENTRA_APP_ROLE]: 3,
-  [MicrosoftMappingSourceType.ENTRA_GROUP]: 2,
+  [MicrosoftMappingSourceType.ENTRA_APP_ROLE]: 4,
+  [MicrosoftMappingSourceType.ENTRA_GROUP]: 3,
+  [MicrosoftMappingSourceType.PROFILE_JOB_TITLE]: 2,
   [MicrosoftMappingSourceType.PROFILE_DEPARTMENT]: 1,
 };
 
@@ -37,6 +40,9 @@ function buildCandidates(
 
   if (claims.department) {
     candidates.push({ sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT, microsoftValue: claims.department });
+  }
+  if (claims.jobTitle) {
+    candidates.push({ sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE, microsoftValue: claims.jobTitle });
   }
   for (const group of claims.groups ?? []) {
     candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_GROUP, microsoftValue: group });
@@ -55,7 +61,14 @@ async function findActiveMappingsForClaims(claims: MicrosoftIdentityClaims): Pro
     where: {
       isActive: true,
       department: { isActive: true },
-      OR: candidates.map((c) => ({ sourceType: c.sourceType, microsoftValue: c.microsoftValue })),
+      // Job title matches are trimmed + case-insensitive (explicit design
+      // choice — see docs/microsoft-graph-directory-sync.md); every other
+      // source type stays exact-match, unchanged from today.
+      OR: candidates.map((c) =>
+        c.sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE
+          ? { sourceType: c.sourceType, microsoftValue: { equals: c.microsoftValue, mode: "insensitive" as const } }
+          : { sourceType: c.sourceType, microsoftValue: c.microsoftValue }
+      ),
     },
   });
 }

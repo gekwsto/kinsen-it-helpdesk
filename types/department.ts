@@ -39,10 +39,10 @@ export type ResolvedMembership = {
 
 // ─── Microsoft identity / mapping ───────────────────────────────────────────────
 
-// `oid`/`email`/`name` come from the OIDC ID token. `department` is fetched
-// live from Microsoft Graph (GET /me) during login sync — see
-// lib/services/microsoft-department-sync-service.ts — and is not an ID-token
-// claim. `groups`/`roles` are typed optional because they still require
+// `oid`/`email`/`name` come from the OIDC ID token. `department`/`jobTitle`
+// are fetched live from Microsoft Graph (GET /me) during login sync — see
+// lib/services/microsoft-department-sync-service.ts — and are not ID-token
+// claims. `groups`/`roles` are typed optional because they still require
 // Azure AD app-registration changes (a "groups" claim / App Roles + a
 // "roles" claim) that are outside this codebase — see
 // lib/services/microsoft-mapping-service.ts.
@@ -52,6 +52,8 @@ export interface MicrosoftIdentityClaims {
   name?: string | null;
   /** Microsoft Graph `user.department` — fetched via GET /me during login sync, not an ID-token claim. */
   department?: string | null;
+  /** Microsoft Graph `user.jobTitle` — fetched via GET /me during login sync, same as department. */
+  jobTitle?: string | null;
   /** Entra group display names/ids — requires a groups claim/consent, not configured today. */
   groups?: string[];
   /** Entra app role values assigned to the app registration — not configured today. */

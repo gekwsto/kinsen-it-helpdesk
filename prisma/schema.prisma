@@ -65,6 +65,7 @@ enum MembershipSource {
   MICROSOFT_DEPARTMENT
   MICROSOFT_GROUP
   MICROSOFT_APP_ROLE
+  MICROSOFT_JOB_TITLE
   MANUAL
 }
 
@@ -83,6 +84,7 @@ enum GlobalRoleSource {
 // matches against.
 enum MicrosoftMappingSourceType {
   PROFILE_DEPARTMENT
+  PROFILE_JOB_TITLE
   ENTRA_GROUP
   ENTRA_APP_ROLE
 }
@@ -220,6 +222,21 @@ model MicrosoftDepartmentMapping {
 // hand-typing it. Rows are never deleted, only marked inactive if a later
 // sync no longer sees them, so history isn't lost.
 model MicrosoftDirectoryDepartmentValue {
+  id          String   @id @default(cuid())
+  value       String   @unique
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @default(now())
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// Same shape and purpose as MicrosoftDirectoryDepartmentValue, but for
+// distinct `jobTitle` profile values — backs the Microsoft Value dropdown
+// when a MicrosoftDepartmentMapping's sourceType is PROFILE_JOB_TITLE.
+// Deliberately no userId column: this is a distinct-value cache for
+// dropdown/mapping purposes, not a per-user snapshot.
+model MicrosoftDirectoryJobTitleValue {
   id          String   @id @default(cuid())
   value       String   @unique
   firstSeenAt DateTime @default(now())

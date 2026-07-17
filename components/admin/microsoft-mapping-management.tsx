@@ -57,24 +57,37 @@ interface DepartmentOption {
   name: string;
 }
 
+interface DirectoryCache {
+  values: string[];
+  lastSyncedAt: string | null;
+}
+
 interface MicrosoftMappingManagementProps {
   mappings: Mapping[];
   departments: DepartmentOption[];
-  directoryValues: string[];
-  directoryLastSyncedAt: string | null;
+  departmentDirectory: DirectoryCache;
+  jobTitleDirectory: DirectoryCache;
 }
+
+// Source types with a real Graph-backed dropdown today — everything else
+// (Entra Group, Entra App Role) stays manual-entry only until directory
+// discovery is built for them too.
+const DIRECTORY_BACKED_SOURCE_TYPES: MicrosoftMappingSourceType[] = [
+  MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
+  MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
+];
 
 export function MicrosoftMappingManagement({
   mappings: initialMappings,
   departments,
-  directoryValues: initialDirectoryValues,
-  directoryLastSyncedAt: initialLastSyncedAt,
+  departmentDirectory: initialDepartmentDirectory,
+  jobTitleDirectory: initialJobTitleDirectory,
 }: MicrosoftMappingManagementProps) {
   const [mappings, setMappings] = useState(initialMappings);
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const [directoryValues, setDirectoryValues] = useState(initialDirectoryValues);
-  const [directoryLastSyncedAt, setDirectoryLastSyncedAt] = useState(initialLastSyncedAt);
+  const [departmentDirectory, setDepartmentDirectory] = useState(initialDepartmentDirectory);
+  const [jobTitleDirectory, setJobTitleDirectory] = useState(initialJobTitleDirectory);
   const [syncing, setSyncing] = useState(false);
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -85,6 +98,12 @@ export function MicrosoftMappingManagement({
   const [value, setValue] = useState("");
   const [departmentId, setDepartmentId] = useState(departments[0]?.id ?? "");
   const [role, setRole] = useState<DepartmentRole>(DepartmentRole.REQUESTER);
+
+  const isDirectoryBacked = DIRECTORY_BACKED_SOURCE_TYPES.includes(sourceType);
+  const isProfileDepartment = sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT;
+  const isProfileJobTitle = sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE;
+  const activeDirectory = isProfileDepartment ? departmentDirectory : isProfileJobTitle ? jobTitleDirectory : null;
+  const showDropdown = isDirectoryBacked && !manualEntry;
 
   const resetForm = () => {
     setEditingMapping(null);
@@ -106,12 +125,18 @@ export function MicrosoftMappingManagement({
     setValue(mapping.microsoftValue);
     setDepartmentId(mapping.departmentId);
     setRole(mapping.role);
-    // If the mapping's current value isn't in the cached directory list,
-    // default to manual entry so the admin sees the real stored value
+    // If the mapping's current value isn't in the relevant cached directory
+    // list, default to manual entry so the admin sees the real stored value
     // instead of an empty/mismatched dropdown.
+    const cache =
+      mapping.sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT
+        ? departmentDirectory
+        : mapping.sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE
+          ? jobTitleDirectory
+          : null;
     setManualEntry(
-      mapping.sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT &&
-        !directoryValues.includes(mapping.microsoftValue)
+      DIRECTORY_BACKED_SOURCE_TYPES.includes(mapping.sourceType) &&
+        !cache?.values.some((v) => v.toLowerCase() === mapping.microsoftValue.toLowerCase())
     );
     setDialogOpen(true);
   };
@@ -119,20 +144,20 @@ export function MicrosoftMappingManagement({
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const res = await fetch("/api/admin/microsoft-directory/departments/sync", { method: "POST" });
+      const res = await fetch("/api/admin/microsoft-directory/values/sync", { method: "POST" });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.error ?? "Sync failed");
       }
-      const listRes = await fetch("/api/admin/microsoft-directory/departments");
+      const listRes = await fetch("/api/admin/microsoft-directory/values");
       if (listRes.ok) {
         const data = await listRes.json();
-        setDirectoryValues(data.values ?? []);
-        setDirectoryLastSyncedAt(data.lastSyncedAt ?? null);
+        setDepartmentDirectory(data.departments ?? { values: [], lastSyncedAt: null });
+        setJobTitleDirectory(data.jobTitles ?? { values: [], lastSyncedAt: null });
       }
-      toast.success("Directory departments synced from Microsoft");
+      toast.success("Microsoft directory values synced (departments and job titles)");
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to sync directory departments");
+      toast.error(error.message ?? "Failed to sync Microsoft directory values");
     } finally {
       setSyncing(false);
     }
@@ -213,15 +238,13 @@ export function MicrosoftMappingManagement({
     }
   };
 
-  const isProfileDepartment = sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT;
-  const showDropdown = isProfileDepartment && !manualEntry;
-
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">
           {mappings.length} mapping{mappings.length !== 1 ? "s" : ""} — inactive mappings are ignored by login sync.
-          Changes apply on the next Microsoft login/sync, not immediately.
+          Changes apply on the next Microsoft login/sync, not immediately. Department and job title values also
+          appear automatically as users log in — a full sync just preloads everything at once.
         </p>
         <Button onClick={openCreate} size="sm" disabled={departments.length === 0}>
           <Plus className="h-4 w-4 mr-1.5" />
@@ -296,14 +319,18 @@ export function MicrosoftMappingManagement({
       </div>
 
       <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
-        <DialogContent>
-          <DialogHeader>
+        <DialogContent className="flex max-h-[calc(100vh-2rem)] w-[calc(100vw-1.5rem)] flex-col gap-0 overflow-hidden p-0 sm:w-full sm:max-w-2xl">
+          <DialogHeader className="shrink-0 border-b px-6 py-4 pr-10">
             <DialogTitle>{editingMapping ? "Edit Microsoft Mapping" : "Add Microsoft Mapping"}</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4 py-2">
+
+          <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-4">
             <div className="space-y-2">
               <Label>Source Type</Label>
-              <Select value={sourceType} onValueChange={(v) => setSourceType(v as MicrosoftMappingSourceType)}>
+              <Select
+                value={sourceType}
+                onValueChange={(v) => { setSourceType(v as MicrosoftMappingSourceType); setManualEntry(false); }}
+              >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {MAPPING_SOURCE_TYPE_OPTIONS.map((t) => (
@@ -312,7 +339,7 @@ export function MicrosoftMappingManagement({
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">{MAPPING_SOURCE_TYPE_HELP[sourceType]}</p>
-              {sourceType !== MicrosoftMappingSourceType.PROFILE_DEPARTMENT && (
+              {!isDirectoryBacked && (
                 <p className="text-xs text-amber-700">
                   Directory discovery isn&apos;t implemented for this source type yet — enter the exact
                   {sourceType === MicrosoftMappingSourceType.ENTRA_GROUP ? " group name or object id" : " app role value"} manually.
@@ -321,12 +348,12 @@ export function MicrosoftMappingManagement({
             </div>
 
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <Label>Microsoft Value</Label>
-                {isProfileDepartment && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] text-muted-foreground">
-                      {directoryLastSyncedAt ? `Synced ${formatDateTime(directoryLastSyncedAt)}` : "Never synced"}
+                {isDirectoryBacked && (
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+                      {activeDirectory?.lastSyncedAt ? `Synced ${formatDateTime(activeDirectory.lastSyncedAt)}` : "Never synced"}
                     </span>
                     <Button
                       type="button"
@@ -335,7 +362,7 @@ export function MicrosoftMappingManagement({
                       className="h-6 px-1.5"
                       onClick={handleSync}
                       disabled={syncing}
-                      title="Sync department values from Microsoft"
+                      title="Sync department and job title values from Microsoft"
                     >
                       {syncing ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                     </Button>
@@ -344,47 +371,55 @@ export function MicrosoftMappingManagement({
               </div>
 
               {showDropdown ? (
-                directoryValues.length > 0 ? (
+                (activeDirectory?.values.length ?? 0) > 0 ? (
                   <Select value={value} onValueChange={setValue}>
-                    <SelectTrigger><SelectValue placeholder="Select a department value" /></SelectTrigger>
+                    <SelectTrigger>
+                      <SelectValue placeholder={`Select a ${isProfileJobTitle ? "job title" : "department"} value`} />
+                    </SelectTrigger>
                     <SelectContent>
-                      {directoryValues.map((v) => (
+                      {activeDirectory?.values.map((v) => (
                         <SelectItem key={v} value={v}>{v}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 ) : (
-                  <p className="text-xs text-muted-foreground border rounded-md p-2">
-                    No cached values yet — click the sync button above, or use manual entry below. Syncing requires
-                    the Microsoft Graph <code className="text-[11px] bg-muted px-1 rounded">Directory.Read.All</code>{" "}
-                    Application permission, admin-consented in Microsoft Entra admin center on the app registration
-                    used by GRAPH_CLIENT_ID. This is a different operation from the per-user login sync
-                    (which uses User.Read and is unaffected) — login keeps working even if this hasn&apos;t been granted yet.
+                  <p className="rounded-md border p-2 text-xs text-muted-foreground">
+                    No cached values yet — sync above, or enter manually below. Values also appear automatically as
+                    users log in (see &quot;More about mapping behavior&quot; below for permission details).
                   </p>
                 )
               ) : (
                 <Input
-                  placeholder='e.g. "Systems Operations"'
+                  placeholder={isProfileJobTitle ? 'e.g. "Systems Operations Manager"' : 'e.g. "Systems Operations"'}
                   value={value}
                   onChange={(e) => setValue(e.target.value)}
                 />
               )}
 
-              {isProfileDepartment && (
+              {isDirectoryBacked && (
                 <>
                   <label className="flex items-center gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"
-                      className="h-3.5 w-3.5 rounded border-input"
+                      className="h-3.5 w-3.5 shrink-0 rounded border-input"
                       checked={manualEntry}
                       onChange={(e) => setManualEntry(e.target.checked)}
                     />
-                    Enter value manually (fallback only — prefer syncing from Microsoft Graph above)
+                    Enter value manually (fallback only)
                   </label>
                   {manualEntry && (
                     <p className="text-[11px] text-amber-700">
-                      Must be an exact match (including casing and spacing) with Microsoft Graph&apos;s{" "}
-                      <code className="bg-muted px-1 rounded">user.department</code> value for this to work at login.
+                      {isProfileJobTitle ? (
+                        <>
+                          Must match Microsoft Graph&apos;s <code className="bg-muted px-1 rounded">user.jobTitle</code>{" "}
+                          value, ignoring only leading/trailing spaces and letter case.
+                        </>
+                      ) : (
+                        <>
+                          Must be an exact match (including casing and spacing) with Microsoft Graph&apos;s{" "}
+                          <code className="bg-muted px-1 rounded">user.department</code> value for this to work at login.
+                        </>
+                      )}
                     </p>
                   )}
                 </>
@@ -416,28 +451,48 @@ export function MicrosoftMappingManagement({
               <p className="text-xs text-muted-foreground">{DEPARTMENT_ROLE_DESCRIPTIONS[role]}</p>
               <p className="text-xs text-muted-foreground">
                 Global Role granted: <span className="font-medium text-foreground">{GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}</span>
-                {" "}— unless the user has a manual global-role override.
+                {" "}— unless manually overridden.
               </p>
               {(role === "DEPARTMENT_ADMIN" || role === "DEPARTMENT_MANAGER") && (
-                <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
-                  This grants elevated global access ({GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}) to
-                  every matching user, not just department-scoped access — review before saving.
+                <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
+                  Grants elevated global access ({GLOBAL_ROLE_LABELS[translateDepartmentRoleToGlobalRole(role)]}) to every
+                  matching user, not just department-scoped access — review before saving.
                 </p>
               )}
-              <p className="text-[11px] text-muted-foreground">
-                Microsoft mappings can never grant System Admin — that always requires a manual admin action.
-              </p>
             </div>
 
-            <p className="text-xs text-muted-foreground border-t pt-3">
-              This mapping controls both: 1) the TicketApp Department assigned from the Microsoft department, and
-              2) the user&apos;s Global Role and Department Membership Role — unless manually overridden. Changes
-              apply on the next Microsoft login/sync for affected users, not immediately.
-            </p>
+            <details className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer font-medium text-foreground">More about mapping behavior</summary>
+              <div className="mt-2 space-y-1.5">
+                <p>
+                  This mapping sets both the TicketApp Department and the user&apos;s Global Role / Department
+                  Membership Role, unless manually overridden. Changes apply on the next Microsoft login/sync — not
+                  immediately for existing users.
+                </p>
+                <p>Microsoft mappings can never grant System Admin — that always requires a manual admin action.</p>
+                {isDirectoryBacked && (
+                  <p>
+                    Full-tenant syncing requires the Microsoft Graph{" "}
+                    <code className="rounded bg-muted px-1">Directory.Read.All</code> Application permission,
+                    admin-consented in Microsoft Entra admin center — the per-user login sync (User.Read) is
+                    unaffected either way.
+                  </p>
+                )}
+                {isProfileJobTitle && (
+                  <p>
+                    Job title mappings are useful when users share the same department but need different TicketApp
+                    roles — a job title mapping overrides a department-only mapping for the same department.
+                  </p>
+                )}
+              </div>
+            </details>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => { setDialogOpen(false); resetForm(); }}>Cancel</Button>
-            <Button onClick={handleSave} disabled={saving || !value.trim() || !departmentId}>
+
+          <DialogFooter className="shrink-0 gap-2 border-t px-6 py-4">
+            <Button variant="outline" className="w-full sm:w-auto" onClick={() => { setDialogOpen(false); resetForm(); }}>
+              Cancel
+            </Button>
+            <Button className="w-full sm:w-auto" onClick={handleSave} disabled={saving || !value.trim() || !departmentId}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               {editingMapping ? "Save Changes" : "Create Mapping"}
             </Button>
