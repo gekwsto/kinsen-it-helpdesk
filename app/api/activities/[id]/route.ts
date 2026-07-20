@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateActivitySchema } from "@/lib/validations";
 import { recalculateProjectRollup, calculateActivityProgress } from "@/lib/projects/progress-rollup";
 import { Role } from "@prisma/client";
@@ -71,14 +72,15 @@ export async function PATCH(
     const { dueDate, startDate, isCompleted, assignedUserIds, ...rest } = data;
 
     if (assignedUserIds && assignedUserIds.length > 0) {
-      const adminCount = await prisma.user.count({
-        where: { id: { in: assignedUserIds }, role: Role.ADMIN },
-      });
-      if (adminCount !== assignedUserIds.length) {
-        return NextResponse.json(
-          { error: "Activities can only be assigned to administrators" },
-          { status: 400 }
-        );
+      const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
+      for (const userId of assignedUserIds) {
+        const assignable = await userHasAssignablePermissionForEntity(userId, "activity", effectiveDepartmentId);
+        if (!assignable) {
+          return NextResponse.json(
+            { error: "One or more selected users cannot be assigned to activities in this department.", code: "assignee_not_assignable" },
+            { status: 400 }
+          );
+        }
       }
     }
 

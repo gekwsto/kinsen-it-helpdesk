@@ -18,19 +18,17 @@ import {
 } from "@/components/ui/select";
 import { ChevronRight, Loader2 } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
-import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
 
 interface Project { id: string; title: string }
 interface AssignableUser { id: string; name: string | null; email: string }
 
-interface Props {
-  id: string;
-  isAdmin: boolean;
+interface ActivityNewFormProps {
+  /** Active workspace department — drives which users are shown as eligible assignees; may be null (no workspace resolved yet), matching what POST /api/activities itself falls back to. */
+  departmentId: string | null;
 }
 
-export function ActivityEditClient({ id, isAdmin }: Props) {
+export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
   const router = useRouter();
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [projects, setProjects] = useState<Project[]>([]);
   const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
@@ -43,38 +41,19 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState("");
   const [dueDate, setDueDate] = useState("");
-  const [progress, setProgress] = useState("0");
-  const [isMilestone, setIsMilestone] = useState(false);
 
   useEffect(() => {
+    const assignableUrl = `/api/users?assignableFor=activity${departmentId ? `&departmentId=${departmentId}` : ""}`;
     Promise.all([
-      fetch(`/api/activities/${id}`).then((r) => (r.ok ? r.json() : null)),
       fetch("/api/projects?limit=100").then((r) => r.json()),
+      fetch(assignableUrl).then((r) => (r.ok ? r.json() : [])),
     ])
-      .then(([activity, p]) => {
-        if (activity && !activity.error) {
-          setTitle(activity.title ?? "");
-          setDescription(activity.description ?? "");
-          setProjectId(activity.projectId ?? "");
-          setStatus(activity.status ?? ActivityStatus.TODO);
-          setPriority(activity.priority ?? ActivityPriority.MEDIUM);
-          setSelectedUserIds((activity.assignedUsers ?? []).map((usr: any) => usr.id));
-          setStartDate(activity.startDate ? activity.startDate.substring(0, 10) : "");
-          setDueDate(activity.dueDate ? activity.dueDate.substring(0, 10) : "");
-          setProgress(String(activity.progress ?? 0));
-          setIsMilestone(activity.isMilestone ?? false);
-
-          // Eligible assignees depend on the activity's own department —
-          // fetched once we know it, not in parallel with the activity itself.
-          const assignableUrl = `/api/users?assignableFor=activity${activity.departmentId ? `&departmentId=${activity.departmentId}` : ""}`;
-          fetch(assignableUrl)
-            .then((r) => (r.ok ? r.json() : []))
-            .then((u) => setAssignableUsers(Array.isArray(u) ? u : []));
-        }
+      .then(([p, u]) => {
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
+        setAssignableUsers(Array.isArray(u) ? u : []);
       })
-      .finally(() => setLoading(false));
-  }, [id]);
+      .catch(() => {});
+  }, [departmentId]);
 
   const toggleUser = (userId: string) => {
     setSelectedUserIds((prev) =>
@@ -90,8 +69,8 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
     }
     setSaving(true);
     try {
-      const res = await fetch(`/api/activities/${id}`, {
-        method: "PATCH",
+      const res = await fetch("/api/activities", {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title,
@@ -100,47 +79,34 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           status,
           priority,
           assignedUserIds: selectedUserIds,
-          startDate: isMilestone ? (dueDate || undefined) : (startDate || undefined),
+          startDate: startDate || undefined,
           dueDate: dueDate || undefined,
-          progress: isMilestone ? 0 : (progress !== "" ? parseInt(progress) : undefined),
-          isMilestone,
         }),
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.error ?? "Failed to update activity");
+        throw new Error(err.error ?? "Failed to create activity");
       }
-      toast.success("Activity updated");
-      router.push(`/activities/${id}`);
+      const activity = await res.json();
+      toast.success("Activity created");
+      router.push(`/activities/${activity.id}`);
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to update activity");
+      toast.error(error.message ?? "Failed to create activity");
       setSaving(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-6 max-w-2xl">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/activities" className="hover:text-foreground">Activities</Link>
         <ChevronRight className="h-4 w-4" />
-        <Link href={`/activities/${id}`} className="hover:text-foreground truncate max-w-[200px]">
-          {title}
-        </Link>
-        <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground font-medium">Edit</span>
+        <span className="text-foreground font-medium">New Activity</span>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>Edit Activity</CardTitle>
+          <CardTitle>Create Activity</CardTitle>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -148,6 +114,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
               <Label htmlFor="title">Title *</Label>
               <Input
                 id="title"
+                placeholder="Activity title"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 required
@@ -158,6 +125,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
               <Label htmlFor="description">Description</Label>
               <Textarea
                 id="description"
+                placeholder="Describe the activity..."
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 rows={3}
@@ -198,7 +166,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
 
             <div className="space-y-2">
               <Label>Project (optional)</Label>
-              <Select value={projectId || ""} onValueChange={setProjectId}>
+              <Select value={projectId} onValueChange={setProjectId}>
                 <SelectTrigger>
                   <SelectValue placeholder="No project (standalone)" />
                 </SelectTrigger>
@@ -240,25 +208,18 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
               )}
             </div>
 
-            <div className="flex items-start gap-3 p-3 rounded-md border bg-muted/30">
-              <input
-                type="checkbox"
-                id="isMilestone"
-                className="h-4 w-4 mt-0.5 rounded"
-                checked={isMilestone}
-                onChange={(e) => setIsMilestone(e.target.checked)}
-              />
-              <div>
-                <Label htmlFor="isMilestone" className="cursor-pointer font-medium">Mark as Milestone</Label>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  Milestones appear as a diamond marker on the Gantt timeline at a single date.
-                </p>
-              </div>
-            </div>
-
-            {isMilestone ? (
+            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
-                <Label htmlFor="dueDate">Milestone Date</Label>
+                <Label htmlFor="startDate">Start Date</Label>
+                <Input
+                  id="startDate"
+                  type="date"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="dueDate">Due Date</Label>
                 <Input
                   id="dueDate"
                   type="date"
@@ -266,47 +227,12 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
                   onChange={(e) => setDueDate(e.target.value)}
                 />
               </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="startDate">Start Date</Label>
-                  <Input
-                    id="startDate"
-                    type="date"
-                    value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="dueDate">Due Date</Label>
-                  <Input
-                    id="dueDate"
-                    type="date"
-                    value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
-                  />
-                </div>
-              </div>
-            )}
-
-            {!isMilestone && (
-              <div className="space-y-2">
-                <Label htmlFor="progress">Progress (%)</Label>
-                <Input
-                  id="progress"
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={progress}
-                  onChange={(e) => setProgress(e.target.value)}
-                />
-              </div>
-            )}
+            </div>
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>
                 {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                Save Changes
+                Create Activity
               </Button>
               <Button type="button" variant="outline" onClick={() => router.back()}>
                 Cancel
@@ -315,24 +241,6 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           </form>
         </CardContent>
       </Card>
-
-      {isAdmin && (
-        <Card className="border-destructive/30">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm text-destructive">Danger Zone</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <p className="text-xs text-muted-foreground mb-3">
-              Permanently delete this activity. This action cannot be undone.
-            </p>
-            <ActivityDeleteButton
-              activityId={id}
-              activityTitle={title}
-              projectId={projectId || null}
-            />
-          </CardContent>
-        </Card>
-      )}
     </div>
   );
 }

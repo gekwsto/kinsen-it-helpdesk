@@ -43,6 +43,10 @@ function main() {
     "USER -> REQUESTER (this app's USER role creates tickets)",
     translateGlobalRoleToDepartmentRole(Role.USER) === DepartmentRole.REQUESTER
   );
+  check(
+    "DIRECTOR -> VIEWER (Director's real power is the canViewAllDepartments bypass, not this membership)",
+    translateGlobalRoleToDepartmentRole(Role.DIRECTOR) === DepartmentRole.VIEWER
+  );
 
   console.log("\nTesting isGlobalRoleAllowedForMicrosoftMapping...\n");
 
@@ -50,12 +54,14 @@ function main() {
   check("DEPARTMENT_MANAGER is allowed", isGlobalRoleAllowedForMicrosoftMapping(Role.DEPARTMENT_MANAGER) === true);
   check("IT_AGENT is allowed", isGlobalRoleAllowedForMicrosoftMapping(Role.IT_AGENT) === true);
   check("USER is allowed", isGlobalRoleAllowedForMicrosoftMapping(Role.USER) === true);
+  check("DIRECTOR is allowed", isGlobalRoleAllowedForMicrosoftMapping(Role.DIRECTOR) === true);
 
   console.log("\nTesting getMicrosoftMappingRoleOptions...\n");
 
   const roleOptions = getMicrosoftMappingRoleOptions();
-  check("returns exactly 3 options (Administrator excluded)", roleOptions.length === 3);
+  check("returns exactly 4 options (Administrator excluded, Director included)", roleOptions.length === 4);
   check("Administrator is never among the options", !roleOptions.some((opt) => opt.value === Role.ADMIN));
+  check("Director is among the options", roleOptions.some((opt) => opt.value === Role.DIRECTOR));
 
   const departmentManagerOption = roleOptions.find((opt) => opt.value === Role.DEPARTMENT_MANAGER);
   check("Department Manager option has the exact /admin/roles label", departmentManagerOption?.label === "Department Manager");

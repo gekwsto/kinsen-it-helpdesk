@@ -51,9 +51,10 @@ export default async function ClosedTicketsPage({
   // departments" default — an explicit all-departments admin mode is
   // deferred). An explicit ?departmentId= still overrides for this request.
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+  const effectiveDepartmentId =
+    params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
-  if (!effectiveDepartmentId) {
+  if (!effectiveDepartmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (

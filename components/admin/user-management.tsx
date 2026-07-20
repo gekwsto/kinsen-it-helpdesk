@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import {
   Table,
@@ -64,12 +64,15 @@ interface UserManagementProps {
   departments: Department[];
   businessUnits: BusinessUnit[];
   currentUserId: string;
+  /** "all" or a department id — the server already filtered `users` accordingly; this just drives the Select's displayed value. */
+  selectedDepartmentId?: string;
 }
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
   IT_AGENT: "IT Agent",
   DEPARTMENT_MANAGER: "Dept. Manager",
+  DIRECTOR: "Director",
   USER: "User",
 };
 
@@ -79,6 +82,7 @@ const ROLE_COLORS: Record<Role, string> = {
   ADMIN: "bg-red-100 text-red-700",
   IT_AGENT: "bg-blue-100 text-blue-700",
   DEPARTMENT_MANAGER: "bg-purple-100 text-purple-700",
+  DIRECTOR: "bg-indigo-100 text-indigo-700",
   USER: "bg-gray-100 text-gray-700",
 };
 
@@ -91,8 +95,16 @@ interface RoleOption {
   enumRole: Role;      // the enum role to store (USER as base for custom roles)
 }
 
-export function UserManagement({ users: initialUsers, departments, businessUnits, currentUserId }: UserManagementProps) {
+export function UserManagement({
+  users: initialUsers,
+  departments,
+  businessUnits,
+  currentUserId,
+  selectedDepartmentId = "all",
+}: UserManagementProps) {
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const [users, setUsers] = useState(initialUsers);
   const [search, setSearch] = useState("");
   const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
@@ -128,6 +140,21 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
       .catch(() => {});
   }, []);
 
+  // Re-sync when the server sends a new `users` prop — e.g. the department
+  // filter below changes the URL, the Server Component re-queries, and this
+  // client component needs to pick up the new list rather than keep
+  // rendering whatever `initialUsers` was on first mount.
+  useEffect(() => {
+    setUsers(initialUsers);
+  }, [initialUsers]);
+
+  const handleDepartmentFilterChange = (value: string) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (value === "all") params.delete("departmentId");
+    else params.set("departmentId", value);
+    router.push(`${pathname}?${params.toString()}`);
+  };
+
   // Build unified role options: built-in enum roles first, then custom non-built-in roles
   const roleOptions: RoleOption[] = [
     ...Object.entries(ROLE_LABELS).map(([value, label]) => ({
@@ -148,7 +175,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
   ];
 
   const getUserRoleDisplay = (user: User) => {
-    if (user.customRole && !user.customRole.key.match(/^(ADMIN|IT_AGENT|DEPARTMENT_MANAGER|USER)$/)) {
+    if (user.customRole && !user.customRole.key.match(/^(ADMIN|IT_AGENT|DEPARTMENT_MANAGER|DIRECTOR|USER)$/)) {
       return { label: `${user.customRole.name} (Custom)`, color: "bg-teal-100 text-teal-700" };
     }
     return { label: ROLE_LABELS[user.role], color: ROLE_COLORS[user.role] };
@@ -247,7 +274,7 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
   const openEdit = (user: User) => {
     setEditUser(user);
     // Determine current role value
-    if (user.customRole && !user.customRole.key.match(/^(ADMIN|IT_AGENT|DEPARTMENT_MANAGER|USER)$/)) {
+    if (user.customRole && !user.customRole.key.match(/^(ADMIN|IT_AGENT|DEPARTMENT_MANAGER|DIRECTOR|USER)$/)) {
       setEditRoleValue(`custom:${user.customRole.id}`);
     } else {
       setEditRoleValue(user.role);
@@ -312,6 +339,17 @@ export function UserManagement({ users: initialUsers, departments, businessUnits
             className="pl-9"
           />
         </div>
+        <Select value={selectedDepartmentId} onValueChange={handleDepartmentFilterChange}>
+          <SelectTrigger className="w-[200px]">
+            <SelectValue placeholder="All departments" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All departments</SelectItem>
+            {departments.map((d) => (
+              <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <span className="text-sm text-muted-foreground">
           {filtered.length} users
         </span>

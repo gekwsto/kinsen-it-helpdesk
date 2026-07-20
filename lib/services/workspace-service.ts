@@ -2,7 +2,11 @@ import { cookies } from "next/headers";
 import { Role } from "@prisma/client";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { listDepartments, toDepartmentSummary } from "@/lib/services/department-service";
+import { canViewAllDepartments } from "@/lib/permissions";
+import { ALL_WORKSPACES_VALUE } from "@/types/department";
 import type { ActiveWorkspaceContext } from "@/types/department";
+
+export { ALL_WORKSPACES_VALUE };
 
 /** Cookie name the workspace switch endpoint (Phase 2B) writes to and this reads from. */
 export const ACTIVE_WORKSPACE_COOKIE = "active_department_id";
@@ -29,16 +33,28 @@ export async function resolveActiveWorkspace(
   requestedDepartmentId?: string | null
 ): Promise<ActiveWorkspaceContext> {
   const isSystemAdmin = role === Role.ADMIN;
+  const viewsAllDepartments = canViewAllDepartments(role);
 
-  if (isSystemAdmin) {
+  if (viewsAllDepartments) {
     const all = await listDepartments();
     const departments = all.map(toDepartmentSummary);
+
+    if (requestedDepartmentId === ALL_WORKSPACES_VALUE) {
+      return { departmentId: null, isSystemAdmin, canViewAllDepartments: true, isAllSelected: true, departments };
+    }
+
     const requestedValid = requestedDepartmentId
       ? departments.find((d) => d.id === requestedDepartmentId)
       : undefined;
     return {
+      // No valid cookie yet defaults to the first active department (not
+      // "All") — an explicit, confirmed choice, not an oversight: keeps
+      // System Admin's existing behavior unchanged, "All Workspaces" stays a
+      // deliberate selection rather than a surprising default.
       departmentId: requestedValid?.id ?? departments[0]?.id ?? null,
-      isSystemAdmin: true,
+      isSystemAdmin,
+      canViewAllDepartments: true,
+      isAllSelected: false,
       departments,
     };
   }
@@ -60,7 +76,7 @@ export async function resolveActiveWorkspace(
     departmentId = memberships[0].departmentId;
   }
 
-  return { departmentId, isSystemAdmin: false, departments };
+  return { departmentId, isSystemAdmin: false, canViewAllDepartments: false, isAllSelected: false, departments };
 }
 
 /**

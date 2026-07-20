@@ -463,10 +463,11 @@ export function MicrosoftMappingManagement({
                   <p className="text-xs text-muted-foreground">
                     Department membership role granted: <span className="font-medium text-foreground">{selectedRoleOption.departmentRolePreview}</span>
                   </p>
-                  {role === "DEPARTMENT_MANAGER" && (
+                  {(role === "DEPARTMENT_MANAGER" || role === "DIRECTOR") && (
                     <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
-                      Grants elevated global access ({selectedRoleOption.label}) to every matching user, not just
-                      department-scoped access — review before saving.
+                      {role === "DIRECTOR"
+                        ? "Grants view-and-create access across every department, not just this one — review before saving."
+                        : `Grants elevated global access (${selectedRoleOption.label}) to every matching user, not just department-scoped access — review before saving.`}
                     </p>
                   )}
                 </>

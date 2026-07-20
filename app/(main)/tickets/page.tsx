@@ -62,7 +62,7 @@ export default async function AllTicketsPage({
   }
 
   if (!(await hasAnyFullTicketView(session.user.id, role))) {
-    redirect("/my-tickets");
+    redirect("/tickets/created-by-me");
   }
 
   const params = await searchParams;
@@ -83,9 +83,10 @@ export default async function AllTicketsPage({
   // ?departmentId= still wins as an "explicit scoped view," but omitting it
   // no longer falls back to a union of every accessible department.
   const activeWorkspace = await getActiveWorkspace(session.user.id, role);
-  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+  const effectiveDepartmentId =
+    params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
-  if (!effectiveDepartmentId) {
+  if (!effectiveDepartmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (

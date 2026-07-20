@@ -39,6 +39,7 @@ interface TicketTableProps {
   page: number;
   totalPages: number;
   showRequester?: boolean;
+  emptyMessage?: string;
 }
 
 export function TicketTable({
@@ -47,6 +48,7 @@ export function TicketTable({
   page,
   totalPages,
   showRequester = true,
+  emptyMessage = "No tickets match your filters.",
 }: TicketTableProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -96,7 +98,7 @@ export function TicketTable({
                 >
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
                     <Inbox className="h-8 w-8" />
-                    <p className="text-sm">No tickets match your filters.</p>
+                    <p className="text-sm">{emptyMessage}</p>
                   </div>
                 </TableCell>
               </TableRow>

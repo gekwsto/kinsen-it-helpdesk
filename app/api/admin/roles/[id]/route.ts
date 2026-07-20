@@ -19,6 +19,13 @@ export async function PATCH(
     const role = await prisma.customRole.findUnique({ where: { id } });
     if (!role) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
+    if (role.scope === "DEPARTMENT") {
+      return NextResponse.json(
+        { error: "Department roles cannot be renamed — their name follows the real DepartmentRole value." },
+        { status: 409 }
+      );
+    }
+
     const body = await req.json();
     const data = updateRoleSchema.parse(body);
 
@@ -50,8 +57,11 @@ export async function DELETE(
     const role = await prisma.customRole.findUnique({ where: { id } });
     if (!role) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    if (role.key === "ADMIN") {
-      return NextResponse.json({ error: "The Administrator role cannot be deleted." }, { status: 409 });
+    if (role.isBuiltIn) {
+      return NextResponse.json(
+        { error: "Built-in roles cannot be deleted — they correspond to a real Role/DepartmentRole enum value still used elsewhere in the app." },
+        { status: 409 }
+      );
     }
 
     const usersWithRole = await prisma.user.count({ where: { customRoleId: id } });

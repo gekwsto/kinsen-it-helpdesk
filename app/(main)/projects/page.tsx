@@ -37,7 +37,7 @@ export default async function ProjectsPage() {
   }
 
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  if (!activeWorkspace.departmentId) {
+  if (!activeWorkspace.departmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (
@@ -45,7 +45,11 @@ export default async function ProjectsPage() {
     );
   }
 
-  const scope = await buildProjectListWhere(session.user.id, session.user.role, activeWorkspace.departmentId);
+  const scope = await buildProjectListWhere(
+    session.user.id,
+    session.user.role,
+    activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId
+  );
   const where = "denied" in scope ? { id: { in: [] as string[] } } : scope;
 
   const projects = await prisma.project.findMany({

@@ -2,7 +2,7 @@ import { DepartmentRole, Role } from "@prisma/client";
 import { getUserDepartmentMemberships, getMembership } from "@/lib/services/department-membership-service";
 import { getDefaultLegacyDepartmentId, listDepartments, toDepartmentSummary } from "@/lib/services/department-service";
 import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
-import { hasDepartmentPermission } from "@/lib/permissions";
+import { hasDepartmentPermission, canViewAllDepartments } from "@/lib/permissions";
 import type { DepartmentSummary } from "@/types/department";
 
 /**
@@ -71,7 +71,7 @@ export async function getAccessibleDepartmentSummaries(
   role: Role,
   permissionKey: string
 ): Promise<DepartmentSummary[]> {
-  if (role === Role.ADMIN) {
+  if (canViewAllDepartments(role)) {
     return (await listDepartments()).map(toDepartmentSummary);
   }
   const memberships = await getUserDepartmentMemberships(userId);
@@ -113,7 +113,7 @@ export function buildCategoryWhere(departmentId: string | null): Record<string, 
  * ever sees their own). ADMIN always qualifies.
  */
 export async function hasAnyFullTicketView(userId: string, role: Role): Promise<boolean> {
-  if (role === Role.ADMIN) return true;
+  if (canViewAllDepartments(role)) return true;
   const { fullView } = await splitTicketViewScope(userId);
   return fullView.length > 0;
 }
@@ -130,7 +130,7 @@ export async function buildTicketListWhere(
   role: Role,
   requestedDepartmentId?: string | null
 ): Promise<Record<string, unknown> | ScopeDenial> {
-  if (role === Role.ADMIN) {
+  if (canViewAllDepartments(role)) {
     return requestedDepartmentId ? { departmentId: requestedDepartmentId } : {};
   }
 
@@ -172,7 +172,7 @@ async function buildEntityListWhere(
   permissionKey: string,
   requestedDepartmentId?: string | null
 ): Promise<Record<string, unknown> | ScopeDenial> {
-  if (role === Role.ADMIN) {
+  if (canViewAllDepartments(role)) {
     return requestedDepartmentId ? { departmentId: requestedDepartmentId } : {};
   }
 
@@ -190,6 +190,25 @@ async function buildEntityListWhere(
   return includeLegacy
     ? { OR: [{ departmentId: { in: accessible } }, { departmentId: null }] }
     : { departmentId: { in: accessible } };
+}
+
+/**
+ * "Assigned to Me" / "Created by Me" ticket scoping — no permission check,
+ * seeing your own assigned/created tickets needs no department membership
+ * (same "isOwner" philosophy as canActOnEntity above). An optional department
+ * id just narrows an already-personal result set further; it never grants
+ * cross-department visibility on its own.
+ */
+export function buildAssignedToMeWhere(userId: string, requestedDepartmentId?: string | null) {
+  return requestedDepartmentId
+    ? { assignedAgentId: userId, departmentId: requestedDepartmentId }
+    : { assignedAgentId: userId };
+}
+
+export function buildCreatedByMeWhere(userId: string, requestedDepartmentId?: string | null) {
+  return requestedDepartmentId
+    ? { requesterId: userId, departmentId: requestedDepartmentId }
+    : { requesterId: userId };
 }
 
 export async function buildProjectListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {
@@ -217,7 +236,7 @@ export async function canActOnEntity(
   isOwner: boolean = false
 ): Promise<boolean> {
   if (isOwner) return true;
-  if (role === Role.ADMIN) return true;
+  if (canViewAllDepartments(role)) return true;
 
   const effectiveDeptId = entityDepartmentId ?? (await getDefaultLegacyDepartmentId());
   if (!effectiveDeptId) return false;
@@ -243,7 +262,7 @@ export async function resolveDepartmentForCreate(
   permissionKey: string
 ): Promise<{ departmentId: string } | CreateDenial> {
   if (requestedDepartmentId) {
-    if (role === Role.ADMIN) return { departmentId: requestedDepartmentId };
+    if (canViewAllDepartments(role)) return { departmentId: requestedDepartmentId };
     const membership = await getMembership(userId, requestedDepartmentId);
     if (!membership) return { denied: "invalid_department" };
     const allowed = await hasDepartmentPermission(membership.role, permissionKey);
@@ -251,7 +270,7 @@ export async function resolveDepartmentForCreate(
     return { departmentId: requestedDepartmentId };
   }
 
-  if (role === Role.ADMIN) return { denied: "workspace_required" };
+  if (canViewAllDepartments(role)) return { denied: "workspace_required" };
 
   const workspace = await resolveActiveWorkspace(userId, role);
   if (!workspace.departmentId) {

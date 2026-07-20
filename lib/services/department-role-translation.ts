@@ -20,6 +20,7 @@ export const GLOBAL_ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
   IT_AGENT: "IT Agent",
   DEPARTMENT_MANAGER: "Department Manager",
+  DIRECTOR: "Director",
   USER: "User",
 };
 
@@ -28,6 +29,7 @@ export const GLOBAL_ROLE_DESCRIPTIONS: Record<Role, string> = {
   ADMIN: "Full access to all features",
   IT_AGENT: "Manage tickets, projects and activities",
   DEPARTMENT_MANAGER: "Manage department projects and goals",
+  DIRECTOR: "View and create across all departments — tickets, projects, activities and goals",
   USER: "Submit and view own tickets",
 };
 
@@ -62,6 +64,12 @@ const GLOBAL_ROLE_TO_DEPARTMENT_ROLE: Record<Role, DepartmentRole> = {
   ADMIN: DepartmentRole.DEPARTMENT_ADMIN,
   DEPARTMENT_MANAGER: DepartmentRole.DEPARTMENT_MANAGER,
   IT_AGENT: DepartmentRole.AGENT_ASSIGNEE,
+  // Director's actual power comes from canViewAllDepartments() (a global-role
+  // bypass, no DepartmentMembership required) — this entry only matters if a
+  // Microsoft mapping happens to create one anyway, so VIEWER (read-oriented)
+  // is the safe, consistent fit rather than granting an elevated department
+  // role Director doesn't need.
+  DIRECTOR: DepartmentRole.VIEWER,
   USER: DepartmentRole.REQUESTER,
 };
 

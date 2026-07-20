@@ -1,10 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
-import { Role } from "@prisma/client";
-import { requireAuth } from "@/lib/permissions";
+import { requireAuth, canViewAllDepartments } from "@/lib/permissions";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { getDepartmentById } from "@/lib/services/department-service";
-import { ACTIVE_WORKSPACE_COOKIE } from "@/lib/services/workspace-service";
+import { ACTIVE_WORKSPACE_COOKIE, ALL_WORKSPACES_VALUE } from "@/lib/services/workspace-service";
 
 /**
  * Switches the caller's active workspace. Always validates server-side
@@ -22,7 +21,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "departmentId is required" }, { status: 400 });
     }
 
-    if (session.user.role === Role.ADMIN) {
+    if (departmentId === ALL_WORKSPACES_VALUE) {
+      if (!canViewAllDepartments(session.user.role)) {
+        return NextResponse.json({ error: "You don't have access to All Workspaces" }, { status: 403 });
+      }
+    } else if (canViewAllDepartments(session.user.role)) {
       const department = await getDepartmentById(departmentId);
       if (!department || !department.isActive) {
         return NextResponse.json({ error: "Invalid department" }, { status: 400 });

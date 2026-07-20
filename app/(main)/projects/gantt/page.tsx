@@ -36,9 +36,10 @@ export default async function ProjectGanttPage({
   // never persisted as the active workspace itself — switching workspace is
   // exclusively done via the selector/gate, which call the workspace API.
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+  const effectiveDepartmentId =
+    params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
-  if (!effectiveDepartmentId) {
+  if (!effectiveDepartmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (

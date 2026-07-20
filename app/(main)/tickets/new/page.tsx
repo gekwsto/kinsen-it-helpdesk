@@ -30,7 +30,7 @@ export default async function NewTicketPage() {
           You don&apos;t have permission to create support tickets. Contact your administrator to request access.
         </p>
         <Button asChild variant="outline" size="sm">
-          <Link href="/my-tickets">View my tickets</Link>
+          <Link href="/tickets/created-by-me">View my tickets</Link>
         </Button>
       </div>
     );

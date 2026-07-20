@@ -3,12 +3,17 @@
 import { createContext, useCallback, useContext, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
+import { ALL_WORKSPACES_VALUE } from "@/types/department";
 import type { DepartmentSummary } from "@/types/department";
 
 interface ActiveWorkspaceContextValue {
   departmentId: string | null;
   departments: DepartmentSummary[];
   isSystemAdmin: boolean;
+  /** True for Role.ADMIN or Role.DIRECTOR — offers the "All Workspaces" choice. */
+  canViewAllDepartments: boolean;
+  /** True when "All Workspaces" is the current selection (departmentId is null in this case). */
+  isAllSelected: boolean;
   /** True while a switch is in flight — selector/gate UI can disable itself to avoid double-submits. */
   switching: boolean;
   setActiveDepartment: (departmentId: string) => Promise<void>;
@@ -20,6 +25,8 @@ interface ActiveWorkspaceProviderProps {
   initialDepartmentId: string | null;
   departments: DepartmentSummary[];
   isSystemAdmin: boolean;
+  canViewAllDepartments: boolean;
+  initialIsAllSelected: boolean;
   children: React.ReactNode;
 }
 
@@ -37,17 +44,23 @@ export function ActiveWorkspaceProvider({
   initialDepartmentId,
   departments,
   isSystemAdmin,
+  canViewAllDepartments,
+  initialIsAllSelected,
   children,
 }: ActiveWorkspaceProviderProps) {
   const router = useRouter();
   const [departmentId, setDepartmentId] = useState(initialDepartmentId);
+  const [isAllSelected, setIsAllSelected] = useState(initialIsAllSelected);
   const [switching, setSwitching] = useState(false);
 
   const setActiveDepartment = useCallback(
     async (id: string) => {
-      const previous = departmentId;
+      const previousDepartmentId = departmentId;
+      const previousIsAllSelected = isAllSelected;
+      const nextIsAllSelected = id === ALL_WORKSPACES_VALUE;
       setSwitching(true);
-      setDepartmentId(id);
+      setDepartmentId(nextIsAllSelected ? null : id);
+      setIsAllSelected(nextIsAllSelected);
       try {
         const res = await fetch("/api/workspace/active", {
           method: "POST",
@@ -60,17 +73,20 @@ export function ActiveWorkspaceProvider({
         }
         router.refresh();
       } catch (error: any) {
-        setDepartmentId(previous);
+        setDepartmentId(previousDepartmentId);
+        setIsAllSelected(previousIsAllSelected);
         toast.error(error.message ?? "Failed to switch workspace");
       } finally {
         setSwitching(false);
       }
     },
-    [departmentId, router]
+    [departmentId, isAllSelected, router]
   );
 
   return (
-    <ActiveWorkspaceContext.Provider value={{ departmentId, departments, isSystemAdmin, switching, setActiveDepartment }}>
+    <ActiveWorkspaceContext.Provider
+      value={{ departmentId, departments, isSystemAdmin, canViewAllDepartments, isAllSelected, switching, setActiveDepartment }}
+    >
       {children}
     </ActiveWorkspaceContext.Provider>
   );

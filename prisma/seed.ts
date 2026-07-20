@@ -1,5 +1,10 @@
-import { PrismaClient, Role, AuthProvider, ProjectStatus, ActivityStatus, ActivityPriority } from "@prisma/client";
+import { PrismaClient, Role, AuthProvider, ProjectStatus, ActivityStatus, ActivityPriority, DepartmentRole, RoleScope } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import {
+  DEPARTMENT_ROLE_LABELS,
+  DEPARTMENT_ROLE_DESCRIPTIONS,
+  DEPARTMENT_ROLE_OPTIONS,
+} from "@/lib/services/department-role-translation";
 
 const prisma = new PrismaClient();
 
@@ -12,11 +17,13 @@ const PERMISSIONS = [
   { key: "activity.edit", description: "Edit activities", module: "activities" },
   { key: "activity.delete", description: "Delete activities", module: "activities" },
   { key: "activity.assign", description: "Assign activities to users", module: "activities" },
+  { key: "activity.assignable", description: "Can be assigned to activities", module: "activities" },
   // Projects
   { key: "project.view", description: "View projects", module: "projects" },
   { key: "project.create", description: "Create projects", module: "projects" },
   { key: "project.edit", description: "Edit projects", module: "projects" },
   { key: "project.delete", description: "Delete projects", module: "projects" },
+  { key: "project.assignable", description: "Can be assigned to projects", module: "projects" },
   // Goals
   { key: "goal.view", description: "View yearly goals", module: "goals" },
   { key: "goal.create", description: "Create yearly goals", module: "goals" },
@@ -29,6 +36,7 @@ const PERMISSIONS = [
   { key: "ticket.internalNote", description: "Add internal notes", module: "tickets" },
   { key: "ticket.assign", description: "Assign tickets to agents", module: "tickets" },
   { key: "ticket.changeStatus", description: "Change ticket status", module: "tickets" },
+  { key: "ticket.assignable", description: "Can be assigned to tickets", module: "tickets" },
   // Admin
   { key: "admin.access", description: "Access admin panel", module: "admin" },
   { key: "user.manage", description: "Manage users", module: "admin" },
@@ -41,50 +49,63 @@ const PERMISSIONS = [
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
   IT_AGENT: [
-    "activity.view", "activity.create", "activity.edit", "activity.assign",
+    "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
     "project.view", "project.create", "project.edit",
     "goal.view",
     "ticket.view", "ticket.create", "ticket.reply",
-    "ticket.internalNote", "ticket.assign", "ticket.changeStatus",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
   ],
   // Shared roleKey: both the global Role.DEPARTMENT_MANAGER enum value and
   // the new DepartmentRole.DEPARTMENT_MANAGER value resolve permissions via
   // this same "DEPARTMENT_MANAGER" key (see hasDepartmentPermission in
   // lib/permissions.ts) — they mean the same thing, one set is enough.
   DEPARTMENT_MANAGER: [
-    "activity.view", "activity.create", "activity.edit", "activity.assign",
-    "project.view", "project.create", "project.edit",
+    "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
+    "project.view", "project.create", "project.edit", "project.assignable",
     "goal.view", "goal.create", "goal.edit",
-    "ticket.view", "ticket.create", "ticket.reply",
+    "ticket.view", "ticket.create", "ticket.reply", "ticket.assignable",
   ],
   USER: [
     "activity.view",
     "ticket.view", "ticket.create", "ticket.reply",
   ],
+  // Cross-department oversight: sees and can start work in every department,
+  // but never admin.*/user.manage/role.manage/department.manage* — those
+  // stay Administrator-only. See canViewAllDepartments() in lib/permissions.ts.
+  DIRECTOR: [
+    "ticket.view",
+    "project.view", "project.create",
+    "activity.view", "activity.create",
+    "goal.view",
+  ],
   // ─── DepartmentRole keys (Phase 1 multi-department RBAC) ──────────────────
   // Full control of one department's projects/tickets/activities/goals.
   DEPARTMENT_ADMIN: [
-    "activity.view", "activity.create", "activity.edit", "activity.delete", "activity.assign",
-    "project.view", "project.create", "project.edit", "project.delete",
+    "activity.view", "activity.create", "activity.edit", "activity.delete", "activity.assign", "activity.assignable",
+    "project.view", "project.create", "project.edit", "project.delete", "project.assignable",
     "goal.view", "goal.create", "goal.edit", "goal.delete",
     "ticket.view", "ticket.create", "ticket.reply",
-    "ticket.internalNote", "ticket.assign", "ticket.changeStatus",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "department.manageSettings", "department.manageMembers",
   ],
   // Owns projects/Gantt within the department, not ticket triage or membership.
+  // ticket.assignable stays off — a Project Manager isn't a ticket handler
+  // by default (enable per-role from Roles & Permissions if a business needs it).
   PROJECT_MANAGER: [
-    "activity.view", "activity.create", "activity.edit", "activity.assign",
-    "project.view", "project.create", "project.edit",
+    "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
+    "project.view", "project.create", "project.edit", "project.assignable",
     "goal.view",
   ],
   // Works assigned tickets/activities — the department-scoped analog of the
   // global IT_AGENT role, so retrofitting department scoping onto ticket
   // actions doesn't regress what an agent can do (full ticket handling).
+  // project.assignable stays off by default — an Agent/Assignee isn't a
+  // project owner/member by default.
   AGENT_ASSIGNEE: [
-    "activity.view", "activity.edit",
+    "activity.view", "activity.edit", "activity.assignable",
     "project.view",
     "ticket.view", "ticket.create", "ticket.reply",
-    "ticket.internalNote", "ticket.assign", "ticket.changeStatus",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
   ],
   // Creates and tracks own tickets within the department.
   REQUESTER: [
@@ -294,18 +315,35 @@ async function main() {
   }
   console.log("✓ Role-permission mappings seeded");
 
-  // Built-in Custom Roles
+  // Built-in Custom Roles — global Role values, plus (below) every
+  // DepartmentRole value, so /admin/roles can show a Department Roles tab
+  // sourced from the same CustomRole table (see the RoleScope enum's
+  // doc-comment in prisma/schema.prisma).
   const builtInRoles = [
-    { key: "ADMIN", name: "Administrator", description: "Full access to all features", isBuiltIn: true },
-    { key: "IT_AGENT", name: "IT Agent", description: "Manage tickets, projects and activities", isBuiltIn: true },
-    { key: "DEPARTMENT_MANAGER", name: "Department Manager", description: "Manage department projects and goals", isBuiltIn: true },
-    { key: "USER", name: "User", description: "Submit and view own tickets", isBuiltIn: true },
+    { key: "ADMIN", name: "Administrator", description: "Full access to all features", isBuiltIn: true, scope: RoleScope.GLOBAL },
+    { key: "IT_AGENT", name: "IT Agent", description: "Manage tickets, projects and activities", isBuiltIn: true, scope: RoleScope.GLOBAL },
+    // Shared roleKey with DepartmentRole.DEPARTMENT_MANAGER (see the
+    // ROLE_PERMISSIONS comment above) — scope BOTH makes it appear on both
+    // /admin/roles tabs rather than needing a second, duplicate row.
+    { key: "DEPARTMENT_MANAGER", name: "Department Manager", description: "Manage department projects and goals", isBuiltIn: true, scope: RoleScope.BOTH },
+    { key: "DIRECTOR", name: "Director", description: "View and create across all departments — tickets, projects, activities and goals", isBuiltIn: true, scope: RoleScope.GLOBAL },
+    { key: "USER", name: "User", description: "Submit and view own tickets", isBuiltIn: true, scope: RoleScope.GLOBAL },
+    // DepartmentRole values (everything except DEPARTMENT_MANAGER, already
+    // listed above) — labels/descriptions reused verbatim from
+    // lib/services/department-role-translation.ts, not re-typed here.
+    ...DEPARTMENT_ROLE_OPTIONS.filter((r) => r !== DepartmentRole.DEPARTMENT_MANAGER).map((r) => ({
+      key: r as string,
+      name: DEPARTMENT_ROLE_LABELS[r],
+      description: DEPARTMENT_ROLE_DESCRIPTIONS[r],
+      isBuiltIn: true,
+      scope: RoleScope.DEPARTMENT,
+    })),
   ];
 
   for (const role of builtInRoles) {
     await prisma.customRole.upsert({
       where: { key: role.key },
-      update: { name: role.name, description: role.description },
+      update: { name: role.name, description: role.description, scope: role.scope },
       create: role,
     });
   }

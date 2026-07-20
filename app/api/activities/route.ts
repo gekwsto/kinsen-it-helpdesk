@@ -8,8 +8,9 @@ import {
   departmentDenialStatus,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { createActivitySchema } from "@/lib/validations";
-import { ActivityStatus, Role } from "@prisma/client";
+import { ActivityStatus } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
   try {
@@ -101,14 +102,14 @@ export async function POST(req: NextRequest) {
     const { dueDate, startDate, assignedUserIds, departmentId: _ignoredDepartmentId, ...rest } = data;
 
     if (assignedUserIds.length > 0) {
-      const adminCount = await prisma.user.count({
-        where: { id: { in: assignedUserIds }, role: Role.ADMIN },
-      });
-      if (adminCount !== assignedUserIds.length) {
-        return NextResponse.json(
-          { error: "Activities can only be assigned to administrators" },
-          { status: 400 }
-        );
+      for (const userId of assignedUserIds) {
+        const assignable = await userHasAssignablePermissionForEntity(userId, "activity", deptResolution.departmentId);
+        if (!assignable) {
+          return NextResponse.json(
+            { error: "One or more selected users cannot be assigned to activities in this department.", code: "assignee_not_assignable" },
+            { status: 400 }
+          );
+        }
       }
     }
 

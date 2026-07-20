@@ -19,7 +19,7 @@ import {
 import { ChevronRight, Loader2 } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 
-interface AdminUser {
+interface AssignableUser {
   id: string;
   name: string | null;
   email: string;
@@ -30,7 +30,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
+  const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
 
   const [title, setTitle] = useState("");
@@ -43,11 +43,9 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [isGoal, setIsGoal] = useState(false);
 
   useEffect(() => {
-    Promise.all([
-      fetch(`/api/projects/${id}`).then((r) => r.json()),
-      fetch("/api/users?role=ADMIN").then((r) => (r.ok ? r.json() : [])),
-    ])
-      .then(([p, admins]) => {
+    fetch(`/api/projects/${id}`)
+      .then((r) => r.json())
+      .then((p) => {
         if (p?.title) {
           setTitle(p.title);
           setDescription(p.description ?? "");
@@ -63,8 +61,14 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
             (p.members ?? []).map((m: { id: string }) => m.id)
           );
           setSelectedMemberIds(existingIds);
+
+          // Eligible members depend on the project's own department —
+          // fetched once we know it, not in parallel with the project itself.
+          const assignableUrl = `/api/users?assignableFor=project${p.departmentId ? `&departmentId=${p.departmentId}` : ""}`;
+          fetch(assignableUrl)
+            .then((r) => (r.ok ? r.json() : []))
+            .then((users) => setAssignableUsers(Array.isArray(users) ? users : []));
         }
-        setAdminUsers(Array.isArray(admins) ? admins : []);
       })
       .finally(() => setLoading(false));
   }, [id]);
@@ -240,14 +244,14 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </p>
             </div>
 
-            {adminUsers.length > 0 && (
-              <div className="space-y-2">
-                <Label>Assigned Administrators</Label>
-                <p className="text-xs text-muted-foreground">
-                  Only administrators can be assigned to projects.
-                </p>
+            <div className="space-y-2">
+              <Label>Members</Label>
+              <p className="text-xs text-muted-foreground">
+                Only users eligible for this workspace are listed.
+              </p>
+              {assignableUsers.length > 0 ? (
                 <div className="border rounded-md divide-y max-h-48 overflow-y-auto">
-                  {adminUsers.map((u) => (
+                  {assignableUsers.map((u) => (
                     <label
                       key={u.id}
                       className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
@@ -262,8 +266,12 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                     </label>
                   ))}
                 </div>
-              </div>
-            )}
+              ) : (
+                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">
+                  No eligible users for this workspace yet.
+                </p>
+              )}
+            </div>
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>

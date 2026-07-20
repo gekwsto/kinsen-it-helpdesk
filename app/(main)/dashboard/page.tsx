@@ -24,7 +24,7 @@ export default async function DashboardPage() {
   const isPersonalView = !(await hasAnyFullTicketView(userId, role));
 
   const activeWorkspace = await getActiveWorkspace(userId, role);
-  if (!activeWorkspace.departmentId) {
+  if (!activeWorkspace.departmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (
@@ -32,7 +32,11 @@ export default async function DashboardPage() {
     );
   }
 
-  const scope = await buildTicketListWhere(userId, role, activeWorkspace.departmentId);
+  const scope = await buildTicketListWhere(
+    userId,
+    role,
+    activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId
+  );
   const ticketWhere = "denied" in scope ? { id: { in: [] as string[] } } : scope;
   const recentActivityWhere = { ticket: ticketWhere };
 

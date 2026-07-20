@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateProjectSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -80,16 +81,16 @@ export async function PATCH(
 
     const { memberIds, startDate, endDate, ...rest } = data;
 
-    // Validate that all assigned members are ADMIN users
     if (memberIds && memberIds.length > 0) {
-      const adminCount = await prisma.user.count({
-        where: { id: { in: memberIds }, role: Role.ADMIN },
-      });
-      if (adminCount !== memberIds.length) {
-        return NextResponse.json(
-          { error: "Project members must be administrators" },
-          { status: 400 }
-        );
+      const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
+      for (const userId of memberIds) {
+        const assignable = await userHasAssignablePermissionForEntity(userId, "project", effectiveDepartmentId);
+        if (!assignable) {
+          return NextResponse.json(
+            { error: "One or more selected members cannot be assigned to projects in this department.", code: "assignee_not_assignable" },
+            { status: 400 }
+          );
+        }
       }
     }
 

@@ -379,7 +379,7 @@ export function TicketFilters({
                   className="h-7 text-xs"
                   onClick={() => handleToggle("myOnly", get("myOnly") !== "true")}
                 >
-                  Assigned to me
+                  Created by me
                 </Button>
               )}
               <Button

@@ -13,6 +13,12 @@ enum Role {
   ADMIN
   IT_AGENT
   DEPARTMENT_MANAGER
+  // Cross-department oversight: view (and create projects/activities) in
+  // every department, without the admin.*/user.manage/role.manage/
+  // department.manage* power Administrator has. See canViewAllDepartments()
+  // in lib/permissions.ts and its use in workspace-service.ts /
+  // department-scope-service.ts.
+  DIRECTOR
   USER
 }
 
@@ -627,15 +633,31 @@ model YearlyGoal {
 
 // ─── Custom Roles ─────────────────────────────────────────────────────────────
 
+// Which role system a CustomRole row represents. RolePermission.roleKey is a
+// bare string shared by both the global Role enum and the DepartmentRole
+// enum (see the RolePermission model below) — this field is what lets
+// /admin/roles show two separate tabs from the same table, and lets the
+// permission-grant route block department-scoped roles from ever getting
+// system-administration permissions (admin.access/user.manage/role.manage).
+// BOTH exists for DEPARTMENT_MANAGER specifically: it's one intentionally
+// shared roleKey used by both Role.DEPARTMENT_MANAGER and
+// DepartmentRole.DEPARTMENT_MANAGER (see prisma/seed.ts) — not two rows.
+enum RoleScope {
+  GLOBAL
+  DEPARTMENT
+  BOTH
+}
+
 model CustomRole {
-  id          String   @id @default(cuid())
-  key         String   @unique
+  id          String    @id @default(cuid())
+  key         String    @unique
   name        String
   description String?
-  isBuiltIn   Boolean  @default(false)
-  users       User[]   @relation("UserCustomRole")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  isBuiltIn   Boolean   @default(false)
+  scope       RoleScope @default(GLOBAL)
+  users       User[]    @relation("UserCustomRole")
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 }
 
 // ─── Permissions ──────────────────────────────────────────────────────────────

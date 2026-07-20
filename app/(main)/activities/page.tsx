@@ -34,7 +34,7 @@ export default async function ActivitiesPage({
   const params = await searchParams;
 
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  if (!activeWorkspace.departmentId) {
+  if (!activeWorkspace.departmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (
@@ -42,7 +42,11 @@ export default async function ActivitiesPage({
     );
   }
 
-  const scope = await buildActivityListWhere(session.user.id, session.user.role, activeWorkspace.departmentId);
+  const scope = await buildActivityListWhere(
+    session.user.id,
+    session.user.role,
+    activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId
+  );
   const andConditions: any[] = ["denied" in scope ? { id: { in: [] as string[] } } : scope];
   if (params.projectId) andConditions.push({ projectId: params.projectId });
 

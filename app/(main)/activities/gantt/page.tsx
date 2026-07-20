@@ -41,9 +41,10 @@ export default async function ActivityGanttPage({
   // Active workspace is the default scope (Phase 2B); an explicit
   // ?departmentId= is still honored as a one-off "explicit scoped view."
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  const effectiveDepartmentId = params.departmentId ?? activeWorkspace.departmentId;
+  const effectiveDepartmentId =
+    params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
-  if (!effectiveDepartmentId) {
+  if (!effectiveDepartmentId && !activeWorkspace.isAllSelected) {
     return activeWorkspace.departments.length === 0 ? (
       <NoWorkspaceState />
     ) : (

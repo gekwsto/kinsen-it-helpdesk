@@ -8,8 +8,8 @@ import {
   departmentDenialStatus,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { createProjectSchema } from "@/lib/validations";
-import { Role } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
   try {
@@ -101,16 +101,15 @@ export async function POST(req: NextRequest) {
 
     const { memberIds, startDate, endDate, departmentId: _ignoredDepartmentId, ...rest } = data;
 
-    // Validate that all assigned members are ADMIN users
     if (memberIds.length > 0) {
-      const adminCount = await prisma.user.count({
-        where: { id: { in: memberIds }, role: Role.ADMIN },
-      });
-      if (adminCount !== memberIds.length) {
-        return NextResponse.json(
-          { error: "Project members must be administrators" },
-          { status: 400 }
-        );
+      for (const userId of memberIds) {
+        const assignable = await userHasAssignablePermissionForEntity(userId, "project", deptResolution.departmentId);
+        if (!assignable) {
+          return NextResponse.json(
+            { error: "One or more selected members cannot be assigned to projects in this department.", code: "assignee_not_assignable" },
+            { status: 400 }
+          );
+        }
       }
     }
 

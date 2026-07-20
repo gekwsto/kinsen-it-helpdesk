@@ -69,7 +69,25 @@ export function canChangeTicketStatus(role: Role): boolean {
 }
 
 export function canManageProjects(role: Role): boolean {
-  return hasRole(role, Role.ADMIN, Role.IT_AGENT, Role.DEPARTMENT_MANAGER);
+  return hasRole(role, Role.ADMIN, Role.IT_AGENT, Role.DEPARTMENT_MANAGER, Role.DIRECTOR);
+}
+
+/**
+ * Cross-department oversight: Admin (full system access) and Director
+ * (view-all + create-anywhere, no admin.access / user.manage / role.manage /
+ * department.manage* power) both see/act across every department, rather
+ * than being scoped to their own DepartmentMembership rows. Every central
+ * scope function in lib/services/department-scope-service.ts and
+ * lib/services/workspace-service.ts that used to special-case
+ * `role === Role.ADMIN` now uses this instead — Director rides the exact
+ * same bypass Admin already had, not a parallel system.
+ *
+ * Deliberately NOT used by requireDepartmentAccess/requireDepartmentPermission
+ * below — those gate department.manageSettings/department.manageMembers
+ * (real department administration), which stays Administrator-only.
+ */
+export function canViewAllDepartments(role: Role): boolean {
+  return role === Role.ADMIN || role === Role.DIRECTOR;
 }
 
 // ─── Dynamic Permission System ────────────────────────────────────────────────

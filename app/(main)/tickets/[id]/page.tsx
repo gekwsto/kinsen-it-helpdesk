@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
 import { canActOnEntity, buildCategoryWhere } from "@/lib/services/department-scope-service";
+import { getAssignableUsersForTicket } from "@/lib/services/assignment-eligibility-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
@@ -109,11 +110,7 @@ export default async function TicketDetailPage({
               })
             : Promise.resolve([]),
           canAssign
-            ? prisma.user.findMany({
-                where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
-                select: { id: true, name: true, email: true, image: true },
-                orderBy: { name: "asc" },
-              })
+            ? getAssignableUsersForTicket(ticket.departmentId)
             : Promise.resolve([]),
         ])
       : Promise.resolve([[], [], [], []]),

@@ -4,6 +4,11 @@ import { requireAdmin } from "@/lib/permissions";
 
 type RouteParams = { params: Promise<{ id: string; permId: string }> };
 
+// Department-scoped roles (DEPARTMENT or the shared BOTH scope) can never
+// reach system administration this way — Administrator stays the only path
+// to these, enforced here (not just hidden/disabled in the UI).
+const GLOBAL_ONLY_PERMISSION_KEYS = new Set(["admin.access", "user.manage", "role.manage"]);
+
 // POST — assign permission to role
 export async function POST(_req: NextRequest, { params }: RouteParams) {
   try {
@@ -15,6 +20,13 @@ export async function POST(_req: NextRequest, { params }: RouteParams) {
 
     const perm = await prisma.permission.findUnique({ where: { id: permId } });
     if (!perm) return NextResponse.json({ error: "Permission not found" }, { status: 404 });
+
+    if (role.scope !== "GLOBAL" && GLOBAL_ONLY_PERMISSION_KEYS.has(perm.key)) {
+      return NextResponse.json(
+        { error: "Department-scoped roles cannot be granted system administration permissions.", code: "global_only_permission" },
+        { status: 400 }
+      );
+    }
 
     await prisma.rolePermission.upsert({
       where: { roleKey_permissionId: { roleKey: role.key, permissionId: permId } },

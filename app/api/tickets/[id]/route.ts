@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, canManageTickets, hasPermission, hasDepartmentPermission } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
@@ -129,6 +130,17 @@ export async function PATCH(
             { status: 403 }
           );
         }
+      }
+    }
+
+    if (data.assignedAgentId) {
+      const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : ticket.departmentId;
+      const assignable = await userHasAssignablePermissionForEntity(data.assignedAgentId, "ticket", effectiveDepartmentId);
+      if (!assignable) {
+        return NextResponse.json(
+          { error: "This user cannot be assigned to tickets in this department.", code: "assignee_not_assignable" },
+          { status: 400 }
+        );
       }
     }
 

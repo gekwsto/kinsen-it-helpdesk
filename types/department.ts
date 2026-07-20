@@ -69,6 +69,14 @@ export type MicrosoftMappingView = Pick<
 
 // ─── Workspace ─────────────────────────────────────────────────────────────────
 
+/**
+ * Cookie/API sentinel for "All Workspaces" — only ever honored for
+ * canViewAllDepartments(role) (lib/permissions.ts). Lives here (not
+ * lib/services/workspace-service.ts) so client components can import it
+ * without pulling in that file's `next/headers` (server-only) import.
+ */
+export const ALL_WORKSPACES_VALUE = "ALL";
+
 // The department a user is currently "in," plus what else they could switch
 // to. `departmentId: null` means no usable department was resolved (either
 // zero memberships — pending-setup state — or more than one with none
@@ -78,6 +86,15 @@ export interface ActiveWorkspaceContext {
   departmentId: string | null;
   /** True for global Role.ADMIN — bypasses membership checks, sees every active department. */
   isSystemAdmin: boolean;
+  /** True for Role.ADMIN or Role.DIRECTOR — see canViewAllDepartments() in lib/permissions.ts. */
+  canViewAllDepartments: boolean;
+  /**
+   * True when the user explicitly picked "All Workspaces" (only offered to
+   * canViewAllDepartments roles) — `departmentId` is null in this case, but
+   * unlike the ambiguous/pending-setup null case for a regular user, it means
+   * "deliberately unrestricted," not "nothing resolved yet."
+   */
+  isAllSelected: boolean;
   departments: DepartmentSummary[];
 }
 

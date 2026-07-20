@@ -1,85 +1,40 @@
-"use client";
-
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { useForm } from "react-hook-form";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { toast } from "sonner";
-import { createProjectSchema, type CreateProjectInput } from "@/lib/validations";
+import { auth } from "@/lib/auth";
+import { redirect } from "next/navigation";
+import { hasPermission } from "@/lib/permissions";
+import { getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { Loader2, ChevronLeft } from "lucide-react";
+import { ProjectForm } from "@/components/projects/project-form";
+import { ChevronLeft } from "lucide-react";
 import Link from "next/link";
-import { ProjectStatus } from "@prisma/client";
 
-interface AdminUser {
-  id: string;
-  name: string | null;
-  email: string;
-}
+export default async function NewProjectPage() {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
 
-export default function NewProjectPage() {
-  const router = useRouter();
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
-  const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
+  const canCreate = await hasPermission(session.user.role, "project.create", session.user.customRoleId);
+  if (!canCreate) redirect("/projects");
 
-  useEffect(() => {
-    fetch("/api/users?role=ADMIN")
-      .then((r) => (r.ok ? r.json() : []))
-      .then((users) => setAdminUsers(Array.isArray(users) ? users : []))
-      .catch(() => {});
-  }, []);
+  // Only departments this user can actually create a project in — the same
+  // set resolveDepartmentForCreate (lib/services/department-scope-service.ts)
+  // validates against on submit, so the dropdown never offers a choice the
+  // API would reject.
+  const [departments, activeWorkspace] = await Promise.all([
+    getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create"),
+    getActiveWorkspace(session.user.id, session.user.role),
+  ]);
 
-  const {
-    register,
-    handleSubmit,
-    setValue,
-    formState: { errors },
-  } = useForm<CreateProjectInput>({
-    resolver: zodResolver(createProjectSchema),
-    defaultValues: { status: ProjectStatus.PLANNING, priority: 2, memberIds: [], isGoal: false },
-  });
-
-  const toggleMember = (userId: string) => {
-    setSelectedMemberIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(userId)) next.delete(userId);
-      else next.add(userId);
-      setValue("memberIds", Array.from(next));
-      return next;
-    });
-  };
-
-  const onSubmit = async (data: CreateProjectInput) => {
-    setIsSubmitting(true);
-    try {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...data, memberIds: Array.from(selectedMemberIds) }),
-      });
-
-      if (!res.ok) throw new Error("Failed to create project");
-      const project = await res.json();
-      toast.success("Project created!");
-      router.push(`/projects/${project.id}`);
-    } catch {
-      toast.error("Failed to create project");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
+  // Preselect the active workspace if it's actually allowed; if there's
+  // exactly one allowed department, that's the obvious choice regardless of
+  // workspace state. Otherwise (multiple choices, or "All Workspaces"
+  // selected) leave it unselected — the form requires an explicit pick.
+  const activeIsAllowed =
+    activeWorkspace.departmentId != null && departments.some((d) => d.id === activeWorkspace.departmentId);
+  const defaultDepartmentId = activeIsAllowed
+    ? (activeWorkspace.departmentId as string)
+    : departments.length === 1
+    ? departments[0].id
+    : undefined;
 
   return (
     <div className="max-w-2xl space-y-6">
@@ -95,141 +50,7 @@ export default function NewProjectPage() {
         </div>
       </div>
 
-      <form onSubmit={handleSubmit(onSubmit)}>
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Project Details</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="title">
-                Title <span className="text-destructive">*</span>
-              </Label>
-              <Input id="title" {...register("title")} placeholder="Project title..." />
-              {errors.title && (
-                <p className="text-xs text-destructive">{errors.title.message}</p>
-              )}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="description">Description</Label>
-              <Textarea
-                id="description"
-                {...register("description")}
-                placeholder="Project description..."
-                className="min-h-[100px]"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Status</Label>
-                <Select
-                  defaultValue={ProjectStatus.PLANNING}
-                  onValueChange={(v) => setValue("status", v as ProjectStatus)}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.values(ProjectStatus).map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s.replace("_", " ")}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div className="space-y-2">
-                <Label>Priority</Label>
-                <Select
-                  defaultValue="2"
-                  onValueChange={(v) => setValue("priority", parseInt(v))}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="3">High</SelectItem>
-                    <SelectItem value="2">Medium</SelectItem>
-                    <SelectItem value="1">Low</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>Start Date</Label>
-                <Input type="date" {...register("startDate")} />
-              </div>
-              <div className="space-y-2">
-                <Label>End Date</Label>
-                <Input type="date" {...register("endDate")} />
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <Label>Success Target</Label>
-              <Textarea
-                {...register("successTarget")}
-                placeholder="What does success look like?"
-                className="min-h-[80px]"
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  className="h-4 w-4 rounded"
-                  {...register("isGoal")}
-                />
-                <span className="text-sm font-medium">This project is a Goal</span>
-              </label>
-              <p className="text-xs text-muted-foreground">
-                Mark this project as a yearly goal for tracking purposes.
-              </p>
-            </div>
-
-            {adminUsers.length > 0 && (
-              <div className="space-y-2">
-                <Label>Assigned Administrators</Label>
-                <p className="text-xs text-muted-foreground">
-                  Only administrators can be assigned to projects.
-                </p>
-                <div className="border rounded-md divide-y max-h-48 overflow-y-auto">
-                  {adminUsers.map((u) => (
-                    <label
-                      key={u.id}
-                      className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
-                    >
-                      <input
-                        type="checkbox"
-                        className="h-4 w-4 rounded"
-                        checked={selectedMemberIds.has(u.id)}
-                        onChange={() => toggleMember(u.id)}
-                      />
-                      <span className="text-sm">{u.name ?? u.email}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            <div className="flex justify-end gap-3 pt-2">
-              <Button type="button" variant="outline" asChild>
-                <Link href="/projects">Cancel</Link>
-              </Button>
-              <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                Create Project
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </form>
+      <ProjectForm departments={departments} defaultDepartmentId={defaultDepartmentId} />
     </div>
   );
 }

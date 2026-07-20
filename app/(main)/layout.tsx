@@ -28,6 +28,8 @@ export default async function MainLayout({
       initialDepartmentId={activeWorkspace.departmentId}
       departments={activeWorkspace.departments}
       isSystemAdmin={activeWorkspace.isSystemAdmin}
+      canViewAllDepartments={activeWorkspace.canViewAllDepartments}
+      initialIsAllSelected={activeWorkspace.isAllSelected}
     >
       <div className="flex h-screen overflow-hidden bg-background">
         <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} />

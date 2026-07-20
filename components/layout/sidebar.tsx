@@ -51,10 +51,11 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
   };
 
   const ticketChildren = [
-    ...(["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"].includes(userRole)
+    ...(["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"].includes(userRole)
       ? [{ label: "All Tickets", href: "/tickets" }]
       : []),
-    { label: "My Tickets", href: "/my-tickets" },
+    { label: "Assigned to Me", href: "/tickets/assigned-to-me" },
+    { label: "Created by Me", href: "/tickets/created-by-me" },
     ...(canCreateTicket ? [{ label: "Create Ticket", href: "/tickets/new" }] : []),
     ...(userRole === "ADMIN"
       ? [{ label: "Closed Tickets", href: "/tickets/closed", roles: ["ADMIN"] as Role[] }]
@@ -77,19 +78,19 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       label: "Projects",
       href: "/projects",
       icon: FolderKanban,
-      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[],
+      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
       children: [
-        { label: "All Projects", href: "/projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
-        { label: "My Projects", href: "/my-projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
-        { label: "New Project", href: "/projects/new", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
-        { label: "Project Gantt", href: "/projects/gantt", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[] },
+        { label: "All Projects", href: "/projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
+        { label: "My Projects", href: "/my-projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
+        { label: "New Project", href: "/projects/new", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
+        { label: "Project Gantt", href: "/projects/gantt", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
       ],
     },
     {
       label: "Activities",
       href: "/activities",
       icon: CheckSquare,
-      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[],
+      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
       children: [
         { label: "All Activities", href: "/activities" },
         { label: "My Activities", href: "/my-activities" },
@@ -101,7 +102,7 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       label: "Goals",
       href: "/goals",
       icon: Target,
-      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER"] as Role[],
+      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
     },
     {
       label: "Administration",

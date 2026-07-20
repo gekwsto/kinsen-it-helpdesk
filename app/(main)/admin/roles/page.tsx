@@ -17,12 +17,15 @@ import {
 import { Loader2, Plus, Pencil, Trash2, ShieldCheck, Shield } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+type RoleScope = "GLOBAL" | "DEPARTMENT" | "BOTH";
+
 interface CustomRole {
   id: string;
   key: string;
   name: string;
   description?: string | null;
   isBuiltIn: boolean;
+  scope: RoleScope;
 }
 
 interface Permission {
@@ -43,7 +46,14 @@ const MODULE_LABELS: Record<string, string> = {
   activities: "Activities",
   goals: "Goals",
   admin: "Administration",
+  department: "Department",
 };
+
+// Global-role-only permissions — the permission-grant route also rejects
+// these server-side for DEPARTMENT/BOTH-scope roles (defense in depth, not
+// just a UI hint); department-scoped roles can never reach system
+// administration this way.
+const GLOBAL_ONLY_PERMISSION_KEYS = new Set(["admin.access", "user.manage", "role.manage"]);
 
 export default function RolesAdminPage() {
   const [loading, setLoading] = useState(true);
@@ -52,6 +62,7 @@ export default function RolesAdminPage() {
   const [rolePerms, setRolePerms] = useState<Set<string>>(new Set());
   const [selectedRole, setSelectedRole] = useState<CustomRole | null>(null);
   const [toggling, setToggling] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"global" | "department">("global");
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -87,7 +98,8 @@ export default function RolesAdminPage() {
       );
       setRolePerms(set);
       if (!selectedRole && data.roles?.length > 0) {
-        setSelectedRole(data.roles[0]);
+        const firstGlobal = (data.roles as CustomRole[]).find((r) => r.scope !== "DEPARTMENT");
+        setSelectedRole(firstGlobal ?? data.roles[0]);
       }
     } catch {
       toast.error("Failed to load roles");
@@ -244,6 +256,21 @@ export default function RolesAdminPage() {
 
   const modules = [...new Set(permissions.map((p) => p.module))].sort();
 
+  // DEPARTMENT_MANAGER (scope BOTH) intentionally appears on both tabs — it's
+  // one shared roleKey for the global Role.DEPARTMENT_MANAGER and
+  // DepartmentRole.DEPARTMENT_MANAGER, not two separate roles.
+  const globalRoles = roles.filter((r) => r.scope !== "DEPARTMENT");
+  const departmentRoles = roles.filter((r) => r.scope !== "GLOBAL");
+  const visibleRoles = activeTab === "global" ? globalRoles : departmentRoles;
+
+  const switchTab = (tab: "global" | "department") => {
+    setActiveTab(tab);
+    const list = tab === "global" ? globalRoles : departmentRoles;
+    if (!selectedRole || !list.some((r) => r.id === selectedRole.id)) {
+      setSelectedRole(list[0] ?? null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -261,18 +288,48 @@ export default function RolesAdminPage() {
         </p>
       </div>
 
+      {/* Global Roles / Department Roles tabs */}
+      <div className="flex items-center gap-1 border-b">
+        <button
+          onClick={() => switchTab("global")}
+          className={cn(
+            "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+            activeTab === "global"
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          Global Roles
+        </button>
+        <button
+          onClick={() => switchTab("department")}
+          className={cn(
+            "px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+            activeTab === "department"
+              ? "border-primary text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          )}
+        >
+          Department Roles
+        </button>
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-[280px_1fr]">
         {/* Role list */}
         <div className="space-y-2">
           <div className="flex items-center justify-between mb-3">
-            <p className="text-sm font-medium text-muted-foreground">All Roles</p>
-            <Button size="sm" onClick={() => setCreateOpen(true)}>
-              <Plus className="h-3.5 w-3.5 mr-1" />
-              New Role
-            </Button>
+            <p className="text-sm font-medium text-muted-foreground">
+              {activeTab === "global" ? "Global Roles" : "Department Roles"}
+            </p>
+            {activeTab === "global" && (
+              <Button size="sm" onClick={() => setCreateOpen(true)}>
+                <Plus className="h-3.5 w-3.5 mr-1" />
+                New Role
+              </Button>
+            )}
           </div>
 
-          {roles.map((role) => (
+          {visibleRoles.map((role) => (
             <div
               key={role.id}
               onClick={() => setSelectedRole(role)}
@@ -297,16 +354,18 @@ export default function RolesAdminPage() {
                 </div>
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button
-                  onClick={(e) => { e.stopPropagation(); openEdit(role); }}
-                  className={cn(
-                    "p-1 rounded hover:bg-black/10 transition-colors",
-                    selectedRole?.id === role.id ? "text-primary-foreground" : "text-muted-foreground"
-                  )}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </button>
-                {role.key !== "ADMIN" && (
+                {role.scope !== "DEPARTMENT" && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); openEdit(role); }}
+                    className={cn(
+                      "p-1 rounded hover:bg-black/10 transition-colors",
+                      selectedRole?.id === role.id ? "text-primary-foreground" : "text-muted-foreground"
+                    )}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                {!role.isBuiltIn && (
                   <button
                     onClick={(e) => { e.stopPropagation(); setDeleteTarget(role); setDeleteOpen(true); }}
                     className="p-1 rounded hover:bg-red-100 text-red-500 transition-colors"
@@ -337,6 +396,11 @@ export default function RolesAdminPage() {
                       {selectedRole.description && (
                         <p className="text-sm text-muted-foreground mt-1">{selectedRole.description}</p>
                       )}
+                      {selectedRole.scope === "BOTH" && (
+                        <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-1 mt-2 inline-block">
+                          Shared with the global Department Manager role — editing permissions here affects both.
+                        </p>
+                      )}
                     </div>
                     {selectedRole.key === "ADMIN" && (
                       <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
@@ -357,6 +421,7 @@ export default function RolesAdminPage() {
                 modules.map((module) => {
                   const modulePerms = permissions.filter((p) => p.module === module);
                   const assignedCount = modulePerms.filter((p) => isAssigned(selectedRole, p.id)).length;
+                  const hasAssignablePerm = modulePerms.some((p) => p.key.endsWith(".assignable"));
                   return (
                     <Card key={module}>
                       <CardHeader className="pb-3">
@@ -368,16 +433,26 @@ export default function RolesAdminPage() {
                             {assignedCount}/{modulePerms.length}
                           </span>
                         </div>
+                        {hasAssignablePerm && (
+                          <p className="text-xs text-muted-foreground pt-1">
+                            &quot;Can be assigned to…&quot; permissions control whether users with this role appear in
+                            assignee dropdowns — separate from being able to assign others.
+                          </p>
+                        )}
                       </CardHeader>
                       <CardContent>
                         <div className="space-y-2">
                           {modulePerms.map((perm) => {
                             const assigned = isAssigned(selectedRole, perm.id);
                             const key = `${selectedRole.key}:${perm.id}`;
+                            const restricted = selectedRole.scope !== "GLOBAL" && GLOBAL_ONLY_PERMISSION_KEYS.has(perm.key);
                             return (
                               <label
                                 key={perm.id}
-                                className="flex items-center gap-3 p-2 rounded-lg hover:bg-muted/50 cursor-pointer transition-colors"
+                                className={cn(
+                                  "flex items-center gap-3 p-2 rounded-lg transition-colors",
+                                  restricted ? "opacity-50 cursor-not-allowed" : "hover:bg-muted/50 cursor-pointer"
+                                )}
                               >
                                 {toggling === key ? (
                                   <Loader2 className="h-4 w-4 animate-spin text-muted-foreground flex-shrink-0" />
@@ -385,14 +460,25 @@ export default function RolesAdminPage() {
                                   <input
                                     type="checkbox"
                                     checked={assigned}
+                                    disabled={restricted}
                                     onChange={() => togglePerm(perm)}
-                                    className="h-4 w-4 rounded flex-shrink-0 cursor-pointer"
+                                    className="h-4 w-4 rounded flex-shrink-0 cursor-pointer disabled:cursor-not-allowed"
                                   />
                                 )}
                                 <div className="min-w-0">
-                                  <p className="text-sm font-medium">{perm.key}</p>
+                                  <p className="text-sm font-medium">
+                                    {perm.key}
+                                    {perm.key.endsWith(".assignable") && (
+                                      <span className="ml-1.5 text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full align-middle">
+                                        Assignable
+                                      </span>
+                                    )}
+                                  </p>
                                   {perm.description && (
                                     <p className="text-xs text-muted-foreground">{perm.description}</p>
+                                  )}
+                                  {restricted && (
+                                    <p className="text-xs text-amber-700">System administration — Administrator only.</p>
                                   )}
                                 </div>
                               </label>

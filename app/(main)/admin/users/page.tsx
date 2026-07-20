@@ -4,7 +4,15 @@ import { requireAdmin } from "@/lib/permissions";
 import { redirect } from "next/navigation";
 import { UserManagement } from "@/components/admin/user-management";
 
-export default async function UsersAdminPage() {
+interface SearchParams {
+  departmentId?: string;
+}
+
+export default async function UsersAdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
   const session = await auth();
   if (!session?.user) redirect("/login");
 
@@ -14,8 +22,26 @@ export default async function UsersAdminPage() {
     redirect("/dashboard");
   }
 
+  const params = await searchParams;
+  const selectedDepartmentId = params.departmentId && params.departmentId !== "all" ? params.departmentId : "all";
+
+  // "All" (default) = every user, including legacy-null-department and
+  // memberless ones. A specific department = active DepartmentMembership in
+  // it OR the legacy User.departmentId field — matched via OR on the same
+  // findMany call, so a user row is never duplicated (no fan-out join).
+  const userWhere =
+    selectedDepartmentId === "all"
+      ? {}
+      : {
+          OR: [
+            { departmentMemberships: { some: { departmentId: selectedDepartmentId, isActive: true } } },
+            { departmentId: selectedDepartmentId },
+          ],
+        };
+
   const [users, departments, businessUnits] = await Promise.all([
     prisma.user.findMany({
+      where: userWhere,
       orderBy: { name: "asc" },
       include: {
         department: { select: { id: true, name: true } },
@@ -47,6 +73,7 @@ export default async function UsersAdminPage() {
         departments={departments}
         businessUnits={businessUnits}
         currentUserId={session.user.id}
+        selectedDepartmentId={selectedDepartmentId}
       />
     </div>
   );

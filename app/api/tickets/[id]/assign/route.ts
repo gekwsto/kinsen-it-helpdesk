@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { assignTicketSchema } from "@/lib/validations";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 
@@ -26,6 +27,16 @@ export async function PATCH(
 
     const body = await req.json();
     const { assignedAgentId } = assignTicketSchema.parse(body);
+
+    if (assignedAgentId) {
+      const assignable = await userHasAssignablePermissionForEntity(assignedAgentId, "ticket", ticket.departmentId);
+      if (!assignable) {
+        return NextResponse.json(
+          { error: "This user cannot be assigned to tickets in this department.", code: "assignee_not_assignable" },
+          { status: 400 }
+        );
+      }
+    }
 
     const [oldAgent, newAgent] = await Promise.all([
       ticket.assignedAgentId
