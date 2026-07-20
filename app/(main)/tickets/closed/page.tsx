@@ -17,6 +17,7 @@ interface SearchParams {
   priorityId?: string;
   categoryId?: string;
   departmentId?: string;
+  subDepartmentId?: string;
   assignedAgentId?: string;
   sortBy?: string;
   sortDir?: string;
@@ -83,6 +84,7 @@ export default async function ClosedTicketsPage({
       ],
     });
   }
+  if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
   if (params.statusId) andConditions.push({ statusId: params.statusId });
   if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
   if (params.categoryId) andConditions.push({ categoryId: params.categoryId });

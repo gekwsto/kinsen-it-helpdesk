@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAdmin } from "@/lib/permissions";
+import { requireAdmin, requireAuth, hasPermission } from "@/lib/permissions";
 import { createDepartmentSchema } from "@/lib/validations";
 import { createDepartment } from "@/lib/services/department-service";
 
@@ -22,7 +22,10 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    await requireAdmin();
+    const session = await requireAuth();
+    const allowed = await hasPermission(session.user.role, "department.create", session.user.customRoleId);
+    if (!allowed) return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
+
     const body = await req.json();
     const data = createDepartmentSchema.parse(body);
     // Slug is auto-generated from name (collision-checked) — the request

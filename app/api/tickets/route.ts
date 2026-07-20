@@ -8,6 +8,7 @@ import {
   departmentDenialStatus,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -28,6 +29,7 @@ export async function GET(req: NextRequest) {
     const categoryId = searchParams.get("categoryId");
     const assignedAgentId = searchParams.get("assignedAgentId");
     const departmentId = searchParams.get("departmentId");
+    const subDepartmentId = searchParams.get("subDepartmentId");
     const source = searchParams.get("source"); // WEB | EMAIL
     const createdAfter = searchParams.get("createdAfter");
     const createdBefore = searchParams.get("createdBefore");
@@ -53,6 +55,9 @@ export async function GET(req: NextRequest) {
 
     const andConditions: any[] = [scope];
     if (myOnly) andConditions.push({ requesterId: session.user.id });
+    // A narrowing filter within whatever department scope already resolved
+    // above — never a second access-control dimension (see Decision §0.5).
+    if (subDepartmentId) andConditions.push({ subDepartmentId });
 
     if (search) {
       const numSearch = parseInt(search);
@@ -188,6 +193,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (data.subDepartmentId) {
+      const valid = await validateSubDepartmentInDepartment(data.subDepartmentId, deptResolution.departmentId);
+      if (!valid) {
+        return NextResponse.json(
+          { error: "The selected sub-department does not belong to this ticket's department.", code: "subdepartment_department_mismatch" },
+          { status: 400 }
+        );
+      }
+    }
+
     const defaultStatus = await prisma.ticketStatus.findFirst({
       where: { isDefault: true },
     });
@@ -209,8 +224,15 @@ export async function POST(req: NextRequest) {
         categoryId: data.categoryId,
         priorityId: data.priorityId,
         departmentId: deptResolution.departmentId,
+        subDepartmentId: data.subDepartmentId,
         projectId: data.projectId,
         activityId: data.activityId,
+        // The requester is always the creator, so both share flags are
+        // accepted unconditionally (owner bypass) — still defensively
+        // coerced server-side per "shareWithSubDepartment requires a
+        // subDepartmentId", not just relying on the UI disabling the checkbox.
+        shareWithDepartment: data.shareWithDepartment,
+        shareWithSubDepartment: data.subDepartmentId ? data.shareWithSubDepartment : false,
       },
       include: {
         status: true,

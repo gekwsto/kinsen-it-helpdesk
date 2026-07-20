@@ -1,6 +1,8 @@
 import { DepartmentRole, Role } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships, getMembership } from "@/lib/services/department-membership-service";
 import { getDefaultLegacyDepartmentId, listDepartments, toDepartmentSummary } from "@/lib/services/department-service";
+import { getUserSubDepartmentIds, getSubDepartmentMembership } from "@/lib/services/sub-department-membership-service";
 import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
 import { hasDepartmentPermission, canViewAllDepartments } from "@/lib/permissions";
 import type { DepartmentSummary } from "@/types/department";
@@ -54,7 +56,7 @@ async function getDepartmentIdsWithPermission(userId: string, permissionKey: str
   const memberships = await getUserDepartmentMemberships(userId);
   const ids: string[] = [];
   for (const m of memberships) {
-    if (await hasDepartmentPermission(m.role, permissionKey)) ids.push(m.departmentId);
+    if (await hasDepartmentPermission(m.role, permissionKey, m.customRoleId)) ids.push(m.departmentId);
   }
   return ids;
 }
@@ -77,9 +79,26 @@ export async function getAccessibleDepartmentSummaries(
   const memberships = await getUserDepartmentMemberships(userId);
   const result: DepartmentSummary[] = [];
   for (const m of memberships) {
-    if (await hasDepartmentPermission(m.role, permissionKey)) result.push(m.department);
+    if (await hasDepartmentPermission(m.role, permissionKey, m.customRoleId)) result.push(m.department);
   }
   return result;
+}
+
+/**
+ * SubDepartment ids where `userId` has an active SubDepartmentMembership AND
+ * the parent department is in `ownOnlyDepartmentIds` — the exact set the
+ * ticket-sharing OR-clauses below widen visibility for. Deliberately never
+ * computed for full-view departments: a full-view member already sees every
+ * ticket in the department regardless of share flags, so it would be a
+ * no-op there.
+ */
+async function getUserShareEligibleSubDepartmentIds(userId: string, ownOnlyDepartmentIds: string[]): Promise<string[]> {
+  if (ownOnlyDepartmentIds.length === 0) return [];
+  const rows = await prisma.subDepartmentMembership.findMany({
+    where: { userId, isActive: true, departmentId: { in: ownOnlyDepartmentIds }, subDepartment: { isActive: true } },
+    select: { subDepartmentId: true },
+  });
+  return rows.map((r) => r.subDepartmentId);
 }
 
 /** Splits a user's ticket-viewable departments into "sees everyone's tickets" vs "own tickets only" (DepartmentRole.REQUESTER). */
@@ -88,7 +107,7 @@ async function splitTicketViewScope(userId: string): Promise<{ fullView: string[
   const fullView: string[] = [];
   const ownOnly: string[] = [];
   for (const m of memberships) {
-    const allowed = await hasDepartmentPermission(m.role, "ticket.view");
+    const allowed = await hasDepartmentPermission(m.role, "ticket.view", m.customRoleId);
     if (!allowed) continue;
     if (m.role === DepartmentRole.REQUESTER) ownOnly.push(m.departmentId);
     else fullView.push(m.departmentId);
@@ -142,11 +161,27 @@ export async function buildTicketListWhere(
     const isOwn = !isFull && ownOnly.includes(requestedDepartmentId);
     if (!isFull && !isOwn) return { denied: "invalid_department" };
 
-    const base = isFull
-      ? { departmentId: requestedDepartmentId }
-      : { departmentId: requestedDepartmentId, requesterId: userId };
+    let base: Record<string, unknown>;
+    if (isFull) {
+      base = { departmentId: requestedDepartmentId };
+    } else {
+      // Own-only (REQUESTER-tier): normally just their own tickets, widened
+      // by whichever sharing flags the ticket itself opted into.
+      const shareSubDeptIds = await getUserShareEligibleSubDepartmentIds(userId, [requestedDepartmentId]);
+      base = {
+        OR: [
+          { departmentId: requestedDepartmentId, requesterId: userId },
+          { departmentId: requestedDepartmentId, shareWithDepartment: true },
+          ...(shareSubDeptIds.length > 0
+            ? [{ subDepartmentId: { in: shareSubDeptIds }, shareWithSubDepartment: true }]
+            : []),
+        ],
+      };
+    }
     if (legacyId !== requestedDepartmentId) return base;
 
+    // Legacy (departmentId: null) rows predate department scoping entirely —
+    // sharing doesn't apply to them, own-only still means own-only here.
     const legacyBase = isFull ? { departmentId: null } : { departmentId: null, requesterId: userId };
     return { OR: [base, legacyBase] };
   }
@@ -158,11 +193,87 @@ export async function buildTicketListWhere(
   }
   if (ownOnly.length > 0) {
     orClauses.push({ departmentId: { in: ownOnly }, requesterId: userId });
+    orClauses.push({ departmentId: { in: ownOnly }, shareWithDepartment: true });
+    const shareSubDeptIds = await getUserShareEligibleSubDepartmentIds(userId, ownOnly);
+    if (shareSubDeptIds.length > 0) {
+      orClauses.push({ subDepartmentId: { in: shareSubDeptIds }, shareWithSubDepartment: true });
+    }
     if (legacyId && ownOnly.includes(legacyId)) orClauses.push({ departmentId: null, requesterId: userId });
   }
 
   if (orClauses.length === 0) return NO_MATCH_WHERE;
   return orClauses.length === 1 ? orClauses[0] : { OR: orClauses };
+}
+
+/**
+ * Ticket-specific view gate for a single already-fetched ticket (GET
+ * /api/tickets/[id]) — sharing grants VIEW only, never edit, and is
+ * ticket-only (Project/Activity have no share flags, use canActOnEntity
+ * directly). Falls back to the existing canActOnEntity for every case that
+ * already worked (admin/director, full department view, assignee,
+ * requester) — sharing only ever adds visibility on top of that, never
+ * removes it.
+ */
+export async function canViewTicket(
+  userId: string,
+  role: Role,
+  ticket: {
+    departmentId: string | null;
+    subDepartmentId: string | null;
+    requesterId: string;
+    shareWithDepartment: boolean;
+    shareWithSubDepartment: boolean;
+  }
+): Promise<boolean> {
+  const isOwner = ticket.requesterId === userId;
+  if (await canActOnEntity(userId, role, ticket.departmentId, "ticket.view", isOwner)) return true;
+  if (!ticket.departmentId) return false;
+
+  const membership = await getMembership(userId, ticket.departmentId);
+  if (!membership) return false;
+  const hasBaseline = await hasDepartmentPermission(membership.role, "ticket.view", membership.customRoleId);
+  if (!hasBaseline) return false;
+
+  if (ticket.shareWithDepartment) return true;
+  if (ticket.shareWithSubDepartment && ticket.subDepartmentId) {
+    const subMembership = await getSubDepartmentMembership(userId, ticket.subDepartmentId);
+    if (subMembership) return true;
+  }
+  return false;
+}
+
+/**
+ * Nav-visibility flags for the sidebar (app/(main)/layout.tsx) — computed
+ * server-side, mirroring the existing canCreateTicket pattern. Sidebar
+ * hiding is UX only; every route below still enforces its own permission
+ * regardless of these flags.
+ */
+export interface NavVisibilityFlags {
+  canViewAdminSubDepartments: boolean;
+  canViewMyDepartments: boolean;
+  canViewMySubDepartments: boolean;
+}
+
+export async function getNavVisibilityFlags(
+  userId: string,
+  role: Role,
+  customRoleId?: string | null
+): Promise<NavVisibilityFlags> {
+  if (canViewAllDepartments(role)) {
+    return { canViewAdminSubDepartments: true, canViewMyDepartments: true, canViewMySubDepartments: true };
+  }
+
+  const [accessibleSubDeptDepartments, memberships, subDeptIds] = await Promise.all([
+    getAccessibleDepartmentSummaries(userId, role, "subdepartment.view"),
+    getUserDepartmentMemberships(userId),
+    getUserSubDepartmentIds(userId),
+  ]);
+
+  return {
+    canViewAdminSubDepartments: accessibleSubDeptDepartments.length > 0,
+    canViewMyDepartments: memberships.length > 0,
+    canViewMySubDepartments: accessibleSubDeptDepartments.length > 0 || subDeptIds.length > 0,
+  };
 }
 
 /** Shared shape for Project/Activity list scoping — accessible department + permission key, no own/all split. */
@@ -244,7 +355,7 @@ export async function canActOnEntity(
   const membership = await getMembership(userId, effectiveDeptId);
   if (!membership) return false;
 
-  return hasDepartmentPermission(membership.role, permissionKey);
+  return hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
 }
 
 /**
@@ -265,7 +376,7 @@ export async function resolveDepartmentForCreate(
     if (canViewAllDepartments(role)) return { departmentId: requestedDepartmentId };
     const membership = await getMembership(userId, requestedDepartmentId);
     if (!membership) return { denied: "invalid_department" };
-    const allowed = await hasDepartmentPermission(membership.role, permissionKey);
+    const allowed = await hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
     if (!allowed) return { denied: "invalid_department" };
     return { departmentId: requestedDepartmentId };
   }
@@ -279,7 +390,7 @@ export async function resolveDepartmentForCreate(
 
   const membership = await getMembership(userId, workspace.departmentId);
   if (!membership) return { denied: "pending_setup" };
-  const allowed = await hasDepartmentPermission(membership.role, permissionKey);
+  const allowed = await hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
   if (!allowed) return { denied: "invalid_department" };
   return { departmentId: workspace.departmentId };
 }

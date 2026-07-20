@@ -37,23 +37,62 @@ const PERMISSIONS = [
   { key: "ticket.assign", description: "Assign tickets to agents", module: "tickets" },
   { key: "ticket.changeStatus", description: "Change ticket status", module: "tickets" },
   { key: "ticket.assignable", description: "Can be assigned to tickets", module: "tickets" },
+  // Ticket-only: moving a ticket to a different Department/SubDepartment
+  // (never Project/Activity — those keep their existing department-move
+  // permission checks unchanged) and opting a ticket into department-/
+  // subdepartment-wide visibility. See canViewTicket/buildTicketListWhere in
+  // department-scope-service.ts.
+  { key: "ticket.department.change", description: "Change a ticket's department/sub-department", module: "tickets" },
+  { key: "ticket.share.department", description: "Share a ticket with the whole department", module: "tickets" },
+  { key: "ticket.share.subdepartment", description: "Share a ticket with the whole sub-department", module: "tickets" },
   // Admin
   { key: "admin.access", description: "Access admin panel", module: "admin" },
   { key: "user.manage", description: "Manage users", module: "admin" },
   { key: "role.manage", description: "Manage roles and permissions", module: "admin" },
   // Department (Phase 3) — department-scoped admin capabilities, granted via
   // DepartmentRole membership rather than the global Role/CustomRole system.
+  { key: "department.view", description: "View department details", module: "department" },
   { key: "department.manageSettings", description: "Edit department settings and categories", module: "department" },
+  // Kept seeded/available even though department.user.assign/unassign below
+  // are now the literal gate on the member add/remove routes — nothing else
+  // currently depends on this key being removed.
   { key: "department.manageMembers", description: "Manage department memberships", module: "department" },
+  { key: "department.create", description: "Create departments", module: "department" },
+  { key: "department.update", description: "Edit department settings (structural — name/slug/active)", module: "department" },
+  { key: "department.delete", description: "Delete or disable departments", module: "department" },
+  { key: "department.user.assign", description: "Assign users to a department", module: "department" },
+  { key: "department.user.unassign", description: "Remove users from a department", module: "department" },
+  // Sub-Department
+  { key: "subdepartment.view", description: "View sub-departments", module: "subdepartment" },
+  { key: "subdepartment.create", description: "Create sub-departments", module: "subdepartment" },
+  { key: "subdepartment.update", description: "Edit sub-departments", module: "subdepartment" },
+  { key: "subdepartment.delete", description: "Delete or disable sub-departments", module: "subdepartment" },
+  { key: "subdepartment.user.assign", description: "Assign users to a sub-department", module: "subdepartment" },
+  { key: "subdepartment.user.unassign", description: "Remove users from a sub-department", module: "subdepartment" },
+  // Department Role management (CustomRole rows with scope DEPARTMENT/BOTH) —
+  // distinct from role.manage, which already covers all roles (global and
+  // department) unconditionally; these let an admin grant JUST department-role
+  // management without granting full Roles & Permissions access.
+  { key: "role.department.create", description: "Create department roles", module: "admin" },
+  { key: "role.department.update", description: "Edit department role permissions", module: "admin" },
+  { key: "role.department.delete", description: "Delete department roles", module: "admin" },
 ];
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
+  // Cosmetic only: Role.ADMIN unconditionally bypasses hasPermission before
+  // this table is ever consulted (see lib/permissions.ts), so this entry
+  // never gates actual admin access — it exists so the now-editable
+  // Administrator matrix in /admin/roles starts fully checked instead of
+  // empty. Only applied once, the first time ADMIN has zero RolePermission
+  // rows (true today) — see the bootstrap-once guard below.
+  ADMIN: PERMISSIONS.map((p) => p.key),
   IT_AGENT: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
     "project.view", "project.create", "project.edit",
     "goal.view",
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
+    "ticket.share.department", "ticket.share.subdepartment",
   ],
   // Shared roleKey: both the global Role.DEPARTMENT_MANAGER enum value and
   // the new DepartmentRole.DEPARTMENT_MANAGER value resolve permissions via
@@ -64,6 +103,10 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "project.view", "project.create", "project.edit", "project.assignable",
     "goal.view", "goal.create", "goal.edit",
     "ticket.view", "ticket.create", "ticket.reply", "ticket.assignable",
+    "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
+    "department.view", "department.user.assign", "department.user.unassign",
+    "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
+    "subdepartment.user.assign", "subdepartment.user.unassign",
   ],
   USER: [
     "activity.view",
@@ -77,6 +120,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "project.view", "project.create",
     "activity.view", "activity.create",
     "goal.view",
+    "department.view", "subdepartment.view",
   ],
   // ─── DepartmentRole keys (Phase 1 multi-department RBAC) ──────────────────
   // Full control of one department's projects/tickets/activities/goals.
@@ -86,7 +130,11 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "goal.view", "goal.create", "goal.edit", "goal.delete",
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
-    "department.manageSettings", "department.manageMembers",
+    "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
+    "department.view", "department.manageSettings", "department.manageMembers",
+    "department.user.assign", "department.user.unassign",
+    "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
+    "subdepartment.user.assign", "subdepartment.user.unassign",
   ],
   // Owns projects/Gantt within the department, not ticket triage or membership.
   // ticket.assignable stays off — a Project Manager isn't a ticket handler
@@ -106,6 +154,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "project.view",
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
+    "ticket.share.department", "ticket.share.subdepartment",
   ],
   // Creates and tracks own tickets within the department.
   REQUESTER: [
@@ -301,8 +350,19 @@ async function main() {
   }
   console.log("✓ Permissions seeded");
 
-  // Role-Permission Mappings
+  // Role-Permission Mappings — bootstrap-once per role, not re-synced on
+  // every run. If a role already has ANY RolePermission rows (from a prior
+  // seed run, or because an admin has since edited its permissions via
+  // /admin/roles), its entire default-permission loop is skipped entirely.
+  // Without this guard, an admin removing one permission from a role that
+  // still has others would see that single pair silently recreated on the
+  // next `db:seed` — this table is non-destructive and never reverts
+  // admin-customized role permissions. Trade-off, deliberate: a future code
+  // change adding a new default key to an already-seeded role's entry here
+  // will NOT retroactively apply to existing databases.
   for (const [roleKey, permKeys] of Object.entries(ROLE_PERMISSIONS)) {
+    const existingCount = await prisma.rolePermission.count({ where: { roleKey } });
+    if (existingCount > 0) continue;
     for (const permKey of permKeys) {
       const perm = await prisma.permission.findUnique({ where: { key: permKey } });
       if (!perm) continue;
@@ -340,10 +400,13 @@ async function main() {
     })),
   ];
 
+  // Create-if-missing only — an admin-renamed/redescribed built-in role
+  // (now editable via PATCH /api/admin/roles/[id]) must never be reverted
+  // back to these hardcoded defaults on a later `db:seed` run.
   for (const role of builtInRoles) {
     await prisma.customRole.upsert({
       where: { key: role.key },
-      update: { name: role.name, description: role.description, scope: role.scope },
+      update: {},
       create: role,
     });
   }

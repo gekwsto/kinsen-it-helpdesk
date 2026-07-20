@@ -23,6 +23,7 @@ interface SearchParams {
   priorityId?: string;
   categoryId?: string;
   departmentId?: string;
+  subDepartmentId?: string;
   assignedAgentId?: string;
   source?: string;
   createdAfter?: string;
@@ -128,6 +129,7 @@ export default async function AllTicketsPage({
       ],
     });
   }
+  if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
   if (params.statusId) andConditions.push({ statusId: params.statusId });
   if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
   if (params.categoryId) andConditions.push({ categoryId: params.categoryId });
@@ -163,6 +165,7 @@ export default async function AllTicketsPage({
           category: { select: { id: true, name: true, color: true } },
           department: { select: { id: true, name: true } },
           project: { select: { id: true, title: true } },
+          departmentChangedBy: { select: { id: true, name: true, email: true } },
           _count: { select: { messages: true, attachments: true } },
         },
       }),

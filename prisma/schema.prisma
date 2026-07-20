@@ -190,6 +190,13 @@ model DepartmentMembership {
   department   Department       @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   departmentId String
   role         DepartmentRole
+  // Custom department-scoped role (CustomRole.scope DEPARTMENT/BOTH) — when
+  // set, this is the source of truth for permission checks (mirrors
+  // User.customRoleId exactly) and `role` above just holds a required,
+  // unused placeholder (VIEWER). See getEffectiveDepartmentRoleKey in
+  // lib/permissions.ts.
+  customRole   CustomRole?      @relation("DepartmentMembershipCustomRole", fields: [customRoleId], references: [id], onDelete: SetNull)
+  customRoleId String?
   source       MembershipSource
   isPrimary    Boolean          @default(false)
   isActive     Boolean          @default(true)
@@ -199,6 +206,7 @@ model DepartmentMembership {
   @@unique([userId, departmentId])
   @@index([departmentId])
   @@index([userId])
+  @@index([customRoleId])
 }
 
 // Pure data table: maps a Microsoft/Entra signal (profile department string,
@@ -258,13 +266,51 @@ model MicrosoftDirectoryJobTitleValue {
 }
 
 model SubDepartment {
-  id           String     @id @default(cuid())
+  id           String                    @id @default(cuid())
   name         String
-  department   Department @relation(fields: [departmentId], references: [id])
+  slug         String?
+  description  String?
+  isActive     Boolean                   @default(true)
+  department   Department                @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   departmentId String
+  // Legacy single-FK relation — kept unchanged (see User.subDepartmentId).
+  // SubDepartmentMembership below is the source of truth going forward,
+  // mirroring how Department/DepartmentMembership already coexist.
   users        User[]
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  memberships  SubDepartmentMembership[]
+  tickets      Ticket[]
+  projects     Project[]
+  activities   ProjectActivity[]
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  @@unique([departmentId, name])
+  @@index([departmentId])
+}
+
+// Per-user, per-sub-department standing — mirrors DepartmentMembership's
+// shape (source tracking, soft revoke) but deliberately has no role: a
+// SubDepartment is an organizational grouping for filtering, not a second
+// permission tier. departmentId is denormalized from subDepartment.departmentId
+// (validated on write in lib/services/sub-department-membership-service.ts)
+// purely for fast filtering, same rationale as other denormalized FKs in
+// this schema.
+model SubDepartmentMembership {
+  id              String           @id @default(cuid())
+  user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId          String
+  subDepartment   SubDepartment    @relation(fields: [subDepartmentId], references: [id], onDelete: Cascade)
+  subDepartmentId String
+  departmentId    String
+  source          MembershipSource
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@unique([userId, subDepartmentId])
+  @@index([subDepartmentId])
+  @@index([userId])
+  @@index([departmentId])
 }
 
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
@@ -305,24 +351,26 @@ model User {
   customRole   CustomRole? @relation("UserCustomRole", fields: [customRoleId], references: [id])
   customRoleId String?
 
-  departmentMemberships DepartmentMembership[]
+  departmentMemberships    DepartmentMembership[]
+  subDepartmentMemberships SubDepartmentMembership[]
 
-  requestedTickets    Ticket[]             @relation("TicketRequester")
-  assignedTickets     Ticket[]             @relation("TicketAgent")
-  ticketMessages      TicketMessage[]
-  ticketAttachments   TicketAttachment[]
-  ticketHistories     TicketHistory[]
-  ownedProjects       Project[]            @relation("ProjectOwner")
-  projectMemberships  Project[]            @relation("ProjectMembers")
-  assignedActivities  ProjectActivity[]    @relation("ActivityAssignee")
-  activityAssignments ProjectActivity[]    @relation("ActivityAssignees")
-  createdActivities   ProjectActivity[]    @relation("ActivityCreator")
-  createdDependencies ActivityDependency[] @relation("ActivityDependenciesCreatedBy")
-  ownedGoals          YearlyGoal[]         @relation("GoalOwner")
-  notifications       Notification[]
-  pushSubscriptions   PushSubscription[]
-  accounts            Account[]
-  sessions            Session[]
+  requestedTickets         Ticket[]             @relation("TicketRequester")
+  assignedTickets          Ticket[]             @relation("TicketAgent")
+  departmentChangedTickets Ticket[]             @relation("TicketDepartmentChangedBy")
+  ticketMessages           TicketMessage[]
+  ticketAttachments        TicketAttachment[]
+  ticketHistories          TicketHistory[]
+  ownedProjects            Project[]            @relation("ProjectOwner")
+  projectMemberships       Project[]            @relation("ProjectMembers")
+  assignedActivities       ProjectActivity[]    @relation("ActivityAssignee")
+  activityAssignments      ProjectActivity[]    @relation("ActivityAssignees")
+  createdActivities        ProjectActivity[]    @relation("ActivityCreator")
+  createdDependencies      ActivityDependency[] @relation("ActivityDependenciesCreatedBy")
+  ownedGoals               YearlyGoal[]         @relation("GoalOwner")
+  notifications            Notification[]
+  pushSubscriptions        PushSubscription[]
+  accounts                 Account[]
+  sessions                 Session[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -433,6 +481,10 @@ model Ticket {
   assignedAgentId String?
   department      Department?         @relation(fields: [departmentId], references: [id])
   departmentId    String?
+  // Must belong to the same departmentId as this ticket — validated in
+  // lib/services/sub-department-service.ts, not enforced at the DB level.
+  subDepartment   SubDepartment?      @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId String?
   category        TicketCategory?     @relation(fields: [categoryId], references: [id])
   categoryId      String?
   priority        TicketPriority?     @relation(fields: [priorityId], references: [id])
@@ -450,6 +502,23 @@ model Ticket {
   activity   ProjectActivity? @relation(fields: [activityId], references: [id])
   activityId String?
 
+  // Ticket-only sharing (never Project/Activity): a non-full-view department
+  // member (see splitTicketViewScope in department-scope-service.ts) only
+  // sees their own tickets by default — these flags opt a specific ticket
+  // into being visible to every active member of its Department/
+  // SubDepartment too. Enforced centrally in buildTicketListWhere/
+  // canViewTicket, never as a page-local filter.
+  shareWithDepartment    Boolean @default(false)
+  shareWithSubDepartment Boolean @default(false)
+
+  // Who last moved this ticket's Department/SubDepartment, and when — set
+  // only by PATCH /api/tickets/[id]/department. Denormalized alongside the
+  // full audit trail in TicketHistory (type: DEPARTMENT_CHANGE) so All
+  // Tickets can show "changed by" without a per-ticket history lookup.
+  departmentChangedBy   User?     @relation("TicketDepartmentChangedBy", fields: [departmentChangedById], references: [id], onDelete: SetNull)
+  departmentChangedById String?
+  departmentChangedAt   DateTime?
+
   messages    TicketMessage[]
   attachments TicketAttachment[]
   history     TicketHistory[]
@@ -464,9 +533,13 @@ model Ticket {
   @@index([priorityId])
   @@index([categoryId])
   @@index([departmentId])
+  @@index([subDepartmentId])
   @@index([createdAt])
   @@index([projectId])
   @@index([activityId])
+  @@index([shareWithDepartment])
+  @@index([shareWithSubDepartment])
+  @@index([departmentChangedById])
 }
 
 model TicketMessage {
@@ -529,22 +602,26 @@ model TicketHistory {
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 model Project {
-  id             String        @id @default(cuid())
-  title          String
-  description    String?       @db.Text
-  status         ProjectStatus @default(PLANNING)
-  priority       Int           @default(2)
-  progress       Int           @default(0)
-  owner          User          @relation("ProjectOwner", fields: [ownerId], references: [id])
-  ownerId        String
-  department     Department?   @relation(fields: [departmentId], references: [id])
-  departmentId   String?
-  businessUnit   BusinessUnit? @relation(fields: [businessUnitId], references: [id])
-  businessUnitId String?
-  startDate      DateTime?
-  endDate        DateTime?
-  successTarget  String?       @db.Text
-  isGoal         Boolean       @default(false)
+  id              String         @id @default(cuid())
+  title           String
+  description     String?        @db.Text
+  status          ProjectStatus  @default(PLANNING)
+  priority        Int            @default(2)
+  progress        Int            @default(0)
+  owner           User           @relation("ProjectOwner", fields: [ownerId], references: [id])
+  ownerId         String
+  department      Department?    @relation(fields: [departmentId], references: [id])
+  departmentId    String?
+  // Must belong to the same departmentId as this project — validated in
+  // lib/services/sub-department-service.ts, not enforced at the DB level.
+  subDepartment   SubDepartment? @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId String?
+  businessUnit    BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
+  businessUnitId  String?
+  startDate       DateTime?
+  endDate         DateTime?
+  successTarget   String?        @db.Text
+  isGoal          Boolean        @default(false)
 
   members     User[]            @relation("ProjectMembers")
   activities  ProjectActivity[]
@@ -557,6 +634,7 @@ model Project {
   @@index([ownerId])
   @@index([status])
   @@index([departmentId])
+  @@index([subDepartmentId])
 }
 
 model ProjectActivity {
@@ -574,6 +652,10 @@ model ProjectActivity {
   createdById     String?
   department      Department?          @relation(fields: [departmentId], references: [id])
   departmentId    String?
+  // Must belong to the same departmentId as this activity — validated in
+  // lib/services/sub-department-service.ts, not enforced at the DB level.
+  subDepartment   SubDepartment?       @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId String?
   businessUnit    BusinessUnit?        @relation(fields: [businessUnitId], references: [id])
   businessUnitId  String?
   startDate       DateTime?
@@ -593,6 +675,7 @@ model ProjectActivity {
   @@index([createdById])
   @@index([status])
   @@index([departmentId])
+  @@index([subDepartmentId])
 }
 
 model ActivityDependency {
@@ -649,15 +732,25 @@ enum RoleScope {
 }
 
 model CustomRole {
-  id          String    @id @default(cuid())
-  key         String    @unique
-  name        String
-  description String?
-  isBuiltIn   Boolean   @default(false)
-  scope       RoleScope @default(GLOBAL)
-  users       User[]    @relation("UserCustomRole")
-  createdAt   DateTime  @default(now())
-  updatedAt   DateTime  @updatedAt
+  id                    String                 @id @default(cuid())
+  key                   String                 @unique
+  name                  String
+  description           String?
+  isBuiltIn             Boolean                @default(false)
+  // Disable lever for built-in roles (which can never be hard-deleted — see
+  // lib/services/role-safety-service.ts) and custom roles alike. A disabled
+  // role stops being offered for new assignment (getDepartmentRoleOptions)
+  // and hasPermission/hasDepartmentPermission fall back to the caller's base
+  // enum role when their customRoleId points at an inactive row — but an
+  // enum-based built-in role (User.role/DepartmentMembership.role used
+  // directly, no customRoleId) can't be retroactively revoked this way; see
+  // the doc-comment on wouldOrphanAdminAccessByDisablingRole.
+  isActive              Boolean                @default(true)
+  scope                 RoleScope              @default(GLOBAL)
+  users                 User[]                 @relation("UserCustomRole")
+  departmentMemberships DepartmentMembership[] @relation("DepartmentMembershipCustomRole")
+  createdAt             DateTime               @default(now())
+  updatedAt             DateTime               @updatedAt
 }
 
 // ─── Permissions ──────────────────────────────────────────────────────────────

@@ -33,9 +33,6 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials } from "@/lib/utils";
 import { Search, Plus, Loader2, UserX, UserCheck } from "lucide-react";
 import {
-  DEPARTMENT_ROLE_LABELS,
-  DEPARTMENT_ROLE_DESCRIPTIONS,
-  DEPARTMENT_ROLE_OPTIONS,
   MEMBERSHIP_SOURCE_LABELS,
   MEMBERSHIP_SOURCE_COLORS,
 } from "@/components/admin/department-role-info";
@@ -44,10 +41,25 @@ interface Membership {
   id: string;
   userId: string;
   role: DepartmentRole;
+  customRoleId: string | null;
+  customRole: { id: string; key: string; name: string } | null;
   source: "MANUAL" | "MICROSOFT_DEPARTMENT" | "MICROSOFT_GROUP" | "MICROSOFT_APP_ROLE";
   isPrimary: boolean;
   isActive: boolean;
   user: { id: string; name: string | null; email: string; image: string | null };
+}
+
+interface RoleOption {
+  value: string;
+  label: string;
+  description?: string;
+  isCustom: boolean;
+  customRoleId?: string;
+}
+
+/** value like "AGENT_ASSIGNEE" or "custom:<id>" for a membership row, matching RoleOption.value. */
+function membershipRoleValue(m: Pick<Membership, "role" | "customRoleId">): string {
+  return m.customRoleId ? `custom:${m.customRoleId}` : m.role;
 }
 
 interface SearchUser {
@@ -61,12 +73,19 @@ interface DepartmentMembersManagementProps {
   departmentId: string;
   departmentName: string;
   memberships: Membership[];
+  /** All default true — preserves today's Admin behavior when omitted. A caller with only some of the three (e.g. a Department Manager with assign/unassign but not full manageMembers) gets a correspondingly narrower UI, not a page that renders then 403s on every action. */
+  canAssign?: boolean;
+  canUnassign?: boolean;
+  canChangeRole?: boolean;
 }
 
 export function DepartmentMembersManagement({
   departmentId,
   departmentName,
   memberships: initialMemberships,
+  canAssign = true,
+  canUnassign = true,
+  canChangeRole = true,
 }: DepartmentMembersManagementProps) {
   const router = useRouter();
   const [memberships, setMemberships] = useState(initialMemberships);
@@ -77,8 +96,16 @@ export function DepartmentMembersManagement({
   const [userResults, setUserResults] = useState<SearchUser[]>([]);
   const [searching, setSearching] = useState(false);
   const [selectedUser, setSelectedUser] = useState<SearchUser | null>(null);
-  const [selectedRole, setSelectedRole] = useState<DepartmentRole>(DepartmentRole.REQUESTER);
+  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
+  const [selectedRoleValue, setSelectedRoleValue] = useState<string>(DepartmentRole.REQUESTER);
   const [adding, setAdding] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/admin/department-roles/options")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((options) => setRoleOptions(Array.isArray(options) ? options : []))
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!userQuery.trim() || selectedUser) {
@@ -104,7 +131,14 @@ export function DepartmentMembersManagement({
     setUserQuery("");
     setUserResults([]);
     setSelectedUser(null);
-    setSelectedRole(DepartmentRole.REQUESTER);
+    setSelectedRoleValue(DepartmentRole.REQUESTER);
+  };
+
+  /** Builds the POST body for either a built-in role or a custom department role, from a RoleOption.value. */
+  const roleBody = (value: string): { role: DepartmentRole } | { customRoleId: string } => {
+    const option = roleOptions.find((o) => o.value === value);
+    if (option?.isCustom && option.customRoleId) return { customRoleId: option.customRoleId };
+    return { role: value as DepartmentRole };
   };
 
   const refreshMemberships = useCallback(async () => {
@@ -124,7 +158,7 @@ export function DepartmentMembersManagement({
       const res = await fetch(`/api/admin/departments/${departmentId}/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: selectedUser.id, role: selectedRole }),
+        body: JSON.stringify({ userId: selectedUser.id, ...roleBody(selectedRoleValue) }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -142,13 +176,13 @@ export function DepartmentMembersManagement({
     }
   };
 
-  const handleChangeRole = async (membership: Membership, role: DepartmentRole) => {
+  const handleChangeRole = async (membership: Membership, roleValue: string) => {
     setBusyId(membership.id);
     try {
       const res = await fetch(`/api/admin/departments/${departmentId}/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId: membership.userId, role }),
+        body: JSON.stringify({ userId: membership.userId, ...roleBody(roleValue) }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -186,7 +220,7 @@ export function DepartmentMembersManagement({
     // Reactivating via the admin UI is a deliberate action, so it goes
     // through the same grant endpoint (source becomes MANUAL) — matches
     // grantManualMembership's existing semantics, no separate endpoint.
-    await handleChangeRole(membership, membership.role);
+    await handleChangeRole(membership, membershipRoleValue(membership));
     setMemberships((prev) => prev.map((m) => (m.id === membership.id ? { ...m, isActive: true, source: "MANUAL" } : m)));
   };
 
@@ -194,10 +228,12 @@ export function DepartmentMembersManagement({
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted-foreground">{memberships.length} membership{memberships.length !== 1 ? "s" : ""}</p>
-        <Button onClick={() => setAddOpen(true)} size="sm">
-          <Plus className="h-4 w-4 mr-1.5" />
-          Add Member
-        </Button>
+        {canAssign && (
+          <Button onClick={() => setAddOpen(true)} size="sm">
+            <Plus className="h-4 w-4 mr-1.5" />
+            Add Member
+          </Button>
+        )}
       </div>
 
       <div className="rounded-lg border overflow-hidden">
@@ -227,22 +263,28 @@ export function DepartmentMembersManagement({
                   </div>
                 </TableCell>
                 <TableCell>
-                  <Select
-                    value={m.role}
-                    onValueChange={(v) => handleChangeRole(m, v as DepartmentRole)}
-                    disabled={busyId === m.id || !m.isActive}
-                  >
-                    <SelectTrigger className="h-8 w-44 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {DEPARTMENT_ROLE_OPTIONS.map((role) => (
-                        <SelectItem key={role} value={role} className="text-xs">
-                          {DEPARTMENT_ROLE_LABELS[role]}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  {canChangeRole ? (
+                    <Select
+                      value={membershipRoleValue(m)}
+                      onValueChange={(v) => handleChangeRole(m, v)}
+                      disabled={busyId === m.id || !m.isActive}
+                    >
+                      <SelectTrigger className="h-8 w-44 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {roleOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value} className="text-xs">
+                            {option.label}{option.isCustom ? " (Custom)" : ""}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">
+                      {roleOptions.find((o) => o.value === membershipRoleValue(m))?.label ?? m.role}
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell>
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full border ${MEMBERSHIP_SOURCE_COLORS[m.source]}`}>
@@ -264,23 +306,27 @@ export function DepartmentMembersManagement({
                   {busyId === m.id ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                   ) : m.isActive ? (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-orange-500 hover:text-orange-600 hover:bg-orange-50"
-                      onClick={() => handleRevoke(m)}
-                    >
-                      Revoke
-                    </Button>
+                    canUnassign && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-orange-500 hover:text-orange-600 hover:bg-orange-50"
+                        onClick={() => handleRevoke(m)}
+                      >
+                        Revoke
+                      </Button>
+                    )
                   ) : (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="text-green-600 hover:text-green-700 hover:bg-green-50"
-                      onClick={() => handleReactivate(m)}
-                    >
-                      Reactivate
-                    </Button>
+                    canAssign && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-green-600 hover:text-green-700 hover:bg-green-50"
+                        onClick={() => handleReactivate(m)}
+                      >
+                        Reactivate
+                      </Button>
+                    )
                   )}
                 </TableCell>
               </TableRow>
@@ -362,17 +408,21 @@ export function DepartmentMembersManagement({
 
             <div className="space-y-2">
               <Label>Role</Label>
-              <Select value={selectedRole} onValueChange={(v) => setSelectedRole(v as DepartmentRole)}>
+              <Select value={selectedRoleValue} onValueChange={setSelectedRoleValue}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {DEPARTMENT_ROLE_OPTIONS.map((role) => (
-                    <SelectItem key={role} value={role}>
-                      {DEPARTMENT_ROLE_LABELS[role]}
+                  {roleOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}{option.isCustom ? " (Custom)" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">{DEPARTMENT_ROLE_DESCRIPTIONS[selectedRole]}</p>
+              {roleOptions.find((o) => o.value === selectedRoleValue)?.description && (
+                <p className="text-xs text-muted-foreground">
+                  {roleOptions.find((o) => o.value === selectedRoleValue)?.description}
+                </p>
+              )}
             </div>
           </div>
           <DialogFooter>

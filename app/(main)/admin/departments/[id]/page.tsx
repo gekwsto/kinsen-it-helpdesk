@@ -1,9 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { requireDepartmentPermission, isAdmin } from "@/lib/permissions";
+import { requireDepartmentPermission, isAdmin, hasDepartmentPermission } from "@/lib/permissions";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
-import { ChevronRight, Users, Tag } from "lucide-react";
+import { ChevronRight, Users, Tag, Building2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { DepartmentSettingsForm } from "@/components/admin/department-settings-form";
 
@@ -16,17 +16,20 @@ export default async function DepartmentDetailPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
+  let access;
   try {
-    await requireDepartmentPermission(id, "department.manageSettings");
+    access = await requireDepartmentPermission(id, "department.manageSettings");
   } catch {
     redirect("/dashboard");
   }
+  const canViewSubDepartments =
+    access.isSystemAdmin || (await hasDepartmentPermission(access.membership!.role, "subdepartment.view", access.membership!.customRoleId));
 
   const department = await prisma.department.findUnique({
     where: { id },
     include: {
       businessUnit: { select: { id: true, name: true } },
-      _count: { select: { users: true, memberships: true, tickets: true, projects: true, categories: true } },
+      _count: { select: { users: true, memberships: true, tickets: true, projects: true, categories: true, subDepartments: true } },
     },
   });
   if (!department) notFound();
@@ -59,7 +62,7 @@ export default async function DepartmentDetailPage({
         canToggleActive={isAdmin(session.user.role)}
       />
 
-      <div className="grid gap-4 sm:grid-cols-2">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Link href={`/admin/departments/${department.id}/members`}>
           <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
             <CardHeader className="flex flex-row items-center gap-3 pb-2">
@@ -93,6 +96,25 @@ export default async function DepartmentDetailPage({
             </CardContent>
           </Card>
         </Link>
+
+        {canViewSubDepartments && (
+          <Link href={`/admin/departments/${department.id}/sub-departments`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <Building2 className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">Sub-Departments</CardTitle>
+                  <CardDescription>{department._count.subDepartments} sub-department{department._count.subDepartments !== 1 ? "s" : ""}</CardDescription>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Create sub-departments and assign members to them.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
       </div>
     </div>
   );

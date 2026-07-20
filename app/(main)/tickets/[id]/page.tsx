@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
-import { canActOnEntity, buildCategoryWhere } from "@/lib/services/department-scope-service";
+import { canActOnEntity, canViewTicket, buildCategoryWhere, getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
 import { getAssignableUsersForTicket } from "@/lib/services/assignment-eligibility-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
@@ -31,6 +31,7 @@ export default async function TicketDetailPage({
       priority: true,
       category: true,
       department: { select: { id: true, name: true } },
+      subDepartment: { select: { id: true, name: true } },
       project: { select: { id: true, title: true } },
       activity: { select: { id: true, title: true } },
       cancelReason: true,
@@ -64,24 +65,36 @@ export default async function TicketDetailPage({
   const isAdminUser = role === Role.ADMIN;
   const isRequester = ticket.requesterId === session.user.id;
 
-  // Gate: can view this specific ticket — department-scoped, not a global
-  // "sees every department's tickets" role check.
-  const canView = await canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.view", isRequester);
+  // Gate: can view this specific ticket — department-scoped (plus the
+  // shareWithDepartment/shareWithSubDepartment widening), not a global
+  // "sees every department's tickets" role check. This page queries Prisma
+  // directly rather than going through GET /api/tickets/[id], so it needs
+  // the same canViewTicket check that route uses, not just canActOnEntity.
+  const canView = await canViewTicket(session.user.id, role, ticket);
   if (!canView) redirect("/dashboard");
 
   // Resolve fine-grained permissions in parallel. ticket.reply/internalNote
   // stay global (not department-scoped in Phase 2A — they gate what a
   // viewer of this ticket can additionally do, not whether they can view
-  // it at all); changeStatus/assign are department-scoped to match the
-  // actual backend gate on the PATCH/assign/status routes, so the UI never
-  // shows a button that would just 403.
-  const [canReplyPerm, canInternalNote, canChangeStatus, canAssign] =
+  // it at all); changeStatus/assign/department.change are department-scoped
+  // to match the actual backend gate on the PATCH/assign/status/department
+  // routes, so the UI never shows a control that would just 403.
+  const [canReplyPerm, canInternalNote, canChangeStatus, canAssign, canChangeDepartment] =
     await Promise.all([
       hasPermission(role, "ticket.reply", customRoleId),
       hasPermission(role, "ticket.internalNote", customRoleId),
       canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.changeStatus", isRequester),
       canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.assign"),
+      canActOnEntity(session.user.id, role, ticket.departmentId, "ticket.department.change", false),
     ]);
+
+  const [canShareDepartmentPerm, canShareSubDepartmentPerm, allDepartments] = await Promise.all([
+    hasPermission(role, "ticket.share.department", customRoleId),
+    hasPermission(role, "ticket.share.subdepartment", customRoleId),
+    canChangeDepartment ? getAccessibleDepartmentSummaries(session.user.id, role, "ticket.department.change") : Promise.resolve([]),
+  ]);
+  const canShareDepartment = isRequester || canShareDepartmentPerm;
+  const canShareSubDepartment = isRequester || canShareSubDepartmentPerm;
 
   // Requesters can always reply to their own ticket (even without ticket.reply perm)
   const canReply = canReplyPerm || isRequester;
@@ -140,6 +153,15 @@ export default async function TicketDetailPage({
     department: ticket.department
       ? { id: ticket.department.id, name: ticket.department.name }
       : null,
+    subDepartment: ticket.subDepartment
+      ? { id: ticket.subDepartment.id, name: ticket.subDepartment.name }
+      : null,
+    allDepartments: allDepartments.map((d) => ({ id: d.id, name: d.name })),
+    canChangeDepartment,
+    shareWithDepartment: ticket.shareWithDepartment,
+    shareWithSubDepartment: ticket.shareWithSubDepartment,
+    canShareDepartment,
+    canShareSubDepartment,
     project: ticket.project
       ? { id: ticket.project.id, title: ticket.project.title }
       : null,

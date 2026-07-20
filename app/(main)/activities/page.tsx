@@ -4,6 +4,7 @@ import { hasPermission, canManageProjects } from "@/lib/permissions";
 import { buildActivityListWhere } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
+import { SubDepartmentFilter } from "@/components/workspace/sub-department-filter";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -14,6 +15,7 @@ import { ActivityList, type SerializedActivity } from "@/components/activities/a
 interface SearchParams {
   projectId?: string;
   status?: string;
+  subDepartmentId?: string;
 }
 
 export default async function ActivitiesPage({
@@ -49,6 +51,7 @@ export default async function ActivitiesPage({
   );
   const andConditions: any[] = ["denied" in scope ? { id: { in: [] as string[] } } : scope];
   if (params.projectId) andConditions.push({ projectId: params.projectId });
+  if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
 
   // Validate status against enum before passing to Prisma
   const validStatuses = Object.values(ActivityStatus) as string[];
@@ -89,14 +92,17 @@ export default async function ActivitiesPage({
           <h1 className="text-2xl font-bold">Activities</h1>
           <p className="text-muted-foreground mt-1">All activities and tasks</p>
         </div>
-        {canCreate && (
-          <Button asChild>
-            <Link href="/activities/new">
-              <Plus className="h-4 w-4 mr-2" />
-              New Activity
-            </Link>
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <SubDepartmentFilter departmentId={activeWorkspace.isAllSelected ? null : activeWorkspace.departmentId} />
+          {canCreate && (
+            <Button asChild>
+              <Link href="/activities/new">
+                <Plus className="h-4 w-4 mr-2" />
+                New Activity
+              </Link>
+            </Button>
+          )}
+        </div>
       </div>
 
       {serializedActivities.length === 0 ? (

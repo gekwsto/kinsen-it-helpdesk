@@ -11,6 +11,7 @@ import {
   CheckSquare,
   Users,
   Building2,
+  Network,
   Tag,
   AlertTriangle,
   Settings,
@@ -21,21 +22,35 @@ import {
   PanelLeftOpen,
 } from "lucide-react";
 import { useState, useEffect } from "react";
+import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
+
+// `visible`, when defined, wins outright over `roles` — lets specific items
+// be gated by a server-computed permission flag (e.g. subdepartment.view)
+// instead of a hardcoded Role[] list, without touching any item that still
+// only sets `roles`.
+interface NavChild {
+  label: string;
+  href: string;
+  roles?: Role[];
+  visible?: boolean;
+}
 
 interface NavItem {
   label: string;
   href: string;
   icon: React.ElementType;
   roles?: Role[];
-  children?: { label: string; href: string; roles?: Role[] }[];
+  visible?: boolean;
+  children?: NavChild[];
 }
 
 interface SidebarProps {
   userRole: Role;
   canCreateTicket: boolean;
+  navFlags: NavVisibilityFlags;
 }
 
-export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
+export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedItems, setExpandedItems] = useState<string[]>(["Tickets"]);
 
@@ -105,21 +120,32 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
     },
     {
+      label: "Organization",
+      href: "/my-departments",
+      icon: Network,
+      visible: navFlags.canViewMyDepartments || navFlags.canViewMySubDepartments,
+      children: [
+        { label: "My Departments", href: "/my-departments", visible: navFlags.canViewMyDepartments },
+        { label: "My SubDepartments", href: "/my-subdepartments", visible: navFlags.canViewMySubDepartments },
+      ],
+    },
+    {
       label: "Administration",
       href: "/admin",
       icon: Settings,
-      roles: ["ADMIN"] as Role[],
+      visible: userRole === "ADMIN" || navFlags.canViewAdminSubDepartments,
       children: [
-        { label: "Users", href: "/admin/users" },
-        { label: "Role Permissions", href: "/admin/roles" },
-        { label: "Departments", href: "/admin/departments" },
-        { label: "Microsoft Mappings", href: "/admin/microsoft-mappings" },
-        { label: "Categories", href: "/admin/categories" },
-        { label: "Priorities", href: "/admin/priorities" },
-        { label: "Statuses", href: "/admin/statuses" },
-        { label: "Cancel Reasons", href: "/admin/cancel-reasons" },
-        { label: "SLA", href: "/admin/sla" },
-        { label: "Email Settings", href: "/admin/email" },
+        { label: "Users", href: "/admin/users", roles: ["ADMIN"] as Role[] },
+        { label: "Role Permissions", href: "/admin/roles", roles: ["ADMIN"] as Role[] },
+        { label: "Departments", href: "/admin/departments", roles: ["ADMIN"] as Role[] },
+        { label: "Sub Departments", href: "/admin/sub-departments", visible: navFlags.canViewAdminSubDepartments },
+        { label: "Microsoft Mappings", href: "/admin/microsoft-mappings", roles: ["ADMIN"] as Role[] },
+        { label: "Categories", href: "/admin/categories", roles: ["ADMIN"] as Role[] },
+        { label: "Priorities", href: "/admin/priorities", roles: ["ADMIN"] as Role[] },
+        { label: "Statuses", href: "/admin/statuses", roles: ["ADMIN"] as Role[] },
+        { label: "Cancel Reasons", href: "/admin/cancel-reasons", roles: ["ADMIN"] as Role[] },
+        { label: "SLA", href: "/admin/sla", roles: ["ADMIN"] as Role[] },
+        { label: "Email Settings", href: "/admin/email", roles: ["ADMIN"] as Role[] },
       ],
     },
   ];
@@ -132,9 +158,10 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
     );
   };
 
-  const canAccess = (roles?: Role[]) => {
-    if (!roles || roles.length === 0) return true;
-    return roles.includes(userRole);
+  const canAccess = (entry: { roles?: Role[]; visible?: boolean }) => {
+    if (entry.visible !== undefined) return entry.visible;
+    if (!entry.roles || entry.roles.length === 0) return true;
+    return entry.roles.includes(userRole);
   };
 
   const isActive = (href: string) => {
@@ -184,7 +211,7 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
       {/* Navigation */}
       <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-1">
         {navItems.map((item) => {
-          if (!canAccess(item.roles)) return null;
+          if (!canAccess(item)) return null;
 
           const hasChildren = item.children && item.children.length > 0;
           const isExpanded = expandedItems.includes(item.label);
@@ -210,7 +237,7 @@ export function Sidebar({ userRole, canCreateTicket }: SidebarProps) {
           }
 
           if (hasChildren) {
-            const visibleChildren = item.children!.filter((c) => canAccess(c.roles));
+            const visibleChildren = item.children!.filter((c) => canAccess(c));
             if (visibleChildren.length === 0) return null;
 
             return (

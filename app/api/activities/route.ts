@@ -9,6 +9,7 @@ import {
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
+import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createActivitySchema } from "@/lib/validations";
 import { ActivityStatus } from "@prisma/client";
 
@@ -21,6 +22,7 @@ export async function GET(req: NextRequest) {
     const status = searchParams.get("status");
     const assignedUserId = searchParams.get("assignedUserId");
     const departmentId = searchParams.get("departmentId");
+    const subDepartmentId = searchParams.get("subDepartmentId");
 
     const scope = await buildActivityListWhere(session.user.id, session.user.role, departmentId);
     if ("denied" in scope) {
@@ -28,6 +30,7 @@ export async function GET(req: NextRequest) {
     }
 
     const andConditions: any[] = [scope];
+    if (subDepartmentId) andConditions.push({ subDepartmentId });
     if (projectId) andConditions.push({ projectId });
     const validStatuses = Object.values(ActivityStatus) as string[];
     if (status && validStatuses.includes(status)) andConditions.push({ status: status as ActivityStatus });
@@ -100,6 +103,16 @@ export async function POST(req: NextRequest) {
     }
 
     const { dueDate, startDate, assignedUserIds, departmentId: _ignoredDepartmentId, ...rest } = data;
+
+    if (rest.subDepartmentId) {
+      const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, deptResolution.departmentId);
+      if (!valid) {
+        return NextResponse.json(
+          { error: "The selected sub-department does not belong to this activity's department.", code: "subdepartment_department_mismatch" },
+          { status: 400 }
+        );
+      }
+    }
 
     if (assignedUserIds.length > 0) {
       for (const userId of assignedUserIds) {

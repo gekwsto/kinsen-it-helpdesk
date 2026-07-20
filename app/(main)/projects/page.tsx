@@ -4,6 +4,7 @@ import { hasPermission } from "@/lib/permissions";
 import { buildProjectListWhere } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
+import { SubDepartmentFilter } from "@/components/workspace/sub-department-filter";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -27,9 +28,14 @@ const PRIORITY_LABELS: Record<number, string> = {
   3: "High",
 };
 
-export default async function ProjectsPage() {
+export default async function ProjectsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ subDepartmentId?: string }>;
+}) {
   const session = await auth();
   if (!session?.user) redirect("/login");
+  const params = await searchParams;
 
   const canView = await hasPermission(session.user.role, "project.view", session.user.customRoleId);
   if (!canView) {
@@ -50,7 +56,8 @@ export default async function ProjectsPage() {
     session.user.role,
     activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId
   );
-  const where = "denied" in scope ? { id: { in: [] as string[] } } : scope;
+  const baseWhere = "denied" in scope ? { id: { in: [] as string[] } } : scope;
+  const where = params.subDepartmentId ? { AND: [baseWhere, { subDepartmentId: params.subDepartmentId }] } : baseWhere;
 
   const projects = await prisma.project.findMany({
     where,
@@ -72,12 +79,15 @@ export default async function ProjectsPage() {
             Manage IT projects and initiatives
           </p>
         </div>
-        <Button asChild>
-          <Link href="/projects/new">
-            <Plus className="h-4 w-4 mr-2" />
-            New Project
-          </Link>
-        </Button>
+        <div className="flex items-center gap-2">
+          <SubDepartmentFilter departmentId={activeWorkspace.isAllSelected ? null : activeWorkspace.departmentId} />
+          <Button asChild>
+            <Link href="/projects/new">
+              <Plus className="h-4 w-4 mr-2" />
+              New Project
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {projects.length === 0 ? (

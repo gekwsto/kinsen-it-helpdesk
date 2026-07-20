@@ -1,11 +1,13 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { requireDepartmentPermission } from "@/lib/permissions";
+import { requireAnyDepartmentPermission, hasAnyDepartmentPermission, hasDepartmentPermission } from "@/lib/permissions";
 import { getDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import { DepartmentMembersManagement } from "@/components/admin/department-members-management";
+
+const MEMBER_PAGE_VIEW_PERMISSIONS = ["department.manageMembers", "department.user.assign", "department.user.unassign"];
 
 export default async function DepartmentMembersPage({
   params,
@@ -16,8 +18,14 @@ export default async function DepartmentMembersPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
+  let access;
   try {
-    await requireDepartmentPermission(id, "department.manageMembers");
+    // Reachable by anyone with ANY of the three member-management
+    // permissions — a Department Manager with only assign/unassign (not the
+    // older manageMembers) must still reach this page; the component itself
+    // narrows which controls actually render (see canAssign/canUnassign/
+    // canChangeRole below).
+    access = await requireAnyDepartmentPermission(id, MEMBER_PAGE_VIEW_PERMISSIONS);
   } catch {
     redirect("/dashboard");
   }
@@ -25,7 +33,15 @@ export default async function DepartmentMembersPage({
   const department = await prisma.department.findUnique({ where: { id }, select: { id: true, name: true } });
   if (!department) notFound();
 
-  const memberships = await getDepartmentMemberships(id);
+  const role = access.membership?.role;
+  const customRoleId = access.membership?.customRoleId;
+
+  const [memberships, canAssign, canUnassign, canChangeRole] = await Promise.all([
+    getDepartmentMemberships(id),
+    access.isSystemAdmin || hasAnyDepartmentPermission(role!, ["department.manageMembers", "department.user.assign"], customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(role!, ["department.manageMembers", "department.user.unassign"], customRoleId),
+    access.isSystemAdmin || hasDepartmentPermission(role!, "department.manageMembers", customRoleId),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -50,6 +66,9 @@ export default async function DepartmentMembersPage({
         departmentId={department.id}
         departmentName={department.name}
         memberships={memberships as any}
+        canAssign={canAssign}
+        canUnassign={canUnassign}
+        canChangeRole={canChangeRole}
       />
     </div>
   );

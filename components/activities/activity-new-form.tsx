@@ -21,6 +21,7 @@ import { ActivityStatus, ActivityPriority } from "@prisma/client";
 
 interface Project { id: string; title: string }
 interface AssignableUser { id: string; name: string | null; email: string }
+interface SubDepartmentOption { id: string; name: string }
 
 interface ActivityNewFormProps {
   /** Active workspace department — drives which users are shown as eligible assignees; may be null (no workspace resolved yet), matching what POST /api/activities itself falls back to. */
@@ -41,16 +42,20 @@ export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState("");
   const [dueDate, setDueDate] = useState("");
+  const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
+  const [subDepartmentId, setSubDepartmentId] = useState("");
 
   useEffect(() => {
     const assignableUrl = `/api/users?assignableFor=activity${departmentId ? `&departmentId=${departmentId}` : ""}`;
     Promise.all([
       fetch("/api/projects?limit=100").then((r) => r.json()),
       fetch(assignableUrl).then((r) => (r.ok ? r.json() : [])),
+      departmentId ? fetch(`/api/departments/${departmentId}/sub-departments`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
     ])
-      .then(([p, u]) => {
+      .then(([p, u, sd]) => {
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setAssignableUsers(Array.isArray(u) ? u : []);
+        setSubDepartments(Array.isArray(sd) ? sd : []);
       })
       .catch(() => {});
   }, [departmentId]);
@@ -81,6 +86,7 @@ export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
           assignedUserIds: selectedUserIds,
           startDate: startDate || undefined,
           dueDate: dueDate || undefined,
+          subDepartmentId: subDepartmentId || undefined,
         }),
       });
       if (!res.ok) {
@@ -178,6 +184,23 @@ export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
                 </SelectContent>
               </Select>
             </div>
+
+            {subDepartments.length > 0 && (
+              <div className="space-y-2">
+                <Label>Sub-Department (optional)</Label>
+                <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None</SelectItem>
+                    {subDepartments.map((sd) => (
+                      <SelectItem key={sd.id} value={sd.id}>{sd.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label>Assigned Users</Label>

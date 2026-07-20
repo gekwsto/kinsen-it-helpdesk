@@ -4,6 +4,7 @@ import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permis
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
+import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateActivitySchema } from "@/lib/validations";
 import { recalculateProjectRollup, calculateActivityProgress } from "@/lib/projects/progress-rollup";
 import { Role } from "@prisma/client";
@@ -57,11 +58,26 @@ export async function PATCH(
     const body = await req.json();
     const data = updateActivitySchema.parse(body);
 
+    // The completion checkbox always sends isCompleted+status together — a
+    // mismatched pair (e.g. isCompleted:true with a non-COMPLETED status, or
+    // isCompleted:false with status:COMPLETED) means the two fields drifted
+    // apart client-side, which the write must reject rather than silently
+    // persist an inconsistent row.
+    if (data.isCompleted !== undefined && data.status !== undefined) {
+      const consistent = data.isCompleted ? data.status === "COMPLETED" : data.status !== "COMPLETED";
+      if (!consistent) {
+        return NextResponse.json(
+          { error: "isCompleted and status are inconsistent.", code: "invalid_status_transition" },
+          { status: 400 }
+        );
+      }
+    }
+
     if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== existing.departmentId) {
       if (session.user.role !== Role.ADMIN) {
         const targetMembership = await getMembership(session.user.id, data.departmentId);
         const allowed = targetMembership
-          ? await hasDepartmentPermission(targetMembership.role, "activity.create")
+          ? await hasDepartmentPermission(targetMembership.role, "activity.create", targetMembership.customRoleId)
           : false;
         if (!allowed) {
           return NextResponse.json({ error: "You don't have access to the target department" }, { status: 403 });
@@ -70,9 +86,9 @@ export async function PATCH(
     }
 
     const { dueDate, startDate, isCompleted, assignedUserIds, ...rest } = data;
+    const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
 
     if (assignedUserIds && assignedUserIds.length > 0) {
-      const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
       for (const userId of assignedUserIds) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "activity", effectiveDepartmentId);
         if (!assignable) {
@@ -84,10 +100,26 @@ export async function PATCH(
       }
     }
 
+    if (rest.subDepartmentId) {
+      const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, effectiveDepartmentId);
+      if (!valid) {
+        return NextResponse.json(
+          { error: "The selected sub-department does not belong to this activity's department.", code: "subdepartment_department_mismatch" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Department changed but no explicit new sub-department was given — the
+    // stale one (if any) can no longer be valid, so it's cleared.
+    const departmentChanging = data.departmentId !== undefined && data.departmentId !== existing.departmentId;
+    const clearStaleSubDepartment = departmentChanging && rest.subDepartmentId === undefined;
+
     const activity = await prisma.projectActivity.update({
       where: { id },
       data: {
         ...rest,
+        subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
         startDate: startDate ? new Date(startDate) : startDate === null ? null : undefined,
         dueDate: dueDate ? new Date(dueDate) : dueDate === null ? null : undefined,
         isCompleted: isCompleted ?? undefined,

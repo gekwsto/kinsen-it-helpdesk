@@ -9,6 +9,7 @@ import {
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
+import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createProjectSchema } from "@/lib/validations";
 
 export async function GET(req: NextRequest) {
@@ -21,6 +22,7 @@ export async function GET(req: NextRequest) {
     const search = searchParams.get("search") ?? "";
     const status = searchParams.get("status");
     const departmentId = searchParams.get("departmentId");
+    const subDepartmentId = searchParams.get("subDepartmentId");
 
     const skip = (page - 1) * limit;
 
@@ -30,6 +32,7 @@ export async function GET(req: NextRequest) {
     }
 
     const andConditions: any[] = [scope];
+    if (subDepartmentId) andConditions.push({ subDepartmentId });
     if (search) {
       andConditions.push({
         OR: [
@@ -100,6 +103,16 @@ export async function POST(req: NextRequest) {
     }
 
     const { memberIds, startDate, endDate, departmentId: _ignoredDepartmentId, ...rest } = data;
+
+    if (rest.subDepartmentId) {
+      const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, deptResolution.departmentId);
+      if (!valid) {
+        return NextResponse.json(
+          { error: "The selected sub-department does not belong to this project's department.", code: "subdepartment_department_mismatch" },
+          { status: 400 }
+        );
+      }
+    }
 
     if (memberIds.length > 0) {
       for (const userId of memberIds) {

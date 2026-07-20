@@ -4,6 +4,7 @@ import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permis
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
+import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateProjectSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 
@@ -71,7 +72,7 @@ export async function PATCH(
       if (session.user.role !== Role.ADMIN) {
         const targetMembership = await getMembership(session.user.id, data.departmentId);
         const allowed = targetMembership
-          ? await hasDepartmentPermission(targetMembership.role, "project.create")
+          ? await hasDepartmentPermission(targetMembership.role, "project.create", targetMembership.customRoleId)
           : false;
         if (!allowed) {
           return NextResponse.json({ error: "You don't have access to the target department" }, { status: 403 });
@@ -80,9 +81,9 @@ export async function PATCH(
     }
 
     const { memberIds, startDate, endDate, ...rest } = data;
+    const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
 
     if (memberIds && memberIds.length > 0) {
-      const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
       for (const userId of memberIds) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "project", effectiveDepartmentId);
         if (!assignable) {
@@ -94,10 +95,26 @@ export async function PATCH(
       }
     }
 
+    if (rest.subDepartmentId) {
+      const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, effectiveDepartmentId);
+      if (!valid) {
+        return NextResponse.json(
+          { error: "The selected sub-department does not belong to this project's department.", code: "subdepartment_department_mismatch" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Department changed but no explicit new sub-department was given — the
+    // stale one (if any) can no longer be valid, so it's cleared.
+    const departmentChanging = data.departmentId !== undefined && data.departmentId !== existing.departmentId;
+    const clearStaleSubDepartment = departmentChanging && rest.subDepartmentId === undefined;
+
     const project = await prisma.project.update({
       where: { id },
       data: {
         ...rest,
+        subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
         startDate: startDate ? new Date(startDate) : undefined,
         endDate: endDate ? new Date(endDate) : undefined,
         members: memberIds

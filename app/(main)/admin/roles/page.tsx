@@ -14,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Loader2, Plus, Pencil, Trash2, ShieldCheck, Shield } from "lucide-react";
+import { Loader2, Plus, Pencil, Trash2, ShieldCheck, Shield, Ban, RotateCcw, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 type RoleScope = "GLOBAL" | "DEPARTMENT" | "BOTH";
@@ -25,6 +25,7 @@ interface CustomRole {
   name: string;
   description?: string | null;
   isBuiltIn: boolean;
+  isActive: boolean;
   scope: RoleScope;
 }
 
@@ -82,6 +83,11 @@ export default function RolesAdminPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
+  // Disable confirm (built-in roles use this instead of hard delete)
+  const [disableTarget, setDisableTarget] = useState<CustomRole | null>(null);
+  const [disableOpen, setDisableOpen] = useState(false);
+  const [disabling, setDisabling] = useState(false);
+
   // Remove permission confirm
   const [removePermTarget, setRemovePermTarget] = useState<Permission | null>(null);
   const [removePermOpen, setRemovePermOpen] = useState(false);
@@ -132,14 +138,17 @@ export default function RolesAdminPage() {
       const res = await fetch(`/api/admin/roles/${selectedRole.id}/permissions/${perm.id}`, {
         method: "POST",
       });
-      if (!res.ok) throw new Error();
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to update permission");
+      }
       setRolePerms((prev) => {
         const next = new Set(prev);
         next.add(key);
         return next;
       });
-    } catch {
-      toast.error("Failed to update permission");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to update permission");
     } finally {
       setToggling(null);
     }
@@ -155,7 +164,10 @@ export default function RolesAdminPage() {
         `/api/admin/roles/${selectedRole.id}/permissions/${removePermTarget.id}`,
         { method: "DELETE" }
       );
-      if (!res.ok) throw new Error();
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to remove permission");
+      }
       setRolePerms((prev) => {
         const next = new Set(prev);
         next.delete(key);
@@ -164,8 +176,8 @@ export default function RolesAdminPage() {
       setRemovePermOpen(false);
       setRemovePermTarget(null);
       toast.success("Permission removed");
-    } catch {
-      toast.error("Failed to remove permission");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to remove permission");
     } finally {
       setRemovingPerm(false);
       setToggling(null);
@@ -179,7 +191,11 @@ export default function RolesAdminPage() {
       const res = await fetch("/api/admin/roles", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: createName, description: createDesc || undefined }),
+        body: JSON.stringify({
+          name: createName,
+          description: createDesc || undefined,
+          scope: activeTab === "global" ? "GLOBAL" : "DEPARTMENT",
+        }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -215,14 +231,17 @@ export default function RolesAdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: editName, description: editDesc || null }),
       });
-      if (!res.ok) throw new Error();
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to update role");
+      }
       const updated = await res.json();
       setRoles((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
       if (selectedRole?.id === updated.id) setSelectedRole(updated);
       setEditOpen(false);
       toast.success("Role updated");
-    } catch {
-      toast.error("Failed to update role");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to update role");
     } finally {
       setSaving(false);
     }
@@ -251,6 +270,35 @@ export default function RolesAdminPage() {
       toast.error("Failed to delete role");
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // Built-in roles can never be hard-deleted (their key is referenced
+  // elsewhere by hardcoded lookups) — Disable is the lever instead, guarded
+  // server-side against orphaning the last path to admin access. Re-enabling
+  // carries no such risk, so it skips the confirm dialog.
+  const handleToggleActive = async (role: CustomRole, nextActive: boolean) => {
+    setDisabling(true);
+    try {
+      const res = await fetch(`/api/admin/roles/${role.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: nextActive }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Failed to update role");
+      }
+      const updated = await res.json();
+      setRoles((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      if (selectedRole?.id === updated.id) setSelectedRole(updated);
+      setDisableOpen(false);
+      setDisableTarget(null);
+      toast.success(nextActive ? "Role enabled" : "Role disabled");
+    } catch (e: any) {
+      toast.error(e.message ?? "Failed to update role");
+    } finally {
+      setDisabling(false);
     }
   };
 
@@ -284,7 +332,8 @@ export default function RolesAdminPage() {
       <div>
         <h1 className="text-2xl font-bold">Roles & Permissions</h1>
         <p className="text-muted-foreground mt-1">
-          Manage roles and configure their permissions. Built-in roles cannot be deleted.
+          Manage roles and configure their permissions. Built-in roles can be renamed and
+          have permissions changed, but use Disable instead of Delete.
         </p>
       </div>
 
@@ -321,12 +370,10 @@ export default function RolesAdminPage() {
             <p className="text-sm font-medium text-muted-foreground">
               {activeTab === "global" ? "Global Roles" : "Department Roles"}
             </p>
-            {activeTab === "global" && (
-              <Button size="sm" onClick={() => setCreateOpen(true)}>
-                <Plus className="h-3.5 w-3.5 mr-1" />
-                New Role
-              </Button>
-            )}
+            <Button size="sm" onClick={() => setCreateOpen(true)}>
+              <Plus className="h-3.5 w-3.5 mr-1" />
+              New Role
+            </Button>
           </div>
 
           {visibleRoles.map((role) => (
@@ -347,28 +394,82 @@ export default function RolesAdminPage() {
                   <Shield className={cn("h-4 w-4 flex-shrink-0", selectedRole?.id === role.id ? "text-primary-foreground" : "text-muted-foreground")} />
                 )}
                 <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">{role.name}</p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-sm font-medium truncate">{role.name}</p>
+                    <span
+                      className={cn(
+                        "shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full",
+                        selectedRole?.id === role.id
+                          ? "bg-primary-foreground/20 text-primary-foreground"
+                          : role.isBuiltIn
+                          ? "bg-slate-100 text-slate-600"
+                          : "bg-teal-100 text-teal-700"
+                      )}
+                    >
+                      {role.isBuiltIn ? "Built-in" : "Custom"}
+                    </span>
+                    {!role.isActive && (
+                      <span
+                        className={cn(
+                          "shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full",
+                          selectedRole?.id === role.id
+                            ? "bg-primary-foreground/20 text-primary-foreground"
+                            : "bg-amber-100 text-amber-700"
+                        )}
+                      >
+                        Disabled
+                      </span>
+                    )}
+                  </div>
                   <p className={cn("text-xs truncate", selectedRole?.id === role.id ? "text-primary-foreground/70" : "text-muted-foreground")}>
-                    {role.key}
+                    {role.key} · {role.scope}
                   </p>
                 </div>
               </div>
               <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                {role.scope !== "DEPARTMENT" && (
-                  <button
-                    onClick={(e) => { e.stopPropagation(); openEdit(role); }}
-                    className={cn(
-                      "p-1 rounded hover:bg-black/10 transition-colors",
-                      selectedRole?.id === role.id ? "text-primary-foreground" : "text-muted-foreground"
-                    )}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                )}
-                {!role.isBuiltIn && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); openEdit(role); }}
+                  title="Edit role"
+                  className={cn(
+                    "p-1 rounded transition-colors hover:bg-black/10",
+                    selectedRole?.id === role.id ? "text-primary-foreground" : "text-muted-foreground"
+                  )}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </button>
+                {role.isBuiltIn ? (
+                  role.isActive ? (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setDisableTarget(role); setDisableOpen(true); }}
+                      title="Disable role — blocked if it would remove the last path to admin access"
+                      className={cn(
+                        "p-1 rounded transition-colors hover:bg-amber-100 text-amber-600",
+                        selectedRole?.id === role.id && "text-primary-foreground hover:text-amber-600"
+                      )}
+                    >
+                      <Ban className="h-3.5 w-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleToggleActive(role, true); }}
+                      disabled={disabling}
+                      title="Enable role"
+                      className={cn(
+                        "p-1 rounded transition-colors hover:bg-emerald-100 text-emerald-600",
+                        selectedRole?.id === role.id && "text-primary-foreground hover:text-emerald-600"
+                      )}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                    </button>
+                  )
+                ) : (
                   <button
                     onClick={(e) => { e.stopPropagation(); setDeleteTarget(role); setDeleteOpen(true); }}
-                    className="p-1 rounded hover:bg-red-100 text-red-500 transition-colors"
+                    title="Delete role"
+                    className={cn(
+                      "p-1 rounded transition-colors hover:bg-red-100 text-red-500",
+                      selectedRole?.id === role.id && "text-primary-foreground hover:text-red-500"
+                    )}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
@@ -411,13 +512,18 @@ export default function RolesAdminPage() {
                 </CardHeader>
               </Card>
 
-              {selectedRole.key === "ADMIN" ? (
-                <Card>
-                  <CardContent className="py-6 text-center text-sm text-muted-foreground">
-                    The Administrator role always has full access to all features and cannot be restricted.
+              {selectedRole.key === "ADMIN" && (
+                <Card className="border-amber-200 bg-amber-50">
+                  <CardContent className="py-3 flex items-start gap-2 text-sm text-amber-800">
+                    <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                    <p>
+                      Changing Administrator permissions can affect system access. Safety checks
+                      prevent removing the last path to admin access.
+                    </p>
                   </CardContent>
                 </Card>
-              ) : (
+              )}
+              {
                 modules.map((module) => {
                   const modulePerms = permissions.filter((p) => p.module === module);
                   const assignedCount = modulePerms.filter((p) => isAssigned(selectedRole, p.id)).length;
@@ -489,7 +595,7 @@ export default function RolesAdminPage() {
                     </Card>
                   );
                 })
-              )}
+              }
             </div>
           )}
         </div>
@@ -499,14 +605,19 @@ export default function RolesAdminPage() {
       <Dialog open={createOpen} onOpenChange={(o) => { setCreateOpen(o); if (!o) { setCreateName(""); setCreateDesc(""); } }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create New Role</DialogTitle>
+            <DialogTitle>{activeTab === "global" ? "Create New Global Role" : "Create New Department Role"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            <p className="text-xs text-muted-foreground">
+              {activeTab === "global"
+                ? "A system-wide role, alongside Administrator, IT Agent, Director and User."
+                : "A department-scoped role — assignable to a user's DepartmentMembership, alongside the built-in Department Admin, Department Manager, Project Manager, Agent/Assignee, Requester and Viewer roles."}
+            </p>
             <div className="space-y-2">
               <Label htmlFor="create-name">Role Name *</Label>
               <Input
                 id="create-name"
-                placeholder="e.g. Support Manager"
+                placeholder={activeTab === "global" ? "e.g. Support Manager" : "e.g. Field Technician"}
                 value={createName}
                 onChange={(e) => setCreateName(e.target.value)}
               />
@@ -590,6 +701,33 @@ export default function RolesAdminPage() {
             <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
               {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Delete Role
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Disable Confirm Dialog (built-in roles use Disable instead of Delete) */}
+      <Dialog open={disableOpen} onOpenChange={(o) => { setDisableOpen(o); if (!o) setDisableTarget(null); }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Disable Role</DialogTitle>
+          </DialogHeader>
+          <div className="py-2">
+            <p className="text-sm text-muted-foreground">
+              Are you sure you want to disable <strong>{disableTarget?.name}</strong>?
+              It will no longer be offered when assigning department roles. This is blocked if it
+              would remove the last path to admin access.
+            </p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDisableOpen(false)}>Cancel</Button>
+            <Button
+              variant="destructive"
+              onClick={() => disableTarget && handleToggleActive(disableTarget, false)}
+              disabled={disabling}
+            >
+              {disabling && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Disable Role
             </Button>
           </DialogFooter>
         </DialogContent>

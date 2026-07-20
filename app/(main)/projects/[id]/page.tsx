@@ -13,6 +13,7 @@ import { ChevronRight, Calendar, Users, Target, Plus, Ticket, Pencil } from "luc
 import { ProjectStatus, ActivityStatus, GoalStatus, Role } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ProjectDeleteButton } from "@/components/projects/project-delete-button";
+import { ActivityCompleteCheckbox } from "@/components/activities/activity-complete-checkbox";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -180,12 +181,7 @@ export default async function ProjectDetailPage({
                       className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/50 transition-colors"
                     >
                       <div className="flex items-center gap-3 min-w-0">
-                        <input
-                          type="checkbox"
-                          checked={activity.isCompleted}
-                          readOnly
-                          className="h-4 w-4 rounded"
-                        />
+                        <ActivityCompleteCheckbox activityId={activity.id} initialIsCompleted={activity.isCompleted} />
                         <div className="min-w-0">
                           <p
                             className={`text-sm font-medium ${

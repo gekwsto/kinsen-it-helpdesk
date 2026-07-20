@@ -1,7 +1,10 @@
 import { prisma } from "@/lib/prisma";
-import type { DepartmentMembership } from "@prisma/client";
+import type { DepartmentMembership, Prisma } from "@prisma/client";
 import { DepartmentRole, MembershipSource } from "@prisma/client";
 import type { DepartmentMembershipView, ResolvedMembership } from "@/types/department";
+
+/** A plain PrismaClient or an in-flight $transaction callback client — lets a caller opt a write into its own transaction without every service function needing its own. */
+type Db = typeof prisma | Prisma.TransactionClient;
 
 const membershipInclude = {
   department: {
@@ -17,6 +20,7 @@ function toView(m: MembershipWithDepartment): DepartmentMembershipView {
     userId: m.userId,
     departmentId: m.departmentId,
     role: m.role,
+    customRoleId: m.customRoleId,
     source: m.source,
     isPrimary: m.isPrimary,
     isActive: m.isActive,
@@ -41,6 +45,8 @@ export interface DepartmentMembershipAdminView {
   userId: string;
   departmentId: string;
   role: DepartmentRole;
+  customRoleId: string | null;
+  customRole: { id: string; key: string; name: string } | null;
   source: MembershipSource;
   isPrimary: boolean;
   isActive: boolean;
@@ -56,7 +62,10 @@ export interface DepartmentMembershipAdminView {
 export async function getDepartmentMemberships(departmentId: string): Promise<DepartmentMembershipAdminView[]> {
   const rows = await prisma.departmentMembership.findMany({
     where: { departmentId },
-    include: { user: { select: memberUserSelect } },
+    include: {
+      user: { select: memberUserSelect },
+      customRole: { select: { id: true, key: true, name: true } },
+    },
     orderBy: [{ isActive: "desc" }, { createdAt: "asc" }],
   });
   return rows.map((m) => ({
@@ -64,6 +73,8 @@ export async function getDepartmentMemberships(departmentId: string): Promise<De
     userId: m.userId,
     departmentId: m.departmentId,
     role: m.role,
+    customRoleId: m.customRoleId,
+    customRole: m.customRole,
     source: m.source,
     isPrimary: m.isPrimary,
     isActive: m.isActive,
@@ -147,19 +158,86 @@ export async function syncDepartmentMemberships(
   });
 }
 
+export type DepartmentRoleSelection = { role: DepartmentRole; customRoleId?: null } | { role?: null; customRoleId: string };
+
+/**
+ * Grants (or updates, upsert-by-[userId,departmentId]) a manual membership —
+ * either a built-in DepartmentRole or a custom department role
+ * (customRoleId, see getDepartmentRoleOptions in
+ * lib/services/department-role-options-service.ts). When a custom role is
+ * selected, `role` still needs a value at the DB level (required column) so
+ * it's set to the least-privilege placeholder VIEWER — it is never read for
+ * permission purposes once customRoleId is set (see hasDepartmentPermission).
+ */
 export async function grantManualMembership(
   userId: string,
   departmentId: string,
-  role: DepartmentRole
+  selection: DepartmentRoleSelection,
+  db: Db = prisma
 ): Promise<DepartmentMembership> {
-  return prisma.departmentMembership.upsert({
+  const role = selection.customRoleId ? DepartmentRole.VIEWER : selection.role!;
+  const customRoleId = selection.customRoleId ?? null;
+  return db.departmentMembership.upsert({
     where: { userId_departmentId: { userId, departmentId } },
-    update: { role, source: MembershipSource.MANUAL, isActive: true },
-    create: { userId, departmentId, role, source: MembershipSource.MANUAL },
+    update: { role, customRoleId, source: MembershipSource.MANUAL, isActive: true },
+    create: { userId, departmentId, role, customRoleId, source: MembershipSource.MANUAL },
   });
 }
 
 /** Soft-revoke — never deletes, so ticket/project history referencing the user is unaffected. */
 export async function revokeMembership(id: string): Promise<DepartmentMembership> {
   return prisma.departmentMembership.update({ where: { id }, data: { isActive: false } });
+}
+
+/**
+ * Ensures an active DepartmentMembership exists for (userId, departmentId),
+ * called when an admin sets a user's Primary/Default Department from the
+ * Add/Edit User dialog (a passive side effect of an account-level edit) —
+ * unlike grantManualMembership above (an explicit, deliberate membership
+ * action from the department members / user-memberships UI), this must
+ * NEVER clobber an already-active row's source/role unless something
+ * actually needs to change, so a Microsoft-synced membership isn't silently
+ * downgraded to MANUAL just by re-saving the same primary department:
+ *  - no row yet -> create it, source MANUAL, role translated from the
+ *    user's global role (see translateGlobalRoleToDepartmentRole).
+ *  - inactive row -> reactivate (isActive:true, source MANUAL) — reactivating
+ *    is itself a deliberate decision, matching the existing "Reactivate"
+ *    semantics elsewhere in this admin surface.
+ *  - active row already on a custom department role (customRoleId set) ->
+ *    left untouched entirely; this passive sync never downgrades a custom
+ *    role assignment to a plain enum role.
+ *  - active row, role already matches the desired role -> untouched (no-op).
+ *  - active row, role differs -> role updated and source becomes MANUAL,
+ *    mirroring the existing "changing this marks it as manual override"
+ *    rule already applied to direct role edits.
+ */
+export async function ensurePrimaryDepartmentMembership(
+  userId: string,
+  departmentId: string,
+  desiredRole: DepartmentRole
+): Promise<DepartmentMembership> {
+  const existing = await prisma.departmentMembership.findUnique({
+    where: { userId_departmentId: { userId, departmentId } },
+  });
+
+  if (!existing) {
+    return prisma.departmentMembership.create({
+      data: { userId, departmentId, role: desiredRole, customRoleId: null, source: MembershipSource.MANUAL, isActive: true },
+    });
+  }
+
+  if (!existing.isActive) {
+    return prisma.departmentMembership.update({
+      where: { id: existing.id },
+      data: { isActive: true, source: MembershipSource.MANUAL, role: desiredRole, customRoleId: null },
+    });
+  }
+
+  if (existing.customRoleId) return existing;
+  if (existing.role === desiredRole) return existing;
+
+  return prisma.departmentMembership.update({
+    where: { id: existing.id },
+    data: { role: desiredRole, source: MembershipSource.MANUAL },
+  });
 }

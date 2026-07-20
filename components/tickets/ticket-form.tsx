@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -59,11 +59,31 @@ export function CreateTicketForm({
     register,
     handleSubmit,
     setValue,
+    watch,
     formState: { errors },
   } = useForm<CreateTicketInput>({
     resolver: zodResolver(createTicketSchema),
     defaultValues: { departmentId: defaultDepartmentId ?? undefined },
   });
+
+  const selectedDepartmentId = watch("departmentId") ?? defaultDepartmentId ?? undefined;
+  const [subDepartments, setSubDepartments] = useState<Array<{ id: string; name: string }>>([]);
+
+  // Sub-departments are scoped to whichever department is currently
+  // selected (explicit choice, or the single default) — re-fetched
+  // whenever it changes, cleared if none is resolved yet.
+  useEffect(() => {
+    setValue("subDepartmentId", undefined);
+    setValue("shareWithSubDepartment", false);
+    if (!selectedDepartmentId) {
+      setSubDepartments([]);
+      return;
+    }
+    fetch(`/api/departments/${selectedDepartmentId}/sub-departments`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((options) => setSubDepartments(Array.isArray(options) ? options : []))
+      .catch(() => setSubDepartments([]));
+  }, [selectedDepartmentId, setValue]);
 
   const uploadAttachment = async (ticketId: string, file: File) => {
     const fd = new FormData();
@@ -269,6 +289,56 @@ export function CreateTicketForm({
                   </Select>
                 </div>
               )}
+
+              {subDepartments.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label>Sub-Department</Label>
+                  <Select
+                    value={watch("subDepartmentId") ?? "__none__"}
+                    onValueChange={(v) => {
+                      setValue("subDepartmentId", v === "__none__" ? undefined : v);
+                      if (v === "__none__") setValue("shareWithSubDepartment", false);
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">None</SelectItem>
+                      {subDepartments.map((sd) => (
+                        <SelectItem key={sd.id} value={sd.id}>
+                          {sd.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded"
+                    checked={watch("shareWithDepartment") ?? false}
+                    onChange={(e) => setValue("shareWithDepartment", e.target.checked)}
+                  />
+                  <span className="text-sm">Share with my department</span>
+                </label>
+                <label className={`flex items-center gap-2 ${watch("subDepartmentId") ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}>
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded"
+                    checked={watch("shareWithSubDepartment") ?? false}
+                    disabled={!watch("subDepartmentId")}
+                    onChange={(e) => setValue("shareWithSubDepartment", e.target.checked)}
+                  />
+                  <span className="text-sm">Share with my sub-department</span>
+                </label>
+                {!watch("subDepartmentId") && (
+                  <p className="text-xs text-muted-foreground pl-6">Select a subdepartment before sharing with it.</p>
+                )}
+              </div>
 
               {projects.length > 0 && (
                 <div className="space-y-1.5">

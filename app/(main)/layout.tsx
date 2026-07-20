@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { hasPermission } from "@/lib/permissions";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { ActiveWorkspaceProvider } from "@/components/workspace/active-workspace-provider";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
@@ -18,9 +19,10 @@ export default async function MainLayout({
     redirect("/login");
   }
 
-  const [canCreateTicket, activeWorkspace] = await Promise.all([
+  const [canCreateTicket, activeWorkspace, navFlags] = await Promise.all([
     hasPermission(session.user.role, "ticket.create", session.user.customRoleId),
     getActiveWorkspace(session.user.id, session.user.role),
+    getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId),
   ]);
 
   return (
@@ -32,7 +34,7 @@ export default async function MainLayout({
       initialIsAllSelected={activeWorkspace.isAllSelected}
     >
       <div className="flex h-screen overflow-hidden bg-background">
-        <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} />
+        <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
         <div className="flex-1 flex flex-col overflow-hidden">
           <Topbar user={session.user} />
           <main className="flex-1 overflow-y-auto p-6">{children}</main>

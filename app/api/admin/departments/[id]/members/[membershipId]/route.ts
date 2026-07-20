@@ -10,7 +10,7 @@ export async function DELETE(
 ) {
   try {
     const { id, membershipId } = await params;
-    await requireDepartmentPermission(id, "department.manageMembers");
+    await requireDepartmentPermission(id, "department.user.unassign");
 
     const membership = await prisma.departmentMembership.findUnique({ where: { id: membershipId } });
     if (!membership || membership.departmentId !== id) {

@@ -45,6 +45,8 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [dueDate, setDueDate] = useState("");
   const [progress, setProgress] = useState("0");
   const [isMilestone, setIsMilestone] = useState(false);
+  const [subDepartments, setSubDepartments] = useState<{ id: string; name: string }[]>([]);
+  const [subDepartmentId, setSubDepartmentId] = useState("");
 
   useEffect(() => {
     Promise.all([
@@ -63,13 +65,23 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           setDueDate(activity.dueDate ? activity.dueDate.substring(0, 10) : "");
           setProgress(String(activity.progress ?? 0));
           setIsMilestone(activity.isMilestone ?? false);
+          setSubDepartmentId(activity.subDepartmentId ?? "");
 
-          // Eligible assignees depend on the activity's own department —
-          // fetched once we know it, not in parallel with the activity itself.
-          const assignableUrl = `/api/users?assignableFor=activity${activity.departmentId ? `&departmentId=${activity.departmentId}` : ""}`;
-          fetch(assignableUrl)
-            .then((r) => (r.ok ? r.json() : []))
-            .then((u) => setAssignableUsers(Array.isArray(u) ? u : []));
+          // Eligible assignees/sub-departments depend on the activity's own
+          // department — fetched once we know it, not in parallel with the
+          // activity itself.
+          if (activity.departmentId) {
+            fetch(`/api/users?assignableFor=activity&departmentId=${activity.departmentId}`)
+              .then((r) => (r.ok ? r.json() : []))
+              .then((u) => setAssignableUsers(Array.isArray(u) ? u : []));
+            fetch(`/api/departments/${activity.departmentId}/sub-departments`)
+              .then((r) => (r.ok ? r.json() : []))
+              .then((sd) => setSubDepartments(Array.isArray(sd) ? sd : []));
+          } else {
+            fetch("/api/users?assignableFor=activity")
+              .then((r) => (r.ok ? r.json() : []))
+              .then((u) => setAssignableUsers(Array.isArray(u) ? u : []));
+          }
         }
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
       })
@@ -104,6 +116,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           dueDate: dueDate || undefined,
           progress: isMilestone ? 0 : (progress !== "" ? parseInt(progress) : undefined),
           isMilestone,
+          subDepartmentId: subDepartmentId || null,
         }),
       });
       if (!res.ok) {
@@ -210,6 +223,23 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
                 </SelectContent>
               </Select>
             </div>
+
+            {subDepartments.length > 0 && (
+              <div className="space-y-2">
+                <Label>Sub-Department (optional)</Label>
+                <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None</SelectItem>
+                    {subDepartments.map((sd) => (
+                      <SelectItem key={sd.id} value={sd.id}>{sd.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             <div className="space-y-2">
               <Label>Assigned Users</Label>

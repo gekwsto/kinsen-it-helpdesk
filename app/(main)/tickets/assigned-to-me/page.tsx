@@ -16,6 +16,7 @@ interface SearchParams {
   priorityId?: string;
   categoryId?: string;
   departmentId?: string;
+  subDepartmentId?: string;
   source?: string;
   createdAfter?: string;
   createdBefore?: string;
@@ -87,6 +88,7 @@ export default async function AssignedToMeTicketsPage({
       ],
     });
   }
+  if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
   if (params.statusId) andConditions.push({ statusId: params.statusId });
   if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
   if (params.categoryId) andConditions.push({ categoryId: params.categoryId });

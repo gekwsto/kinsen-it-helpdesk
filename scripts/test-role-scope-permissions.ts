@@ -73,7 +73,13 @@ async function main() {
     REQUESTER: "DEPARTMENT",
     VIEWER: "DEPARTMENT",
   };
-  const roles = await prisma.customRole.findMany({ where: { key: { in: Object.keys(expectedScopes) } } });
+  // Explicit select — avoids Prisma's default "all scalar columns" query,
+  // which would fail against a database that hasn't yet run the (unrelated,
+  // separately-guarded) 20260723090000_add_custom_role_is_active migration.
+  const roles = await prisma.customRole.findMany({
+    where: { key: { in: Object.keys(expectedScopes) } },
+    select: { id: true, key: true, scope: true, isBuiltIn: true },
+  });
   const roleByKey = new Map(roles.map((r) => [r.key, r]));
 
   let allSeeded = true;

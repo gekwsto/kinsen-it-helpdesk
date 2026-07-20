@@ -64,6 +64,18 @@ async function main() {
     return;
   }
 
+  try {
+    await prisma.departmentMembership.findFirst({ select: { id: true, customRoleId: true } });
+  } catch (err) {
+    console.log(
+      "\nDepartmentMembership.customRoleId isn't usable against this database yet (migration " +
+        "20260721100000_add_subdepartments_and_custom_department_roles not applied) — skipping DB-backed checks."
+    );
+    console.log(String(err instanceof Error ? err.message : err));
+    printSummaryAndExit();
+    return;
+  }
+
   console.log("\nSetting up Director-role fixtures...\n");
   let directorUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   let otherDeptUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;

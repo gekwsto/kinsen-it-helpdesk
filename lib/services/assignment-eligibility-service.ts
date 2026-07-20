@@ -59,7 +59,7 @@ async function evaluateAssignability(
 
   if (departmentId) {
     const membership = await getMembership(candidate.id, departmentId);
-    if (membership) return hasDepartmentPermission(membership.role, permKey);
+    if (membership) return hasDepartmentPermission(membership.role, permKey, membership.customRoleId);
     if (!canViewAllDepartments(candidate.role)) return false;
   }
 

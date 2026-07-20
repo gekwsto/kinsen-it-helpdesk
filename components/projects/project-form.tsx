@@ -33,6 +33,11 @@ interface DepartmentOption {
   name: string;
 }
 
+interface SubDepartmentOption {
+  id: string;
+  name: string;
+}
+
 interface ProjectFormProps {
   departments: DepartmentOption[];
   /** Preselected department — the active workspace's department if it's in `departments`, or the sole option if there's exactly one. Undefined forces an explicit choice. */
@@ -63,6 +68,7 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
   });
 
   const departmentId = watch("departmentId");
+  const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
 
   // Eligible members depend on the selected workspace — re-fetched whenever
   // it changes, not loaded once and filtered in the browser.
@@ -73,6 +79,21 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
       .then((users) => setAssignableUsers(Array.isArray(users) ? users : []))
       .catch(() => {});
   }, [departmentId]);
+
+  // Sub-departments are scoped to the selected workspace — cleared and
+  // re-fetched whenever the workspace changes, since a sub-department from
+  // the previous department is never valid for the new one.
+  useEffect(() => {
+    setValue("subDepartmentId", undefined);
+    if (!departmentId) {
+      setSubDepartments([]);
+      return;
+    }
+    fetch(`/api/departments/${departmentId}/sub-departments`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((options) => setSubDepartments(Array.isArray(options) ? options : []))
+      .catch(() => setSubDepartments([]));
+  }, [departmentId, setValue]);
 
   const toggleMember = (userId: string) => {
     setSelectedMemberIds((prev) => {
@@ -173,6 +194,28 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
               This project will belong to the selected workspace.
             </p>
           </div>
+
+          {subDepartments.length > 0 && (
+            <div className="space-y-2">
+              <Label>Sub-Department</Label>
+              <Select
+                value={watch("subDepartmentId") ?? ""}
+                onValueChange={(v) => setValue("subDepartmentId", v || undefined)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="None" />
+                </SelectTrigger>
+                <SelectContent>
+                  {subDepartments.map((sd) => (
+                    <SelectItem key={sd.id} value={sd.id}>
+                      {sd.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">Optional — narrows this project within the workspace.</p>
+            </div>
+          )}
 
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">

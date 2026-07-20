@@ -26,7 +26,7 @@ export type DepartmentWithCounts = DepartmentSummary & {
 
 export type DepartmentMembershipView = Pick<
   DepartmentMembership,
-  "id" | "userId" | "departmentId" | "role" | "source" | "isPrimary" | "isActive"
+  "id" | "userId" | "departmentId" | "role" | "customRoleId" | "source" | "isPrimary" | "isActive"
 > & {
   department: DepartmentSummary;
 };

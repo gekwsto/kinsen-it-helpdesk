@@ -44,6 +44,17 @@ async function main() {
     process.exit(0);
   }
 
+  try {
+    await prisma.departmentMembership.findFirst({ select: { id: true, customRoleId: true } });
+  } catch (err) {
+    console.log(
+      "\nDepartmentMembership.customRoleId isn't usable against this database yet (migration " +
+        "20260721100000_add_subdepartments_and_custom_department_roles not applied) — skipping."
+    );
+    console.log(String(err instanceof Error ? err.message : err));
+    process.exit(0);
+  }
+
   let deptA: Awaited<ReturnType<typeof prisma.department.create>> | undefined;
   let deptB: Awaited<ReturnType<typeof prisma.department.create>> | undefined;
   const userIds: string[] = [];

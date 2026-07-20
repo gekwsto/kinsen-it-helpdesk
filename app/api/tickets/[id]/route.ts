@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireAdmin, canManageTickets, hasPermission, hasDepartmentPermission } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
-import { getMembership } from "@/lib/services/department-membership-service";
+import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
+import { canActOnEntity, canViewTicket } from "@/lib/services/department-scope-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
@@ -56,13 +55,7 @@ export async function GET(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const canView = await canActOnEntity(
-      session.user.id,
-      session.user.role,
-      ticket.departmentId,
-      "ticket.view",
-      ticket.requesterId === session.user.id
-    );
+    const canView = await canViewTicket(session.user.id, session.user.role, ticket);
 
     if (!canView) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -115,30 +108,32 @@ export async function PATCH(
       );
     }
 
-    // Moving a ticket into a different department requires standing in that
-    // NEW department too — otherwise a member of dept A could "launder" a
-    // ticket into dept B they have no access to just by editing this field.
-    if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== ticket.departmentId) {
-      if (session.user.role !== Role.ADMIN) {
-        const targetMembership = await getMembership(session.user.id, data.departmentId);
-        const allowed = targetMembership
-          ? await hasDepartmentPermission(targetMembership.role, "ticket.create")
-          : false;
-        if (!allowed) {
-          return NextResponse.json(
-            { error: "You don't have access to the target department" },
-            { status: 403 }
-          );
-        }
-      }
-    }
-
     if (data.assignedAgentId) {
-      const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : ticket.departmentId;
-      const assignable = await userHasAssignablePermissionForEntity(data.assignedAgentId, "ticket", effectiveDepartmentId);
+      const assignable = await userHasAssignablePermissionForEntity(data.assignedAgentId, "ticket", ticket.departmentId);
       if (!assignable) {
         return NextResponse.json(
           { error: "This user cannot be assigned to tickets in this department.", code: "assignee_not_assignable" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Share flags: the requester/creator can always set these on their own
+    // ticket (owner bypass); anyone else needs the matching ticket.share.*
+    // permission. shareWithSubDepartment additionally requires the ticket to
+    // already have a subDepartmentId (set via PATCH /api/tickets/[id]/department).
+    if (data.shareWithDepartment !== undefined && data.shareWithDepartment !== ticket.shareWithDepartment && !isOwner) {
+      const allowed = await hasPermission(session.user.role, "ticket.share.department", session.user.customRoleId);
+      if (!allowed) return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
+    }
+    if (data.shareWithSubDepartment !== undefined && data.shareWithSubDepartment !== ticket.shareWithSubDepartment) {
+      if (!isOwner) {
+        const allowed = await hasPermission(session.user.role, "ticket.share.subdepartment", session.user.customRoleId);
+        if (!allowed) return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
+      }
+      if (data.shareWithSubDepartment && !ticket.subDepartmentId) {
+        return NextResponse.json(
+          { error: "Select a sub-department before sharing with it.", code: "subdepartment_required_for_share" },
           { status: 400 }
         );
       }

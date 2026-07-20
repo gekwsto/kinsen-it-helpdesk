@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAdmin, requireDepartmentPermission } from "@/lib/permissions";
+import { requireAuth, requireDepartmentPermission, hasPermission } from "@/lib/permissions";
 import { updateDepartmentSchema } from "@/lib/validations";
 import { updateDepartment, setDepartmentActive } from "@/lib/services/department-service";
 
@@ -37,11 +37,16 @@ export async function PATCH(
     const body = await req.json();
     const data = updateDepartmentSchema.parse(body);
 
-    // Activate/deactivate is System-Admin-only (a structural, global-impact
-    // action) — everything else (name/slug/description) a Department Admin
-    // can also do for their own department.
+    // Activate/deactivate is a structural, global-impact action, gated by
+    // the global department.update permission (Administrator has it via the
+    // usual hasPermission bypass; grantable to others from Roles &
+    // Permissions) — everything else (name/slug/description) a Department
+    // Admin can also do for their own department via the existing
+    // department-scoped department.manageSettings gate.
     if (data.isActive !== undefined) {
-      await requireAdmin();
+      const session = await requireAuth();
+      const allowed = await hasPermission(session.user.role, "department.update", session.user.customRoleId);
+      if (!allowed) return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
     } else {
       await requireDepartmentPermission(id, "department.manageSettings");
     }
@@ -87,10 +92,13 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    // Deletion is System-Admin-only (structural/destructive), unlike
-    // settings/member management which a Department Admin can also do for
-    // their own department.
-    await requireAdmin();
+    // Deletion is gated by the global department.delete permission
+    // (Administrator via the usual bypass; grantable to others from Roles &
+    // Permissions) — a structural/destructive action, unlike settings/member
+    // management which a Department Admin can also do for their own department.
+    const session = await requireAuth();
+    const allowed = await hasPermission(session.user.role, "department.delete", session.user.customRoleId);
+    if (!allowed) return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
 
     const department = await prisma.department.findUnique({
       where: { id },

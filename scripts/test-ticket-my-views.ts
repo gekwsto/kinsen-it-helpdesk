@@ -61,6 +61,19 @@ async function main() {
     return;
   }
 
+  try {
+    await prisma.ticket.findFirst({ select: { id: true, shareWithDepartment: true } });
+  } catch (err) {
+    console.log(
+      "\nTicket.shareWithDepartment isn't usable against this database yet (migration " +
+        "20260722090000_add_ticket_sharing_and_department_change_audit not applied) — skipping DB-backed round-trip."
+    );
+    console.log(String(err instanceof Error ? err.message : err));
+    console.log(`\n${passed} passed, ${failed} failed`);
+    if (failed > 0) process.exit(1);
+    return;
+  }
+
   console.log("\nSetting up fixtures for the DB round-trip...\n");
   let userA: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   let userB: Awaited<ReturnType<typeof prisma.user.create>> | undefined;

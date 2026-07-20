@@ -1,4 +1,4 @@
-import { DepartmentRole, Role } from "@prisma/client";
+import { DepartmentRole, Role, RoleScope } from "@prisma/client";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { cache } from "react";
@@ -118,7 +118,10 @@ export async function hasPermission(
 
   if (customRoleId) {
     const customRole = await prisma.customRole.findUnique({ where: { id: customRoleId } });
-    if (customRole) {
+    // A disabled custom role falls through to the base enum role below,
+    // exactly like a not-found one already did — disabling never produces a
+    // hard "zero permissions" cliff.
+    if (customRole && customRole.isActive) {
       const keys = await getPermissionsForRole(customRole.key);
       return keys.includes(permissionKey);
     }
@@ -126,6 +129,41 @@ export async function hasPermission(
 
   const keys = await getPermissionsForRole(role);
   return keys.includes(permissionKey);
+}
+
+/**
+ * Can this user reach the Roles & Permissions admin surface at all —
+ * either globally (`role.manage`, covers every role regardless of scope)
+ * or narrowly, for department roles only (any `role.department.*` grant).
+ * Used to gate GET /api/admin/roles (viewing the list); the more specific
+ * canManageRoleScope below gates individual create/update/delete actions.
+ */
+export async function canManageAnyRoles(role: Role, customRoleId?: string | null): Promise<boolean> {
+  if (await hasPermission(role, "role.manage", customRoleId)) return true;
+  for (const key of ["role.department.create", "role.department.update", "role.department.delete"]) {
+    if (await hasPermission(role, key, customRoleId)) return true;
+  }
+  return false;
+}
+
+/**
+ * Gate for a specific create/update/delete action on a role with a given
+ * scope. `role.manage` is the blanket permission (covers GLOBAL and
+ * DEPARTMENT/BOTH alike — unchanged from before this feature). A
+ * `role.department.<action>` grant covers DEPARTMENT/BOTH-scope targets
+ * only — never GLOBAL, so a department-role-manager can never touch
+ * Administrator/IT Agent/Director/User or an admin-created global custom
+ * role through this narrower permission.
+ */
+export async function canManageRoleScope(
+  role: Role,
+  customRoleId: string | null | undefined,
+  targetScope: RoleScope,
+  action: "create" | "update" | "delete"
+): Promise<boolean> {
+  if (await hasPermission(role, "role.manage", customRoleId)) return true;
+  if (targetScope === RoleScope.GLOBAL) return false;
+  return hasPermission(role, `role.department.${action}`, customRoleId);
 }
 
 /**
@@ -175,12 +213,41 @@ export async function requireITAgent() {
 // above, which currently lets IT_AGENT/DEPARTMENT_MANAGER see every
 // department's tickets) is explicitly Phase 2 — see the architecture plan.
 
+/**
+ * Same resolution order as hasPermission: a custom department role
+ * (DepartmentMembership.customRoleId → CustomRole.key, scope DEPARTMENT/BOTH)
+ * takes priority when set; `role` is the fallback (and the only source for
+ * every existing built-in-only membership, unchanged).
+ */
 export async function hasDepartmentPermission(
   role: DepartmentRole,
-  permissionKey: string
+  permissionKey: string,
+  customRoleId?: string | null
 ): Promise<boolean> {
+  if (customRoleId) {
+    const customRole = await prisma.customRole.findUnique({ where: { id: customRoleId } });
+    // Same fallback rule as hasPermission above — a disabled custom role
+    // falls through to the base DepartmentRole enum.
+    if (customRole && customRole.isActive) {
+      const keys = await getPermissionsForRole(customRole.key);
+      return keys.includes(permissionKey);
+    }
+  }
+
   const keys = await getPermissionsForRole(role);
   return keys.includes(permissionKey);
+}
+
+/** True if any one of the given permission keys is held — used where a page/action should be reachable by whichever narrower grant a caller has (e.g. department.user.assign OR department.user.unassign OR the older department.manageMembers), rather than requiring one specific key. */
+export async function hasAnyDepartmentPermission(
+  role: DepartmentRole,
+  permissionKeys: string[],
+  customRoleId?: string | null
+): Promise<boolean> {
+  for (const key of permissionKeys) {
+    if (await hasDepartmentPermission(role, key, customRoleId)) return true;
+  }
+  return false;
 }
 
 /**
@@ -207,7 +274,42 @@ export async function requireDepartmentPermission(
 ): Promise<DepartmentAccessResult> {
   const result = await requireDepartmentAccess(departmentId);
   if (result.isSystemAdmin) return result;
-  const allowed = await hasDepartmentPermission(result.membership!.role, permissionKey);
+  const allowed = await hasDepartmentPermission(result.membership!.role, permissionKey, result.membership!.customRoleId);
   if (!allowed) throw new Error("Forbidden");
   return result;
+}
+
+/** Same as requireDepartmentPermission, but passes if the caller holds ANY of the given keys — for pages reachable by more than one narrower grant. */
+export async function requireAnyDepartmentPermission(
+  departmentId: string,
+  permissionKeys: string[]
+): Promise<DepartmentAccessResult> {
+  const result = await requireDepartmentAccess(departmentId);
+  if (result.isSystemAdmin) return result;
+  const allowed = await hasAnyDepartmentPermission(result.membership!.role, permissionKeys, result.membership!.customRoleId);
+  if (!allowed) throw new Error("Forbidden");
+  return result;
+}
+
+/**
+ * Whether `actingUserId` (the caller, e.g. an admin using Add/Edit User) may
+ * assign SOMEONE ELSE into `departmentId` — used by the global user-account
+ * routes (app/api/admin/users/*) so setting a user's Primary Department
+ * there is gated the same way the department members page's own assign
+ * action already is, not just by whatever permission gates the rest of the
+ * request. `user.manage`/ADMIN is a blanket bypass; short of that, the
+ * caller needs department.user.assign in that specific department via their
+ * own DepartmentMembership there — the same standing requireDepartmentPermission
+ * would check for the department members page.
+ */
+export async function canAssignUserToDepartment(
+  actingRole: Role,
+  actingCustomRoleId: string | null | undefined,
+  actingUserId: string,
+  departmentId: string
+): Promise<boolean> {
+  if (await hasPermission(actingRole, "user.manage", actingCustomRoleId)) return true;
+  const membership = await getMembership(actingUserId, departmentId);
+  if (!membership) return false;
+  return hasDepartmentPermission(membership.role, "department.user.assign", membership.customRoleId);
 }

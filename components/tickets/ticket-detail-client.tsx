@@ -34,6 +34,8 @@ import { TicketThread, type ThreadMessage } from "@/components/tickets/ticket-th
 import { TicketReplyForm } from "@/components/tickets/ticket-reply-form";
 import { TicketHistory } from "@/components/tickets/ticket-history";
 import { TicketActions } from "@/components/tickets/ticket-actions";
+import { TicketDepartmentEditor } from "@/components/tickets/ticket-department-editor";
+import { TicketShareToggles } from "@/components/tickets/ticket-share-toggles";
 import { useTicketRealtime } from "@/hooks/use-ticket-realtime";
 import type { TicketRealtimeEvent } from "@/lib/realtime/types";
 
@@ -95,6 +97,13 @@ export interface TicketDetailClientProps {
   ticketCreatedAt: string;
   requester: { id: string; name: string | null; email: string; image: string | null };
   department: { id: string; name: string } | null;
+  subDepartment: { id: string; name: string } | null;
+  allDepartments: { id: string; name: string }[];
+  canChangeDepartment: boolean;
+  shareWithDepartment: boolean;
+  shareWithSubDepartment: boolean;
+  canShareDepartment: boolean;
+  canShareSubDepartment: boolean;
   project: { id: string; title: string } | null;
   activity: { id: string; title: string } | null;
   initialStatus: TicketStatus;
@@ -132,6 +141,13 @@ export function TicketDetailClient({
   ticketCreatedAt,
   requester,
   department,
+  subDepartment,
+  allDepartments,
+  canChangeDepartment,
+  shareWithDepartment,
+  shareWithSubDepartment,
+  canShareDepartment,
+  canShareSubDepartment,
   project,
   activity,
   initialStatus,
@@ -600,11 +616,41 @@ export function TicketDetailClient({
                 <ColorBadge name={category.name} color={category.color} />
               </div>
             )}
-            {department && (
-              <div className="flex justify-between items-center">
-                <span className="text-muted-foreground">Department</span>
-                <span className="font-medium">{department.name}</span>
-              </div>
+            {canChangeDepartment ? (
+              <TicketDepartmentEditor
+                ticketId={ticketId}
+                department={department}
+                subDepartment={subDepartment}
+                departments={allDepartments}
+              />
+            ) : (
+              <>
+                {department && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Department</span>
+                    <span className="font-medium">{department.name}</span>
+                  </div>
+                )}
+                {subDepartment && (
+                  <div className="flex justify-between items-center">
+                    <span className="text-muted-foreground">Sub-Department</span>
+                    <span className="font-medium">{subDepartment.name}</span>
+                  </div>
+                )}
+              </>
+            )}
+            {(canShareDepartment || canShareSubDepartment) && (
+              <>
+                <Separator />
+                <TicketShareToggles
+                  ticketId={ticketId}
+                  initialShareWithDepartment={shareWithDepartment}
+                  initialShareWithSubDepartment={shareWithSubDepartment}
+                  hasSubDepartment={!!subDepartment}
+                  canShareDepartment={canShareDepartment}
+                  canShareSubDepartment={canShareSubDepartment}
+                />
+              </>
             )}
             {project && (
               <div className="flex justify-between items-center">

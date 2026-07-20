@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useTransition } from "react";
+import { useState, useEffect, useCallback, useTransition } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -98,6 +98,26 @@ export function TicketFilters({
   const handleSelect = (key: string, value: string) => {
     push({ [key]: value === "all" ? null : value });
   };
+
+  const handleDepartmentSelect = (value: string) => {
+    // The old sub-department (if any) belongs to the previous department —
+    // never valid for a new one, so it's cleared in the same navigation.
+    push({ departmentId: value === "all" ? null : value, subDepartmentId: null });
+  };
+
+  const [subDepartments, setSubDepartments] = useState<{ id: string; name: string }[]>([]);
+  const selectedDepartmentId = get("departmentId");
+
+  useEffect(() => {
+    if (!selectedDepartmentId) {
+      setSubDepartments([]);
+      return;
+    }
+    fetch(`/api/departments/${selectedDepartmentId}/sub-departments`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((options) => setSubDepartments(Array.isArray(options) ? options : []))
+      .catch(() => setSubDepartments([]));
+  }, [selectedDepartmentId]);
 
   const handleToggle = (key: string, checked: boolean) => {
     push({ [key]: checked ? "true" : null });
@@ -293,7 +313,7 @@ export function TicketFilters({
               <Label className="text-xs text-muted-foreground">Department</Label>
               <Select
                 value={get("departmentId") || "all"}
-                onValueChange={(v) => handleSelect("departmentId", v)}
+                onValueChange={handleDepartmentSelect}
               >
                 <SelectTrigger className="h-8 text-xs">
                   <SelectValue placeholder="Any department" />
@@ -306,6 +326,27 @@ export function TicketFilters({
                 </SelectContent>
               </Select>
             </div>
+
+            {/* Sub-Department — only meaningful once a specific Department is selected */}
+            {selectedDepartmentId && subDepartments.length > 0 && (
+              <div className="space-y-1">
+                <Label className="text-xs text-muted-foreground">Sub-Department</Label>
+                <Select
+                  value={get("subDepartmentId") || "all"}
+                  onValueChange={(v) => handleSelect("subDepartmentId", v)}
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Any sub-department" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">Any sub-department</SelectItem>
+                    {subDepartments.map((sd) => (
+                      <SelectItem key={sd.id} value={sd.id}>{sd.name}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             {/* Assigned agent (all-tickets only) */}
             {isAllTickets && (

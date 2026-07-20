@@ -25,6 +25,11 @@ interface AssignableUser {
   email: string;
 }
 
+interface SubDepartmentOption {
+  id: string;
+  name: string;
+}
+
 export default function EditProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
@@ -41,6 +46,8 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [endDate, setEndDate] = useState("");
   const [successTarget, setSuccessTarget] = useState("");
   const [isGoal, setIsGoal] = useState(false);
+  const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
+  const [subDepartmentId, setSubDepartmentId] = useState("");
 
   useEffect(() => {
     fetch(`/api/projects/${id}`)
@@ -56,18 +63,28 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setEndDate(p.endDate ? p.endDate.split("T")[0] : "");
           setSuccessTarget(p.successTarget ?? "");
           setIsGoal(p.isGoal ?? false);
+          setSubDepartmentId(p.subDepartmentId ?? "");
           // Pre-select existing members
           const existingIds = new Set<string>(
             (p.members ?? []).map((m: { id: string }) => m.id)
           );
           setSelectedMemberIds(existingIds);
 
-          // Eligible members depend on the project's own department —
-          // fetched once we know it, not in parallel with the project itself.
-          const assignableUrl = `/api/users?assignableFor=project${p.departmentId ? `&departmentId=${p.departmentId}` : ""}`;
-          fetch(assignableUrl)
-            .then((r) => (r.ok ? r.json() : []))
-            .then((users) => setAssignableUsers(Array.isArray(users) ? users : []));
+          // Eligible members/sub-departments depend on the project's own
+          // department (fixed — this form doesn't let you move departments)
+          // — fetched once we know it, not in parallel with the project itself.
+          if (p.departmentId) {
+            fetch(`/api/users?assignableFor=project&departmentId=${p.departmentId}`)
+              .then((r) => (r.ok ? r.json() : []))
+              .then((users) => setAssignableUsers(Array.isArray(users) ? users : []));
+            fetch(`/api/departments/${p.departmentId}/sub-departments`)
+              .then((r) => (r.ok ? r.json() : []))
+              .then((options) => setSubDepartments(Array.isArray(options) ? options : []));
+          } else {
+            fetch("/api/users?assignableFor=project")
+              .then((r) => (r.ok ? r.json() : []))
+              .then((users) => setAssignableUsers(Array.isArray(users) ? users : []));
+          }
         }
       })
       .finally(() => setLoading(false));
@@ -103,6 +120,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           successTarget: successTarget || undefined,
           memberIds: Array.from(selectedMemberIds),
           isGoal,
+          subDepartmentId: subDepartmentId || null,
         }),
       });
       if (!res.ok) {
@@ -164,6 +182,25 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 rows={3}
               />
             </div>
+
+            {subDepartments.length > 0 && (
+              <div className="space-y-2">
+                <Label>Sub-Department</Label>
+                <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None</SelectItem>
+                    {subDepartments.map((sd) => (
+                      <SelectItem key={sd.id} value={sd.id}>
+                        {sd.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">

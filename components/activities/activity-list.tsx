@@ -1,12 +1,15 @@
 "use client";
 
+import { useState } from "react";
 import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
-import { Calendar } from "lucide-react";
+import { Calendar, Loader2 } from "lucide-react";
+import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
 
 const STATUS_COLORS: Record<ActivityStatus, string> = {
   TODO: "bg-gray-100 text-gray-700",
@@ -44,8 +47,28 @@ interface ActivityListProps {
   activities: SerializedActivity[];
 }
 
-export function ActivityList({ activities }: ActivityListProps) {
+export function ActivityList({ activities: initialActivities }: ActivityListProps) {
   const router = useRouter();
+  const [activities, setActivities] = useState(initialActivities);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  const handleToggle = async (activity: SerializedActivity) => {
+    const previous = activity.isCompleted;
+    setTogglingId(activity.id);
+    // Optimistic flip, rolled back on failure below.
+    setActivities((prev) =>
+      prev.map((a) => (a.id === activity.id ? { ...a, isCompleted: !previous, status: !previous ? ActivityStatus.COMPLETED : ActivityStatus.IN_PROGRESS } : a))
+    );
+    try {
+      const { isCompleted, status } = await toggleActivityComplete(activity.id, previous);
+      setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, isCompleted, status: status as ActivityStatus } : a)));
+    } catch (error: any) {
+      setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, isCompleted: previous, status: activity.status } : a)));
+      toast.error(error.message ?? "Failed to update activity");
+    } finally {
+      setTogglingId(null);
+    }
+  };
 
   return (
     <div className="space-y-2">
@@ -67,13 +90,20 @@ export function ActivityList({ activities }: ActivityListProps) {
             <CardContent className="py-3 px-4">
               <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-3 min-w-0">
-                  <input
-                    type="checkbox"
-                    checked={activity.isCompleted}
-                    readOnly
-                    className="h-4 w-4 rounded flex-shrink-0"
-                    onClick={(e) => e.stopPropagation()}
-                  />
+                  {togglingId === activity.id ? (
+                    <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-muted-foreground" />
+                  ) : (
+                    <input
+                      type="checkbox"
+                      checked={activity.isCompleted}
+                      onChange={() => {}}
+                      className="h-4 w-4 rounded flex-shrink-0 cursor-pointer"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleToggle(activity);
+                      }}
+                    />
+                  )}
                   <div className="min-w-0">
                     <p
                       className={`text-sm font-medium truncate ${

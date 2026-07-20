@@ -20,6 +20,7 @@ import { ChevronRight, Loader2, CheckCircle2, Circle, Pencil, Ticket, GitMerge, 
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
+import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
 
 const STATUS_COLORS: Record<ActivityStatus, string> = {
   TODO: "bg-gray-100 text-gray-700",
@@ -171,20 +172,11 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
     if (!activity) return;
     setToggling(true);
     try {
-      const res = await fetch(`/api/activities/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          isCompleted: !activity.isCompleted,
-          status: !activity.isCompleted ? "COMPLETED" : "IN_PROGRESS",
-        }),
-      });
-      if (!res.ok) throw new Error();
-      const updated = await res.json();
-      setActivity(updated);
-      toast.success(updated.isCompleted ? "Activity completed!" : "Activity reopened");
-    } catch {
-      toast.error("Failed to update activity");
+      const { isCompleted, status } = await toggleActivityComplete(id, activity.isCompleted);
+      setActivity((prev) => (prev ? { ...prev, isCompleted, status: status as ActivityStatus } : prev));
+      toast.success(isCompleted ? "Activity completed!" : "Activity reopened");
+    } catch (error: any) {
+      toast.error(error.message ?? "Failed to update activity");
     } finally {
       setToggling(false);
     }

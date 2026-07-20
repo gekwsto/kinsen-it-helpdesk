@@ -19,21 +19,40 @@ export const createTicketSchema = z.object({
   categoryId: z.string().optional(),
   priorityId: z.string().optional(),
   departmentId: z.string().optional(),
+  subDepartmentId: z.string().optional(),
   projectId: z.string().optional(),
   activityId: z.string().optional(),
+  // Ticket-only sharing — the requester creating this ticket is always
+  // allowed to set these on their own ticket (owner bypass), see
+  // POST /api/tickets.
+  shareWithDepartment: z.boolean().default(false),
+  shareWithSubDepartment: z.boolean().default(false),
 });
 
+// departmentId/subDepartmentId are deliberately NOT here — moving a ticket's
+// department/sub-department goes through the dedicated, audited
+// PATCH /api/tickets/[id]/department route (changeTicketDepartmentSchema
+// below) instead, gated by ticket.department.change rather than whatever
+// permission this generic update happens to be gated by.
 export const updateTicketSchema = z.object({
   title: z.string().min(5).max(200).optional(),
   description: z.string().min(10).optional(),
   categoryId: z.string().nullable().optional(),
   priorityId: z.string().nullable().optional(),
-  departmentId: z.string().nullable().optional(),
   statusId: z.string().optional(),
   assignedAgentId: z.string().nullable().optional(),
   cancelReasonId: z.string().nullable().optional(),
   projectId: z.string().nullable().optional(),
   activityId: z.string().nullable().optional(),
+  shareWithDepartment: z.boolean().optional(),
+  shareWithSubDepartment: z.boolean().optional(),
+});
+
+// PATCH /api/tickets/[id]/department body — the one audited path for moving
+// a ticket's department/sub-department (see decision #1 in the plan).
+export const changeTicketDepartmentSchema = z.object({
+  departmentId: z.string().min(1, "Department is required"),
+  subDepartmentId: z.string().nullable().optional(),
 });
 
 export const replyTicketSchema = z.object({
@@ -59,6 +78,7 @@ export const createProjectSchema = z.object({
   status: z.nativeEnum(ProjectStatus).default(ProjectStatus.PLANNING),
   priority: z.number().int().min(1).max(3).default(2),
   departmentId: z.string().optional(),
+  subDepartmentId: z.string().nullable().optional(),
   businessUnitId: z.string().optional(),
   startDate: z.string().optional(),
   endDate: z.string().optional(),
@@ -79,6 +99,7 @@ export const createActivitySchema = z.object({
   priority: z.nativeEnum(ActivityPriority).default(ActivityPriority.MEDIUM),
   assignedUserIds: z.array(z.string()).default([]),
   departmentId: z.string().optional(),
+  subDepartmentId: z.string().nullable().optional(),
   businessUnitId: z.string().optional(),
   startDate: z.string().optional(),
   dueDate: z.string().optional(),
@@ -110,10 +131,27 @@ export const updateGoalSchema = createGoalSchema.partial();
 
 // ─── Admin Schemas ─────────────────────────────────────────────────────────────
 
+// A single "Department Memberships" row from the Add/Edit User dialog —
+// exactly one of role/customRoleId, matching the same shape
+// grantManualMembership's DepartmentRoleSelection already expects.
+const departmentMembershipInputSchema = z
+  .object({
+    departmentId: z.string().min(1),
+    role: z.nativeEnum(DepartmentRole).optional(),
+    customRoleId: z.string().nullable().optional(),
+  })
+  .refine((data) => !!data.role !== !!data.customRoleId, {
+    message: "Provide exactly one of role or customRoleId",
+  });
+
 export const updateUserRoleSchema = z.object({
   role: z.nativeEnum(Role),
   customRoleId: z.string().nullable().optional(),
+  // departmentId is the legacy field name — primaryDepartmentId is the
+  // preferred alias the Add/Edit User UI now sends; the route treats them
+  // as the same write (see app/api/admin/users/[id]/route.ts).
   departmentId: z.string().nullable().optional(),
+  primaryDepartmentId: z.string().nullable().optional(),
   businessUnitId: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
   email: z
@@ -130,7 +168,12 @@ export const createUserSchema = z.object({
   email: z.string().trim().toLowerCase().email("Invalid email address"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   role: z.nativeEnum(Role).default(Role.USER),
+  // Legacy single-department field — kept for backward compatibility with
+  // any other caller; the Add User UI now sends primaryDepartmentId +
+  // departmentMemberships instead (see app/api/admin/users/route.ts).
   departmentId: z.string().optional(),
+  primaryDepartmentId: z.string().nullable().optional(),
+  departmentMemberships: z.array(departmentMembershipInputSchema).default([]),
   businessUnitId: z.string().optional(),
   isActive: z.boolean().default(true),
 });
@@ -159,6 +202,17 @@ export const updateDepartmentSchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+export const createSubDepartmentSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters"),
+  description: z.string().trim().min(1).optional(),
+});
+
+export const updateSubDepartmentSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters").optional(),
+  description: z.string().trim().nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+
 export const createCategorySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   description: z.string().optional(),
@@ -170,10 +224,19 @@ export const createCategorySchema = z.object({
 
 // ─── Department Membership Schemas (Phase 3) ────────────────────────────────────
 
-export const grantMembershipSchema = z.object({
-  userId: z.string().min(1, "User is required"),
-  role: z.nativeEnum(DepartmentRole),
-});
+// Either a built-in DepartmentRole or a custom department role (CustomRole,
+// scope DEPARTMENT/BOTH) — never both. See getDepartmentRoleOptions()
+// (lib/services/department-role-options-service.ts) for the unified list
+// the "Add Member"/"Change Role" dropdown offers.
+export const grantMembershipSchema = z
+  .object({
+    userId: z.string().min(1, "User is required"),
+    role: z.nativeEnum(DepartmentRole).optional(),
+    customRoleId: z.string().optional(),
+  })
+  .refine((data) => !!data.role !== !!data.customRoleId, {
+    message: "Provide exactly one of role or customRoleId",
+  });
 
 // ─── Microsoft Mapping Schemas (Phase 3) ─────────────────────────────────────────
 

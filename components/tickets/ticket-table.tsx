@@ -30,6 +30,8 @@ interface Ticket {
   category?: { id: string; name: string; color: string } | null;
   department?: { id: string; name: string } | null;
   project?: { id: string; title: string } | null;
+  departmentChangedBy?: { id: string; name?: string | null; email: string } | null;
+  departmentChangedAt?: string | null;
   _count: { messages: number; attachments: number };
 }
 
@@ -85,6 +87,7 @@ export function TicketTable({
               <TableHead>Category</TableHead>
               <TableHead>Project</TableHead>
               <TableHead>Assigned To</TableHead>
+              <TableHead>Dept. changed by</TableHead>
               <TableHead>Created</TableHead>
               <TableHead className="w-16"></TableHead>
             </TableRow>
@@ -93,7 +96,7 @@ export function TicketTable({
             {tickets.length === 0 && (
               <TableRow>
                 <TableCell
-                  colSpan={showRequester ? 11 : 10}
+                  colSpan={showRequester ? 12 : 11}
                   className="py-20"
                 >
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
@@ -201,6 +204,15 @@ export function TicketTable({
                     </div>
                   ) : (
                     <span className="text-xs text-muted-foreground">Unassigned</span>
+                  )}
+                </TableCell>
+                <TableCell>
+                  {ticket.departmentChangedBy ? (
+                    <span className="text-xs text-muted-foreground" title={ticket.departmentChangedAt ? formatDateTime(ticket.departmentChangedAt) : undefined}>
+                      {ticket.departmentChangedBy.name ?? ticket.departmentChangedBy.email}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">—</span>
                   )}
                 </TableCell>
                 <TableCell>
