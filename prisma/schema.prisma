@@ -166,6 +166,12 @@ model Department {
   slug              String                       @unique
   description       String?
   isActive          Boolean                      @default(true)
+  // Inbound mail routing address for the Pending Tickets flow — see
+  // PendingTicket below. Normalized lowercase/trim before save (see
+  // setDepartmentInboundEmail in lib/services/department-service.ts).
+  // Null = not configured; unique across departments so one address can never
+  // be claimed by two departments at once.
+  inboundEmail      String?                      @unique
   businessUnit      BusinessUnit?                @relation(fields: [businessUnitId], references: [id])
   businessUnitId    String?
   subDepartments    SubDepartment[]
@@ -173,6 +179,7 @@ model Department {
   memberships       DepartmentMembership[]
   microsoftMappings MicrosoftDepartmentMapping[]
   tickets           Ticket[]
+  pendingTickets    PendingTicket[]
   projects          Project[]
   activities        ProjectActivity[]
   categories        TicketCategory[]
@@ -360,6 +367,9 @@ model User {
   ticketMessages           TicketMessage[]
   ticketAttachments        TicketAttachment[]
   ticketHistories          TicketHistory[]
+  pendingTicketsRequested  PendingTicket[]      @relation("PendingTicketRequester")
+  pendingTicketsAccepted   PendingTicket[]      @relation("PendingTicketAccepted")
+  pendingTicketsRejected   PendingTicket[]      @relation("PendingTicketRejected")
   ownedProjects            Project[]            @relation("ProjectOwner")
   projectMemberships       Project[]            @relation("ProjectMembers")
   assignedActivities       ProjectActivity[]    @relation("ActivityAssignee")
@@ -523,6 +533,11 @@ model Ticket {
   attachments TicketAttachment[]
   history     TicketHistory[]
 
+  // Set only when this ticket originated from an accepted PendingTicket —
+  // see acceptPendingTicket in lib/services/pending-ticket-service.ts. Never
+  // set for WEB-created or directly-appended-reply tickets.
+  pendingTicketOrigin PendingTicket?
+
   closedAt  DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -540,6 +555,81 @@ model Ticket {
   @@index([shareWithDepartment])
   @@index([shareWithSubDepartment])
   @@index([departmentChangedById])
+}
+
+// ─── Pending Tickets (Department Email → Pending review flow) ─────────────────
+//
+// Inbound email never creates a real Ticket directly anymore — it creates a
+// PendingTicket, which only becomes a real Ticket (via acceptPendingTicket in
+// lib/services/pending-ticket-service.ts) once a permissioned reviewer
+// Accepts it. Rejecting is a soft update (status: REJECTED) — the row is
+// kept for audit and never produces a Ticket. Deliberately a separate table,
+// not a flag on Ticket: every existing Ticket query (buildTicketListWhere,
+// GET /api/tickets, TicketTable) stays completely unaware this flow exists,
+// so a pending row can never leak into "All Tickets" by omission.
+enum PendingTicketStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+}
+
+model PendingTicket {
+  id     String              @id @default(cuid())
+  status PendingTicketStatus @default(PENDING)
+
+  // Real DB-unique dedup key (stronger than TicketMessage.emailMessageId's
+  // app-level findFirst check, which stays for reply-append dedup) — see
+  // processInboundEmails in lib/ticket-email-service.ts.
+  emailMessageId String   @unique
+  emailThreadId  String?
+  fromEmail      String
+  fromName       String?
+  subject        String
+  body           String   @db.Text
+  receivedAt     DateTime
+
+  // Resolved from the message's recipient(s) against Department.inboundEmail
+  // at receipt time (see matchDepartmentForRecipients) — null means no
+  // department address matched; visible only to Admin/Director in
+  // /tickets/pending until accepted with an explicitly chosen department.
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  departmentId String?
+  requester    User?       @relation("PendingTicketRequester", fields: [requesterId], references: [id], onDelete: SetNull)
+  requesterId  String?
+
+  attachments PendingTicketAttachment[]
+
+  acceptedTicket   Ticket?   @relation(fields: [acceptedTicketId], references: [id], onDelete: SetNull)
+  acceptedTicketId String?   @unique
+  acceptedBy       User?     @relation("PendingTicketAccepted", fields: [acceptedById], references: [id], onDelete: SetNull)
+  acceptedById     String?
+  acceptedAt       DateTime?
+  rejectedBy       User?     @relation("PendingTicketRejected", fields: [rejectedById], references: [id], onDelete: SetNull)
+  rejectedById     String?
+  rejectedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([departmentId])
+  @@index([status])
+  @@index([requesterId])
+}
+
+model PendingTicketAttachment {
+  id              String        @id @default(cuid())
+  pendingTicket   PendingTicket @relation(fields: [pendingTicketId], references: [id], onDelete: Cascade)
+  pendingTicketId String
+
+  filename     String
+  originalName String
+  mimeType     String
+  size         Int
+  path         String
+
+  createdAt DateTime @default(now())
+
+  @@index([pendingTicketId])
 }
 
 model TicketMessage {

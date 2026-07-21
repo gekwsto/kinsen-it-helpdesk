@@ -4,7 +4,7 @@ import { getUserDepartmentMemberships, getMembership } from "@/lib/services/depa
 import { getDefaultLegacyDepartmentId, listDepartments, toDepartmentSummary } from "@/lib/services/department-service";
 import { getUserSubDepartmentIds, getSubDepartmentMembership } from "@/lib/services/sub-department-membership-service";
 import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
-import { hasDepartmentPermission, canViewAllDepartments } from "@/lib/permissions";
+import { hasDepartmentPermission, hasPermission, canViewAllDepartments } from "@/lib/permissions";
 import type { DepartmentSummary } from "@/types/department";
 
 /**
@@ -207,12 +207,21 @@ export async function buildTicketListWhere(
 
 /**
  * Ticket-specific view gate for a single already-fetched ticket (GET
- * /api/tickets/[id]) — sharing grants VIEW only, never edit, and is
- * ticket-only (Project/Activity have no share flags, use canActOnEntity
- * directly). Falls back to the existing canActOnEntity for every case that
- * already worked (admin/director, full department view, assignee,
- * requester) — sharing only ever adds visibility on top of that, never
- * removes it.
+ * /api/tickets/[id], the ticket detail page) — mirrors buildTicketListWhere's
+ * full-view/own-only split (see splitTicketViewScope) so a direct URL/API
+ * call can never see a ticket the All Tickets list itself would hide.
+ *
+ * Deliberately does NOT delegate its department-membership check to
+ * canActOnEntity(..., "ticket.view", ...): that helper is a generic
+ * "does this permission key apply anywhere in this department" check with no
+ * concept of REQUESTER-tier own-only scoping, and DepartmentRole.REQUESTER
+ * IS seeded with ticket.view (so a requester can view/create/reply to their
+ * own tickets) — using it here would grant a requester-tier department
+ * member visibility into every other ticket in the department, not just
+ * their own. Order matters: system-wide, then direct relationship
+ * (owner/assignee), then department-wide permission (full-view tier only),
+ * then sharing for own-only tier — never let department membership alone
+ * return true.
  */
 export async function canViewTicket(
   userId: string,
@@ -221,18 +230,37 @@ export async function canViewTicket(
     departmentId: string | null;
     subDepartmentId: string | null;
     requesterId: string;
+    assignedAgentId?: string | null;
     shareWithDepartment: boolean;
     shareWithSubDepartment: boolean;
   }
 ): Promise<boolean> {
-  const isOwner = ticket.requesterId === userId;
-  if (await canActOnEntity(userId, role, ticket.departmentId, "ticket.view", isOwner)) return true;
-  if (!ticket.departmentId) return false;
+  // 1. System-wide (Admin/Director).
+  if (canViewAllDepartments(role)) return true;
 
-  const membership = await getMembership(userId, ticket.departmentId);
+  // 2. Direct relationship — requester or assigned agent, regardless of
+  // department standing (an agent reassigned out of a department mid-ticket
+  // should still see their own assignment history).
+  if (ticket.requesterId === userId) return true;
+  if (ticket.assignedAgentId && ticket.assignedAgentId === userId) return true;
+
+  // 3. Department-wide permission — full-view tier only. Legacy
+  // (departmentId: null) rows fall back to the default legacy department,
+  // matching buildTicketListWhere's own legacy handling.
+  const effectiveDeptId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
+  if (!effectiveDeptId) return false;
+
+  const membership = await getMembership(userId, effectiveDeptId);
   if (!membership) return false;
-  const hasBaseline = await hasDepartmentPermission(membership.role, "ticket.view", membership.customRoleId);
-  if (!hasBaseline) return false;
+  const hasView = await hasDepartmentPermission(membership.role, "ticket.view", membership.customRoleId);
+  if (!hasView) return false;
+
+  if (membership.role !== DepartmentRole.REQUESTER) return true;
+
+  // 4. Sharing — own-only (REQUESTER) tier only, and only for a real
+  // (non-legacy) department ticket: sharing doesn't apply to legacy rows,
+  // own-only still means own-only there (see buildTicketListWhere).
+  if (!ticket.departmentId) return false;
 
   if (ticket.shareWithDepartment) return true;
   if (ticket.shareWithSubDepartment && ticket.subDepartmentId) {
@@ -252,6 +280,8 @@ export interface NavVisibilityFlags {
   canViewAdminSubDepartments: boolean;
   canViewMyDepartments: boolean;
   canViewMySubDepartments: boolean;
+  /** Gates the "Pending Tickets" sidebar entry — mirrors ticket.pending.view, department-scoped or global. */
+  canViewPendingTickets: boolean;
 }
 
 export async function getNavVisibilityFlags(
@@ -260,19 +290,30 @@ export async function getNavVisibilityFlags(
   customRoleId?: string | null
 ): Promise<NavVisibilityFlags> {
   if (canViewAllDepartments(role)) {
-    return { canViewAdminSubDepartments: true, canViewMyDepartments: true, canViewMySubDepartments: true };
+    return {
+      canViewAdminSubDepartments: true,
+      canViewMyDepartments: true,
+      canViewMySubDepartments: true,
+      canViewPendingTickets: true,
+    };
   }
 
-  const [accessibleSubDeptDepartments, memberships, subDeptIds] = await Promise.all([
+  const [accessibleSubDeptDepartments, memberships, subDeptIds, pendingTicketDepartmentIds, globalPendingView] = await Promise.all([
     getAccessibleDepartmentSummaries(userId, role, "subdepartment.view"),
     getUserDepartmentMemberships(userId),
     getUserSubDepartmentIds(userId),
+    getDepartmentIdsWithPermission(userId, "ticket.pending.view"),
+    // A global-role grant (e.g. IT_AGENT) is independent of any department
+    // membership — checked in addition to, not instead of, the
+    // membership-based check above (which covers AGENT_ASSIGNEE etc.).
+    hasPermission(role, "ticket.pending.view", customRoleId),
   ]);
 
   return {
     canViewAdminSubDepartments: accessibleSubDeptDepartments.length > 0,
     canViewMyDepartments: memberships.length > 0,
     canViewMySubDepartments: accessibleSubDeptDepartments.length > 0 || subDeptIds.length > 0,
+    canViewPendingTickets: pendingTicketDepartmentIds.length > 0 || globalPendingView,
   };
 }
 
@@ -328,6 +369,26 @@ export async function buildProjectListWhere(userId: string, role: Role, requeste
 
 export async function buildActivityListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {
   return buildEntityListWhere(userId, role, "activity.view", requestedDepartmentId);
+}
+
+/**
+ * PendingTicket list scoping — same shape as buildProjectListWhere, gated by
+ * ticket.pending.view. ADMIN/Director's branch already returns `{}` (no
+ * filter), which includes departmentId: null rows for free — exactly the
+ * "unmatched pending tickets are Admin/Director-only" rule the plan calls
+ * for, with no special-casing needed here.
+ */
+export async function buildPendingTicketListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {
+  return buildEntityListWhere(userId, role, "ticket.pending.view", requestedDepartmentId);
+}
+
+/**
+ * Resource Planning scoping — same shape as buildProjectListWhere/
+ * buildActivityListWhere, gated by resourcePlanning.view. The resulting
+ * {departmentId: ...} where is applied directly to ProjectActivity queries.
+ */
+export async function buildResourcePlanningWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {
+  return buildEntityListWhere(userId, role, "resourcePlanning.view", requestedDepartmentId);
 }
 
 /**

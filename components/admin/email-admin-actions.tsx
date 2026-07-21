@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { CheckCircle2, XCircle, Loader2, Plug, TestTube2, ExternalLink } from "lucide-react";
 import Link from "next/link";
-import { formatTicketNumber } from "@/lib/utils";
 
 interface ConnectionResult {
   tokenOk: boolean;
@@ -18,9 +17,8 @@ interface ConnectionResult {
 
 interface TestTicketResult {
   success: boolean;
-  ticketId?: string;
-  ticketNumber?: number;
-  title?: string;
+  pendingTicketId?: string;
+  subject?: string;
   error?: string;
 }
 
@@ -137,19 +135,19 @@ export function EmailAdminActions() {
                 <>
                   <div className="flex items-center gap-1.5">
                     <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0" />
-                    <span className="text-emerald-700 font-medium">Ticket created</span>
+                    <span className="text-emerald-700 font-medium">Pending ticket created</span>
                   </div>
-                  {ticketResult.ticketNumber && ticketResult.ticketId && (
+                  {ticketResult.pendingTicketId && (
                     <Link
-                      href={`/tickets/${ticketResult.ticketId}`}
-                      className="flex items-center gap-1 pl-5 text-primary hover:underline font-mono"
+                      href="/tickets/pending"
+                      className="flex items-center gap-1 pl-5 text-primary hover:underline"
                     >
-                      {formatTicketNumber(ticketResult.ticketNumber)}
+                      Review in Pending Tickets
                       <ExternalLink className="h-3 w-3" />
                     </Link>
                   )}
-                  {ticketResult.title && (
-                    <p className="text-muted-foreground pl-5 truncate">{ticketResult.title}</p>
+                  {ticketResult.subject && (
+                    <p className="text-muted-foreground pl-5 truncate">{ticketResult.subject}</p>
                   )}
                 </>
               ) : (

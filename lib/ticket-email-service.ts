@@ -2,13 +2,13 @@ import { prisma } from "@/lib/prisma";
 import { microsoftGraph } from "@/lib/microsoft-graph";
 import {
   parseIncomingEmail,
-  buildAutoReplyHtml,
   buildReplyNotificationHtml,
   type ParsedEmail,
 } from "@/lib/email-ticket-parser";
 import { formatTicketNumber } from "@/lib/utils";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { EmailLogAction } from "@prisma/client";
+import { matchDepartmentForRecipients, createPendingTicketFromEmail } from "@/lib/services/pending-ticket-service";
 import path from "path";
 import fs from "fs/promises";
 
@@ -112,31 +112,26 @@ export async function processInboundEmails(): Promise<{
         continue;
       }
 
-      // ── Message-ID deduplication ──────────────────────────────────────────
-      const duplicate = await prisma.ticketMessage.findFirst({
-        where: { emailMessageId: parsed.messageId },
-        select: { id: true },
-      });
-      if (duplicate) {
+      // ── Message-ID deduplication ────────────────────────────────────────────
+      // Checks both tables a message could already exist under: a reply
+      // already appended to a real Ticket (TicketMessage), or a still-pending
+      // (or already resolved) PendingTicket from an earlier poll run.
+      const [duplicateMessage, duplicatePending] = await Promise.all([
+        prisma.ticketMessage.findFirst({ where: { emailMessageId: parsed.messageId }, select: { id: true } }),
+        prisma.pendingTicket.findFirst({ where: { emailMessageId: parsed.messageId }, select: { id: true } }),
+      ]);
+      if (duplicateMessage || duplicatePending) {
         await logEmail(run.id, parsed, "SKIPPED_DUPLICATE");
         await microsoftGraph.markAsRead(message.id);
         skipped++;
         continue;
       }
 
-      // ── Find or create the requester ──────────────────────────────────────
-      let user = await prisma.user.findUnique({
-        where: { email: parsed.fromEmail },
-        select: { id: true },
-      });
-      if (!user) {
-        user = await prisma.user.create({
-          data: { email: parsed.fromEmail, name: parsed.fromName || undefined },
-          select: { id: true },
-        });
-      }
-
-      // ── Route: append or create ───────────────────────────────────────────
+      // ── Route: append to an already-accepted ticket, or create a pending ticket ──
+      // Replies to a real, already-accepted Ticket (subject carries its
+      // number) still append directly — no pending step for those. Every
+      // other new thread now creates a PendingTicket, never a Ticket
+      // directly; a human must Accept it via /tickets/pending.
       let ticketId: string | null = null;
 
       if (parsed.existingTicketNumber !== null) {
@@ -146,21 +141,22 @@ export async function processInboundEmails(): Promise<{
         });
 
         if (ticket) {
+          const user = await findOrCreateRequesterForReply(parsed);
           await appendEmailReply(parsed, ticket, user.id);
           ticketId = ticket.id;
           await logEmail(run.id, parsed, "APPENDED_REPLY", ticketId);
           appended++;
         } else {
-          // Ticket ref in subject but ticket not found — create new
-          const newTicket = await createTicketFromEmail(parsed, user.id);
-          ticketId = newTicket.id;
-          await logEmail(run.id, parsed, "CREATED_TICKET", ticketId);
+          // Ticket ref in subject but ticket not found — create a pending ticket
+          const department = await matchDepartmentForRecipients(parsed.toEmails);
+          const pendingTicket = await createPendingTicketFromEmail(parsed, department);
+          await logEmail(run.id, parsed, "CREATED_TICKET", pendingTicket.id);
           created++;
         }
       } else {
-        const newTicket = await createTicketFromEmail(parsed, user.id);
-        ticketId = newTicket.id;
-        await logEmail(run.id, parsed, "CREATED_TICKET", ticketId);
+        const department = await matchDepartmentForRecipients(parsed.toEmails);
+        const pendingTicket = await createPendingTicketFromEmail(parsed, department);
+        await logEmail(run.id, parsed, "CREATED_TICKET", pendingTicket.id);
         created++;
       }
 
@@ -267,79 +263,19 @@ async function appendEmailReply(
   publishTicketEvent("TICKET_MESSAGE_CREATED", ticket.id, userId, msg);
 }
 
-// ── Create new ticket from email ─────────────────────────────────────────────
+// ── Find or create the requester for a reply to an already-accepted ticket ────
+// New-thread requester resolution now happens inside
+// createPendingTicketFromEmail (lib/services/pending-ticket-service.ts) — this
+// copy stays only for the append-reply path, which still writes a
+// TicketMessage.authorId directly against a real Ticket.
 
-async function createTicketFromEmail(parsed: ParsedEmail, requesterId: string) {
-  const defaultStatus = await prisma.ticketStatus.findFirst({
-    where: { isDefault: true },
+async function findOrCreateRequesterForReply(parsed: ParsedEmail): Promise<{ id: string }> {
+  const existing = await prisma.user.findUnique({ where: { email: parsed.fromEmail }, select: { id: true } });
+  if (existing) return existing;
+  return prisma.user.create({
+    data: { email: parsed.fromEmail, name: parsed.fromName || undefined },
     select: { id: true },
   });
-  if (!defaultStatus) throw new Error("No default ticket status configured");
-
-  const ticket = await prisma.ticket.create({
-    data: {
-      title: parsed.subject || "Email Support Request",
-      description: parsed.bodyHtml,
-      source: "EMAIL",
-      requesterId,
-      statusId: defaultStatus.id,
-      emailMessageId: parsed.messageId,
-      emailThreadId: parsed.conversationId,
-    },
-    include: { requester: { select: { id: true, name: true, email: true } } },
-  });
-
-  const msg = await prisma.ticketMessage.create({
-    data: {
-      ticketId: ticket.id,
-      authorId: requesterId,
-      body: parsed.bodyHtml,
-      direction: "INBOUND",
-      emailMessageId: parsed.messageId,
-      fromEmail: parsed.fromEmail,
-      fromName: parsed.fromName,
-    },
-    include: {
-      author: { select: { id: true, name: true, email: true, image: true, role: true } },
-      attachments: true,
-    },
-  });
-
-  await saveEmailAttachments(parsed.attachments, ticket.id, msg.id, requesterId);
-
-  await prisma.ticketHistory.create({
-    data: {
-      ticketId: ticket.id,
-      changedById: requesterId,
-      type: "CREATED",
-      description: `Ticket created from email by ${parsed.fromEmail}`,
-      newValue: "EMAIL",
-    },
-  });
-
-  publishTicketEvent("TICKET_MESSAGE_CREATED", ticket.id, requesterId, msg);
-
-  // Send auto-reply — failure must not abort ticket creation
-  try {
-    const ref = formatTicketNumber(ticket.ticketNumber);
-    const html = buildAutoReplyHtml({
-      ticketNumber: ticket.ticketNumber,
-      ticketTitle: ticket.title,
-      requesterName: parsed.fromName || parsed.fromEmail,
-      appUrl: APP_URL,
-    });
-    await microsoftGraph.sendTicketReply({
-      to: parsed.fromEmail,
-      toName: parsed.fromName,
-      subject: `Re: [${ref}] ${ticket.title}`,
-      htmlBody: html,
-      ticketNumber: ticket.ticketNumber,
-    });
-  } catch (err) {
-    console.error("[email] Failed to send auto-reply:", err);
-  }
-
-  return ticket;
 }
 
 // ── Save base64 attachments to disk ──────────────────────────────────────────
@@ -378,12 +314,15 @@ async function saveEmailAttachments(
   }
 }
 
-// ── Admin: create synthetic test ticket ──────────────────────────────────────
+// ── Admin: create synthetic test pending ticket ──────────────────────────────
+// Exercises the exact same pending-ticket creation path real inbound email
+// now uses (matchDepartmentForRecipients + createPendingTicketFromEmail) —
+// no more direct-to-Ticket shortcut, so this diagnostic stays honest about
+// what actually happens on a real inbound message.
 
 export async function createTestEmailTicket(): Promise<{
   id: string;
-  ticketNumber: number;
-  title: string;
+  subject: string;
 }> {
   const now = new Date();
   const parsed: ParsedEmail = {
@@ -393,27 +332,18 @@ export async function createTestEmailTicket(): Promise<{
     fromEmail: "test-sender@example.com",
     fromName: "Test Sender (Admin Test)",
     bodyHtml:
-      "<p>This is a <strong>test ticket</strong> created via the admin email diagnostics panel to verify the email-to-ticket pipeline.</p>",
-    bodyText: "This is a test ticket created via the admin email diagnostics panel.",
+      "<p>This is a <strong>test pending ticket</strong> created via the admin email diagnostics panel to verify the email-to-pending-ticket pipeline.</p>",
+    bodyText: "This is a test pending ticket created via the admin email diagnostics panel.",
     existingTicketNumber: null,
     internetMessageHeaders: [],
     attachments: [],
     receivedAt: now,
+    toEmails: [],
   };
 
-  let user = await prisma.user.findUnique({
-    where: { email: parsed.fromEmail },
-    select: { id: true },
-  });
-  if (!user) {
-    user = await prisma.user.create({
-      data: { email: parsed.fromEmail, name: parsed.fromName || undefined },
-      select: { id: true },
-    });
-  }
-
-  const ticket = await createTicketFromEmail(parsed, user.id);
-  return { id: ticket.id, ticketNumber: ticket.ticketNumber, title: ticket.title };
+  const department = await matchDepartmentForRecipients(parsed.toEmails);
+  const pendingTicket = await createPendingTicketFromEmail(parsed, department);
+  return { id: pendingTicket.id, subject: parsed.subject };
 }
 
 // ── Send outbound reply from IT portal ───────────────────────────────────────

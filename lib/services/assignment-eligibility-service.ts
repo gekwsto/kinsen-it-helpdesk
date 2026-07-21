@@ -119,11 +119,25 @@ export async function getAssignableUsersForEntity(
 
   const orConditions: Record<string, unknown>[] = [{ role: { in: globalRoles } }];
   if (allRoleKeys.length > 0) {
+    // Global custom role (User.customRoleId).
     orConditions.push({ customRole: { key: { in: allRoleKeys } } });
   }
   if (departmentId && departmentRoles.length > 0) {
     orConditions.push({
       departmentMemberships: { some: { departmentId, isActive: true, role: { in: departmentRoles } } },
+    });
+  }
+  if (departmentId && allRoleKeys.length > 0) {
+    // Department-scoped custom role (DepartmentMembership.customRoleId) —
+    // distinct from the two conditions above (neither the global-customRole
+    // nor the departmentRoles/enum-role condition covers a custom
+    // DEPARTMENT-scope CustomRole attached to one specific membership).
+    // Without this, evaluateAssignability's per-candidate check below would
+    // correctly say "yes" for such a user, but they'd never be gathered as a
+    // candidate in the first place — violating this function's own "never
+    // misses anyone" prefilter contract.
+    orConditions.push({
+      departmentMemberships: { some: { departmentId, isActive: true, customRole: { key: { in: allRoleKeys } } } },
     });
   }
 

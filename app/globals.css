@@ -83,6 +83,30 @@
   background: hsl(var(--muted-foreground));
 }
 
+/* Sidebar nav scroll — the app-wide scrollbar above uses --border/
+   --muted-foreground, which are light-theme tones; against the dark
+   sidebar that renders as a thick pale bar. Scoped to .sidebar-scroll only
+   (not a global override) and built from the sidebar's own foreground
+   color at low opacity so it reads as a subtle dark/slate hairline instead
+   of drawing attention away from the menu. */
+.sidebar-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--sidebar-foreground) / 0.22) transparent;
+}
+.sidebar-scroll::-webkit-scrollbar {
+  width: 5px;
+}
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: hsl(var(--sidebar-foreground) / 0.22);
+  border-radius: 9999px;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--sidebar-foreground) / 0.4);
+}
+
 /* Ticket thread */
 .ticket-body img {
   max-width: 100%;

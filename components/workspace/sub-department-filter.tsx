@@ -13,6 +13,8 @@ import {
 interface SubDepartmentFilterProps {
   /** A specific department id, or null/undefined when "All Workspaces" is active — the filter renders nothing in that case (see plan §9: optional filter inside a selected workspace, never a second access-control dimension across All). */
   departmentId: string | null | undefined;
+  /** Overrides the trigger's default fixed width (e.g. "w-full" inside a vertical filter rail) — defaults to the original fixed-width horizontal-bar sizing so every existing caller stays pixel-identical. */
+  triggerClassName?: string;
 }
 
 /**
@@ -20,7 +22,7 @@ interface SubDepartmentFilterProps {
  * have a richer filter bar (Projects, Activities) — pushes `?subDepartmentId=`
  * onto the current URL, same convention as the ticket filters' equivalent.
  */
-export function SubDepartmentFilter({ departmentId }: SubDepartmentFilterProps) {
+export function SubDepartmentFilter({ departmentId, triggerClassName }: SubDepartmentFilterProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -50,7 +52,7 @@ export function SubDepartmentFilter({ departmentId }: SubDepartmentFilterProps) 
 
   return (
     <Select value={value} onValueChange={handleChange}>
-      <SelectTrigger className="h-9 w-[180px] text-xs">
+      <SelectTrigger className={triggerClassName ?? "h-9 w-[180px] text-xs"}>
         <SelectValue placeholder="Any sub-department" />
       </SelectTrigger>
       <SelectContent>

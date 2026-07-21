@@ -20,9 +20,11 @@ import {
   Target,
   PanelLeftClose,
   PanelLeftOpen,
+  BookOpen,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
+import { useHelpGuide } from "@/components/help/help-guide-provider";
 
 // `visible`, when defined, wins outright over `roles` — lets specific items
 // be gated by a server-computed permission flag (e.g. subdepartment.view)
@@ -50,9 +52,24 @@ interface SidebarProps {
   navFlags: NavVisibilityFlags;
 }
 
+// Shared sizing for every nav/footer row — one place to tune "comfortable
+// on tall screens, compact on short ones" instead of repeating the same
+// responsive utility string at each of the 6 places an item renders
+// (collapsed icon links, the expandable button, child links, leaf links,
+// and the two footer buttons). maxh-800/maxh-700 are custom max-height
+// screens (tailwind.config.ts) — width-based breakpoints (sm/md/lg) don't
+// help here since the constraint is vertical (short laptop viewports), not
+// sidebar width, which is already handled separately by collapsed mode.
+const NAV_ITEM_SIZE = "min-h-[44px] py-2.5 maxh-800:min-h-[40px] maxh-800:py-2 maxh-700:min-h-[36px] maxh-700:py-1.5";
+const NAV_CHILD_SIZE = "min-h-[40px] py-2 maxh-800:min-h-[38px] maxh-800:py-1.5 maxh-700:min-h-[34px] maxh-700:py-1";
+const NAV_ICON_SIZE = "p-2.5 maxh-700:p-2";
+
 export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedItems, setExpandedItems] = useState<string[]>(["Tickets"]);
+  // Help Guide is available to every user regardless of role/permissions —
+  // no canAccess() gate applies to it, unlike every other item above.
+  const { toggle: toggleHelpGuide } = useHelpGuide();
 
   useEffect(() => {
     const stored = localStorage.getItem("sidebar-collapsed");
@@ -72,6 +89,7 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
     { label: "Assigned to Me", href: "/tickets/assigned-to-me" },
     { label: "Created by Me", href: "/tickets/created-by-me" },
     ...(canCreateTicket ? [{ label: "Create Ticket", href: "/tickets/new" }] : []),
+    { label: "Pending Tickets", href: "/tickets/pending", visible: navFlags.canViewPendingTickets },
     ...(userRole === "ADMIN"
       ? [{ label: "Closed Tickets", href: "/tickets/closed", roles: ["ADMIN"] as Role[] }]
       : []),
@@ -99,6 +117,7 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
         { label: "My Projects", href: "/my-projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
         { label: "New Project", href: "/projects/new", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
         { label: "Project Gantt", href: "/projects/gantt", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
+        { label: "Resource Planning", href: "/projects/resource-planning", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
       ],
     },
     {
@@ -208,8 +227,11 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
         </div>
       )}
 
-      {/* Navigation */}
-      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-1">
+      {/* Navigation — sidebar-scroll gives this its own thin/dark scrollbar
+          (globals.css) instead of the app-wide light one; py/space-y shrink
+          slightly on shorter viewports (maxh-800/maxh-700, tailwind.config.ts)
+          so the menu needs less scrolling on laptop-height screens. */}
+      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-1 maxh-800:py-3 maxh-700:py-2 maxh-700:space-y-0.5 sidebar-scroll">
         {navItems.map((item) => {
           if (!canAccess(item)) return null;
 
@@ -225,7 +247,8 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
                 href={item.href}
                 title={item.label}
                 className={cn(
-                  "flex items-center justify-center p-2.5 rounded-lg transition-colors",
+                  "flex items-center justify-center rounded-lg transition-colors",
+                  NAV_ICON_SIZE,
                   active
                     ? "bg-sidebar-primary text-sidebar-primary-foreground"
                     : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -245,7 +268,8 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
                 <button
                   onClick={() => toggleExpand(item.label)}
                   className={cn(
-                    "w-full flex items-center justify-between gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
+                    "w-full flex items-center justify-between gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
+                    NAV_ITEM_SIZE,
                     "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
                     pathname.startsWith(item.href)
                       ? "bg-sidebar-accent text-sidebar-accent-foreground"
@@ -264,13 +288,14 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
                   />
                 </button>
                 {isExpanded && (
-                  <div className="mt-1 ml-4 pl-3 border-l border-sidebar-border space-y-1">
+                  <div className="mt-1 ml-4 pl-3 border-l border-sidebar-border space-y-1 maxh-700:space-y-0.5">
                     {visibleChildren.map((child) => (
                       <Link
                         key={child.href}
                         href={child.href}
                         className={cn(
-                          "flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors",
+                          "flex items-center gap-2 px-3 rounded-lg text-sm transition-colors",
+                          NAV_CHILD_SIZE,
                           isActive(child.href)
                             ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium"
                             : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -290,7 +315,8 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
+                "flex items-center gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
+                NAV_ITEM_SIZE,
                 active
                   ? "bg-sidebar-primary text-sidebar-primary-foreground"
                   : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
@@ -304,23 +330,45 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       </nav>
 
       {/* Footer */}
-      <div className="p-2 border-t border-sidebar-border">
+      <div className="p-2 border-t border-sidebar-border space-y-1 maxh-700:space-y-0.5">
         {collapsed ? (
-          <Link
-            href="/settings"
-            title="Settings"
-            className="flex items-center justify-center p-2.5 rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-          >
-            <Settings className="h-5 w-5" />
-          </Link>
+          <>
+            <Link
+              href="/settings"
+              title="Settings"
+              className={cn("flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
+            >
+              <Settings className="h-5 w-5" />
+            </Link>
+            <button
+              type="button"
+              onClick={toggleHelpGuide}
+              title="Help Guide"
+              aria-label="Help Guide"
+              className={cn("w-full flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
+            >
+              <BookOpen className="h-5 w-5" />
+            </button>
+          </>
         ) : (
-          <Link
-            href="/settings"
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-          >
-            <Settings className="h-4 w-4" />
-            Settings
-          </Link>
+          <>
+            <Link
+              href="/settings"
+              className={cn("flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
+            >
+              <Settings className="h-4 w-4" />
+              Settings
+            </Link>
+            <button
+              type="button"
+              onClick={toggleHelpGuide}
+              aria-label="Help Guide"
+              className={cn("w-full flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
+            >
+              <BookOpen className="h-4 w-4" />
+              Help Guide
+            </button>
+          </>
         )}
       </div>
     </aside>

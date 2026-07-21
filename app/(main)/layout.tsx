@@ -6,6 +6,7 @@ import { getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { ActiveWorkspaceProvider } from "@/components/workspace/active-workspace-provider";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
+import { HelpGuideProvider } from "@/components/help/help-guide-provider";
 import { HelpGuideWidget } from "@/components/help/help-guide-widget";
 
 export default async function MainLayout({
@@ -33,14 +34,16 @@ export default async function MainLayout({
       canViewAllDepartments={activeWorkspace.canViewAllDepartments}
       initialIsAllSelected={activeWorkspace.isAllSelected}
     >
-      <div className="flex h-screen overflow-hidden bg-background">
-        <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <Topbar user={session.user} />
-          <main className="flex-1 overflow-y-auto p-6">{children}</main>
+      <HelpGuideProvider>
+        <div className="flex h-screen overflow-hidden bg-background">
+          <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <Topbar user={session.user} />
+            <main className="flex-1 overflow-y-auto p-6">{children}</main>
+          </div>
         </div>
-      </div>
-      <HelpGuideWidget />
+        <HelpGuideWidget />
+      </HelpGuideProvider>
     </ActiveWorkspaceProvider>
   );
 }

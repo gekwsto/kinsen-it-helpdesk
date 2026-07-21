@@ -303,7 +303,7 @@ export default async function EmailAdminPage() {
                           </Badge>
                           {log.ticketId && (
                             <p className="text-[10px] text-muted-foreground mt-0.5">
-                              ticket: {log.ticketId.slice(0, 8)}…
+                              {log.action === "APPENDED_REPLY" ? "ticket" : "ref"}: {log.ticketId.slice(0, 8)}…
                             </p>
                           )}
                           {log.error && (

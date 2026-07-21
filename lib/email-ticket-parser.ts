@@ -13,6 +13,8 @@ export interface ParsedEmail {
   receivedAt: Date;
   existingTicketNumber: number | null;
   internetMessageHeaders: Array<{ name: string; value: string }>;
+  /** Recipient addresses (To only) — used to route a new pending ticket to a Department.inboundEmail match. */
+  toEmails: string[];
 }
 
 export interface ParsedAttachment {
@@ -48,6 +50,7 @@ export function parseIncomingEmail(message: GraphMailMessage): ParsedEmail {
     receivedAt: new Date(message.receivedDateTime),
     existingTicketNumber,
     internetMessageHeaders: message.internetMessageHeaders ?? [],
+    toEmails: (message.toRecipients ?? []).map((r) => r.emailAddress.address).filter(Boolean),
   };
 }
 

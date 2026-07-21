@@ -3,16 +3,20 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Users, Ticket, FolderKanban, CheckSquare, Network } from "lucide-react";
+import { DepartmentInboundEmailForm } from "@/components/departments/department-inbound-email-form";
+import { DepartmentHierarchyDialog } from "@/components/organization/department-hierarchy-dialog";
 
 export interface MyDepartmentRow {
   id: string;
   name: string;
   isActive: boolean;
   roleLabel: string;
+  inboundEmail: string | null;
   counts: { members: number; tickets: number; projects: number; activities: number; subDepartments: number };
   canManageMembers: boolean;
   canCreateSubDepartment: boolean;
   canViewSubDepartments: boolean;
+  canManageInboundEmail: boolean;
 }
 
 export function MyDepartmentsView({ departments }: { departments: MyDepartmentRow[] }) {
@@ -43,6 +47,12 @@ export function MyDepartmentsView({ departments }: { departments: MyDepartmentRo
               <span className="flex items-center gap-1.5"><FolderKanban className="h-3.5 w-3.5" /> {dept.counts.projects} projects</span>
               <span className="flex items-center gap-1.5"><CheckSquare className="h-3.5 w-3.5" /> {dept.counts.activities} activities</span>
             </div>
+            <DepartmentInboundEmailForm
+              departmentId={dept.id}
+              inboundEmail={dept.inboundEmail}
+              canManage={dept.canManageInboundEmail}
+              compact
+            />
             <div className="flex flex-wrap gap-2">
               {dept.canManageMembers && (
                 <Button size="sm" variant="outline" asChild>
@@ -56,6 +66,7 @@ export function MyDepartmentsView({ departments }: { departments: MyDepartmentRo
                   </Link>
                 </Button>
               )}
+              <DepartmentHierarchyDialog departmentId={dept.id} departmentName={dept.name} />
             </div>
           </CardContent>
         </Card>

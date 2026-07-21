@@ -101,6 +101,16 @@ export async function setDepartmentActive(id: string, isActive: boolean): Promis
   return prisma.department.update({ where: { id }, data: { isActive } });
 }
 
+/**
+ * Sets/clears a department's inbound-email routing address for the Pending
+ * Tickets flow (see lib/services/pending-ticket-service.ts). Caller is
+ * responsible for authorization (department.email.manage) and uniqueness
+ * validation — this is a pure write, matching this module's convention.
+ */
+export async function setDepartmentInboundEmail(id: string, inboundEmail: string | null): Promise<Department> {
+  return prisma.department.update({ where: { id }, data: { inboundEmail } });
+}
+
 export function toDepartmentSummary(department: DepartmentSummary): DepartmentSummary {
   return {
     id: department.id,

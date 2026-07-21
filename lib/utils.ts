@@ -22,6 +22,16 @@ export function formatRelative(date: Date | string): string {
   return formatDistanceToNow(new Date(date), { addSuffix: true });
 }
 
+/** Plain-text snippet from an HTML email body — used for list-row previews (e.g. Pending Tickets). Not a sanitizer; never used for rendering as HTML. */
+export function stripHtmlToText(html: string): string {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;

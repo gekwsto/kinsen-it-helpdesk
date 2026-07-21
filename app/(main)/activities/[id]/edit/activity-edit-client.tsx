@@ -49,11 +49,9 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [subDepartmentId, setSubDepartmentId] = useState("");
 
   useEffect(() => {
-    Promise.all([
-      fetch(`/api/activities/${id}`).then((r) => (r.ok ? r.json() : null)),
-      fetch("/api/projects?limit=100").then((r) => r.json()),
-    ])
-      .then(([activity, p]) => {
+    fetch(`/api/activities/${id}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((activity) => {
         if (activity && !activity.error) {
           setTitle(activity.title ?? "");
           setDescription(activity.description ?? "");
@@ -67,9 +65,13 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           setIsMilestone(activity.isMilestone ?? false);
           setSubDepartmentId(activity.subDepartmentId ?? "");
 
-          // Eligible assignees/sub-departments depend on the activity's own
-          // department — fetched once we know it, not in parallel with the
-          // activity itself.
+          // Eligible assignees/sub-departments/projects all depend on the
+          // activity's own department — fetched once we know it, not in
+          // parallel with the activity itself. The Project dropdown must
+          // only ever offer projects from this same department (never
+          // company-wide) — GET /api/projects already supports this via
+          // ?departmentId=, the same scoping buildProjectListWhere applies
+          // everywhere else.
           if (activity.departmentId) {
             fetch(`/api/users?assignableFor=activity&departmentId=${activity.departmentId}`)
               .then((r) => (r.ok ? r.json() : []))
@@ -77,13 +79,22 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
             fetch(`/api/departments/${activity.departmentId}/sub-departments`)
               .then((r) => (r.ok ? r.json() : []))
               .then((sd) => setSubDepartments(Array.isArray(sd) ? sd : []));
+            fetch(`/api/projects?departmentId=${activity.departmentId}&limit=100`)
+              .then((r) => (r.ok ? r.json() : null))
+              .then((p) => setProjects(Array.isArray(p?.projects) ? p.projects : []));
           } else {
+            // Legacy deptless activity — no single department to scope by;
+            // falls back to whatever the viewer can already see, same as
+            // before (still scoped to their own accessible departments by
+            // buildProjectListWhere, never unscoped).
             fetch("/api/users?assignableFor=activity")
               .then((r) => (r.ok ? r.json() : []))
               .then((u) => setAssignableUsers(Array.isArray(u) ? u : []));
+            fetch("/api/projects?limit=100")
+              .then((r) => (r.ok ? r.json() : null))
+              .then((p) => setProjects(Array.isArray(p?.projects) ? p.projects : []));
           }
         }
-        setProjects(Array.isArray(p?.projects) ? p.projects : []);
       })
       .finally(() => setLoading(false));
   }, [id]);
@@ -108,7 +119,11 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
         body: JSON.stringify({
           title,
           description: description || undefined,
-          projectId: projectId || undefined,
+          // Explicit null (not undefined) when cleared — undefined is
+          // dropped by JSON.stringify, which would silently leave the
+          // activity's existing project untouched instead of making it
+          // Standalone.
+          projectId: projectId || null,
           status,
           priority,
           assignedUserIds: selectedUserIds,
@@ -210,18 +225,21 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
             </div>
 
             <div className="space-y-2">
-              <Label>Project (optional)</Label>
+              <Label>Project</Label>
               <Select value={projectId || ""} onValueChange={setProjectId}>
                 <SelectTrigger>
-                  <SelectValue placeholder="No project (standalone)" />
+                  <SelectValue placeholder="Standalone" />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">No project</SelectItem>
+                  <SelectItem value="">Standalone</SelectItem>
                   {projects.map((p) => (
                     <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <p className="text-xs text-muted-foreground">
+                Only projects in this activity&apos;s department are listed.
+              </p>
             </div>
 
             {subDepartments.length > 0 && (

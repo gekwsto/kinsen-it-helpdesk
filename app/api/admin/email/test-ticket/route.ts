@@ -10,16 +10,15 @@ export async function POST() {
   }
 
   try {
-    const ticket = await createTestEmailTicket();
+    const pendingTicket = await createTestEmailTicket();
     return NextResponse.json({
       success: true,
-      ticketId: ticket.id,
-      ticketNumber: ticket.ticketNumber,
-      title: ticket.title,
+      pendingTicketId: pendingTicket.id,
+      subject: pendingTicket.subject,
     });
   } catch (error: any) {
     return NextResponse.json(
-      { error: error.message ?? "Failed to create test ticket" },
+      { error: error.message ?? "Failed to create test pending ticket" },
       { status: 500 }
     );
   }

@@ -9,6 +9,8 @@
  * reports clearly and exits if either is missing.
  */
 import { prisma } from "@/lib/prisma";
+import { Role } from "@prisma/client";
+import { hasPermission } from "@/lib/permissions";
 
 let passed = 0;
 let failed = 0;
@@ -76,9 +78,17 @@ async function main() {
     }
   }
 
-  console.log("\nTesting ADMIN bypasses everything without needing seeded rows...\n");
-  const adminRows = await prisma.rolePermission.findMany({ where: { roleKey: "ADMIN" } });
-  check("ADMIN has no explicit RolePermission rows (bypassed in hasPermission instead)", adminRows.length === 0);
+  console.log("\nTesting ADMIN bypasses hasPermission regardless of RolePermission row state...\n");
+  // ADMIN's RolePermission rows are cosmetic-only (populate the now-editable
+  // Administrator matrix in /admin/roles — see prisma/seed.ts's ADMIN entry)
+  // — hasPermission's hardcoded `if (role === Role.ADMIN) return true` bypass
+  // is checked before ever consulting this table, so ADMIN grants every key
+  // whether or not rows exist for it. This is the invariant that actually
+  // matters here, not whether the row count happens to be zero or the full
+  // catalog on any given database.
+  for (const permKey of ASSIGNABLE_KEYS) {
+    check(`hasPermission(ADMIN, "${permKey}") is true regardless of seeded rows`, await hasPermission(Role.ADMIN, permKey));
+  }
 
   await prisma.$disconnect();
   printSummaryAndExit();

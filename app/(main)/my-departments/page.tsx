@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { canViewAllDepartments, hasAnyDepartmentPermission, hasDepartmentPermission } from "@/lib/permissions";
+import { canViewAllDepartments, isAdmin, hasAnyDepartmentPermission, hasDepartmentPermission } from "@/lib/permissions";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { listDepartments } from "@/lib/services/department-service";
 import { DEPARTMENT_ROLE_LABELS } from "@/lib/services/department-role-translation";
@@ -36,6 +36,12 @@ export default async function MyDepartmentsPage() {
     );
   }
 
+  // Real membership rows are needed for anyone who isn't the true System
+  // Admin bypass — including Director, who is cross-department for viewing
+  // (canViewAllDepartments) but must NOT auto-inherit department.email.manage
+  // the way Admin does (see canManageInboundEmail below). The existing
+  // canManageMembers/canCreateSubDepartment/canViewSubDepartments flags keep
+  // using the isCrossDepartment bypass exactly as before — unrelated to this change.
   const [departments, memberships] = await Promise.all([
     prisma.department.findMany({
       where: { id: { in: departmentIds } },
@@ -44,7 +50,7 @@ export default async function MyDepartmentsPage() {
         _count: { select: { memberships: true, tickets: true, projects: true, activities: true, subDepartments: true } },
       },
     }),
-    isCrossDepartment ? Promise.resolve([]) : getUserDepartmentMemberships(userId),
+    isAdmin(role) ? Promise.resolve([]) : getUserDepartmentMemberships(userId),
   ]);
 
   const membershipByDeptId = new Map(memberships.map((m) => [m.departmentId, m]));
@@ -86,12 +92,24 @@ export default async function MyDepartmentsPage() {
         : membership
         ? await hasDepartmentPermission(membership.role, "subdepartment.view", membership.customRoleId)
         : false;
+      // Deliberately NOT bundled into the isCrossDepartment bypass above —
+      // only the true System Admin auto-manages every department's inbound
+      // email; a Director needs an actual department.email.manage grant via
+      // a real DepartmentMembership, computed the same way a regular member's
+      // would be. Server-computed here, never trusted from the client — the
+      // PATCH route re-checks this independently regardless of what the UI shows.
+      const canManageInboundEmail = isAdmin(role)
+        ? true
+        : membership
+        ? await hasDepartmentPermission(membership.role, "department.email.manage", membership.customRoleId)
+        : false;
 
       return {
         id: dept.id,
         name: dept.name,
         isActive: dept.isActive,
         roleLabel,
+        inboundEmail: dept.inboundEmail,
         counts: {
           members: dept._count.memberships,
           tickets: dept._count.tickets,
@@ -102,6 +120,7 @@ export default async function MyDepartmentsPage() {
         canManageMembers,
         canCreateSubDepartment,
         canViewSubDepartments,
+        canManageInboundEmail,
       };
     })
   );

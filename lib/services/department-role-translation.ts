@@ -136,3 +136,90 @@ export function shouldSyncGlobalRole(user: { role: Role; globalRoleSource: Globa
   if (user.globalRoleSource === GlobalRoleSource.MANUAL) return false;
   return true;
 }
+
+// ─── Department Hierarchy (My Departments popup) ──────────────────────────────
+//
+// Operational rank for a department's members — used by
+// app/api/departments/[id]/hierarchy/route.ts. Distinct from the global vs.
+// department Role systems above: this collapses both into one ordered tree
+// for display, with two deliberate overrides driven by the SAME fact this
+// file already documents (translateGlobalRoleToDepartmentRole's comment on
+// Role.DIRECTOR) — Director's real power is a global-role bypass
+// (canViewAllDepartments), not a DepartmentRole value, so a Director's
+// DepartmentMembership.role is frequently just a meaningless placeholder
+// (e.g. VIEWER from Microsoft sync). Ranking a Director by that placeholder
+// would be wrong, hence the override below.
+
+export type HierarchyTier =
+  | "SYSTEM_ADMIN"
+  | "DIRECTOR"
+  | "DEPARTMENT_MANAGER"
+  | "DEPARTMENT_ADMIN"
+  | "PROJECT_MANAGER"
+  | "OTHER_ROLES"
+  | "AGENT"
+  | "REQUESTER"
+  | "VIEWER";
+
+/** Top-down order — index is the sort rank, lower renders first. SYSTEM_ADMIN is rendered as a visually separate group (see the dialog), never mixed into the 7-tier operational list, but still needs a position for internal sorting. */
+export const HIERARCHY_TIER_ORDER: HierarchyTier[] = [
+  "SYSTEM_ADMIN",
+  "DIRECTOR",
+  "DEPARTMENT_MANAGER",
+  "DEPARTMENT_ADMIN",
+  "PROJECT_MANAGER",
+  "OTHER_ROLES",
+  "AGENT",
+  "REQUESTER",
+  "VIEWER",
+];
+
+export const HIERARCHY_TIER_LABELS: Record<HierarchyTier, string> = {
+  SYSTEM_ADMIN: "System Administrators",
+  DIRECTOR: "Director",
+  DEPARTMENT_MANAGER: "Department Manager",
+  DEPARTMENT_ADMIN: "Department Admin",
+  PROJECT_MANAGER: "Project Manager",
+  OTHER_ROLES: "Other Roles",
+  AGENT: "Agents",
+  REQUESTER: "Requesters / Users",
+  VIEWER: "Viewer",
+};
+
+/** Every DepartmentRole enum value maps 1:1 to a tier — Director has no DepartmentRole member (see the file-level comment above), reached only via the globalRole override below. */
+const BUILTIN_DEPARTMENT_ROLE_TIER: Record<DepartmentRole, HierarchyTier> = {
+  DEPARTMENT_ADMIN: "DEPARTMENT_ADMIN",
+  DEPARTMENT_MANAGER: "DEPARTMENT_MANAGER",
+  PROJECT_MANAGER: "PROJECT_MANAGER",
+  AGENT_ASSIGNEE: "AGENT",
+  REQUESTER: "REQUESTER",
+  VIEWER: "VIEWER",
+};
+
+/**
+ * Operational hierarchy tier for one department member. Order of precedence:
+ * 1. Global Role.ADMIN -> SYSTEM_ADMIN (utility group, outside the tree).
+ * 2. Global Role.DIRECTOR -> DIRECTOR, regardless of their DepartmentMembership.role
+ *    value (see the file-level comment — that value is frequently a
+ *    meaningless placeholder for a Director, never ranked by it).
+ * 3. An explicit customRole: a built-in one (isBuiltIn: true) ranks by
+ *    whichever DepartmentRole its key matches; a genuinely custom one
+ *    (isBuiltIn: false) always lands in OTHER_ROLES — never guessed above
+ *    Director/Department Manager, per the explicit product requirement.
+ * 4. Otherwise, the membership's own DepartmentRole value, direct 1:1 lookup.
+ */
+export function getDepartmentHierarchyTier(member: {
+  globalRole: Role;
+  departmentRole: DepartmentRole;
+  customRole: { key: string; isBuiltIn: boolean } | null;
+}): HierarchyTier {
+  if (member.globalRole === Role.ADMIN) return "SYSTEM_ADMIN";
+  if (member.globalRole === Role.DIRECTOR) return "DIRECTOR";
+
+  if (member.customRole) {
+    if (!member.customRole.isBuiltIn) return "OTHER_ROLES";
+    return BUILTIN_DEPARTMENT_ROLE_TIER[member.customRole.key as DepartmentRole] ?? "OTHER_ROLES";
+  }
+
+  return BUILTIN_DEPARTMENT_ROLE_TIER[member.departmentRole] ?? "OTHER_ROLES";
+}

@@ -19,6 +19,14 @@ const config: Config = {
       },
     },
     extend: {
+      // Viewport-HEIGHT-driven variants (not Tailwind's default width-based
+      // screens) — used by the sidebar to compact its nav item sizing on
+      // shorter laptop displays instead of forcing extra scroll. Additive to
+      // the default sm/md/lg/xl/2xl width screens, not a replacement.
+      screens: {
+        "maxh-800": { raw: "(max-height: 800px)" },
+        "maxh-700": { raw: "(max-height: 700px)" },
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",

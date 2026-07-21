@@ -1,11 +1,12 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { requireDepartmentPermission, isAdmin, hasDepartmentPermission } from "@/lib/permissions";
+import { requireAnyDepartmentPermission, isAdmin, hasDepartmentPermission } from "@/lib/permissions";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight, Users, Tag, Building2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { DepartmentSettingsForm } from "@/components/admin/department-settings-form";
+import { DepartmentInboundEmailForm } from "@/components/departments/department-inbound-email-form";
 
 export default async function DepartmentDetailPage({
   params,
@@ -16,14 +17,22 @@ export default async function DepartmentDetailPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
+  // Reachable with EITHER permission — department.manageSettings (name/slug/
+  // description) and department.email.manage (inbound email) are granted
+  // independently (e.g. Department Manager has email.manage but not
+  // manageSettings, see prisma/seed.ts) — each section below checks its own
+  // specific permission and renders only if held.
   let access;
   try {
-    access = await requireDepartmentPermission(id, "department.manageSettings");
+    access = await requireAnyDepartmentPermission(id, ["department.manageSettings", "department.email.manage"]);
   } catch {
     redirect("/dashboard");
   }
-  const canViewSubDepartments =
-    access.isSystemAdmin || (await hasDepartmentPermission(access.membership!.role, "subdepartment.view", access.membership!.customRoleId));
+  const [canViewSubDepartments, canManageSettings, canManageEmail] = await Promise.all([
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "subdepartment.view", access.membership!.customRoleId),
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "department.manageSettings", access.membership!.customRoleId),
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "department.email.manage", access.membership!.customRoleId),
+  ]);
 
   const department = await prisma.department.findUnique({
     where: { id },
@@ -51,15 +60,23 @@ export default async function DepartmentDetailPage({
         </p>
       </div>
 
-      <DepartmentSettingsForm
-        department={{
-          id: department.id,
-          name: department.name,
-          slug: department.slug,
-          description: department.description,
-          isActive: department.isActive,
-        }}
-        canToggleActive={isAdmin(session.user.role)}
+      {canManageSettings && (
+        <DepartmentSettingsForm
+          department={{
+            id: department.id,
+            name: department.name,
+            slug: department.slug,
+            description: department.description,
+            isActive: department.isActive,
+          }}
+          canToggleActive={isAdmin(session.user.role)}
+        />
+      )}
+
+      <DepartmentInboundEmailForm
+        departmentId={department.id}
+        inboundEmail={department.inboundEmail}
+        canManage={canManageEmail}
       />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

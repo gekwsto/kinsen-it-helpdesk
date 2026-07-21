@@ -94,7 +94,10 @@ export const updateProjectSchema = createProjectSchema.partial();
 export const createActivitySchema = z.object({
   title: z.string().min(3, "Title must be at least 3 characters").max(200),
   description: z.string().optional(),
-  projectId: z.string().optional(),
+  // Nullable (not just optional) so an update can explicitly clear it back
+  // to Standalone — `undefined` means "leave unchanged", `null` means "make
+  // Standalone", same distinction subDepartmentId below already uses.
+  projectId: z.string().nullable().optional(),
   status: z.nativeEnum(ActivityStatus).default(ActivityStatus.TODO),
   priority: z.nativeEnum(ActivityPriority).default(ActivityPriority.MEDIUM),
   assignedUserIds: z.array(z.string()).default([]),
@@ -200,6 +203,20 @@ export const updateDepartmentSchema = z.object({
   description: z.string().trim().nullable().optional(),
   businessUnitId: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
+});
+
+// Separate from updateDepartmentSchema on purpose — inbound email is gated
+// by department.email.manage, a different permission than the general
+// department.manageSettings/department.update fields above, and mixing them
+// into one PATCH body would conflate the two checks. See
+// PATCH /api/admin/departments/[id]/inbound-email.
+export const updateDepartmentInboundEmailSchema = z.object({
+  inboundEmail: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email("Enter a valid email address")
+    .nullable(),
 });
 
 export const createSubDepartmentSchema = z.object({

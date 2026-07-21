@@ -24,6 +24,11 @@ const PERMISSIONS = [
   { key: "project.edit", description: "Edit projects", module: "projects" },
   { key: "project.delete", description: "Delete projects", module: "projects" },
   { key: "project.assignable", description: "Can be assigned to projects", module: "projects" },
+  // Read-only aggregation of project/activity assignment data by agent — see
+  // app/(main)/projects/resource-planning/page.tsx. Granted alongside
+  // project.view + activity.view since it's a view over exactly that data,
+  // not a new capability of its own.
+  { key: "resourcePlanning.view", description: "View the resource planning timeline", module: "projects" },
   // Goals
   { key: "goal.view", description: "View yearly goals", module: "goals" },
   { key: "goal.create", description: "Create yearly goals", module: "goals" },
@@ -45,6 +50,14 @@ const PERMISSIONS = [
   { key: "ticket.department.change", description: "Change a ticket's department/sub-department", module: "tickets" },
   { key: "ticket.share.department", description: "Share a ticket with the whole department", module: "tickets" },
   { key: "ticket.share.subdepartment", description: "Share a ticket with the whole sub-department", module: "tickets" },
+  // Pending Tickets (Department Email -> Pending review flow) — see
+  // lib/services/pending-ticket-service.ts. Distinct from ticket.view/create:
+  // a pending row is never a real Ticket, so seeing/acting on it needs its
+  // own gate rather than reusing ticket.* (which would also expose it via
+  // any code path that just checks ticket.view).
+  { key: "ticket.pending.view", description: "View pending tickets awaiting review", module: "tickets" },
+  { key: "ticket.pending.accept", description: "Accept a pending ticket into a real ticket", module: "tickets" },
+  { key: "ticket.pending.reject", description: "Reject/discard a pending ticket", module: "tickets" },
   // Admin
   { key: "admin.access", description: "Access admin panel", module: "admin" },
   { key: "user.manage", description: "Manage users", module: "admin" },
@@ -62,6 +75,7 @@ const PERMISSIONS = [
   { key: "department.delete", description: "Delete or disable departments", module: "department" },
   { key: "department.user.assign", description: "Assign users to a department", module: "department" },
   { key: "department.user.unassign", description: "Remove users from a department", module: "department" },
+  { key: "department.email.manage", description: "Set/change a department's inbound email address", module: "department" },
   // Sub-Department
   { key: "subdepartment.view", description: "View sub-departments", module: "subdepartment" },
   { key: "subdepartment.create", description: "Create sub-departments", module: "subdepartment" },
@@ -88,11 +102,12 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   ADMIN: PERMISSIONS.map((p) => p.key),
   IT_AGENT: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit",
+    "project.view", "project.create", "project.edit", "resourcePlanning.view",
     "goal.view",
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.share.department", "ticket.share.subdepartment",
+    "ticket.pending.view", "ticket.pending.accept",
   ],
   // Shared roleKey: both the global Role.DEPARTMENT_MANAGER enum value and
   // the new DepartmentRole.DEPARTMENT_MANAGER value resolve permissions via
@@ -100,13 +115,14 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // lib/permissions.ts) — they mean the same thing, one set is enough.
   DEPARTMENT_MANAGER: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "project.assignable",
+    "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view",
     "goal.view", "goal.create", "goal.edit",
     "ticket.view", "ticket.create", "ticket.reply", "ticket.assignable",
     "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
-    "department.view", "department.user.assign", "department.user.unassign",
+    "department.view", "department.user.assign", "department.user.unassign", "department.email.manage",
     "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
     "subdepartment.user.assign", "subdepartment.user.unassign",
+    "ticket.pending.view", "ticket.pending.accept", "ticket.pending.reject",
   ],
   USER: [
     "activity.view",
@@ -117,31 +133,33 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // stay Administrator-only. See canViewAllDepartments() in lib/permissions.ts.
   DIRECTOR: [
     "ticket.view",
-    "project.view", "project.create",
+    "project.view", "project.create", "resourcePlanning.view",
     "activity.view", "activity.create",
     "goal.view",
     "department.view", "subdepartment.view",
+    "ticket.pending.view",
   ],
   // ─── DepartmentRole keys (Phase 1 multi-department RBAC) ──────────────────
   // Full control of one department's projects/tickets/activities/goals.
   DEPARTMENT_ADMIN: [
     "activity.view", "activity.create", "activity.edit", "activity.delete", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "project.delete", "project.assignable",
+    "project.view", "project.create", "project.edit", "project.delete", "project.assignable", "resourcePlanning.view",
     "goal.view", "goal.create", "goal.edit", "goal.delete",
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
-    "department.view", "department.manageSettings", "department.manageMembers",
+    "department.view", "department.manageSettings", "department.manageMembers", "department.email.manage",
     "department.user.assign", "department.user.unassign",
     "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
     "subdepartment.user.assign", "subdepartment.user.unassign",
+    "ticket.pending.view", "ticket.pending.accept", "ticket.pending.reject",
   ],
   // Owns projects/Gantt within the department, not ticket triage or membership.
   // ticket.assignable stays off — a Project Manager isn't a ticket handler
   // by default (enable per-role from Roles & Permissions if a business needs it).
   PROJECT_MANAGER: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "project.assignable",
+    "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view",
     "goal.view",
   ],
   // Works assigned tickets/activities — the department-scoped analog of the
@@ -151,10 +169,11 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // project owner/member by default.
   AGENT_ASSIGNEE: [
     "activity.view", "activity.edit", "activity.assignable",
-    "project.view",
+    "project.view", "resourcePlanning.view",
     "ticket.view", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.share.department", "ticket.share.subdepartment",
+    "ticket.pending.view", "ticket.pending.accept",
   ],
   // Creates and tracks own tickets within the department.
   REQUESTER: [
@@ -251,9 +270,19 @@ async function main() {
     create: { id: "bu-default", name: "Information Technology", companyId: company.id },
   });
 
+  // Same resolution chain as the "Monitored Mailbox" shown on
+  // /admin/email and used by lib/microsoft-graph.ts — IT Department's
+  // inboundEmail defaults to matching it, so mail arriving at the one
+  // shared mailbox (the common case before any other department configures
+  // its own distinct address) routes to IT Department's Pending Tickets
+  // instead of landing unmatched/Admin-only. Never hardcoded independently.
+  const supportMailbox = (process.env.GRAPH_USER_EMAIL || process.env.SUPPORT_EMAIL || "kinsenitsupport@kinsen.gr")
+    .trim()
+    .toLowerCase();
+
   // Default Departments
   const departments = [
-    { id: "dept-it", name: "IT Department", slug: "it" },
+    { id: "dept-it", name: "IT Department", slug: "it", inboundEmail: supportMailbox },
     { id: "dept-hr", name: "Human Resources", slug: "hr" },
     { id: "dept-finance", name: "Finance", slug: "finance" },
     { id: "dept-sales", name: "Sales", slug: "sales" },
@@ -263,6 +292,9 @@ async function main() {
   for (const dept of departments) {
     await prisma.department.upsert({
       where: { id: dept.id },
+      // inboundEmail is create-only, like the rest of this file's
+      // non-destructive seeding convention — never re-applied on top of an
+      // admin's later change (including clearing it back to null).
       update: { slug: dept.slug },
       create: { ...dept, businessUnitId: defaultBU.id },
     });

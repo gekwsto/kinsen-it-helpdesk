@@ -47,16 +47,32 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAuth();
 
-    const existing = await prisma.projectActivity.findUnique({ where: { id }, select: { departmentId: true } });
-    if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
+    const existing = await prisma.projectActivity.findUnique({
+      where: { id },
+      select: { departmentId: true, startDate: true, dueDate: true },
+    });
+    if (!existing) return NextResponse.json({ error: "Not found", code: "activity_not_found" }, { status: 404 });
 
     const canEdit = await canActOnEntity(session.user.id, session.user.role, existing.departmentId, "activity.edit");
     if (!canEdit) {
-      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+      return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
     }
 
     const body = await req.json();
     const data = updateActivitySchema.parse(body);
+
+    // Same shared check regardless of caller (manual edit form, Project
+    // Gantt drag, or Resource Planning drag) — computed from whichever of
+    // startDate/dueDate this request actually changes, falling back to the
+    // stored value for the one it doesn't.
+    const effectiveStart = data.startDate !== undefined ? (data.startDate ? new Date(data.startDate) : null) : existing.startDate;
+    const effectiveDue = data.dueDate !== undefined ? (data.dueDate ? new Date(data.dueDate) : null) : existing.dueDate;
+    if (effectiveStart && effectiveDue && effectiveStart > effectiveDue) {
+      return NextResponse.json(
+        { error: "Start date cannot be after due date.", code: "invalid_date_range" },
+        { status: 400 }
+      );
+    }
 
     // The completion checkbox always sends isCompleted+status together — a
     // mismatched pair (e.g. isCompleted:true with a non-COMPLETED status, or
@@ -87,6 +103,28 @@ export async function PATCH(
 
     const { dueDate, startDate, isCompleted, assignedUserIds, ...rest } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
+
+    // Moving an activity into a different project (or clearing it back to
+    // Standalone) — shared by the Activity edit form's Project dropdown and
+    // any other caller of this route. Clearing to null needs no extra check;
+    // moving into a real project requires it to exist and to belong to this
+    // activity's own (effective) department — cross-department moves are
+    // blocked outright, never silently reparented.
+    if (data.projectId !== undefined && data.projectId !== null) {
+      const targetProject = await prisma.project.findUnique({
+        where: { id: data.projectId },
+        select: { id: true, departmentId: true },
+      });
+      if (!targetProject) {
+        return NextResponse.json({ error: "Project not found", code: "project_not_found" }, { status: 404 });
+      }
+      if (targetProject.departmentId !== effectiveDepartmentId) {
+        return NextResponse.json(
+          { error: "The selected project belongs to a different department.", code: "invalid_project_scope" },
+          { status: 400 }
+        );
+      }
+    }
 
     if (assignedUserIds && assignedUserIds.length > 0) {
       for (const userId of assignedUserIds) {
