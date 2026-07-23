@@ -172,8 +172,8 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
     if (!activity) return;
     setToggling(true);
     try {
-      const { isCompleted, status } = await toggleActivityComplete(id, activity.isCompleted);
-      setActivity((prev) => (prev ? { ...prev, isCompleted, status: status as ActivityStatus } : prev));
+      const { isCompleted, status, progress } = await toggleActivityComplete(id, activity.isCompleted);
+      setActivity((prev) => (prev ? { ...prev, isCompleted, status: status as ActivityStatus, progress } : prev));
       toast.success(isCompleted ? "Activity completed!" : "Activity reopened");
     } catch (error: any) {
       toast.error(error.message ?? "Failed to update activity");
@@ -283,7 +283,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
               <div className="text-right">
                 <span className="text-xs font-medium">{activity.progress}%</span>
                 <p className="text-[10px] text-muted-foreground">
-                  {relatedTickets.length > 0 ? "Calculated from linked tickets" : "Manual progress"}
+                  Calculated automatically from status
                 </p>
               </div>
             </div>

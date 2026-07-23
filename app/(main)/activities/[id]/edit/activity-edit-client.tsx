@@ -129,7 +129,8 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           assignedUserIds: selectedUserIds,
           startDate: isMilestone ? (dueDate || undefined) : (startDate || undefined),
           dueDate: dueDate || undefined,
-          progress: isMilestone ? 0 : (progress !== "" ? parseInt(progress) : undefined),
+          // progress is not sent — it's derived server-side from status
+          // (per-department configurable, never manually editable).
           isMilestone,
           subDepartmentId: subDepartmentId || null,
         }),
@@ -339,15 +340,10 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
 
             {!isMilestone && (
               <div className="space-y-2">
-                <Label htmlFor="progress">Progress (%)</Label>
-                <Input
-                  id="progress"
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={progress}
-                  onChange={(e) => setProgress(e.target.value)}
-                />
+                <Label>Progress</Label>
+                <p className="text-sm text-muted-foreground">
+                  {progress}% — calculated automatically from status
+                </p>
               </div>
             )}
 

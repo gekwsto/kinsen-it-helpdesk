@@ -76,6 +76,24 @@ async function main() {
     });
     userIds.push(admin.id);
 
+    // A System Admin who ALSO happens to hold a real, lesser-privileged
+    // DepartmentMembership row in this department (e.g. added as a plain
+    // REQUESTER at some point) — regression case for the bug where
+    // evaluateAssignability returned the membership-role's (insufficient)
+    // verdict directly instead of still falling back to the global ADMIN
+    // bypass. See lib/services/assignment-eligibility-service.ts.
+    const adminWithWeakMembership = await prisma.user.create({
+      data: { email: `test-activity-admin-weak-membership-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.CREDENTIALS, role: Role.ADMIN },
+    });
+    userIds.push(adminWithWeakMembership.id);
+    membershipIds.push(
+      (
+        await prisma.departmentMembership.create({
+          data: { userId: adminWithWeakMembership.id, departmentId: dept.id, role: DepartmentRole.REQUESTER, source: MembershipSource.MANUAL, isActive: true },
+        })
+      ).id
+    );
+
     console.log("Testing the ADMIN-only -> permission-driven widening...\n");
     check(
       "AGENT_ASSIGNEE member is now assignable to activities (was ADMIN-only before this feature)",
@@ -83,12 +101,17 @@ async function main() {
     );
     check("REQUESTER member stays NOT assignable (no activity.assignable grant)", !(await userHasAssignablePermissionForEntity(requester.id, "activity", dept.id)));
     check("ADMIN stays assignable (unchanged)", await userHasAssignablePermissionForEntity(admin.id, "activity", dept.id));
+    check(
+      "ADMIN with a real but insufficient (REQUESTER) department membership is still assignable — global bypass wins",
+      await userHasAssignablePermissionForEntity(adminWithWeakMembership.id, "activity", dept.id)
+    );
 
     console.log("\nTesting getAssignableUsersForActivity list builder...\n");
     const list = (await getAssignableUsersForActivity(dept.id)).map((u) => u.id);
     check("Includes the AGENT_ASSIGNEE member", list.includes(agentAssignee.id));
     check("Includes ADMIN", list.includes(admin.id));
     check("Excludes the REQUESTER member", !list.includes(requester.id));
+    check("Includes the ADMIN with a weak (REQUESTER) membership row", list.includes(adminWithWeakMembership.id));
   } finally {
     const cleanupSteps: Array<[string, () => Promise<unknown>]> = [
       ["departmentMembership", () => prisma.departmentMembership.deleteMany({ where: { id: { in: membershipIds } } })],

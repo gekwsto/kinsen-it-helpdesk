@@ -103,9 +103,13 @@ export async function DELETE(
       );
     }
 
-    // Remove all permission assignments for this role before deleting
-    await prisma.rolePermission.deleteMany({ where: { roleKey: role.key } });
-    await prisma.customRole.delete({ where: { id } });
+    // Remove all permission assignments for this role before deleting, in a
+    // single transaction so a mid-way failure can never leave the role
+    // stripped of its permissions but not yet deleted.
+    await prisma.$transaction([
+      prisma.rolePermission.deleteMany({ where: { roleKey: role.key } }),
+      prisma.customRole.delete({ where: { id } }),
+    ]);
 
     return new NextResponse(null, { status: 204 });
   } catch {

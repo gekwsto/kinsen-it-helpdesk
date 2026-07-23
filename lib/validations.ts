@@ -107,7 +107,11 @@ export const createActivitySchema = z.object({
   startDate: z.string().optional(),
   dueDate: z.string().optional(),
   isCompleted: z.boolean().default(false),
-  progress: z.number().int().min(0).max(100).optional(),
+  // progress is deliberately NOT accepted here — it's fully derived from
+  // status (per-department configurable, see
+  // lib/activities/activity-progress.ts) and set server-side on every
+  // write, never manually editable. Any progress a client sends is simply
+  // dropped by Zod before it ever reaches the route handler.
   isMilestone: z.boolean().optional(),
 });
 
@@ -234,8 +238,11 @@ export const createCategorySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   description: z.string().optional(),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color").default("#6366f1"),
-  // Nullable/omitted = global/shared category. Only System Admin may create
-  // one without a departmentId — enforced in the route, not here.
+  // Required — every category belongs to exactly one department, there is
+  // no more global/shared category. Enforced (with a clean department_required
+  // error code) in the route, not here — kept nullable/optional in the schema
+  // itself so that omission surfaces as that specific code, not a generic
+  // Zod validation error.
   departmentId: z.string().nullable().optional(),
 });
 
@@ -265,6 +272,10 @@ export const createMicrosoftMappingSchema = z.object({
   // sending an old DepartmentRole string (e.g. "AGENT_ASSIGNEE") is rejected
   // here automatically, since it isn't a member of Role.
   role: z.nativeEnum(Role).default(Role.USER),
+  // DepartmentRole granted on the resulting DepartmentMembership —
+  // independent of `role` above (see department-role-translation.ts).
+  // Required: an admin must make an explicit choice, no silent default.
+  departmentRole: z.nativeEnum(DepartmentRole),
 });
 
 export const updateMicrosoftMappingSchema = z.object({
@@ -272,6 +283,7 @@ export const updateMicrosoftMappingSchema = z.object({
   microsoftValue: z.string().trim().min(1, "Value is required").optional(),
   departmentId: z.string().min(1).optional(),
   role: z.nativeEnum(Role).optional(),
+  departmentRole: z.nativeEnum(DepartmentRole).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -279,6 +291,10 @@ export const createPrioritySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   level: z.number().int().min(1).max(10),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color"),
+  // Required — every priority belongs to exactly one department, there is
+  // no more global/shared priority. Enforced (with a clean department_required
+  // error code) in the route, not here.
+  departmentId: z.string().nullable().optional(),
 });
 
 export const createStatusSchema = z.object({
@@ -287,6 +303,25 @@ export const createStatusSchema = z.object({
   isDefault: z.boolean().default(false),
   isClosed: z.boolean().default(false),
   order: z.number().int().default(0),
+  // Required — every status belongs to exactly one department, there is no
+  // more global/shared status. Enforced (with a clean department_required
+  // error code) in the route, not here.
+  departmentId: z.string().nullable().optional(),
+});
+
+export const createCancelReasonSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  description: z.string().trim().max(500).optional(),
+  // Nullable/omitted = global/shared reason. Only System Admin may create
+  // one without a departmentId — enforced in the route, not here.
+  departmentId: z.string().nullable().optional(),
+});
+
+export const updateCancelReasonSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().trim().min(1).max(100).optional(),
+  description: z.string().trim().max(500).nullable().optional(),
+  isActive: z.boolean().optional(),
 });
 
 // ─── Auth Schemas ──────────────────────────────────────────────────────────────

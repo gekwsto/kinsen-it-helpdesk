@@ -1,7 +1,16 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
-import { canActOnEntity, canViewTicket, buildCategoryWhere, getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import {
+  canActOnEntity,
+  canViewTicket,
+  buildCategoryWhere,
+  buildPriorityWhere,
+  buildStatusWhere,
+  buildCancelReasonWhere,
+  getAccessibleDepartmentSummaries,
+} from "@/lib/services/department-scope-service";
+import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { getAssignableUsersForTicket } from "@/lib/services/assignment-eligibility-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
@@ -73,6 +82,12 @@ export default async function TicketDetailPage({
   const canView = await canViewTicket(session.user.id, role, ticket);
   if (!canView) redirect("/dashboard");
 
+  // Categories/Priorities/Statuses are now strictly department-owned (no
+  // more global fallback) — a legacy ticket with no department (ticket.
+  // departmentId: null) falls back to the same default legacy department
+  // used elsewhere for this exact case (see canActOnEntity above).
+  const effectiveDeptId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
+
   // Resolve fine-grained permissions in parallel. ticket.reply/internalNote
   // stay global (not department-scoped in Phase 2A — they gate what a
   // viewer of this ticket can additionally do, not whether they can view
@@ -96,6 +111,23 @@ export default async function TicketDetailPage({
   const canShareDepartment = isRequester || canShareDepartmentPerm;
   const canShareSubDepartment = isRequester || canShareSubDepartmentPerm;
 
+  // Same hard rule as Create Ticket and the generic PATCH route (see
+  // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) — only System
+  // Admin may link a ticket to a Project/Activity.
+  const canLinkProjectActivity = isAdminUser;
+  const [allProjects, allActivities] = await Promise.all([
+    canLinkProjectActivity
+      ? prisma.project.findMany({ orderBy: { title: "asc" }, select: { id: true, title: true } })
+      : Promise.resolve([]),
+    canLinkProjectActivity
+      ? prisma.projectActivity.findMany({
+          where: { isCompleted: false },
+          orderBy: { title: "asc" },
+          select: { id: true, title: true, projectId: true },
+        })
+      : Promise.resolve([]),
+  ]);
+
   // Requesters can always reply to their own ticket (even without ticket.reply perm)
   const canReply = canReplyPerm || isRequester;
   const canViewHistory = canChangeStatus || canInternalNote || canAssign;
@@ -110,15 +142,21 @@ export default async function TicketDetailPage({
   const [[statuses, priorities, categories, agents], cancelReasons] = await Promise.all([
     needsAdminData
       ? Promise.all([
-          canChangeStatus
-            ? prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" } })
+          canChangeStatus && effectiveDeptId
+            ? prisma.ticketStatus.findMany({
+                where: { AND: [{ isActive: true }, buildStatusWhere(effectiveDeptId)] },
+                orderBy: { order: "asc" },
+              })
             : Promise.resolve([]),
-          canChangeStatus
-            ? prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" } })
+          canChangeStatus && effectiveDeptId
+            ? prisma.ticketPriority.findMany({
+                where: { AND: [{ isActive: true }, buildPriorityWhere(effectiveDeptId)] },
+                orderBy: { level: "desc" },
+              })
             : Promise.resolve([]),
-          canChangeStatus
+          canChangeStatus && effectiveDeptId
             ? prisma.ticketCategory.findMany({
-                where: { AND: [{ isActive: true }, buildCategoryWhere(ticket.departmentId)] },
+                where: { AND: [{ isActive: true }, buildCategoryWhere(effectiveDeptId)] },
                 orderBy: { name: "asc" },
               })
             : Promise.resolve([]),
@@ -129,7 +167,10 @@ export default async function TicketDetailPage({
       : Promise.resolve([[], [], [], []]),
     // Cancel reasons needed by both admins and requesters (who can cancel their own tickets)
     isAdminUser || isRequester
-      ? prisma.ticketCancelReason.findMany({ where: { isActive: true }, orderBy: { name: "asc" } })
+      ? prisma.ticketCancelReason.findMany({
+          where: { AND: [{ isActive: true }, buildCancelReasonWhere(ticket.departmentId)] },
+          orderBy: { name: "asc" },
+        })
       : Promise.resolve([]),
   ]);
 
@@ -168,6 +209,9 @@ export default async function TicketDetailPage({
     activity: ticket.activity
       ? { id: ticket.activity.id, title: ticket.activity.title }
       : null,
+    canLinkProjectActivity,
+    allProjects: allProjects.map((p) => ({ id: p.id, title: p.title })),
+    allActivities: allActivities.map((a) => ({ id: a.id, title: a.title, projectId: a.projectId })),
     initialStatus: {
       id: ticket.status.id,
       name: ticket.status.name,

@@ -1,191 +1,111 @@
-"use client";
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { redirect } from "next/navigation";
+import { isAdmin, requireAnyDepartmentPermission, hasDepartmentPermission } from "@/lib/permissions";
+import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { listDepartments } from "@/lib/services/department-service";
+import { buildPriorityWhere } from "@/lib/services/department-scope-service";
+import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
+import { WorkspaceSlaManager } from "@/components/admin/workspace-sla-manager";
 
-import { useState, useEffect } from "react";
-import { toast } from "sonner";
-import { Loader2, Clock, ShieldCheck } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
+const SLA_PERMISSION_KEYS = ["sla.create", "sla.edit", "sla.delete"];
 
-interface PriorityPolicy {
-  id: string;
-  name: string;
-  color: string;
-  level: number;
-  firstResponseHours: number;
-  resolutionHours: number;
+function toPriorityPolicy(p: any) {
+  return {
+    id: p.id,
+    name: p.name,
+    color: p.color,
+    level: p.level,
+    departmentId: p.departmentId,
+    department: p.department ?? null,
+    firstResponseHours: p.slaPolicy?.firstResponseHours ?? 8,
+    resolutionHours: p.slaPolicy?.resolutionHours ?? 48,
+    hasPolicy: p.slaPolicy != null,
+  };
 }
 
-export default function SlaAdminPage() {
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [isEnabled, setIsEnabled] = useState(false);
-  const [policies, setPolicies] = useState<PriorityPolicy[]>([]);
+export default async function SlaAdminPage() {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
 
-  useEffect(() => {
-    fetch("/api/admin/sla")
-      .then((r) => r.json())
-      .then((data) => {
-        setIsEnabled(data.isEnabled ?? false);
-        setPolicies(data.priorities ?? []);
-      })
-      .catch(() => toast.error("Failed to load SLA settings"))
-      .finally(() => setLoading(false));
-  }, []);
+  const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
+  const userIsAdmin = isAdmin(session.user.role);
 
-  const updatePolicy = (id: string, field: "firstResponseHours" | "resolutionHours", value: string) => {
-    const num = parseInt(value);
-    if (isNaN(num) || num < 1) return;
-    setPolicies((prev) =>
-      prev.map((p) => (p.id === id ? { ...p, [field]: num } : p))
-    );
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const res = await fetch("/api/admin/sla", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          isEnabled,
-          policies: policies.map((p) => ({
-            priorityId: p.id,
-            firstResponseHours: p.firstResponseHours,
-            resolutionHours: p.resolutionHours,
-          })),
-        }),
-      });
-      if (!res.ok) throw new Error();
-      toast.success("SLA settings saved");
-    } catch {
-      toast.error("Failed to save SLA settings");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (loading) {
+  if (activeWorkspace.isAllSelected) {
+    if (!userIsAdmin) redirect("/dashboard");
+    const [settings, priorities, departments] = await Promise.all([
+      prisma.slaSettings.findFirst(),
+      prisma.ticketPriority.findMany({
+        where: { isActive: true },
+        orderBy: { level: "desc" },
+        include: { slaPolicy: true, department: { select: { id: true, name: true } } },
+      }),
+      listDepartments(),
+    ]);
     return (
-      <div className="flex items-center justify-center py-20">
-        <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-      </div>
+      <PageShell>
+        <WorkspaceSlaManager
+          isEnabled={settings?.isEnabled ?? false}
+          priorities={priorities.map(toPriorityPolicy)}
+          departmentOptions={departments.map((d) => ({ id: d.id, name: d.name }))}
+          mode="all"
+          canEdit={true}
+          canDelete={true}
+        />
+      </PageShell>
     );
   }
 
+  const departmentId = activeWorkspace.departmentId;
+  if (!departmentId) {
+    return activeWorkspace.departments.length === 0 ? <NoWorkspaceState /> : <ChooseWorkspaceState departments={activeWorkspace.departments} />;
+  }
+
+  let access;
+  try {
+    access = await requireAnyDepartmentPermission(departmentId, SLA_PERMISSION_KEYS);
+  } catch {
+    redirect("/dashboard");
+  }
+
+  const [settings, priorities, departments, canEdit, canDelete] = await Promise.all([
+    prisma.slaSettings.findFirst(),
+    prisma.ticketPriority.findMany({
+      where: { AND: [{ isActive: true }, buildPriorityWhere(departmentId)] },
+      orderBy: { level: "desc" },
+      include: { slaPolicy: true, department: { select: { id: true, name: true } } },
+    }),
+    userIsAdmin ? listDepartments() : Promise.resolve([]),
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.edit", access.membership!.customRoleId),
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.delete", access.membership!.customRoleId),
+  ]);
+
   return (
-    <div className="space-y-6 max-w-2xl">
+    <PageShell>
+      <WorkspaceSlaManager
+        isEnabled={settings?.isEnabled ?? false}
+        priorities={priorities.map(toPriorityPolicy)}
+        departmentOptions={departments.map((d) => ({ id: d.id, name: d.name }))}
+        fixedDepartmentId={userIsAdmin ? undefined : departmentId}
+        initialViewDepartmentId={departmentId}
+        mode="scoped"
+        canEdit={canEdit}
+        canDelete={canDelete}
+      />
+    </PageShell>
+  );
+}
+
+function PageShell({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">SLA Configuration</h1>
         <p className="text-muted-foreground mt-1">
-          Set response and resolution time targets per ticket priority.
+          Set response and resolution time targets per ticket priority for the current workspace.
         </p>
       </div>
-
-      {/* Enable / Disable toggle */}
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                <ShieldCheck className="h-4 w-4 text-primary" />
-              </div>
-              <div>
-                <CardTitle className="text-base">SLA Enforcement</CardTitle>
-                <CardDescription className="text-sm mt-0.5">
-                  {isEnabled
-                    ? "SLA timers are active and tracking deadlines."
-                    : "SLA is currently disabled. No deadlines are tracked."}
-                </CardDescription>
-              </div>
-            </div>
-            <Switch
-              checked={isEnabled}
-              onCheckedChange={setIsEnabled}
-              aria-label="Toggle SLA"
-            />
-          </div>
-        </CardHeader>
-      </Card>
-
-      {/* Per-priority policies */}
-      <Card>
-        <CardHeader className="pb-4">
-          <div className="flex items-center gap-2">
-            <Clock className="h-4 w-4 text-muted-foreground" />
-            <CardTitle className="text-base">Deadlines by Priority</CardTitle>
-          </div>
-          <CardDescription>
-            Times are in hours from ticket creation. Applied when SLA is enabled.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-1">
-          {/* Column headers */}
-          <div className="grid grid-cols-[1fr_140px_140px] gap-4 px-3 pb-2">
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Priority</span>
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">First Response</span>
-            <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Resolution</span>
-          </div>
-
-          <div className="divide-y rounded-lg border">
-            {policies.map((p) => (
-              <div
-                key={p.id}
-                className="grid grid-cols-[1fr_140px_140px] gap-4 items-center px-3 py-3"
-              >
-                {/* Priority badge */}
-                <div className="flex items-center gap-2">
-                  <span
-                    className="inline-block h-2.5 w-2.5 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: p.color }}
-                  />
-                  <span className="text-sm font-medium">{p.name}</span>
-                </div>
-
-                {/* First response */}
-                <div className="flex items-center gap-1.5">
-                  <Input
-                    type="number"
-                    min={1}
-                    value={p.firstResponseHours}
-                    onChange={(e) => updatePolicy(p.id, "firstResponseHours", e.target.value)}
-                    className="h-8 w-20 text-sm"
-                    disabled={!isEnabled}
-                  />
-                  <span className="text-xs text-muted-foreground">h</span>
-                </div>
-
-                {/* Resolution */}
-                <div className="flex items-center gap-1.5">
-                  <Input
-                    type="number"
-                    min={1}
-                    value={p.resolutionHours}
-                    onChange={(e) => updatePolicy(p.id, "resolutionHours", e.target.value)}
-                    className="h-8 w-20 text-sm"
-                    disabled={!isEnabled}
-                  />
-                  <span className="text-xs text-muted-foreground">h</span>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {!isEnabled && (
-            <p className="text-xs text-muted-foreground pt-2 px-1">
-              Enable SLA above to edit deadlines.
-            </p>
-          )}
-        </CardContent>
-      </Card>
-
-      <div className="flex justify-end">
-        <Button onClick={handleSave} disabled={saving}>
-          {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Save Settings
-        </Button>
-      </div>
+      {children}
     </div>
   );
 }

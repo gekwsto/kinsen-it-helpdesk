@@ -116,13 +116,83 @@ async function splitTicketViewScope(userId: string): Promise<{ fullView: string[
 }
 
 /**
- * Category visibility: global (departmentId: null) categories plus the
- * given department's own — never another department's. Pass null for
- * departmentId (e.g. a legacy ticket with no department) to see only
- * global categories.
+ * Category visibility: strictly the given department's own — there is no
+ * more global/shared category (each department has its own independent
+ * set; see the 20260727_retire_global_config migration).
  */
-export function buildCategoryWhere(departmentId: string | null): Record<string, unknown> {
+export function buildCategoryWhere(departmentId: string): Record<string, unknown> {
+  return { departmentId };
+}
+
+/** Priority visibility — strictly that department's own, same shape as buildCategoryWhere. */
+export function buildPriorityWhere(departmentId: string): Record<string, unknown> {
+  return { departmentId };
+}
+
+/** Status visibility — strictly that department's own, same shape as buildCategoryWhere. */
+export function buildStatusWhere(departmentId: string): Record<string, unknown> {
+  return { departmentId };
+}
+
+/** Cancel reason visibility — same global-plus-own shape as buildCategoryWhere. */
+export function buildCancelReasonWhere(departmentId: string | null): Record<string, unknown> {
   return departmentId ? { OR: [{ departmentId: null }, { departmentId }] } : { departmentId: null };
+}
+
+/**
+ * The default TicketStatus for a new ticket in `departmentId` — that
+ * department's own active isDefault status. Used by both ticket creation
+ * (app/api/tickets/route.ts) and the pending-ticket accept flow
+ * (lib/services/pending-ticket-service.ts) so the two paths can never
+ * disagree on which status a fresh ticket starts in. Returns null only if
+ * the department has no active default status configured — callers treat
+ * that as a genuine configuration error, not a silent fallback.
+ */
+export async function resolveDefaultStatusId(departmentId: string): Promise<string | null> {
+  const departmentDefault = await prisma.ticketStatus.findFirst({
+    where: { departmentId, isDefault: true, isActive: true },
+    // Deterministic tie-break if more than one row ever qualifies (should
+    // never happen by design, but a `findFirst` with no order is not
+    // guaranteed stable across calls) — oldest wins, matching the dedupe
+    // script's canonical-selection convention.
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  return departmentDefault?.id ?? null;
+}
+
+/**
+ * True if `id` is currently the only active default status in its own
+ * department — removing/un-defaulting/deactivating/deleting it would leave
+ * ticket creation and the pending-ticket accept flow with no default status
+ * to resolve to for that department (see resolveDefaultStatusId above).
+ * Every department is protected this way now, not just what used to be the
+ * one shared global default.
+ */
+export async function isLastActiveDefaultStatusInDepartment(id: string, departmentId: string): Promise<boolean> {
+  const otherActiveDefaults = await prisma.ticketStatus.count({
+    where: { departmentId, isDefault: true, isActive: true, NOT: { id } },
+  });
+  return otherActiveDefaults === 0;
+}
+
+/**
+ * The default TicketPriority for a new ticket in `departmentId` — priorities
+ * have no isDefault flag (unlike TicketStatus), so "default" here means the
+ * lowest-`level` active priority in this department (least urgent — a safe,
+ * non-escalating default for tickets created without explicit priority
+ * input, e.g. the pending-ticket accept flow). Returns null if the
+ * department has no active priority of its own.
+ */
+export async function resolveDefaultPriorityId(departmentId: string): Promise<string | null> {
+  const priority = await prisma.ticketPriority.findFirst({
+    where: { AND: [{ isActive: true }, buildPriorityWhere(departmentId)] },
+    // createdAt as a secondary key breaks ties deterministically when two
+    // priorities share the same level (should never happen by design, but
+    // `findFirst` with only a partial order is not guaranteed stable).
+    orderBy: [{ level: "asc" }, { createdAt: "asc" }],
+  });
+  return priority?.id ?? null;
 }
 
 /**
@@ -454,4 +524,57 @@ export async function resolveDepartmentForCreate(
   const allowed = await hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
   if (!allowed) return { denied: "invalid_department" };
   return { departmentId: workspace.departmentId };
+}
+
+export type TicketLinkValidation =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "project_not_found" | "activity_not_found" | "invalid_project_scope" | "invalid_activity_scope" | "invalid_project_activity_pair";
+      message: string;
+    };
+
+/**
+ * Validates a ticket's (final, already-resolved — not partial/undefined)
+ * projectId/activityId pair against the ticket's own department — shared by
+ * ticket creation (POST /api/tickets) and editing (PATCH /api/tickets/[id])
+ * so the two paths can never disagree on what's a valid link. Mirrors the
+ * activity-scope-checking pattern already used for an activity's OWN project
+ * link in app/api/activities/[id]/route.ts.
+ *
+ * - A project must exist and belong to this department.
+ * - An activity must exist; a null activity.departmentId (legacy/unscoped)
+ *   is treated as compatible with any department, same leniency
+ *   TicketDepartmentEditor's stillValid check already applies to category/
+ *   priority/cancelReason.
+ * - If the activity itself belongs to a specific project, the ticket's
+ *   resolved projectId must match it exactly (never silently auto-filled —
+ *   Create Ticket's form doesn't do that either, so validation matches
+ *   existing behavior rather than inventing new leniency).
+ */
+export async function validateTicketProjectActivityLink(
+  departmentId: string,
+  projectId: string | null,
+  activityId: string | null
+): Promise<TicketLinkValidation> {
+  if (projectId) {
+    const project = await prisma.project.findUnique({ where: { id: projectId }, select: { departmentId: true } });
+    if (!project) return { ok: false, code: "project_not_found", message: "Project not found." };
+    if (project.departmentId !== departmentId) {
+      return { ok: false, code: "invalid_project_scope", message: "The selected project belongs to a different department." };
+    }
+  }
+
+  if (activityId) {
+    const activity = await prisma.projectActivity.findUnique({ where: { id: activityId }, select: { departmentId: true, projectId: true } });
+    if (!activity) return { ok: false, code: "activity_not_found", message: "Activity not found." };
+    if (activity.departmentId && activity.departmentId !== departmentId) {
+      return { ok: false, code: "invalid_activity_scope", message: "The selected activity belongs to a different department." };
+    }
+    if (activity.projectId && activity.projectId !== projectId) {
+      return { ok: false, code: "invalid_project_activity_pair", message: "The selected activity does not belong to the selected project." };
+    }
+  }
+
+  return { ok: true };
 }

@@ -106,6 +106,9 @@ export interface TicketDetailClientProps {
   canShareSubDepartment: boolean;
   project: { id: string; title: string } | null;
   activity: { id: string; title: string } | null;
+  canLinkProjectActivity: boolean;
+  allProjects: Array<{ id: string; title: string }>;
+  allActivities: Array<{ id: string; title: string; projectId: string | null }>;
   initialStatus: TicketStatus;
   initialPriority: TicketPriority | null;
   initialCategory: TicketCategory | null;
@@ -150,6 +153,9 @@ export function TicketDetailClient({
   canShareSubDepartment,
   project,
   activity,
+  canLinkProjectActivity,
+  allProjects,
+  allActivities,
   initialStatus,
   initialPriority,
   initialCategory,
@@ -175,7 +181,7 @@ export function TicketDetailClient({
   agents,
 }: TicketDetailClientProps) {
   const router = useRouter();
-  const canManageAny = canChangeStatus || canAssign;
+  const canManageAny = canChangeStatus || canAssign || canLinkProjectActivity;
   const [messages, setMessages] = useState<ThreadMessage[]>(initialMessages);
   const [status, setStatus] = useState<TicketStatus>(initialStatus);
   const [priority, setPriority] = useState<TicketPriority | null>(initialPriority);
@@ -299,6 +305,8 @@ export function TicketDetailClient({
     priorityId: priority?.id ?? null,
     categoryId: category?.id ?? null,
     assignedAgentId: assignedAgent?.id ?? null,
+    projectId: project?.id ?? null,
+    activityId: activity?.id ?? null,
   };
 
   return (
@@ -489,6 +497,9 @@ export function TicketDetailClient({
             agents={agents}
             canChangeStatus={canChangeStatus}
             canAssign={canAssign}
+            canLinkProjectActivity={canLinkProjectActivity}
+            projects={allProjects}
+            activities={allActivities}
           />
         )}
 
@@ -652,26 +663,34 @@ export function TicketDetailClient({
                 />
               </>
             )}
-            {project && (
+            {(project || canLinkProjectActivity) && (
               <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Project</span>
-                <Link
-                  href={`/projects/${project.id}`}
-                  className="font-medium text-primary hover:underline text-sm truncate max-w-[140px]"
-                >
-                  {project.title}
-                </Link>
+                {project ? (
+                  <Link
+                    href={`/projects/${project.id}`}
+                    className="font-medium text-primary hover:underline text-sm truncate max-w-[140px]"
+                  >
+                    {project.title}
+                  </Link>
+                ) : (
+                  <span className="text-sm text-muted-foreground">None</span>
+                )}
               </div>
             )}
-            {activity && (
+            {(activity || canLinkProjectActivity) && (
               <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Activity</span>
-                <Link
-                  href={`/activities/${activity.id}`}
-                  className="font-medium text-primary hover:underline text-sm truncate max-w-[140px]"
-                >
-                  {activity.title}
-                </Link>
+                {activity ? (
+                  <Link
+                    href={`/activities/${activity.id}`}
+                    className="font-medium text-primary hover:underline text-sm truncate max-w-[140px]"
+                  >
+                    {activity.title}
+                  </Link>
+                ) : (
+                  <span className="text-sm text-muted-foreground">None</span>
+                )}
               </div>
             )}
             <Separator />

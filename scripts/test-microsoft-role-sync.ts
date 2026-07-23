@@ -11,7 +11,9 @@ import { DepartmentRole, GlobalRoleSource, Role } from "@prisma/client";
 import {
   translateGlobalRoleToDepartmentRole,
   isGlobalRoleAllowedForMicrosoftMapping,
+  isDepartmentRoleAllowedForMicrosoftMapping,
   getMicrosoftMappingRoleOptions,
+  getMicrosoftMappingDepartmentRoleOptions,
   shouldSyncGlobalRole,
 } from "@/lib/services/department-role-translation";
 
@@ -78,6 +80,23 @@ function main() {
   const userOption = roleOptions.find((opt) => opt.value === Role.USER);
   check("User option has the exact /admin/roles label", userOption?.label === "User");
   check("User option's departmentRolePreview is Requester", userOption?.departmentRolePreview === "Requester");
+
+  console.log("\nTesting isDepartmentRoleAllowedForMicrosoftMapping...\n");
+
+  check("DEPARTMENT_ADMIN is never allowed", isDepartmentRoleAllowedForMicrosoftMapping(DepartmentRole.DEPARTMENT_ADMIN) === false);
+  check("DEPARTMENT_MANAGER is allowed", isDepartmentRoleAllowedForMicrosoftMapping(DepartmentRole.DEPARTMENT_MANAGER) === true);
+  check("PROJECT_MANAGER is allowed", isDepartmentRoleAllowedForMicrosoftMapping(DepartmentRole.PROJECT_MANAGER) === true);
+  check("AGENT_ASSIGNEE is allowed", isDepartmentRoleAllowedForMicrosoftMapping(DepartmentRole.AGENT_ASSIGNEE) === true);
+  check("REQUESTER is allowed", isDepartmentRoleAllowedForMicrosoftMapping(DepartmentRole.REQUESTER) === true);
+  check("VIEWER is allowed", isDepartmentRoleAllowedForMicrosoftMapping(DepartmentRole.VIEWER) === true);
+
+  console.log("\nTesting getMicrosoftMappingDepartmentRoleOptions...\n");
+
+  const departmentRoleOptions = getMicrosoftMappingDepartmentRoleOptions();
+  check("returns exactly 5 options (Department Admin excluded)", departmentRoleOptions.length === 5);
+  check("Department Admin is never among the options", !departmentRoleOptions.some((opt) => opt.value === DepartmentRole.DEPARTMENT_ADMIN));
+  check("Agent / Assignee is among the options", departmentRoleOptions.some((opt) => opt.value === DepartmentRole.AGENT_ASSIGNEE));
+  check("Requester is among the options", departmentRoleOptions.some((opt) => opt.value === DepartmentRole.REQUESTER));
 
   console.log("\nTesting shouldSyncGlobalRole...\n");
 

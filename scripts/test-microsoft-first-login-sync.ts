@@ -17,6 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { DepartmentRole, GlobalRoleSource, MembershipSource, MicrosoftMappingSourceType, Role, AuthProvider } from "@prisma/client";
 import { syncMicrosoftUserDepartment, handleMicrosoftJwtSignIn } from "@/lib/services/microsoft-department-sync-service";
 import { syncMicrosoftDirectoryValues } from "@/lib/services/microsoft-directory-service";
+import { createMapping, updateMapping, MicrosoftMappingValidationError } from "@/lib/services/microsoft-mapping-service";
 
 let passed = 0;
 let failed = 0;
@@ -85,32 +86,35 @@ async function main() {
     department = await prisma.department.create({
       data: { name: `Test IT Dept ${RUN_ID}`, slug: TEST_DEPT_SLUG },
     });
-    // MicrosoftDepartmentMapping.role is the GLOBAL Role now (matches
-    // /admin/roles) — Role.DEPARTMENT_MANAGER here, translated via
-    // translateGlobalRoleToDepartmentRole for the resulting
-    // DepartmentMembership, same expected end values as before this change.
+    // MicrosoftDepartmentMapping now stores `role` (GLOBAL Role, matches
+    // /admin/roles) and `departmentRole` (DepartmentRole) independently —
+    // set here to the SAME values translateGlobalRoleToDepartmentRole would
+    // have produced, so Scenarios 1-8 below keep asserting the same expected
+    // end values as before this change. Scenario 9 below is the one that
+    // actually proves departmentRole is applied verbatim, not re-derived.
     const mapping = await prisma.microsoftDepartmentMapping.create({
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
         microsoftValue: TEST_MAPPING_VALUE,
         departmentId: department.id,
         role: Role.DEPARTMENT_MANAGER,
+        departmentRole: DepartmentRole.DEPARTMENT_MANAGER,
       },
     });
     mappingIds.push(mapping.id);
 
     // A second, distinct department-value mapping (global role: USER,
-    // translates to DepartmentRole.REQUESTER) + two job-title mappings
-    // pointing at the SAME department, for the
-    // job-title-overrides-department priority scenarios (§9 Cases 1-3) —
-    // kept separate from `mapping` above so those scenarios don't disturb
-    // the already-asserted behavior in Scenarios 1-8.
+    // department role: REQUESTER) + two job-title mappings pointing at the
+    // SAME department, for the job-title-overrides-department priority
+    // scenarios (§9 Cases 1-3) — kept separate from `mapping` above so those
+    // scenarios don't disturb the already-asserted behavior in Scenarios 1-8.
     const lowPriorityDeptMapping = await prisma.microsoftDepartmentMapping.create({
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
         microsoftValue: TEST_LOW_PRIORITY_DEPT_VALUE,
         departmentId: department.id,
         role: Role.USER,
+        departmentRole: DepartmentRole.REQUESTER,
       },
     });
     mappingIds.push(lowPriorityDeptMapping.id);
@@ -120,6 +124,7 @@ async function main() {
         microsoftValue: TEST_JOB_TITLE_MANAGER_VALUE,
         departmentId: department.id,
         role: Role.DEPARTMENT_MANAGER,
+        departmentRole: DepartmentRole.DEPARTMENT_MANAGER,
       },
     });
     mappingIds.push(jobTitleManagerMapping.id);
@@ -129,6 +134,7 @@ async function main() {
         microsoftValue: TEST_JOB_TITLE_ASSISTANT_VALUE,
         departmentId: department.id,
         role: Role.IT_AGENT,
+        departmentRole: DepartmentRole.AGENT_ASSIGNEE,
       },
     });
     mappingIds.push(jobTitleAssistantMapping.id);
@@ -373,6 +379,103 @@ async function main() {
     const cachedTitleA = await prisma.microsoftDirectoryJobTitleValue.findUnique({ where: { value: case5TitleA } });
     check("Case 5: trimmed department value cached", cachedDeptA !== null && cachedDeptA.isActive);
     check("Case 5: job title value cached", cachedTitleA !== null && cachedTitleA.isActive);
+
+    console.log("\nScenario 9: explicit departmentRole is applied verbatim, never re-derived from globalRole\n");
+    const TEST_VERBATIM_VALUE = `Test Verbatim Dept ${RUN_ID}`;
+    // Global Role USER would translate to REQUESTER by default — deliberately
+    // pick a DIFFERENT departmentRole (AGENT_ASSIGNEE) to prove
+    // resolveDepartmentMemberships reads the stored departmentRole directly
+    // instead of re-deriving it via translateGlobalRoleToDepartmentRole.
+    const verbatimMapping = await createMapping({
+      sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
+      microsoftValue: TEST_VERBATIM_VALUE,
+      departmentId: department.id,
+      role: Role.USER,
+      departmentRole: DepartmentRole.AGENT_ASSIGNEE,
+    });
+    mappingIds.push(verbatimMapping.id);
+    const verbatimUser = await createTestUser();
+    mockGraphMeOnce(TEST_VERBATIM_VALUE, `test-oid-${RUN_ID}-verbatim`);
+    await syncMicrosoftUserDepartment({
+      accessToken: "fake-token",
+      userId: verbatimUser.id,
+      oid: `test-oid-${RUN_ID}-verbatim`,
+      email: verbatimUser.email,
+      name: "Test User",
+    });
+    const verbatimUserAfter = await prisma.user.findUnique({ where: { id: verbatimUser.id } });
+    const verbatimMembership = await prisma.departmentMembership.findUnique({
+      where: { userId_departmentId: { userId: verbatimUser.id, departmentId: department.id } },
+    });
+    check("Scenario 9: User.role === USER (globalRole applied)", verbatimUserAfter?.role === Role.USER);
+    check(
+      "Scenario 9: DepartmentMembership.role === AGENT_ASSIGNEE (explicit departmentRole, NOT the REQUESTER translateGlobalRoleToDepartmentRole would derive)",
+      verbatimMembership?.role === DepartmentRole.AGENT_ASSIGNEE
+    );
+
+    console.log("\nScenario 10: Administrator cannot be granted as Global Role via createMapping\n");
+    try {
+      await createMapping({
+        sourceType: MicrosoftMappingSourceType.ENTRA_GROUP,
+        microsoftValue: `Test Admin Blocked ${RUN_ID}`,
+        departmentId: department.id,
+        role: Role.ADMIN,
+        departmentRole: DepartmentRole.REQUESTER,
+      });
+      check("Scenario 10: createMapping rejects Role.ADMIN", false);
+    } catch (err) {
+      check(
+        "Scenario 10: createMapping rejects Role.ADMIN with ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING",
+        err instanceof MicrosoftMappingValidationError && err.code === "ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING"
+      );
+    }
+
+    console.log("\nScenario 11: Department Admin cannot be granted as Department Role via createMapping\n");
+    try {
+      await createMapping({
+        sourceType: MicrosoftMappingSourceType.ENTRA_GROUP,
+        microsoftValue: `Test Dept Admin Blocked ${RUN_ID}`,
+        departmentId: department.id,
+        role: Role.USER,
+        departmentRole: DepartmentRole.DEPARTMENT_ADMIN,
+      });
+      check("Scenario 11: createMapping rejects DepartmentRole.DEPARTMENT_ADMIN", false);
+    } catch (err) {
+      check(
+        "Scenario 11: createMapping rejects DepartmentRole.DEPARTMENT_ADMIN with DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING",
+        err instanceof MicrosoftMappingValidationError && err.code === "DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING"
+      );
+    }
+
+    console.log("\nScenario 12: editing Global Role via updateMapping preserves the existing Department Role\n");
+    const editMapping = await createMapping({
+      sourceType: MicrosoftMappingSourceType.ENTRA_GROUP,
+      microsoftValue: `Test Edit Preserves ${RUN_ID}`,
+      departmentId: department.id,
+      role: Role.USER,
+      departmentRole: DepartmentRole.VIEWER,
+    });
+    mappingIds.push(editMapping.id);
+    const editedMapping = await updateMapping(editMapping.id, { role: Role.IT_AGENT });
+    check("Scenario 12: role updated to IT_AGENT", editedMapping.role === Role.IT_AGENT);
+    check("Scenario 12: departmentRole untouched (still VIEWER)", editedMapping.departmentRole === DepartmentRole.VIEWER);
+
+    console.log("\nScenario 13: createMapping rejects a non-existent department\n");
+    try {
+      await createMapping({
+        sourceType: MicrosoftMappingSourceType.ENTRA_GROUP,
+        microsoftValue: `Test Bad Department ${RUN_ID}`,
+        departmentId: "nonexistent-department-id",
+        role: Role.USER,
+        departmentRole: DepartmentRole.REQUESTER,
+      });
+      check("Scenario 13: createMapping rejects a missing department", false);
+    } catch (err) {
+      check(
+        "Scenario 13: createMapping rejects a missing department with DEPARTMENT_NOT_FOUND",
+        err instanceof MicrosoftMappingValidationError && err.code === "DEPARTMENT_NOT_FOUND"
+      );
+    }
   } finally {
     // Each step is independently guarded: one cleanup step failing (e.g.
     // the JobTitleValue table not existing yet, pre-migration) must not

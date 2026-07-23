@@ -41,6 +41,8 @@ import {
   Minimize2,
 } from "lucide-react";
 import { getInitials } from "@/lib/utils";
+import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
+import { StatusLegend } from "@/components/gantt/status-legend";
 
 export type ViewMode = "day" | "week" | "month";
 
@@ -51,37 +53,8 @@ const TOP_H  = 22;
 const BTM_H  = 30;
 const LEFT_W = 296;
 
-const STATUS_BAR: Record<string, string> = {
-  PLANNING:    "bg-blue-500",
-  TODO:        "bg-slate-400",
-  IN_PROGRESS: "bg-amber-500",
-  ON_HOLD:     "bg-orange-400",
-  BLOCKED:     "bg-red-500",
-  COMPLETED:   "bg-emerald-500",
-  CANCELLED:   "bg-gray-300",
-};
-
-const STATUS_DOT: Record<string, string> = {
-  PLANNING:    "bg-blue-500",
-  TODO:        "bg-slate-400",
-  IN_PROGRESS: "bg-amber-500",
-  ON_HOLD:     "bg-orange-400",
-  BLOCKED:     "bg-red-500",
-  COMPLETED:   "bg-emerald-500",
-  CANCELLED:   "bg-gray-300",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  PLANNING: "Planning", TODO: "To Do", IN_PROGRESS: "In Progress",
-  ON_HOLD: "On Hold", BLOCKED: "Blocked", COMPLETED: "Completed", CANCELLED: "Cancelled",
-};
-
-const PRIORITY_CLS: Record<string, string> = {
-  LOW:    "bg-green-50 text-green-700 border border-green-200",
-  MEDIUM: "bg-yellow-50 text-yellow-700 border border-yellow-200",
-  HIGH:   "bg-orange-50 text-orange-700 border border-orange-200",
-  URGENT: "bg-red-50 text-red-700 border border-red-200",
-};
+// STATUS_DOT was identical to STATUS_BAR (same values) — uses STATUS_BAR
+// directly below instead of keeping a second copy.
 
 export interface GanttItem {
   id: string;
@@ -821,14 +794,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
         </div>
 
         {/* Legend */}
-        <div className="flex flex-wrap gap-3 text-xs text-muted-foreground">
-          {Object.entries(STATUS_LABEL).map(([k, v]) => (
-            <span key={k} className="flex items-center gap-1.5">
-              <span className={cn("inline-block h-2 w-4 rounded-sm", STATUS_BAR[k])} />
-              {v}
-            </span>
-          ))}
-        </div>
+        <StatusLegend />
 
         {/* Chart */}
         <div className="rounded-lg border overflow-hidden">
@@ -902,7 +868,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                                 <button onClick={() => toggleCollapse(group.id)} className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors" aria-label={isCollapsed ? "Expand" : "Collapse"}>
                                   {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                                 </button>
-                                <span className={cn("h-2 w-2 rounded-full flex-shrink-0", STATUS_DOT[group.status] ?? "bg-slate-400")} />
+                                <span className={cn("h-2 w-2 rounded-full flex-shrink-0", STATUS_BAR[group.status] ?? "bg-slate-400")} />
                                 {group.ownerImage !== undefined && (
                                   <Avatar className="h-5 w-5 flex-shrink-0">
                                     <AvatarImage src={group.ownerImage ?? undefined} />
@@ -941,9 +907,9 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                               >
                                 <div className="flex items-center gap-1.5 pl-8 pr-2 h-full min-w-0">
                                   {child.type === "milestone" ? (
-                                    <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", STATUS_DOT[child.status] ?? "bg-slate-400")} />
+                                    <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", STATUS_BAR[child.status] ?? "bg-slate-400")} />
                                   ) : (
-                                    <span className={cn("h-1.5 w-1.5 rounded-full flex-shrink-0", STATUS_DOT[child.status] ?? "bg-slate-400")} />
+                                    <span className={cn("h-1.5 w-1.5 rounded-full flex-shrink-0", STATUS_BAR[child.status] ?? "bg-slate-400")} />
                                   )}
                                   {child.type !== "milestone" && child.assigneeImage !== undefined && (
                                     <Avatar className="h-4 w-4 flex-shrink-0">
@@ -1002,9 +968,9 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                             >
                               <div className={cn("flex items-center gap-1.5 h-full min-w-0", item.isGroup ? "px-7" : "pl-8 pr-2")}>
                                 {item.isMilestone ? (
-                                  <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", STATUS_DOT[item.status] ?? "bg-slate-400")} />
+                                  <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", STATUS_BAR[item.status] ?? "bg-slate-400")} />
                                 ) : (
-                                  <span className={cn("rounded-full flex-shrink-0", item.isGroup ? "h-2 w-2" : "h-1.5 w-1.5", STATUS_DOT[item.status] ?? "bg-slate-400")} />
+                                  <span className={cn("rounded-full flex-shrink-0", item.isGroup ? "h-2 w-2" : "h-1.5 w-1.5", STATUS_BAR[item.status] ?? "bg-slate-400")} />
                                 )}
                                 <Link href={item.href} className={cn("truncate hover:text-primary transition-colors text-muted-foreground/70", item.isGroup ? "text-xs font-semibold" : "text-xs")}>
                                   {item.title}

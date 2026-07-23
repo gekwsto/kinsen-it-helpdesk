@@ -183,6 +183,10 @@ model Department {
   projects          Project[]
   activities        ProjectActivity[]
   categories        TicketCategory[]
+  priorities        TicketPriority[]
+  statuses          TicketStatus[]
+  cancelReasons     TicketCancelReason[]
+  activityProgressConfigs ActivityProgressConfig[]
   createdAt         DateTime                     @default(now())
   updatedAt         DateTime                     @updatedAt
 }
@@ -225,12 +229,16 @@ model MicrosoftDepartmentMapping {
   microsoftValue String
   department     Department                 @relation(fields: [departmentId], references: [id])
   departmentId   String
-  // The GLOBAL role (matches /admin/roles / User.role), not the
-  // department-scoped DepartmentRole — so this dropdown shows exactly the
-  // same roles as Roles & Permissions. DepartmentMembership.role (still
-  // DepartmentRole) is derived from this at sync time via
-  // translateGlobalRoleToDepartmentRole (lib/services/department-role-translation.ts).
+  // The GLOBAL role (matches /admin/roles / User.role) — so this dropdown
+  // shows exactly the same roles as Roles & Permissions.
   role           Role                       @default(USER)
+  // The DepartmentRole granted in `department` above. Explicitly chosen by
+  // the admin (no longer derived from `role` at sync time) — see
+  // resolveDepartmentMemberships in lib/services/microsoft-mapping-service.ts.
+  // DEPARTMENT_ADMIN is deliberately never allowed here (department-scoped
+  // analog of Role.ADMIN) — see isDepartmentRoleAllowedForMicrosoftMapping in
+  // lib/services/department-role-translation.ts.
+  departmentRole DepartmentRole
   isActive       Boolean                    @default(true)
   createdAt      DateTime                   @default(now())
   updatedAt      DateTime                   @updatedAt
@@ -427,53 +435,77 @@ model TicketCategory {
   name         String
   description  String?
   color        String      @default("#6366f1")
+  isActive     Boolean    @default(true)
+  // Always owned by exactly one department — there is no more global/shared
+  // category. See the 20260727_retire_global_config migration and
+  // scripts/retire-global-config.ts for the one-time data migration that
+  // moved every pre-existing global row into a department before this
+  // column became required.
+  department   Department @relation(fields: [departmentId], references: [id])
+  departmentId String
+  tickets      Ticket[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([departmentId, name])
+}
+
+model TicketPriority {
+  id           String      @id @default(cuid())
+  name         String
+  level        Int
+  color        String
+  isActive     Boolean    @default(true)
+  // Always owned by exactly one department — there is no more global/shared
+  // priority. Mirrors TicketCategory's departmentId. A department-owned
+  // priority's SlaPolicy (below) is therefore department-scoped too, with
+  // no extra field needed.
+  department   Department @relation(fields: [departmentId], references: [id])
+  departmentId String
+  tickets      Ticket[]
+  slaPolicy    SlaPolicy?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([departmentId, name])
+}
+
+model TicketStatus {
+  id           String      @id @default(cuid())
+  name         String
+  color        String
+  // isDefault/isClosed remain simple booleans, per-department: each
+  // department marks its own default status. See resolveDefaultStatusId in
+  // lib/services/department-scope-service.ts.
+  isDefault    Boolean    @default(false)
+  isClosed     Boolean    @default(false)
+  isActive     Boolean    @default(true)
+  order        Int        @default(0)
+  // Always owned by exactly one department — there is no more global/shared
+  // status. Mirrors TicketCategory.
+  department   Department @relation(fields: [departmentId], references: [id])
+  departmentId String
+  tickets      Ticket[]
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@unique([departmentId, name])
+}
+
+model TicketCancelReason {
+  id           String      @id @default(cuid())
+  name         String
+  description  String?
   isActive     Boolean     @default(true)
-  // Nullable = global/shared category visible to every department (e.g. an
-  // existing category migrated as-is); non-null = owned by one department.
+  // Nullable = global/shared reason visible to every department (existing
+  // rows); non-null = owned by one department. Mirrors TicketCategory.
   department   Department? @relation(fields: [departmentId], references: [id])
   departmentId String?
   tickets      Ticket[]
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 
-  // Replaces the flat `name @unique` — Postgres treats NULL departmentId as
-  // distinct per row, so this does not collapse existing global categories.
   @@unique([departmentId, name])
-}
-
-model TicketPriority {
-  id        String     @id @default(cuid())
-  name      String     @unique
-  level     Int
-  color     String
-  isActive  Boolean    @default(true)
-  tickets   Ticket[]
-  slaPolicy SlaPolicy?
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
-}
-
-model TicketStatus {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  color     String
-  isDefault Boolean  @default(false)
-  isClosed  Boolean  @default(false)
-  isActive  Boolean  @default(true)
-  order     Int      @default(0)
-  tickets   Ticket[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-}
-
-model TicketCancelReason {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
-  isActive    Boolean  @default(true)
-  tickets     Ticket[]
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
 }
 
 // ─── Tickets ──────────────────────────────────────────────────────────────────
@@ -766,6 +798,24 @@ model ProjectActivity {
   @@index([status])
   @@index([departmentId])
   @@index([subDepartmentId])
+}
+
+// Per-department, editable status->progress% mapping — Activity progress is
+// derived from status (see lib/activities/activity-progress.ts), never
+// manually entered, but each department may set its own percentages (e.g.
+// IT might treat BLOCKED as 50%, another department as 25%). All 6
+// ActivityStatus values always exist per department (seeded, never
+// create/delete from the UI — only the percentage is editable).
+model ActivityProgressConfig {
+  id              String         @id @default(cuid())
+  department      Department     @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId    String
+  status          ActivityStatus
+  progressPercent Int            @default(0)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@unique([departmentId, status])
 }
 
 model ActivityDependency {

@@ -63,11 +63,10 @@ export async function maybeAutoCreateDepartmentForGraphValue(
       sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
       microsoftValue: trimmed,
       departmentId: department.id,
-      // Global Role now (MicrosoftDepartmentMapping.role changed type) —
-      // Role.USER is the auto-create default, translating to
-      // DepartmentRole.REQUESTER below for the actual membership, same as
-      // before this change.
+      // Role.USER / DepartmentRole.REQUESTER is the auto-create default for
+      // both fields — matches the ResolvedMembership returned below.
       role: Role.USER,
+      departmentRole: DepartmentRole.REQUESTER,
     });
     console.log("[microsoft-directory] Auto-created default mapping", {
       microsoftValue: trimmed,

@@ -1,9 +1,9 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { requireAnyDepartmentPermission, isAdmin, hasDepartmentPermission } from "@/lib/permissions";
+import { requireAnyDepartmentPermission, isAdmin, hasDepartmentPermission, hasAnyDepartmentPermission } from "@/lib/permissions";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
-import { ChevronRight, Users, Tag, Building2 } from "lucide-react";
+import { ChevronRight, Users, Tag, Building2, Flag, ListChecks, XCircle, Timer, TrendingUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { DepartmentSettingsForm } from "@/components/admin/department-settings-form";
 import { DepartmentInboundEmailForm } from "@/components/departments/department-inbound-email-form";
@@ -28,10 +28,15 @@ export default async function DepartmentDetailPage({
   } catch {
     redirect("/dashboard");
   }
-  const [canViewSubDepartments, canManageSettings, canManageEmail] = await Promise.all([
+  const [canViewSubDepartments, canManageSettings, canManageEmail, canManagePriorities, canManageStatuses, canManageCancelReasons, canManageSla, canManageActivityProgress] = await Promise.all([
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "subdepartment.view", access.membership!.customRoleId),
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "department.manageSettings", access.membership!.customRoleId),
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "department.email.manage", access.membership!.customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, ["priority.create", "priority.edit", "priority.delete"], access.membership!.customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, ["status.create", "status.edit", "status.delete"], access.membership!.customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, ["cancelReason.create", "cancelReason.edit", "cancelReason.delete"], access.membership!.customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, ["sla.create", "sla.edit", "sla.delete"], access.membership!.customRoleId),
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "activityProgress.edit", access.membership!.customRoleId),
   ]);
 
   const department = await prisma.department.findUnique({
@@ -113,6 +118,96 @@ export default async function DepartmentDetailPage({
             </CardContent>
           </Card>
         </Link>
+
+        {canManagePriorities && (
+          <Link href={`/admin/departments/${department.id}/priorities`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <Flag className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">Priorities</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Manage ticket priorities for this department.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
+
+        {canManageStatuses && (
+          <Link href={`/admin/departments/${department.id}/statuses`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <ListChecks className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">Statuses</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Manage ticket statuses for this department.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
+
+        {canManageCancelReasons && (
+          <Link href={`/admin/departments/${department.id}/cancel-reasons`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <XCircle className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">Cancel Reasons</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Manage ticket cancellation reasons for this department.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
+
+        {canManageSla && (
+          <Link href={`/admin/departments/${department.id}/sla`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <Timer className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">SLA</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Manage response/resolution hours for this department.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
+
+        {canManageActivityProgress && (
+          <Link href={`/admin/departments/${department.id}/activity-progress`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <TrendingUp className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">Activity Progress</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Set progress% per activity status for this department.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
 
         {canViewSubDepartments && (
           <Link href={`/admin/departments/${department.id}/sub-departments`}>

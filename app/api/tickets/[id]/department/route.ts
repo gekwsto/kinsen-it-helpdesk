@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, canViewAllDepartments, hasDepartmentPermission } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { canActOnEntity, resolveDefaultStatusId } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { changeTicketDepartmentSchema } from "@/lib/validations";
@@ -28,6 +28,12 @@ export async function PATCH(
         departmentId: true,
         subDepartmentId: true,
         shareWithSubDepartment: true,
+        categoryId: true,
+        priorityId: true,
+        statusId: true,
+        cancelReasonId: true,
+        projectId: true,
+        activityId: true,
       },
     });
     if (!ticket) {
@@ -85,6 +91,47 @@ export async function PATCH(
       }
     }
 
+    // Department changed -> re-validate the ticket's category/priority/
+    // status/cancel reason still belong to the target department (or are
+    // global) — never silently keep a config value scoped to the OLD
+    // department. Category/priority/cancel reason are nullable, so an
+    // invalid one just clears; status is required, so it falls back to the
+    // target department's own default (or the global default) via the same
+    // resolveDefaultStatusId used at ticket creation.
+    let resolvedCategoryId = ticket.categoryId;
+    let resolvedPriorityId = ticket.priorityId;
+    let resolvedStatusId = ticket.statusId;
+    let resolvedCancelReasonId = ticket.cancelReasonId;
+    let resolvedProjectId = ticket.projectId;
+    let resolvedActivityId = ticket.activityId;
+
+    if (departmentChanging) {
+      const [category, priority, status, cancelReason, project, activity] = await Promise.all([
+        ticket.categoryId ? prisma.ticketCategory.findUnique({ where: { id: ticket.categoryId }, select: { departmentId: true } }) : Promise.resolve(null),
+        ticket.priorityId ? prisma.ticketPriority.findUnique({ where: { id: ticket.priorityId }, select: { departmentId: true } }) : Promise.resolve(null),
+        prisma.ticketStatus.findUnique({ where: { id: ticket.statusId }, select: { departmentId: true } }),
+        ticket.cancelReasonId ? prisma.ticketCancelReason.findUnique({ where: { id: ticket.cancelReasonId }, select: { departmentId: true } }) : Promise.resolve(null),
+        ticket.projectId ? prisma.project.findUnique({ where: { id: ticket.projectId }, select: { departmentId: true } }) : Promise.resolve(null),
+        ticket.activityId ? prisma.projectActivity.findUnique({ where: { id: ticket.activityId }, select: { departmentId: true, projectId: true } }) : Promise.resolve(null),
+      ]);
+
+      const stillValid = (rowDepartmentId: string | null | undefined) =>
+        rowDepartmentId == null || rowDepartmentId === data.departmentId;
+
+      if (ticket.categoryId && !stillValid(category?.departmentId)) resolvedCategoryId = null;
+      if (ticket.priorityId && !stillValid(priority?.departmentId)) resolvedPriorityId = null;
+      if (ticket.cancelReasonId && !stillValid(cancelReason?.departmentId)) resolvedCancelReasonId = null;
+      if (!stillValid(status?.departmentId)) {
+        const fallbackStatusId = await resolveDefaultStatusId(data.departmentId);
+        if (fallbackStatusId) resolvedStatusId = fallbackStatusId;
+      }
+      // Project/Activity — same leniency, plus the activity must still
+      // belong to whichever project survives (if it belonged to one at all).
+      if (ticket.projectId && !stillValid(project?.departmentId)) resolvedProjectId = null;
+      if (ticket.activityId && !stillValid(activity?.departmentId)) resolvedActivityId = null;
+      if (resolvedActivityId && activity?.projectId && activity.projectId !== resolvedProjectId) resolvedActivityId = null;
+    }
+
     const subDepartmentChanging = resolvedSubDepartmentId !== ticket.subDepartmentId;
     if (!departmentChanging && !subDepartmentChanging) {
       // No-op: nothing actually moved — return the ticket as-is, no audit noise.
@@ -116,6 +163,12 @@ export async function PATCH(
         shareWithSubDepartment: clearingSubDepartment ? false : ticket.shareWithSubDepartment,
         departmentChangedById: session.user.id,
         departmentChangedAt: now,
+        categoryId: resolvedCategoryId,
+        priorityId: resolvedPriorityId,
+        statusId: resolvedStatusId,
+        cancelReasonId: resolvedCancelReasonId,
+        projectId: resolvedProjectId,
+        activityId: resolvedActivityId,
       },
       include: {
         department: { select: { id: true, name: true } },

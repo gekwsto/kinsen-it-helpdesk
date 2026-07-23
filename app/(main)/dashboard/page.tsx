@@ -15,6 +15,31 @@ import Link from "next/link";
 
 const TIMELINE_DAYS = 30;
 
+/**
+ * Statuses/priorities/categories are strictly department-owned now (no more
+ * global row shared across departments — see the 20260727_retire_global_config
+ * migration), so the "All Workspaces" view can legitimately fetch several
+ * same-named rows (e.g. every department's own "Open" status) as separate
+ * DB rows. Charts key by name, so those duplicates must be merged (summed)
+ * before rendering — otherwise React sees two children with the same key
+ * (`Encountered two children with the same key` console error) and the pie/
+ * bar chart silently drops one of them. A single department's own view never
+ * has duplicate names to begin with (its own @@unique([departmentId, name])
+ * guarantees that), so this is a no-op there.
+ */
+function aggregateByName<T extends { name: string; color: string }>(
+  rows: T[],
+  getValue: (row: T) => number
+): Array<{ name: string; color: string; value: number }> {
+  const byName = new Map<string, { name: string; color: string; value: number }>();
+  for (const row of rows) {
+    const existing = byName.get(row.name);
+    if (existing) existing.value += getValue(row);
+    else byName.set(row.name, { name: row.name, color: row.color, value: getValue(row) });
+  }
+  return Array.from(byName.values());
+}
+
 export default async function DashboardPage() {
   const session = await auth();
   if (!session?.user) return null;
@@ -64,9 +89,14 @@ export default async function DashboardPage() {
     prisma.ticket.count({ where: { ...ticketWhere, status: { isClosed: true } } }),
     prisma.ticket.count({ where: { ...ticketWhere, source: "EMAIL" } }),
 
-    // Chart: by status
+    // Chart: by status — scoped to the active workspace's own department.
+    // Every status/priority/category is department-owned now (no more
+    // global fallback), so an unscoped fetch would show every department's
+    // identically-named rows as separate (mostly zero-count) chart entries.
+    // "All Workspaces" has no single department to scope to, so it still
+    // shows every row — a known limitation, not fixed here.
     prisma.ticketStatus.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...(activeWorkspace.departmentId ? { departmentId: activeWorkspace.departmentId } : {}) },
       select: {
         id: true,
         name: true,
@@ -78,7 +108,7 @@ export default async function DashboardPage() {
 
     // Chart: by priority (open tickets only)
     prisma.ticketPriority.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...(activeWorkspace.departmentId ? { departmentId: activeWorkspace.departmentId } : {}) },
       select: {
         id: true,
         name: true,
@@ -91,7 +121,7 @@ export default async function DashboardPage() {
 
     // Chart: by category
     prisma.ticketCategory.findMany({
-      where: { isActive: true },
+      where: { isActive: true, ...(activeWorkspace.departmentId ? { departmentId: activeWorkspace.departmentId } : {}) },
       select: {
         id: true,
         name: true,
@@ -144,22 +174,16 @@ export default async function DashboardPage() {
     return { date: key, count: dayMap.get(key) ?? 0 };
   });
 
-  // Serialise chart data
-  const statusChartData = byStatus.map((s) => ({
-    name: s.name,
-    value: s._count.tickets,
-    color: s.color,
-  }));
+  // Serialise chart data — aggregated by name (see aggregateByName above),
+  // since "All Workspaces" can legitimately return several departments' own
+  // same-named status/priority/category rows as separate DB rows now.
+  const statusChartData = aggregateByName(byStatus, (s) => s._count.tickets);
 
-  const priorityChartData = byPriority.map((p) => ({
-    name: p.name,
-    value: p._count.tickets,
-    color: p.color,
-  }));
+  const priorityChartData = aggregateByName(byPriority, (p) => p._count.tickets);
 
-  const categoryChartData = byCategory.map((c) => ({
+  const categoryChartData = aggregateByName(byCategory, (c) => c._count.tickets).map((c) => ({
     name: c.name,
-    count: c._count.tickets,
+    count: c.value,
     color: c.color,
   }));
 

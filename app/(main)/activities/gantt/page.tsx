@@ -9,6 +9,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, GanttChartSquare, ShieldOff } from "lucide-react";
 import { GanttChart, GanttGroup, GanttDependency } from "@/components/gantt/gantt-chart";
+import { getProgressConfigsForDepartments, resolveProgress } from "@/lib/activities/activity-progress";
 
 interface SearchParams {
   status?: string;
@@ -118,6 +119,12 @@ export default async function ActivityGanttPage({
     children: [],
   };
 
+  // Activity progress is derived from status (per-department configurable —
+  // see lib/activities/activity-progress.ts), resolved fresh here rather
+  // than trusting the possibly-stale stored column.
+  const activityDepartmentIds = activities.map((a) => a.departmentId).filter((id): id is string => !!id);
+  const progressConfigs = await getProgressConfigsForDepartments(activityDepartmentIds);
+
   for (const a of activities) {
     const child = {
       id: a.id,
@@ -127,7 +134,7 @@ export default async function ActivityGanttPage({
         ? (a.dueDate?.toISOString() ?? null)
         : (a.startDate?.toISOString() ?? null),
       endDate: a.dueDate?.toISOString() ?? null,
-      progress: a.progress,
+      progress: resolveProgress(progressConfigs, a.departmentId, a.status),
       href: `/activities/${a.id}`,
       priority: a.priority,
       assigneeName: a.assignedUsers[0]?.name ?? null,

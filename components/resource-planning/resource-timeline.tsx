@@ -24,6 +24,7 @@ import { getClippedBarMetrics } from "@/lib/resource-planning-bar-metrics";
 import { computePxPerDay } from "@/lib/resource-planning-column-sizing";
 import { computeResourceRowHeights } from "@/lib/resource-planning-row-heights";
 import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
+import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
 
 export interface ResourceRow extends ResourcePlanningResource {
   roleLabel: string;
@@ -40,10 +41,11 @@ interface ResourceTimelineProps {
   canEdit: boolean;
 }
 
-// Same convention as components/gantt/gantt-chart.tsx (status color maps,
-// drag mechanics) — standalone values/state here since this component
-// groups by agent, not by project/activity, and doesn't share that
-// component's GanttGroup/GanttItem shape.
+// Drag mechanics below are standalone (this component groups by agent, not
+// by project/activity, so it doesn't share Gantt's GanttGroup/GanttItem
+// shape) — but the status/priority color maps ARE the shared
+// components/gantt/status-colors.ts ones, so the two views can never drift
+// out of visual sync.
 //
 // Day-column width is NOT a fixed constant — a fixed px-per-day either
 // leaves a large blank strip on wide screens or forces the chart wider than
@@ -72,32 +74,6 @@ const PAGE_BOTTOM_PADDING = 24;
 // small laptop) never computes a collapsed or negative min-height.
 const MIN_CHART_HEIGHT = 320;
 
-const STATUS_BAR: Record<string, string> = {
-  TODO: "bg-slate-400",
-  IN_PROGRESS: "bg-amber-500",
-  ON_HOLD: "bg-orange-400",
-  BLOCKED: "bg-red-500",
-  COMPLETED: "bg-emerald-500",
-  CANCELLED: "bg-gray-300",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  TODO: "To Do",
-  IN_PROGRESS: "In Progress",
-  ON_HOLD: "On Hold",
-  BLOCKED: "Blocked",
-  COMPLETED: "Completed",
-  CANCELLED: "Cancelled",
-};
-
-// Same palette as components/gantt/gantt-chart.tsx's PRIORITY_CLS — a
-// priority badge means the same thing visually in both places.
-const PRIORITY_CLS: Record<string, string> = {
-  LOW: "bg-green-50 text-green-700 border border-green-200",
-  MEDIUM: "bg-yellow-50 text-yellow-700 border border-yellow-200",
-  HIGH: "bg-orange-50 text-orange-700 border border-orange-200",
-  URGENT: "bg-red-50 text-red-700 border border-red-200",
-};
 
 type DragMeta = {
   id: string; // activity id — used for the PATCH and optimistic local-state update

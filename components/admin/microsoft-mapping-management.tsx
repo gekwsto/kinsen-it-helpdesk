@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { toast } from "sonner";
-import { MicrosoftMappingSourceType, Role } from "@prisma/client";
+import { DepartmentRole, MicrosoftMappingSourceType, Role } from "@prisma/client";
 import {
   Table,
   TableBody,
@@ -37,7 +37,12 @@ import {
   MAPPING_SOURCE_TYPE_HELP,
   MAPPING_SOURCE_TYPE_OPTIONS,
 } from "@/components/admin/department-role-info";
-import { getMicrosoftMappingRoleOptions } from "@/lib/services/department-role-translation";
+import {
+  getMicrosoftMappingRoleOptions,
+  getMicrosoftMappingDepartmentRoleOptions,
+  translateGlobalRoleToDepartmentRole,
+  DEPARTMENT_ROLE_LABELS,
+} from "@/lib/services/department-role-translation";
 
 // The actual, centrally-validated set of GLOBAL roles a Microsoft mapping
 // can grant — the same roles shown on /admin/roles, minus Administrator.
@@ -46,12 +51,17 @@ import { getMicrosoftMappingRoleOptions } from "@/lib/services/department-role-t
 // this list, not shown disabled — see the persistent note near the field.
 const ROLE_OPTIONS = getMicrosoftMappingRoleOptions();
 
+// Same idea for the Department Role dropdown — every built-in DepartmentRole
+// except Department Admin (the department-scoped analog of Administrator).
+const DEPARTMENT_ROLE_SELECT_OPTIONS = getMicrosoftMappingDepartmentRoleOptions();
+
 interface Mapping {
   id: string;
   sourceType: MicrosoftMappingSourceType;
   microsoftValue: string;
   departmentId: string;
   role: Role;
+  departmentRole: DepartmentRole;
   isActive: boolean;
   department: { id: string; name: string; slug: string };
 }
@@ -102,6 +112,12 @@ export function MicrosoftMappingManagement({
   const [value, setValue] = useState("");
   const [departmentId, setDepartmentId] = useState(departments[0]?.id ?? "");
   const [role, setRole] = useState<Role>(Role.USER);
+  const [departmentRole, setDepartmentRole] = useState<DepartmentRole>(translateGlobalRoleToDepartmentRole(Role.USER));
+  // Once the admin edits Department Role directly, stop auto-suggesting a
+  // new default when Global Role changes — never silently overwrite an
+  // explicit choice. Starts true in edit mode (see openEdit below), so
+  // opening an existing mapping never re-suggests over its stored value.
+  const [departmentRoleTouched, setDepartmentRoleTouched] = useState(false);
 
   const isDirectoryBacked = DIRECTORY_BACKED_SOURCE_TYPES.includes(sourceType);
   const isProfileDepartment = sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT;
@@ -109,6 +125,19 @@ export function MicrosoftMappingManagement({
   const activeDirectory = isProfileDepartment ? departmentDirectory : isProfileJobTitle ? jobTitleDirectory : null;
   const showDropdown = isDirectoryBacked && !manualEntry;
   const selectedRoleOption = ROLE_OPTIONS.find((opt) => opt.value === role);
+  const selectedDepartmentRoleOption = DEPARTMENT_ROLE_SELECT_OPTIONS.find((opt) => opt.value === departmentRole);
+
+  const handleRoleChange = (v: Role) => {
+    setRole(v);
+    if (!departmentRoleTouched) {
+      setDepartmentRole(translateGlobalRoleToDepartmentRole(v));
+    }
+  };
+
+  const handleDepartmentRoleChange = (v: DepartmentRole) => {
+    setDepartmentRole(v);
+    setDepartmentRoleTouched(true);
+  };
 
   const resetForm = () => {
     setEditingMapping(null);
@@ -116,6 +145,8 @@ export function MicrosoftMappingManagement({
     setValue("");
     setDepartmentId(departments[0]?.id ?? "");
     setRole(Role.USER);
+    setDepartmentRole(translateGlobalRoleToDepartmentRole(Role.USER));
+    setDepartmentRoleTouched(false);
     setManualEntry(false);
   };
 
@@ -130,6 +161,10 @@ export function MicrosoftMappingManagement({
     setValue(mapping.microsoftValue);
     setDepartmentId(mapping.departmentId);
     setRole(mapping.role);
+    setDepartmentRole(mapping.departmentRole);
+    // Seed as "touched" so tweaking Global Role while editing never silently
+    // overwrites this mapping's already-stored Department Role.
+    setDepartmentRoleTouched(true);
     // If the mapping's current value isn't in the relevant cached directory
     // list, default to manual entry so the admin sees the real stored value
     // instead of an empty/mismatched dropdown.
@@ -172,7 +207,7 @@ export function MicrosoftMappingManagement({
     if (!value.trim() || !departmentId) return;
     setSaving(true);
     try {
-      const payload = { sourceType, microsoftValue: value.trim(), departmentId, role };
+      const payload = { sourceType, microsoftValue: value.trim(), departmentId, role, departmentRole };
       const res = await fetch(
         editingMapping ? `/api/admin/microsoft-mappings/${editingMapping.id}` : "/api/admin/microsoft-mappings",
         {
@@ -281,7 +316,10 @@ export function MicrosoftMappingManagement({
                 </TableCell>
                 <TableCell>
                   <span className="text-sm">
-                    {m.department.name} <span className="text-muted-foreground">— {GLOBAL_ROLE_LABELS[m.role]}</span>
+                    {m.department.name}{" "}
+                    <span className="text-muted-foreground">
+                      — {GLOBAL_ROLE_LABELS[m.role]} / {DEPARTMENT_ROLE_LABELS[m.departmentRole]}
+                    </span>
                   </span>
                 </TableCell>
                 <TableCell>
@@ -444,8 +482,8 @@ export function MicrosoftMappingManagement({
             </div>
 
             <div className="space-y-2">
-              <Label>Role granted</Label>
-              <Select value={role} onValueChange={(v) => setRole(v as Role)}>
+              <Label>Global Role</Label>
+              <Select value={role} onValueChange={(v) => handleRoleChange(v as Role)}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
                   {ROLE_OPTIONS.map((opt) => (
@@ -456,13 +494,6 @@ export function MicrosoftMappingManagement({
               {selectedRoleOption && (
                 <>
                   <p className="text-xs text-muted-foreground">{selectedRoleOption.description}</p>
-                  <p className="text-xs text-muted-foreground">
-                    Global Role granted: <span className="font-medium text-foreground">{selectedRoleOption.label}</span>
-                    {" "}— unless manually overridden.
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    Department membership role granted: <span className="font-medium text-foreground">{selectedRoleOption.departmentRolePreview}</span>
-                  </p>
                   {(role === "DEPARTMENT_MANAGER" || role === "DIRECTOR") && (
                     <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
                       {role === "DIRECTOR"
@@ -473,8 +504,28 @@ export function MicrosoftMappingManagement({
                 </>
               )}
               <p className="text-[11px] text-muted-foreground">
-                Administrator cannot be granted automatically by Microsoft mappings. Assign Administrator manually
-                from Roles &amp; Permissions or User Management.
+                Global Role controls the user&apos;s app-wide role. Administrator cannot be granted automatically by
+                Microsoft mappings — assign it manually from Roles &amp; Permissions or User Management.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Department Role</Label>
+              <Select value={departmentRole} onValueChange={(v) => handleDepartmentRoleChange(v as DepartmentRole)}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  {DEPARTMENT_ROLE_SELECT_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {selectedDepartmentRoleOption && (
+                <p className="text-xs text-muted-foreground">{selectedDepartmentRoleOption.description}</p>
+              )}
+              <p className="text-[11px] text-muted-foreground">
+                Department Role controls the user&apos;s membership role in the selected department — chosen
+                independently of Global Role above (pre-filled with a sensible default until you change it).
+                Department Admin cannot be granted automatically by Microsoft mappings.
               </p>
             </div>
 
@@ -482,11 +533,14 @@ export function MicrosoftMappingManagement({
               <summary className="cursor-pointer font-medium text-foreground">More about mapping behavior</summary>
               <div className="mt-2 space-y-1.5">
                 <p>
-                  This mapping sets both the TicketApp Department and the user&apos;s Global Role / Department
-                  Membership Role, unless manually overridden. Changes apply on the next Microsoft login/sync — not
-                  immediately for existing users.
+                  This mapping sets the TicketApp Department, the user&apos;s Global Role, and their Department
+                  Role in that department — each chosen independently above — unless manually overridden. Changes
+                  apply on the next Microsoft login/sync — not immediately for existing users.
                 </p>
-                <p>Microsoft mappings can never grant System Admin — that always requires a manual admin action.</p>
+                <p>
+                  Microsoft mappings can never grant System Admin (Global Role) or Department Admin (Department
+                  Role) — those always require a manual admin action.
+                </p>
                 {isDirectoryBacked && (
                   <p>
                     Full-tenant syncing requires the Microsoft Graph{" "}

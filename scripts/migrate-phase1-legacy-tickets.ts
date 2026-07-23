@@ -356,6 +356,16 @@ async function migrateUsers(pool: sql.ConnectionPool, companyId: string, busines
 
 // ─── Statuses & Priorities ────────────────────────────────────────────────────
 
+// TicketStatus/TicketPriority are fully department-owned now (required
+// departmentId, no more global/shared row — see the
+// 20260727_retire_global_config migration), so this script creates/reuses
+// them scoped to dept-it, matching ensureCategory below and
+// prisma/seed.ts's own per-department seeding. find-by-(departmentId, name)
+// then create-or-update-by-id reproduces the original find-or-create-by-name
+// behavior exactly, without relying on `name` being globally unique at the
+// Prisma type level.
+const LEGACY_IMPORT_DEPARTMENT_ID = "dept-it";
+
 async function ensureTicketStatuses() {
   const statuses = [0, 1, 2, 3];
   const map = new Map<number, string>();
@@ -364,18 +374,23 @@ async function ensureTicketStatuses() {
     const name = statusNameFromLegacy(legacyStatus);
     const isClosed = statusIsClosedFromLegacy(legacyStatus);
 
-    const status = await prisma.ticketStatus.upsert({
-      where: { name },
-      update: { isClosed, isActive: true, order: legacyStatus },
-      create: {
-        name,
-        color: isClosed ? "#22c55e" : legacyStatus === 1 ? "#3b82f6" : legacyStatus === 2 ? "#f97316" : "#6366f1",
-        isDefault: legacyStatus === 0,
-        isClosed,
-        isActive: true,
-        order: legacyStatus,
-      },
-    });
+    const existing = await prisma.ticketStatus.findFirst({ where: { departmentId: LEGACY_IMPORT_DEPARTMENT_ID, name } });
+    const status = existing
+      ? await prisma.ticketStatus.update({
+          where: { id: existing.id },
+          data: { isClosed, isActive: true, order: legacyStatus },
+        })
+      : await prisma.ticketStatus.create({
+          data: {
+            name,
+            color: isClosed ? "#22c55e" : legacyStatus === 1 ? "#3b82f6" : legacyStatus === 2 ? "#f97316" : "#6366f1",
+            isDefault: legacyStatus === 0,
+            isClosed,
+            isActive: true,
+            order: legacyStatus,
+            departmentId: LEGACY_IMPORT_DEPARTMENT_ID,
+          },
+        });
 
     map.set(legacyStatus, status.id);
   }
@@ -390,11 +405,15 @@ async function ensureTicketPriorities() {
   for (const legacyPriority of legacyPriorities) {
     const p = priorityFromLegacy(legacyPriority);
 
-    const priority = await prisma.ticketPriority.upsert({
-      where: { name: p.name },
-      update: { level: p.level, color: p.color, isActive: true },
-      create: { name: p.name, level: p.level, color: p.color, isActive: true },
-    });
+    const existing = await prisma.ticketPriority.findFirst({ where: { departmentId: LEGACY_IMPORT_DEPARTMENT_ID, name: p.name } });
+    const priority = existing
+      ? await prisma.ticketPriority.update({
+          where: { id: existing.id },
+          data: { level: p.level, color: p.color, isActive: true },
+        })
+      : await prisma.ticketPriority.create({
+          data: { name: p.name, level: p.level, color: p.color, isActive: true, departmentId: LEGACY_IMPORT_DEPARTMENT_ID },
+        });
 
     map.set(legacyPriority, priority.id);
   }

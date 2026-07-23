@@ -5,7 +5,6 @@ import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { changeStatusSchema } from "@/lib/validations";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
-import { recalculateFromTicket } from "@/lib/projects/progress-rollup";
 
 export async function PATCH(
   req: NextRequest,
@@ -77,10 +76,6 @@ export async function PATCH(
         console.error("[notification] Failed to send closed notification:", err);
       });
     }
-
-    recalculateFromTicket(id).catch((err) => {
-      console.error("[progress-rollup] status change recalculation failed:", err);
-    });
 
     return NextResponse.json(updated);
   } catch (error: any) {

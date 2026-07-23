@@ -5,6 +5,15 @@ import {
   DEPARTMENT_ROLE_DESCRIPTIONS,
   DEPARTMENT_ROLE_OPTIONS,
 } from "@/lib/services/department-role-translation";
+import {
+  STARTER_CATEGORIES,
+  STARTER_PRIORITIES,
+  STARTER_STATUSES,
+  ensureCategoryForDepartment,
+  ensurePriorityForDepartment,
+  ensureStatusForDepartment,
+  ensureActivityProgressConfigForDepartment,
+} from "@/lib/services/config-starter-data";
 
 const prisma = new PrismaClient();
 
@@ -90,6 +99,54 @@ const PERMISSIONS = [
   { key: "role.department.create", description: "Create department roles", module: "admin" },
   { key: "role.department.update", description: "Edit department role permissions", module: "admin" },
   { key: "role.department.delete", description: "Delete department roles", module: "admin" },
+  // Ticket configuration — department-scoped create/edit/delete for
+  // Categories/Priorities/Statuses/Cancel Reasons/SLA. Enforced via
+  // requireDepartmentPermission/requireAnyDepartmentPermission (System Admin
+  // bypasses, a department-scoped role needs the specific key for its own
+  // department — see app/api/admin/{categories,priorities,statuses,
+  // cancel-reasons,sla}/route.ts). Categories already existed and were
+  // gated only by the blanket department.manageSettings key — category.manage
+  // is additive here, checked via requireAnyDepartmentPermission(id,
+  // ["category.manage", "department.manageSettings"]) so existing
+  // installs/roles that already had department.manageSettings don't lose
+  // category management the moment this ships.
+  { key: "category.manage", description: "Create, edit and delete ticket categories", module: "ticketConfig" },
+  // Granular delete, additive on top of the blanket category.manage above —
+  // lets an admin grant JUST delete capability (e.g. to a role that should
+  // clean up unused categories but not create/edit them) without also
+  // granting full category.manage. Checked as an OR alongside
+  // category.manage/department.manageSettings in the DELETE handler, never
+  // a replacement for either.
+  { key: "category.delete", description: "Delete/deactivate ticket categories", module: "ticketConfig" },
+  { key: "priority.create", description: "Create ticket priorities", module: "ticketConfig" },
+  { key: "priority.edit", description: "Edit ticket priorities", module: "ticketConfig" },
+  { key: "priority.delete", description: "Delete/deactivate ticket priorities", module: "ticketConfig" },
+  { key: "status.create", description: "Create ticket statuses", module: "ticketConfig" },
+  { key: "status.edit", description: "Edit ticket statuses", module: "ticketConfig" },
+  { key: "status.delete", description: "Delete/deactivate ticket statuses", module: "ticketConfig" },
+  { key: "cancelReason.create", description: "Create ticket cancel reasons", module: "ticketConfig" },
+  { key: "cancelReason.edit", description: "Edit ticket cancel reasons", module: "ticketConfig" },
+  { key: "cancelReason.delete", description: "Delete/deactivate ticket cancel reasons", module: "ticketConfig" },
+  { key: "sla.create", description: "Create a department's SLA policy for a priority", module: "ticketConfig" },
+  { key: "sla.edit", description: "Edit SLA response/resolution hours", module: "ticketConfig" },
+  { key: "sla.delete", description: "Remove a department's SLA policy override", module: "ticketConfig" },
+  { key: "activityProgress.edit", description: "Edit this department's status->progress% mapping for activities", module: "ticketConfig" },
+];
+
+// Every new permission key introduced above, grouped by the roleKey that
+// should get it by default. Applied two ways below: (1) folded into
+// ROLE_PERMISSIONS for roles seeded for the first time (fresh installs), and
+// (2) via the always-runs, per-(roleKey, permissionKey)-pair idempotent loop
+// near the bottom of this file, so an already-bootstrapped role on an
+// existing database still picks up brand-new keys without any of its other
+// (possibly admin-customized) permissions being touched.
+const TICKET_CONFIG_PERMISSION_KEYS = [
+  "category.manage", "category.delete",
+  "priority.create", "priority.edit", "priority.delete",
+  "status.create", "status.edit", "status.delete",
+  "cancelReason.create", "cancelReason.edit", "cancelReason.delete",
+  "sla.create", "sla.edit", "sla.delete",
+  "activityProgress.edit",
 ];
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
@@ -123,6 +180,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
     "subdepartment.user.assign", "subdepartment.user.unassign",
     "ticket.pending.view", "ticket.pending.accept", "ticket.pending.reject",
+    ...TICKET_CONFIG_PERMISSION_KEYS,
   ],
   USER: [
     "activity.view",
@@ -153,6 +211,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
     "subdepartment.user.assign", "subdepartment.user.unassign",
     "ticket.pending.view", "ticket.pending.accept", "ticket.pending.reject",
+    ...TICKET_CONFIG_PERMISSION_KEYS,
   ],
   // Owns projects/Gantt within the department, not ticket triage or membership.
   // ticket.assignable stays off — a Project Manager isn't a ticket handler
@@ -200,42 +259,12 @@ async function main() {
   // No fake users, no mock tickets, no demo projects.
   // ═══════════════════════════════════════════════════════════════════════════
 
-  // Ticket Statuses
-  const statuses = [
-    { name: "Open", color: "#3b82f6", isDefault: true, isClosed: false, order: 1 },
-    { name: "In Progress", color: "#f59e0b", isDefault: false, isClosed: false, order: 2 },
-    { name: "Pending User", color: "#8b5cf6", isDefault: false, isClosed: false, order: 3 },
-    { name: "Resolved", color: "#10b981", isDefault: false, isClosed: false, order: 4 },
-    { name: "Closed", color: "#6b7280", isDefault: false, isClosed: true, order: 5 },
-    { name: "Cancelled", color: "#ef4444", isDefault: false, isClosed: true, order: 6 },
-  ];
-
-  for (const status of statuses) {
-    await prisma.ticketStatus.upsert({
-      where: { name: status.name },
-      update: {},
-      create: status,
-    });
-  }
-  console.log("✓ Ticket statuses seeded");
-
-  // Ticket Priorities
-  const priorities = [
-    { name: "High", level: 3, color: "#f97316" },
-    { name: "Medium", level: 2, color: "#f59e0b" },
-    { name: "Low", level: 1, color: "#22c55e" },
-  ];
-
-  for (const priority of priorities) {
-    await prisma.ticketPriority.upsert({
-      where: { name: priority.name },
-      update: {},
-      create: priority,
-    });
-  }
-  console.log("✓ Ticket priorities seeded");
-
-  // Cancel Reasons
+  // Cancel Reasons — global (departmentId: null). Categories/Priorities/
+  // Statuses were retired from this global pattern (see below, seeded
+  // per-department instead) but Cancel Reasons stay global/shared.
+  // Find-then-create (never upsert-by-id) matched on the real
+  // (departmentId, name) natural key — see scripts/audit-and-dedupe-config.ts's
+  // header comment for why an id-based upsert caused real duplicates before.
   const cancelReasons = [
     { name: "Duplicate", description: "Ticket is a duplicate of another" },
     { name: "Already Resolved", description: "The issue was already resolved before this ticket was processed" },
@@ -247,11 +276,8 @@ async function main() {
   ];
 
   for (const reason of cancelReasons) {
-    await prisma.ticketCancelReason.upsert({
-      where: { name: reason.name },
-      update: {},
-      create: reason,
-    });
+    const existing = await prisma.ticketCancelReason.findFirst({ where: { departmentId: null, name: reason.name } });
+    if (!existing) await prisma.ticketCancelReason.create({ data: reason });
   }
   console.log("✓ Cancel reasons seeded");
 
@@ -301,52 +327,52 @@ async function main() {
   }
   console.log("✓ Departments seeded");
 
-  // Ticket Categories — department-owned (Phase 1 of the multi-department
-  // architecture). All existing categories are IT-flavored, so they're
-  // seeded under the IT department rather than left global/shared; the
-  // schema still supports a global category (departmentId: null) for cases
-  // that genuinely apply to every department — none exist yet.
-  const categories = [
-    { name: "Hardware", description: "Physical device issues", color: "#6366f1" },
-    { name: "Software", description: "Application or OS issues", color: "#8b5cf6" },
-    { name: "Network", description: "Connectivity and network issues", color: "#06b6d4" },
-    { name: "Access & Permissions", description: "Login, permissions, account issues", color: "#14b8a6" },
-    { name: "Email", description: "Email client and server issues", color: "#f59e0b" },
-    { name: "Printing", description: "Printer and printing issues", color: "#f97316" },
-    { name: "Security", description: "Security incidents and concerns", color: "#ef4444" },
-    { name: "General IT", description: "General IT support requests", color: "#6b7280" },
-  ];
-
-  for (const category of categories) {
-    await prisma.ticketCategory.upsert({
-      where: { departmentId_name: { departmentId: "dept-it", name: category.name } },
-      update: {},
-      create: { ...category, departmentId: "dept-it" },
-    });
+  // Ticket Categories/Priorities/Statuses — fully department-owned, every
+  // department gets its own independent copy of the same starter set (no
+  // more global/shared departmentId:null rows — see the
+  // 20260727_retire_global_config migration and scripts/retire-global-config.ts
+  // for the one-time data migration that moved a pre-existing production DB
+  // to this same shape). Uses the real (departmentId, name) natural key via
+  // ensure*ForDepartment, never upsert-by-id — see scripts/audit-and-dedupe-config.ts's
+  // header comment for why an id-based upsert caused real duplicates before.
+  for (const dept of departments) {
+    for (const category of STARTER_CATEGORIES) {
+      await ensureCategoryForDepartment(prisma, dept.id, category);
+    }
+    for (const priority of STARTER_PRIORITIES) {
+      await ensurePriorityForDepartment(prisma, dept.id, priority);
+    }
+    for (const status of STARTER_STATUSES) {
+      await ensureStatusForDepartment(prisma, dept.id, status);
+    }
+    await ensureActivityProgressConfigForDepartment(prisma, dept.id);
   }
-  console.log("✓ Ticket categories seeded");
+  console.log("✓ Ticket categories/priorities/statuses seeded per department");
+  console.log("✓ Activity progress-from-status config seeded per department");
 
   // Microsoft Entra mapping examples — pure data, no code branches. These
   // are real, usable templates (not placeholders) demonstrating all three
   // mapping source types; add more via this table, never via new code.
-  // `role` is the GLOBAL Role (matches /admin/roles), not DepartmentRole —
-  // see lib/services/department-role-translation.ts.
+  // `role` is the GLOBAL Role (matches /admin/roles) and `departmentRole` is
+  // the DepartmentRole granted on the resulting DepartmentMembership — the
+  // two are chosen independently (see lib/services/department-role-translation.ts).
   const microsoftMappings: {
     sourceType: "PROFILE_DEPARTMENT" | "ENTRA_GROUP" | "ENTRA_APP_ROLE";
     microsoftValue: string;
     departmentId: string;
     role: "ADMIN" | "IT_AGENT" | "DEPARTMENT_MANAGER" | "USER";
+    departmentRole: DepartmentRole;
   }[] = [
-    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - IT", departmentId: "dept-it", role: "DEPARTMENT_MANAGER" },
-    { sourceType: "ENTRA_APP_ROLE", microsoftValue: "TicketApp.IT.Manager", departmentId: "dept-it", role: "DEPARTMENT_MANAGER" },
-    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - Finance", departmentId: "dept-finance", role: "USER" },
-    { sourceType: "PROFILE_DEPARTMENT", microsoftValue: "Human Resources", departmentId: "dept-hr", role: "USER" },
+    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - IT", departmentId: "dept-it", role: "DEPARTMENT_MANAGER", departmentRole: DepartmentRole.DEPARTMENT_MANAGER },
+    { sourceType: "ENTRA_APP_ROLE", microsoftValue: "TicketApp.IT.Manager", departmentId: "dept-it", role: "DEPARTMENT_MANAGER", departmentRole: DepartmentRole.DEPARTMENT_MANAGER },
+    { sourceType: "ENTRA_GROUP", microsoftValue: "TicketApp - Finance", departmentId: "dept-finance", role: "USER", departmentRole: DepartmentRole.REQUESTER },
+    { sourceType: "PROFILE_DEPARTMENT", microsoftValue: "Human Resources", departmentId: "dept-hr", role: "USER", departmentRole: DepartmentRole.REQUESTER },
   ];
 
   for (const mapping of microsoftMappings) {
     await prisma.microsoftDepartmentMapping.upsert({
       where: { sourceType_microsoftValue: { sourceType: mapping.sourceType, microsoftValue: mapping.microsoftValue } },
-      update: { departmentId: mapping.departmentId, role: mapping.role },
+      update: { departmentId: mapping.departmentId, role: mapping.role, departmentRole: mapping.departmentRole },
       create: mapping,
     });
   }
@@ -406,6 +432,34 @@ async function main() {
     }
   }
   console.log("✓ Role-permission mappings seeded");
+
+  // Always-runs, idempotent per (roleKey, permissionKey) pair — the standing
+  // convention for onboarding brand-new permission keys going forward. The
+  // bootstrap-once loop above skips a role entirely once it has ANY
+  // RolePermission row, so on an existing (already-seeded) database a new
+  // key added to ROLE_PERMISSIONS for an already-bootstrapped role would
+  // otherwise never actually reach it. This loop only ever inserts a
+  // specific (roleKey, permissionKey) pair if that exact pair doesn't exist
+  // yet — it never touches any other pair for that role, so it can't revert
+  // an admin's customization of anything else. On a genuinely fresh
+  // database this is a no-op (the bootstrap-once loop above already created
+  // these same pairs via ROLE_PERMISSIONS).
+  const NEW_PERMISSION_DEFAULT_GRANTS: Record<string, string[]> = {
+    DEPARTMENT_ADMIN: TICKET_CONFIG_PERMISSION_KEYS,
+    DEPARTMENT_MANAGER: TICKET_CONFIG_PERMISSION_KEYS,
+  };
+  for (const [roleKey, permKeys] of Object.entries(NEW_PERMISSION_DEFAULT_GRANTS)) {
+    for (const permKey of permKeys) {
+      const perm = await prisma.permission.findUnique({ where: { key: permKey } });
+      if (!perm) continue;
+      await prisma.rolePermission.upsert({
+        where: { roleKey_permissionId: { roleKey, permissionId: perm.id } },
+        update: {},
+        create: { roleKey, permissionId: perm.id },
+      });
+    }
+  }
+  console.log("✓ New permission-key default grants backfilled (idempotent)");
 
   // Built-in Custom Roles — global Role values, plus (below) every
   // DepartmentRole value, so /admin/roles can show a Department Roles tab
@@ -575,21 +629,24 @@ async function main() {
     prisma.user.findUnique({ where: { email: "agent@kinsen.gr" } }),
     prisma.user.findUnique({ where: { email: "manager@kinsen.gr" } }),
     prisma.user.findUnique({ where: { email: "user@kinsen.gr" } }),
-    prisma.ticketStatus.findFirst({ where: { name: "Open" } }),
-    prisma.ticketStatus.findFirst({ where: { name: "In Progress" } }),
-    prisma.ticketStatus.findFirst({ where: { name: "Pending User" } }),
-    prisma.ticketStatus.findFirst({ where: { name: "Resolved" } }),
-    prisma.ticketStatus.findFirst({ where: { name: "Closed" } }),
-    prisma.ticketPriority.findFirst({ where: { name: "High" } }),
-    prisma.ticketPriority.findFirst({ where: { name: "Medium" } }),
-    prisma.ticketPriority.findFirst({ where: { name: "Low" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Hardware" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Software" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Network" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Access & Permissions" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Email" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Printing" } }),
-    prisma.ticketCategory.findFirst({ where: { name: "Security" } }),
+    // dept-it explicitly, not just findFirst-by-name — every department now
+    // has its own identically-named rows, so an unscoped name lookup would
+    // be ambiguous (arbitrary pick) rather than reliably resolving IT's.
+    prisma.ticketStatus.findFirst({ where: { departmentId: "dept-it", name: "Open" } }),
+    prisma.ticketStatus.findFirst({ where: { departmentId: "dept-it", name: "In Progress" } }),
+    prisma.ticketStatus.findFirst({ where: { departmentId: "dept-it", name: "Pending User" } }),
+    prisma.ticketStatus.findFirst({ where: { departmentId: "dept-it", name: "Resolved" } }),
+    prisma.ticketStatus.findFirst({ where: { departmentId: "dept-it", name: "Closed" } }),
+    prisma.ticketPriority.findFirst({ where: { departmentId: "dept-it", name: "High" } }),
+    prisma.ticketPriority.findFirst({ where: { departmentId: "dept-it", name: "Medium" } }),
+    prisma.ticketPriority.findFirst({ where: { departmentId: "dept-it", name: "Low" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Hardware" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Software" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Network" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Access & Permissions" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Email" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Printing" } }),
+    prisma.ticketCategory.findFirst({ where: { departmentId: "dept-it", name: "Security" } }),
   ]);
 
   if (!adminUser || !agentUser || !managerUser || !demoUser) {

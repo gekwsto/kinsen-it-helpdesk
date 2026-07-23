@@ -13,6 +13,8 @@ import { ResourcePlanningFilters } from "@/components/resource-planning/resource
 import { ResourcePlanningToolbar, type ResourcePlanningView } from "@/components/resource-planning/resource-planning-toolbar";
 import { ResourceTimeline, type ResourceRow } from "@/components/resource-planning/resource-timeline";
 import { UnscheduledPanel } from "@/components/resource-planning/unscheduled-panel";
+import { StatusLegend } from "@/components/gantt/status-legend";
+import { ACTIVITY_STATUS_KEYS } from "@/components/gantt/status-colors";
 
 interface SearchParams {
   departmentId?: string;
@@ -176,6 +178,8 @@ export default async function ResourcePlanningPage({
 
         <div className="flex-1 min-w-0 space-y-3">
           <ResourcePlanningToolbar view={view} rangeStart={format(rangeStart, "yyyy-MM-dd")} rangeLabel={rangeLabel} />
+
+          <StatusLegend statusKeys={ACTIVITY_STATUS_KEYS} />
 
           {resourceRows.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border py-16 text-center text-muted-foreground">

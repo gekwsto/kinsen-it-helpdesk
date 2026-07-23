@@ -62,22 +62,27 @@ export default async function NewTicketPage() {
   );
   const accessibleDepartmentIds = accessibleDepartments.map((d) => d.id);
 
-  const categoryWhere = {
+  // Both category and priority are strictly department-owned now (no more
+  // global fallback) — scoped to the union of every department the user can
+  // create tickets in; the ticket form then re-filters this list down to
+  // just the currently-selected department client-side (see
+  // ticket-form.tsx), the same pattern already used for sub-departments.
+  const scopedWhere = {
     isActive: true,
-    OR: [{ departmentId: null }, { departmentId: { in: accessibleDepartmentIds } }],
+    departmentId: { in: accessibleDepartmentIds },
   };
 
   const [categories, priorities, itAgents, projects, activities] =
     await Promise.all([
       prisma.ticketCategory.findMany({
-        where: categoryWhere,
+        where: scopedWhere,
         orderBy: { name: "asc" },
-        select: { id: true, name: true },
+        select: { id: true, name: true, departmentId: true },
       }),
       prisma.ticketPriority.findMany({
-        where: { isActive: true },
+        where: scopedWhere,
         orderBy: { level: "desc" },
-        select: { id: true, name: true, color: true, level: true },
+        select: { id: true, name: true, color: true, level: true, departmentId: true },
       }),
       prisma.user.findMany({
         where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },

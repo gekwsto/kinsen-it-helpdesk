@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
-import { canActOnEntity, canViewTicket } from "@/lib/services/department-scope-service";
+import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink } from "@/lib/services/department-scope-service";
+import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
-import { recalculateFromTicket, recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 import path from "path";
 import fs from "fs/promises";
 
@@ -108,6 +108,25 @@ export async function PATCH(
       );
     }
 
+    if (projectChanging || activityChanging) {
+      const effectiveProjectId = data.projectId !== undefined ? data.projectId : ticket.projectId;
+      const effectiveActivityId = data.activityId !== undefined ? data.activityId : ticket.activityId;
+      // Legacy tickets with no department fall back to the same default
+      // legacy department used elsewhere for this exact case (see
+      // canActOnEntity in department-scope-service.ts).
+      const effectiveTicketDepartmentId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
+      if (!effectiveTicketDepartmentId) {
+        return NextResponse.json({ error: "This ticket has no department to validate the link against.", code: "invalid_project_scope" }, { status: 400 });
+      }
+      const linkValidation = await validateTicketProjectActivityLink(effectiveTicketDepartmentId, effectiveProjectId, effectiveActivityId);
+      if (!linkValidation.ok) {
+        return NextResponse.json(
+          { error: linkValidation.message, code: linkValidation.code },
+          { status: linkValidation.code === "project_not_found" || linkValidation.code === "activity_not_found" ? 404 : 400 }
+        );
+      }
+    }
+
     if (data.assignedAgentId) {
       const assignable = await userHasAssignablePermissionForEntity(data.assignedAgentId, "ticket", ticket.departmentId);
       if (!assignable) {
@@ -138,9 +157,6 @@ export async function PATCH(
         );
       }
     }
-
-    const oldProjectId = ticket.projectId;
-    const oldActivityId = ticket.activityId;
 
     // Track changes for history
     const historyEntries: Array<{
@@ -232,23 +248,6 @@ export async function PATCH(
     if (data.assignedAgentId !== undefined && data.assignedAgentId !== ticket.assignedAgentId) {
       publishTicketEvent("TICKET_ASSIGNEE_CHANGED", id, session.user.id, {
         assignedAgent: updatedTicket.assignedAgent,
-      });
-    }
-
-    // Recalculate progress rollup when project/activity assignment changes
-    const projectChanged = data.projectId !== undefined && data.projectId !== oldProjectId;
-    const activityChanged = data.activityId !== undefined && data.activityId !== oldActivityId;
-
-    if (projectChanged || activityChanged) {
-      // Recalculate old project (ticket is now unlinked from it)
-      if (oldProjectId) {
-        recalculateProjectRollup(oldProjectId).catch((err) => {
-          console.error("[progress-rollup] old project recalculation failed:", err);
-        });
-      }
-      // Recalculate for new assignment
-      recalculateFromTicket(id).catch((err) => {
-        console.error("[progress-rollup] new assignment recalculation failed:", err);
       });
     }
 

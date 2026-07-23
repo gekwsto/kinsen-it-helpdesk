@@ -11,6 +11,8 @@ import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createActivitySchema } from "@/lib/validations";
+import { getActivityProgressFromStatus } from "@/lib/activities/activity-progress";
+import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 import { ActivityStatus } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
@@ -129,6 +131,7 @@ export async function POST(req: NextRequest) {
     const activity = await prisma.projectActivity.create({
       data: {
         ...rest,
+        progress: await getActivityProgressFromStatus(deptResolution.departmentId, rest.status),
         departmentId: deptResolution.departmentId,
         startDate: startDate ? new Date(startDate) : undefined,
         dueDate: dueDate ? new Date(dueDate) : undefined,
@@ -142,6 +145,12 @@ export async function POST(req: NextRequest) {
         assignedUsers: { select: { id: true, name: true, email: true, image: true } },
       },
     });
+
+    if (activity.projectId) {
+      recalculateProjectRollup(activity.projectId).catch((err) => {
+        console.error("[progress-rollup] activity create recalculation failed:", err);
+      });
+    }
 
     return NextResponse.json(activity, { status: 201 });
   } catch (error: any) {

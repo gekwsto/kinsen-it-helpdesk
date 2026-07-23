@@ -6,7 +6,8 @@ import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateActivitySchema } from "@/lib/validations";
-import { recalculateProjectRollup, calculateActivityProgress } from "@/lib/projects/progress-rollup";
+import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
+import { getActivityProgressFromStatus } from "@/lib/activities/activity-progress";
 import { Role } from "@prisma/client";
 
 export async function GET(
@@ -33,7 +34,12 @@ export async function GET(
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    return NextResponse.json(activity);
+    // Recomputed fresh against the department's CURRENT config, not just the
+    // last-written stored value — so an admin's later percentage edit shows
+    // up immediately without needing the activity's status to change again.
+    const progress = await getActivityProgressFromStatus(activity.departmentId, activity.status);
+
+    return NextResponse.json({ ...activity, progress });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -49,7 +55,7 @@ export async function PATCH(
 
     const existing = await prisma.projectActivity.findUnique({
       where: { id },
-      select: { departmentId: true, startDate: true, dueDate: true },
+      select: { departmentId: true, startDate: true, dueDate: true, status: true, projectId: true },
     });
     if (!existing) return NextResponse.json({ error: "Not found", code: "activity_not_found" }, { status: 404 });
 
@@ -106,13 +112,20 @@ export async function PATCH(
 
     // Moving an activity into a different project (or clearing it back to
     // Standalone) — shared by the Activity edit form's Project dropdown and
-    // any other caller of this route. Clearing to null needs no extra check;
-    // moving into a real project requires it to exist and to belong to this
-    // activity's own (effective) department — cross-department moves are
-    // blocked outright, never silently reparented.
-    if (data.projectId !== undefined && data.projectId !== null) {
+    // any other caller of this route. Only validated when the project is
+    // actually CHANGING — the edit form always resends the current
+    // projectId whether or not the user touched that field, so gating on
+    // "present in the payload" alone would re-validate (and could wrongly
+    // reject) an unchanged value, e.g. for a legacy activity with no
+    // departmentId of its own being compared against its own already-valid
+    // project. Clearing to null needs no extra check; moving into a real
+    // project requires it to exist and to belong to this activity's own
+    // (effective) department — cross-department moves are blocked outright,
+    // never silently reparented.
+    const projectChanged = data.projectId !== undefined && data.projectId !== existing.projectId;
+    if (projectChanged && data.projectId !== null) {
       const targetProject = await prisma.project.findUnique({
-        where: { id: data.projectId },
+        where: { id: data.projectId! },
         select: { id: true, departmentId: true },
       });
       if (!targetProject) {
@@ -153,10 +166,20 @@ export async function PATCH(
     const departmentChanging = data.departmentId !== undefined && data.departmentId !== existing.departmentId;
     const clearStaleSubDepartment = departmentChanging && rest.subDepartmentId === undefined;
 
+    // Progress is always derived from status (per this department's own
+    // configured percentages, see lib/activities/activity-progress.ts) —
+    // never accepted from the client (the "progress" field was removed from
+    // updateActivitySchema entirely; see lib/validations.ts). Recomputed on
+    // every write, not just when status itself changes, so it can never
+    // silently drift out of sync with the department's current config.
+    const effectiveStatus = data.status ?? existing.status;
+    const derivedProgress = await getActivityProgressFromStatus(effectiveDepartmentId, effectiveStatus);
+
     const activity = await prisma.projectActivity.update({
       where: { id },
       data: {
         ...rest,
+        progress: derivedProgress,
         subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
         startDate: startDate ? new Date(startDate) : startDate === null ? null : undefined,
         dueDate: dueDate ? new Date(dueDate) : dueDate === null ? null : undefined,
@@ -172,21 +195,19 @@ export async function PATCH(
       },
     });
 
-    const progressOrStatusChanged = data.progress !== undefined || data.status !== undefined;
-    if (progressOrStatusChanged) {
-      if (activity.project?.id) {
-        recalculateProjectRollup(activity.project.id).catch((err) => {
-          console.error("[progress-rollup] activity change recalculation failed:", err);
-        });
-      } else {
-        calculateActivityProgress(id).then((prog) => {
-          if (prog !== null) {
-            return prisma.projectActivity.update({ where: { id }, data: { progress: prog } });
-          }
-        }).catch((err) => {
-          console.error("[progress-rollup] standalone activity recalculation failed:", err);
-        });
-      }
+    // Roll the (now always in-sync) progress up into any affected project's
+    // average — the old project (if the activity just moved out of it) and/or
+    // the new/current one (status changed, or it moved into a project).
+    const statusChanged = data.status !== undefined && data.status !== existing.status;
+    if (projectChanged && existing.projectId) {
+      recalculateProjectRollup(existing.projectId).catch((err) => {
+        console.error("[progress-rollup] old project recalculation failed:", err);
+      });
+    }
+    if ((statusChanged || projectChanged) && activity.project?.id) {
+      recalculateProjectRollup(activity.project.id).catch((err) => {
+        console.error("[progress-rollup] activity change recalculation failed:", err);
+      });
     }
 
     return NextResponse.json(activity);

@@ -59,7 +59,15 @@ async function evaluateAssignability(
 
   if (departmentId) {
     const membership = await getMembership(candidate.id, departmentId);
-    if (membership) return hasDepartmentPermission(membership.role, permKey, membership.customRoleId);
+    if (membership && (await hasDepartmentPermission(membership.role, permKey, membership.customRoleId))) {
+      return true;
+    }
+    // No membership, or a membership exists but its department-level role
+    // doesn't grant it — only a canViewAllDepartments role (Admin/Director)
+    // still qualifies via their global role's permission (e.g. a System
+    // Admin who also happens to hold a lesser-privileged membership row in
+    // this specific department must not be blocked by it); anyone else with
+    // insufficient department standing is simply not assignable here.
     if (!canViewAllDepartments(candidate.role)) return false;
   }
 

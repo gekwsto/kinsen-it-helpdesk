@@ -2,11 +2,16 @@
  * Central, server-and-client-safe home for everything about the two role
  * systems in this app (global `Role` — matches /admin/roles and User.role —
  * vs. department-scoped `DepartmentRole`, used by DepartmentMembership) and
- * how they relate. MicrosoftDepartmentMapping.role stores the GLOBAL `Role`
- * directly (so its "Role granted" dropdown shows exactly the same options
- * as Roles & Permissions) — translateGlobalRoleToDepartmentRole derives the
- * DepartmentRole a resulting DepartmentMembership should get. Pure (no DB,
- * no network) so it's directly unit-testable — see
+ * how they relate. MicrosoftDepartmentMapping stores BOTH explicitly now:
+ * `role` (the GLOBAL Role, so the "Global Role" dropdown shows exactly the
+ * same options as Roles & Permissions) and `departmentRole` (the
+ * DepartmentRole granted on the resulting DepartmentMembership) — an admin
+ * picks both directly; translateGlobalRoleToDepartmentRole below is kept
+ * only as (1) the one-time backfill formula for pre-existing mapping rows
+ * and (2) a UI "smart default" that pre-fills Department Role from Global
+ * Role until the admin edits it directly (see
+ * components/admin/microsoft-mapping-management.tsx). Pure (no DB, no
+ * network) so it's directly unit-testable — see
  * scripts/test-microsoft-role-sync.ts. Lives in lib/services/ (not
  * components/admin/) specifically so API routes can import the same
  * functions the UI uses — components/admin/department-role-info.ts
@@ -54,12 +59,12 @@ export const DEPARTMENT_ROLE_DESCRIPTIONS: Record<DepartmentRole, string> = {
 
 export const DEPARTMENT_ROLE_OPTIONS = Object.values(DepartmentRole);
 
-// The reverse direction: given the GLOBAL role a Microsoft mapping grants
-// (MicrosoftDepartmentMapping.role, since a previous phase), what
-// DepartmentRole should the resulting DepartmentMembership row get.
-// Role.ADMIN's entry is kept only for type-completeness — it's unreachable
-// via a mapping, since isGlobalRoleAllowedForMicrosoftMapping filters it out
-// upstream of every call site that matters.
+// The reverse direction: given the GLOBAL role a Microsoft mapping grants,
+// what DepartmentRole is a sensible UI default / backfill value for the
+// resulting DepartmentMembership. Role.ADMIN's entry is kept only for
+// type-completeness — it's unreachable via a mapping, since
+// isGlobalRoleAllowedForMicrosoftMapping filters it out upstream of every
+// call site that matters.
 const GLOBAL_ROLE_TO_DEPARTMENT_ROLE: Record<Role, DepartmentRole> = {
   ADMIN: DepartmentRole.DEPARTMENT_ADMIN,
   DEPARTMENT_MANAGER: DepartmentRole.DEPARTMENT_MANAGER,
@@ -74,11 +79,13 @@ const GLOBAL_ROLE_TO_DEPARTMENT_ROLE: Record<Role, DepartmentRole> = {
 };
 
 /**
- * What DepartmentRole a Microsoft-mapped global Role should grant on the
- * resulting DepartmentMembership — used by resolveDepartmentMemberships
- * (microsoft-mapping-service.ts) so the UI's single Role selection drives
- * both User.role and DepartmentMembership.role consistently, never two
- * independently-decided values.
+ * Suggested-default-only helper: used (a) once, to backfill pre-existing
+ * MicrosoftDepartmentMapping rows' new `departmentRole` column from their
+ * `role`, and (b) by the mapping modal to pre-fill Department Role when
+ * Global Role changes and the admin hasn't touched Department Role yet.
+ * Never used at sync time anymore — resolveDepartmentMemberships
+ * (microsoft-mapping-service.ts) reads the mapping's stored `departmentRole`
+ * directly, so Global Role and Department Role can be set independently.
  */
 export function translateGlobalRoleToDepartmentRole(role: Role): DepartmentRole {
   return GLOBAL_ROLE_TO_DEPARTMENT_ROLE[role];
@@ -93,16 +100,27 @@ export function isGlobalRoleAllowedForMicrosoftMapping(role: Role): boolean {
   return role !== Role.ADMIN;
 }
 
+/**
+ * Whether a DepartmentRole is safe for a Microsoft mapping to grant.
+ * DEPARTMENT_ADMIN is the department-scoped analog of Role.ADMIN (full
+ * control of the department — settings, members, email) so, mirroring
+ * isGlobalRoleAllowedForMicrosoftMapping above, it can never be granted by an
+ * unattended login-sync mapping — enforced here, not just hidden in the UI.
+ */
+export function isDepartmentRoleAllowedForMicrosoftMapping(role: DepartmentRole): boolean {
+  return role !== DepartmentRole.DEPARTMENT_ADMIN;
+}
+
 export interface MicrosoftMappingRoleOption {
   value: Role;
   label: string;
   description: string;
-  /** Human-readable label of the DepartmentRole this Role translates to for DepartmentMembership. */
+  /** Human-readable label of the DepartmentRole this Role translates to by default (a suggestion, not an enforced link). */
   departmentRolePreview: string;
 }
 
 /**
- * The actual options a Microsoft mapping's "Role granted" dropdown should
+ * The actual options a Microsoft mapping's "Global Role" dropdown should
  * show — the same global roles as /admin/roles (Roles & Permissions),
  * minus Administrator. Forbidden roles are simply absent (not included
  * disabled/greyed-out) — shadcn/Radix Select disabled items aren't reliably
@@ -117,6 +135,27 @@ export function getMicrosoftMappingRoleOptions(): MicrosoftMappingRoleOption[] {
       description: GLOBAL_ROLE_DESCRIPTIONS[role],
       departmentRolePreview: DEPARTMENT_ROLE_LABELS[translateGlobalRoleToDepartmentRole(role)],
     }));
+}
+
+export interface MicrosoftMappingDepartmentRoleOption {
+  value: DepartmentRole;
+  label: string;
+  description: string;
+}
+
+/**
+ * The actual options a Microsoft mapping's "Department Role" dropdown should
+ * show — every built-in DepartmentRole except DEPARTMENT_ADMIN (see
+ * isDepartmentRoleAllowedForMicrosoftMapping). Custom department roles are
+ * out of scope for this feature — a mapping only grants one of these 5
+ * built-in values, never a CustomRole.
+ */
+export function getMicrosoftMappingDepartmentRoleOptions(): MicrosoftMappingDepartmentRoleOption[] {
+  return DEPARTMENT_ROLE_OPTIONS.filter(isDepartmentRoleAllowedForMicrosoftMapping).map((role) => ({
+    value: role,
+    label: DEPARTMENT_ROLE_LABELS[role],
+    description: DEPARTMENT_ROLE_DESCRIPTIONS[role],
+  }));
 }
 
 /**

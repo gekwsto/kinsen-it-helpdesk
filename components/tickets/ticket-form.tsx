@@ -30,8 +30,8 @@ interface Agent {
 }
 
 interface CreateTicketFormProps {
-  categories: Array<{ id: string; name: string }>;
-  priorities: Array<{ id: string; name: string; color: string; level: number }>;
+  categories: Array<{ id: string; name: string; departmentId: string | null }>;
+  priorities: Array<{ id: string; name: string; color: string; level: number; departmentId: string | null }>;
   departments: Array<{ id: string; name: string }>;
   /** Active workspace's department — pre-selected, and the only choice shown when there's nothing to pick between. */
   defaultDepartmentId?: string | null;
@@ -84,6 +84,28 @@ export function CreateTicketForm({
       .then((options) => setSubDepartments(Array.isArray(options) ? options : []))
       .catch(() => setSubDepartments([]));
   }, [selectedDepartmentId, setValue]);
+
+  // Category/Priority are fetched once (server-side) scoped to the union of
+  // every accessible department, then re-filtered here to strictly the
+  // currently-selected department (every category/priority is now
+  // department-owned, no more global fallback) — mirrors the sub-department
+  // reactive-refetch above, just client-side since the full list is already
+  // in hand. Clears any previously-selected value that no longer belongs to
+  // the newly-selected department, same as subDepartmentId above.
+  const visibleCategories = categories.filter((c) => c.departmentId === selectedDepartmentId);
+  const visiblePriorities = priorities.filter((p) => p.departmentId === selectedDepartmentId);
+
+  useEffect(() => {
+    const currentCategoryId = watch("categoryId");
+    if (currentCategoryId && !visibleCategories.some((c) => c.id === currentCategoryId)) {
+      setValue("categoryId", undefined);
+    }
+    const currentPriorityId = watch("priorityId");
+    if (currentPriorityId && !visiblePriorities.some((p) => p.id === currentPriorityId)) {
+      setValue("priorityId", undefined);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDepartmentId]);
 
   const uploadAttachment = async (ticketId: string, file: File) => {
     const fd = new FormData();
@@ -233,12 +255,12 @@ export function CreateTicketForm({
             <CardContent className="space-y-4">
               <div className="space-y-1.5">
                 <Label>Category</Label>
-                <Select onValueChange={(v) => setValue("categoryId", v)}>
+                <Select value={watch("categoryId") ?? ""} onValueChange={(v) => setValue("categoryId", v)}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select category…" />
                   </SelectTrigger>
                   <SelectContent>
-                    {categories.map((c) => (
+                    {visibleCategories.map((c) => (
                       <SelectItem key={c.id} value={c.id}>
                         {c.name}
                       </SelectItem>
@@ -249,12 +271,12 @@ export function CreateTicketForm({
 
               <div className="space-y-1.5">
                 <Label>Priority</Label>
-                <Select onValueChange={(v) => setValue("priorityId", v)}>
+                <Select value={watch("priorityId") ?? ""} onValueChange={(v) => setValue("priorityId", v)}>
                   <SelectTrigger>
                     <SelectValue placeholder="Select priority…" />
                   </SelectTrigger>
                   <SelectContent>
-                    {[...priorities].sort((a, b) => b.level - a.level).map((p) => (
+                    {[...visiblePriorities].sort((a, b) => b.level - a.level).map((p) => (
                       <SelectItem key={p.id} value={p.id}>
                         <span className="flex items-center gap-2">
                           <span

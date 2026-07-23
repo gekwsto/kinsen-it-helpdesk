@@ -6,6 +6,8 @@ import {
   resolveDepartmentForCreate,
   departmentDenialMessage,
   departmentDenialStatus,
+  resolveDefaultStatusId,
+  validateTicketProjectActivityLink,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -150,9 +152,10 @@ export async function POST(req: NextRequest) {
     }
 
     // A ticket attached to a project must live in that project's department
-    // — inherit it if the caller didn't specify one, reject a mismatch if
-    // they did. Fetched before department resolution so resolveDepartmentForCreate
-    // validates the department the ticket will actually end up in.
+    // — inherit it if the caller didn't specify one. The actual scope/pair
+    // validation (project exists, belongs to this department, activity
+    // exists/matches) happens once below via validateTicketProjectActivityLink,
+    // after the department is fully resolved.
     let effectiveRequestedDepartmentId = data.departmentId;
     if (data.projectId) {
       const project = await prisma.project.findUnique({
@@ -160,13 +163,7 @@ export async function POST(req: NextRequest) {
         select: { departmentId: true },
       });
       if (!project) {
-        return NextResponse.json({ error: "Project not found" }, { status: 404 });
-      }
-      if (data.departmentId && project.departmentId && data.departmentId !== project.departmentId) {
-        return NextResponse.json(
-          { error: "A ticket cannot be attached to a project from a different department" },
-          { status: 400 }
-        );
+        return NextResponse.json({ error: "Project not found", code: "project_not_found" }, { status: 404 });
       }
       effectiveRequestedDepartmentId = data.departmentId ?? project.departmentId ?? undefined;
     }
@@ -193,6 +190,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (data.projectId || data.activityId) {
+      const linkValidation = await validateTicketProjectActivityLink(
+        deptResolution.departmentId,
+        data.projectId ?? null,
+        data.activityId ?? null
+      );
+      if (!linkValidation.ok) {
+        return NextResponse.json({ error: linkValidation.message, code: linkValidation.code }, { status: linkValidation.code === "project_not_found" || linkValidation.code === "activity_not_found" ? 404 : 400 });
+      }
+    }
+
     if (data.subDepartmentId) {
       const valid = await validateSubDepartmentInDepartment(data.subDepartmentId, deptResolution.departmentId);
       if (!valid) {
@@ -203,11 +211,12 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    const defaultStatus = await prisma.ticketStatus.findFirst({
-      where: { isDefault: true },
-    });
+    // Department-specific default status wins if the target department has
+    // one configured; otherwise the global default — see
+    // resolveDefaultStatusId in department-scope-service.ts.
+    const defaultStatusId = await resolveDefaultStatusId(deptResolution.departmentId);
 
-    if (!defaultStatus) {
+    if (!defaultStatusId) {
       return NextResponse.json(
         { error: "No default status configured" },
         { status: 500 }
@@ -220,7 +229,7 @@ export async function POST(req: NextRequest) {
         description: data.description,
         source: "WEB",
         requesterId: session.user.id,
-        statusId: defaultStatus.id,
+        statusId: defaultStatusId,
         categoryId: data.categoryId,
         priorityId: data.priorityId,
         departmentId: deptResolution.departmentId,

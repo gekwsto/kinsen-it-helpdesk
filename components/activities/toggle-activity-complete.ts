@@ -9,7 +9,7 @@
  * drift apart (PATCH /api/activities/[id] also rejects a mismatched pair —
  * see the consistency guard there).
  */
-export async function toggleActivityComplete(activityId: string, currentlyCompleted: boolean): Promise<{ isCompleted: boolean; status: string }> {
+export async function toggleActivityComplete(activityId: string, currentlyCompleted: boolean): Promise<{ isCompleted: boolean; status: string; progress: number }> {
   const res = await fetch(`/api/activities/${activityId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -23,5 +23,8 @@ export async function toggleActivityComplete(activityId: string, currentlyComple
     throw new Error(err.error ?? "Failed to update activity");
   }
   const updated = await res.json();
-  return { isCompleted: updated.isCompleted, status: updated.status };
+  // progress is always derived server-side from the new status (see
+  // lib/activities/activity-progress.ts) — returned here so callers that
+  // track it locally (e.g. activity-list.tsx's table view) don't go stale.
+  return { isCompleted: updated.isCompleted, status: updated.status, progress: updated.progress };
 }

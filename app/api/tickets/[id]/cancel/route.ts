@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, isAdmin } from "@/lib/permissions";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
+import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { z } from "zod";
 
 const cancelSchema = z.object({
@@ -52,11 +53,18 @@ export async function POST(
       return NextResponse.json({ error: "Cancel reason not found or inactive" }, { status: 422 });
     }
 
-    // Find a closed status to move the ticket into, if one exists
-    const closedStatus = await prisma.ticketStatus.findFirst({
-      where: { isClosed: true, isActive: true },
-      orderBy: { order: "asc" },
-    });
+    // Find a closed status to move the ticket into, if one exists — scoped
+    // to the ticket's own department (every status is department-owned now,
+    // so an unscoped lookup could pick another department's "Closed" status
+    // entirely). Legacy tickets with no department fall back to the same
+    // default legacy department used elsewhere for this exact case.
+    const statusDepartmentId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
+    const closedStatus = statusDepartmentId
+      ? await prisma.ticketStatus.findFirst({
+          where: { departmentId: statusDepartmentId, isClosed: true, isActive: true },
+          orderBy: { order: "asc" },
+        })
+      : null;
 
     const result = await prisma.$transaction(async (tx) => {
       const updated = await tx.ticket.update({

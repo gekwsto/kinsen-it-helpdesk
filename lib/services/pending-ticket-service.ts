@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { PendingTicketStatus } from "@prisma/client";
 import type { ParsedEmail } from "@/lib/email-ticket-parser";
+import { resolveDefaultStatusId, resolveDefaultPriorityId } from "@/lib/services/department-scope-service";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
 
@@ -133,9 +134,19 @@ export async function acceptPendingTicket(
     const dept = await prisma.department.findUnique({ where: { id: overrideDepartmentId }, select: { id: true } });
     if (!dept) return { ok: false, error: "invalid_department" };
   }
+  // Status/priority are strictly department-owned now (no more global
+  // fallback) — an unmatched pending ticket with no department at all
+  // (and no override supplied) has nothing to resolve them against.
+  if (!departmentId) return { ok: false, error: "invalid_department" };
 
-  const defaultStatus = await prisma.ticketStatus.findFirst({ where: { isDefault: true }, select: { id: true } });
-  if (!defaultStatus) throw new Error("No default ticket status configured");
+  // The target department's own configured status/priority — see
+  // resolveDefaultStatusId/resolveDefaultPriorityId in
+  // department-scope-service.ts. Category has no isDefault concept (no
+  // schema field for it, unlike status), so it's deliberately left unset
+  // here, same as before this change — not guessed at.
+  const defaultStatusId = await resolveDefaultStatusId(departmentId);
+  if (!defaultStatusId) throw new Error("No default ticket status configured");
+  const defaultPriorityId = await resolveDefaultPriorityId(departmentId);
 
   const requesterId = pendingTicket.requesterId ?? (await findOrCreateRequester(pendingTicket.fromEmail, pendingTicket.fromName ?? "")).id;
 
@@ -146,7 +157,8 @@ export async function acceptPendingTicket(
       source: "EMAIL",
       requesterId,
       departmentId,
-      statusId: defaultStatus.id,
+      statusId: defaultStatusId,
+      priorityId: defaultPriorityId,
       emailMessageId: pendingTicket.emailMessageId,
       emailThreadId: pendingTicket.emailThreadId,
     },

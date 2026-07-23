@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { ActivityStatus } from "@prisma/client";
 import { CheckSquare, Plus } from "lucide-react";
 import { ActivityList, type SerializedActivity } from "@/components/activities/activity-list";
+import { ViewToggle } from "@/components/ui/view-toggle";
+import { getProgressConfigsForDepartments, resolveProgress } from "@/lib/activities/activity-progress";
 
 interface SearchParams {
   projectId?: string;
@@ -65,9 +67,12 @@ export default async function ActivitiesPage({
     orderBy: { createdAt: "desc" },
     include: {
       project: { select: { id: true, title: true } },
+      department: { select: { id: true, name: true } },
       assignedUsers: { select: { id: true, name: true, email: true, image: true } },
     },
   });
+
+  const progressConfigs = await getProgressConfigsForDepartments(activities.map((a) => a.departmentId).filter((id): id is string => !!id));
 
   const serializedActivities: SerializedActivity[] = activities.map((a) => ({
     id: a.id,
@@ -75,8 +80,11 @@ export default async function ActivitiesPage({
     status: a.status,
     priority: a.priority,
     isCompleted: a.isCompleted,
+    startDate: a.startDate?.toISOString() ?? null,
     dueDate: a.dueDate?.toISOString() ?? null,
+    progress: resolveProgress(progressConfigs, a.departmentId, a.status),
     project: a.project,
+    department: a.department,
     assignedUsers: a.assignedUsers.map((u) => ({
       id: u.id,
       name: u.name,
@@ -93,6 +101,7 @@ export default async function ActivitiesPage({
           <p className="text-muted-foreground mt-1">All activities and tasks</p>
         </div>
         <div className="flex items-center gap-2">
+          <ViewToggle />
           <SubDepartmentFilter departmentId={activeWorkspace.isAllSelected ? null : activeWorkspace.departmentId} />
           {canCreate && (
             <Button asChild>
