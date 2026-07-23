@@ -4,6 +4,14 @@
 -- 20260726090000_add_global_name_uniqueness for these three tables can
 -- never match any row. Dropped as dead weight. TicketCancelReason's
 -- equivalent index is untouched — Cancel Reasons stay global/shared.
-DROP INDEX "TicketCategory_global_name_key";
-DROP INDEX "TicketPriority_global_name_key";
-DROP INDEX "TicketStatus_global_name_key";
+--
+-- IF EXISTS added: this migration's filename timestamp (20260722130000) sorts
+-- BEFORE 20260726090000_add_global_name_uniqueness, which is the migration
+-- that actually creates these three indexes. On a database replaying full
+-- history from empty in filename order, this migration used to run before
+-- the indexes it drops ever existed, failing outright. See
+-- 20260727000000_enforce_config_scope_final_state for the corrective
+-- follow-up that finishes this drop on any database where it's skipped here.
+DROP INDEX IF EXISTS "TicketCategory_global_name_key";
+DROP INDEX IF EXISTS "TicketPriority_global_name_key";
+DROP INDEX IF EXISTS "TicketStatus_global_name_key";
