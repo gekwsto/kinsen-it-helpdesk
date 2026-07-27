@@ -8,7 +8,10 @@ import { ActivityStatus } from "@prisma/client";
 import { CheckSquare, Plus } from "lucide-react";
 import { ActivityList, type SerializedActivity } from "@/components/activities/activity-list";
 import { ViewToggle } from "@/components/ui/view-toggle";
-import { getProgressConfigsForDepartments, resolveProgress } from "@/lib/activities/activity-progress";
+import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "@/lib/activities/activity-progress";
+import { getActivityTerminalConfigsForDepartments, resolveActivityTerminal } from "@/lib/status-terminal";
+import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
+import { isActivityOverdue } from "@/lib/overdue";
 
 interface SearchParams { status?: string }
 
@@ -45,17 +48,24 @@ export default async function MyActivitiesPage({
     },
   });
 
-  const progressConfigs = await getProgressConfigsForDepartments(activities.map((a) => a.departmentId).filter((id): id is string => !!id));
+  const activityDepartmentIds = activities.map((a) => a.departmentId).filter((id): id is string => !!id);
+  const progressConfigs = await getProgressConfigsForDepartments(activityDepartmentIds);
+  const terminalConfigs = await getActivityTerminalConfigsForDepartments(activityDepartmentIds);
+  const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(activityDepartmentIds);
+  const now = new Date();
 
   const serializedActivities: SerializedActivity[] = activities.map((a) => ({
     id: a.id,
     title: a.title,
     status: a.status,
+    statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
+    statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
     priority: a.priority,
     isCompleted: a.isCompleted,
     startDate: a.startDate?.toISOString() ?? null,
     dueDate: a.dueDate?.toISOString() ?? null,
-    progress: resolveProgress(progressConfigs, a.departmentId, a.status),
+    progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
+    overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(terminalConfigs, a.departmentId, a.status), now),
     project: a.project,
     department: a.department,
     assignedUsers: a.assignedUsers.map((u) => ({

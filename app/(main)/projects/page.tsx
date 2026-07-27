@@ -11,6 +11,8 @@ import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Plus, FolderKanban } from "lucide-react";
+import { getProjectTerminalConfigsForDepartments, resolveProjectTerminal } from "@/lib/status-terminal";
+import { isProjectOverdue } from "@/lib/overdue";
 
 export default async function ProjectsPage({
   searchParams,
@@ -54,6 +56,18 @@ export default async function ProjectsPage({
     },
   });
 
+  // Overdue is derived, never stored — resolved fresh against each project's
+  // department's current terminal-status configuration (lib/status-terminal.ts),
+  // bulk-loaded once for all departments represented here (no N+1).
+  const terminalConfigs = await getProjectTerminalConfigsForDepartments(
+    projects.map((p) => p.departmentId).filter((id): id is string => !!id)
+  );
+  const now = new Date();
+  const projectsWithOverdue = projects.map((p) => ({
+    ...p,
+    overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(terminalConfigs, p.departmentId, p.status), now),
+  }));
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -84,7 +98,7 @@ export default async function ProjectsPage({
           </Button>
         </div>
       ) : (
-        <ProjectList projects={projects} />
+        <ProjectList projects={projectsWithOverdue} />
       )}
     </div>
   );

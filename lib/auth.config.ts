@@ -23,26 +23,44 @@ const microsoftIssuer = TENANT_ID
 export const authConfig = {
   trustHost: true,
   providers: [
-    MicrosoftEntraID({
-      clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_ID!,
-      clientSecret: process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET!,
-      issuer: microsoftIssuer,
-      authorization: {
-        params: {
-          scope: "openid profile email User.Read",
+    {
+      ...MicrosoftEntraID({
+        clientId: process.env.AUTH_MICROSOFT_ENTRA_ID_ID!,
+        clientSecret: process.env.AUTH_MICROSOFT_ENTRA_ID_SECRET!,
+        issuer: microsoftIssuer,
+        authorization: {
+          params: {
+            scope: "openid profile email User.Read",
+          },
         },
+        // Auto-link a Microsoft sign-in to an existing User row with the same
+        // email (e.g. one created via credentials/admin) instead of erroring
+        // out or creating a duplicate. This is only safe because sign-in is
+        // already pinned to our own Entra tenant (`issuer` above) and further
+        // gated to @<ALLOWED_DOMAIN> in the `signIn` callback (lib/auth.ts) — an
+        // attacker cannot get a token bearing an existing user's email unless
+        // they already control that identity in our own tenant. If the tenant
+        // isn't configured (falls back to the multi-tenant "common" endpoint),
+        // this is disabled since email would no longer be a trustworthy signal.
+        allowDangerousEmailAccountLinking: Boolean(TENANT_ID),
+      }),
+      // Overrides the built-in provider's own `profile()`, which otherwise
+      // does an IMPLICIT, uncontrolled Graph call (GET /me/photos/48x48/$value,
+      // no timeout) on every single Microsoft sign-in and stuffs the result
+      // into `user.image` — Auth.js's adapter only ever persists that field
+      // on brand-new-user creation, so for every returning user this fetch
+      // ran and its result was silently discarded, on every login, forever
+      // (the root cause this change fixes). Photo sync is now handled
+      // explicitly and uniformly — for both new and existing users — by
+      // lib/services/microsoft-profile-photo-service.ts (called from
+      // lib/services/microsoft-department-sync-service.ts), which adds a
+      // real timeout, ETag caching, structured logging, and the
+      // manual-avatar overwrite protection. This override just reproduces
+      // the built-in profile()'s shape minus the photo fetch.
+      profile(profile: { sub: string; name?: string; email?: string }) {
+        return { id: profile.sub, name: profile.name, email: profile.email, image: null };
       },
-      // Auto-link a Microsoft sign-in to an existing User row with the same
-      // email (e.g. one created via credentials/admin) instead of erroring
-      // out or creating a duplicate. This is only safe because sign-in is
-      // already pinned to our own Entra tenant (`issuer` above) and further
-      // gated to @<ALLOWED_DOMAIN> in the `signIn` callback (lib/auth.ts) — an
-      // attacker cannot get a token bearing an existing user's email unless
-      // they already control that identity in our own tenant. If the tenant
-      // isn't configured (falls back to the multi-tenant "common" endpoint),
-      // this is disabled since email would no longer be a trustworthy signal.
-      allowDangerousEmailAccountLinking: Boolean(TENANT_ID),
-    }),
+    },
   ],
   callbacks: {
     authorized({ auth, request: { nextUrl } }) {

@@ -5,15 +5,6 @@ import Link from "next/link";
 import { CalendarClock, ChevronDown, ChevronUp } from "lucide-react";
 import type { ResourceEvent, ResourcePlanningResource } from "@/lib/services/resource-planning-service";
 
-const STATUS_LABEL: Record<string, string> = {
-  TODO: "To Do",
-  IN_PROGRESS: "In Progress",
-  ON_HOLD: "On Hold",
-  BLOCKED: "Blocked",
-  COMPLETED: "Completed",
-  CANCELLED: "Cancelled",
-};
-
 interface UnscheduledPanelProps {
   unscheduled: ResourceEvent[];
   resources: ResourcePlanningResource[];
@@ -49,7 +40,7 @@ export function UnscheduledPanel({ unscheduled, resources }: UnscheduledPanelPro
           </p>
           {!collapsed && (
             <p className="text-xs text-muted-foreground mt-0.5">
-              No start or due date — can&apos;t be placed on the timeline.
+              No dates or no assignee yet — can&apos;t be placed on the timeline.
             </p>
           )}
         </div>
@@ -83,8 +74,15 @@ export function UnscheduledPanel({ unscheduled, resources }: UnscheduledPanelPro
                       <span className="text-xs text-muted-foreground truncate">
                         {assigneeNames.length > 0 ? assigneeNames.join(", ") : "Unassigned"}
                       </span>
-                      <span className="text-[10px] text-muted-foreground flex-shrink-0">{STATUS_LABEL[e.status] ?? e.status}</span>
+                      <span className="text-[10px] text-muted-foreground flex-shrink-0">{e.statusLabel}</span>
                     </div>
+                    {/* Two structurally different reasons share this one bucket
+                        (neither can ever be placed on a resource row) — spelled
+                        out per item so the blanket panel subtitle above isn't
+                        wrong for half of them. */}
+                    <p className="text-[10px] text-muted-foreground/70 italic mt-0.5">
+                      {e.unscheduledReason === "no-assignee" ? "No assignee" : "No start or due date"}
+                    </p>
                   </Link>
                 );
               })}

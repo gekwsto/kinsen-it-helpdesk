@@ -23,6 +23,7 @@ import { SlidersHorizontal, RotateCcw } from "lucide-react";
 import type { ResourceEvent, ResourcePlanningResource } from "@/lib/services/resource-planning-service";
 import { ActivityPriority } from "@prisma/client";
 import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
+import type { PriorityFilterOption } from "@/lib/priority-config";
 
 const STATUS_OPTIONS = [
   { value: "TODO", label: "To Do" },
@@ -33,9 +34,12 @@ const STATUS_OPTIONS = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
-// Urgency-first, matching lib/activity-priority.ts's canonical ranking —
-// not the schema's own LOW..URGENT declaration order.
-const PRIORITY_OPTIONS = [ActivityPriority.URGENT, ActivityPriority.HIGH, ActivityPriority.MEDIUM, ActivityPriority.LOW].map(
+// Fallback ONLY when the page can't resolve a scoped priorityOptions prop
+// (should not happen in practice — this component's page always has a
+// single selectedDepartmentId). Urgency-first, matching lib/activity-priority.ts's
+// canonical ranking — the department's own ActivityPriorityConfig
+// (lib/priority-config.ts) is the real source, passed in via props.
+const CANONICAL_PRIORITY_OPTIONS: PriorityFilterOption[] = [ActivityPriority.URGENT, ActivityPriority.HIGH, ActivityPriority.MEDIUM, ActivityPriority.LOW].map(
   (value) => ({ value, label: ACTIVITY_PRIORITY_LABEL[value] })
 );
 
@@ -46,6 +50,10 @@ interface ResourcePlanningFiltersProps {
   selectedProjectId?: string;
   selectedStatus?: string;
   selectedPriority?: string;
+  /** Department-scoped, order/enablement-resolved priority options (lib/priority-config.ts) — same source Project Gantt's own Priority filter reads. */
+  priorityOptions?: PriorityFilterOption[];
+  /** Department-scoped, order/enablement-resolved Activity Status options (lib/services/activity-status-config.ts) — falls back to STATUS_OPTIONS only if the page can't resolve one (shouldn't happen; this page always has a single selectedDepartmentId). */
+  statusOptions?: { value: string; label: string }[];
   /** Rendered directly under the filter fields at lg+ — see the module doc comment below. */
   unscheduled: ResourceEvent[];
   resources: ResourcePlanningResource[];
@@ -76,6 +84,8 @@ export function ResourcePlanningFilters({
   selectedProjectId,
   selectedStatus,
   selectedPriority,
+  priorityOptions = CANONICAL_PRIORITY_OPTIONS,
+  statusOptions = STATUS_OPTIONS,
   unscheduled,
   resources,
 }: ResourcePlanningFiltersProps) {
@@ -147,7 +157,7 @@ export function ResourcePlanningFilters({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Any status</SelectItem>
-            {STATUS_OPTIONS.map((s) => (
+            {statusOptions.map((s) => (
               <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>
             ))}
           </SelectContent>
@@ -162,7 +172,7 @@ export function ResourcePlanningFilters({
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">Any priority</SelectItem>
-            {PRIORITY_OPTIONS.map((p) => (
+            {priorityOptions.map((p) => (
               <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
             ))}
           </SelectContent>

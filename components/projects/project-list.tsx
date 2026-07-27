@@ -17,6 +17,8 @@ import { Calendar, Users } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { ProjectStatus } from "@prisma/client";
 import type { ViewMode } from "@/components/ui/view-toggle";
+import { PROJECT_PRIORITY_LABEL as PRIORITY_LABELS } from "@/lib/project-priority";
+import { OverdueBadge } from "@/components/shared/overdue-badge";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -24,12 +26,6 @@ const STATUS_COLORS: Record<ProjectStatus, string> = {
   ON_HOLD: "bg-orange-100 text-orange-700",
   COMPLETED: "bg-green-100 text-green-700",
   CANCELLED: "bg-gray-100 text-gray-700",
-};
-
-const PRIORITY_LABELS: Record<number, string> = {
-  1: "Low",
-  2: "Medium",
-  3: "High",
 };
 
 export interface ProjectListItem {
@@ -40,6 +36,8 @@ export interface ProjectListItem {
   priority: number;
   startDate: Date | null;
   endDate: Date | null;
+  /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
+  overdue: boolean;
   department: { id: string; name: string } | null;
   members: { id: string; name: string | null; image: string | null }[];
   _count: { activities: number };
@@ -87,9 +85,12 @@ export function ProjectList({ projects }: ProjectListProps) {
                   </span>
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className="text-xs">
-                    Priority {PRIORITY_LABELS[project.priority]}
-                  </Badge>
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <Badge variant="outline" className="text-xs">
+                      Priority {PRIORITY_LABELS[project.priority]}
+                    </Badge>
+                    {project.overdue && <OverdueBadge />}
+                  </div>
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
                   {project.startDate || project.endDate ? (
@@ -133,11 +134,14 @@ export function ProjectList({ projects }: ProjectListProps) {
                 <CardTitle className="text-base line-clamp-2">
                   {project.title}
                 </CardTitle>
-                <span
-                  className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_COLORS[project.status]}`}
-                >
-                  {project.status.replace("_", " ")}
-                </span>
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  {project.overdue && <OverdueBadge />}
+                  <span
+                    className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_COLORS[project.status]}`}
+                  >
+                    {project.status.replace("_", " ")}
+                  </span>
+                </div>
               </div>
               {project.description && (
                 <CardDescription className="line-clamp-2">

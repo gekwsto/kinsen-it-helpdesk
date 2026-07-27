@@ -24,12 +24,33 @@
  *     shifted — after the shift both fields end up equal to the new date,
  *     matching Gantt's milestone-drag precedent (always sends both fields).
  *
+ * Also covers Resource Planning's new cross-row drag-and-drop persistence
+ * (components/resource-planning/resource-timeline.tsx +
+ * lib/resource-planning-drag-target.ts) — dragging an activity onto a
+ * different agent's row now sends `assignedUserIds` alongside the dates in
+ * the exact same PATCH /api/activities/[id] body a same-row date-only drag
+ * already used, reusing the route's own pre-existing (already-shipped, just
+ * previously unreached from this UI) assignee-reassignment support:
+ *  7. Persisting new startDate/dueDate together with a new assignedUserIds
+ *     in one write round-trips correctly — both survive a fresh read.
+ *  8. A target user with real activity.assignable standing passes the
+ *     route's per-assignee validation (userHasAssignablePermissionForEntity)
+ *     — the same check a cross-row drop is gated by.
+ *  9. A target user with NO standing in the department fails that same
+ *     check — mirrors the route's 400 assignee_not_assignable response,
+ *     which is what triggers the frontend's revert-on-failure path.
+ *  10. Omitting assignedUserIds entirely (a same-row, date-only drag) never
+ *      touches the activity's existing assignees — confirms the two drag
+ *      paths stay independent, matching updateActivitySchema.partial()'s
+ *      "omitted key = leave unchanged" semantics the route relies on.
+ *
  * Usage: npx tsx scripts/test-activity-date-drag.ts
  * Requires a reachable DATABASE_URL — reports clearly and exits if unreachable.
  */
 import { prisma } from "@/lib/prisma";
 import { Role, DepartmentRole, AuthProvider, MembershipSource, ProjectStatus, ActivityStatus, ActivityPriority } from "@prisma/client";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateActivitySchema } from "@/lib/validations";
 import { addDays } from "date-fns";
 
@@ -107,6 +128,7 @@ async function main() {
   let editorUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   let viewOnlyUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   let outsiderUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
+  let targetAgentUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   const membershipIds: string[] = [];
   const activityIds: string[] = [];
   let project: Awaited<ReturnType<typeof prisma.project.create>> | undefined;
@@ -137,6 +159,16 @@ async function main() {
       data: { userId: viewOnlyUser.id, departmentId: deptA.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL },
     });
     membershipIds.push(viewOnlyMembership.id);
+
+    // A second real assignee target — what a cross-row drag in Resource
+    // Planning actually drops an activity onto.
+    targetAgentUser = await prisma.user.create({
+      data: { email: `drag-target-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true },
+    });
+    const targetAgentMembership = await prisma.departmentMembership.create({
+      data: { userId: targetAgentUser.id, departmentId: deptA.id, role: DepartmentRole.AGENT_ASSIGNEE, source: MembershipSource.MANUAL },
+    });
+    membershipIds.push(targetAgentMembership.id);
 
     project = await prisma.project.create({
       data: { title: `Drag Project ${RUN_ID}`, ownerId: editorUser.id, departmentId: deptA.id, status: ProjectStatus.IN_PROGRESS },
@@ -172,6 +204,62 @@ async function main() {
       "The same editor has no standing in deptB (cross-department case)",
       !(await canActOnEntity(editorUser.id, Role.USER, deptB.id, "activity.edit"))
     );
+
+    console.log("\nTesting cross-row drag-and-drop's assignee validation — the exact check the PATCH route runs per target...\n");
+    check(
+      "A target with real activity.assignable standing (AGENT_ASSIGNEE) passes",
+      await userHasAssignablePermissionForEntity(targetAgentUser.id, "activity", deptA.id)
+    );
+    check(
+      "A target with no standing in the department fails — mirrors the route's assignee_not_assignable rejection",
+      !(await userHasAssignablePermissionForEntity(outsiderUser.id, "activity", deptA.id))
+    );
+
+    console.log("\nTesting persistence: a cross-row drop writes BOTH new dates AND the new assignee in one PATCH-equivalent write...\n");
+    const dragDaysDelta = 4;
+    const reassignNewStart = addDays(originalStart, dragDaysDelta);
+    const reassignNewEnd = addDays(originalEnd, dragDaysDelta);
+    const afterReassign = await prisma.projectActivity.update({
+      where: { id: activity.id },
+      data: {
+        startDate: reassignNewStart,
+        dueDate: reassignNewEnd,
+        assignedUsers: { set: [{ id: targetAgentUser.id }] },
+      },
+      include: { assignedUsers: { select: { id: true } } },
+    });
+    check("New startDate persisted", afterReassign.startDate?.toISOString() === reassignNewStart.toISOString());
+    check("New dueDate persisted", afterReassign.dueDate?.toISOString() === reassignNewEnd.toISOString());
+    check("New assignee persisted, replacing the old one", afterReassign.assignedUsers.length === 1 && afterReassign.assignedUsers[0].id === targetAgentUser.id);
+
+    const rereadAfterReassign = await prisma.projectActivity.findUnique({
+      where: { id: activity.id },
+      include: { assignedUsers: { select: { id: true } } },
+    });
+    check(
+      "The change survives a completely fresh read (not just the update()'s own return value)",
+      rereadAfterReassign?.assignedUsers[0]?.id === targetAgentUser.id &&
+        rereadAfterReassign?.startDate?.toISOString() === reassignNewStart.toISOString()
+    );
+
+    console.log("\nTesting a same-row, date-only drag never touches the existing assignee...\n");
+    const dateOnlyNewStart = addDays(reassignNewStart, 1);
+    const dateOnlyNewEnd = addDays(reassignNewEnd, 1);
+    // Mirrors the PATCH body a same-row drag sends: assignedUserIds simply
+    // absent from the payload — Zod's updateActivitySchema (createActivitySchema.partial())
+    // resolves an omitted key to `undefined`, and the route's own
+    // `assignedUserIds !== undefined` guard is what keeps this a true partial
+    // update instead of clearing assignees back to empty.
+    const dateOnlyUpdate = await prisma.projectActivity.update({
+      where: { id: activity.id },
+      data: { startDate: dateOnlyNewStart, dueDate: dateOnlyNewEnd },
+      include: { assignedUsers: { select: { id: true } } },
+    });
+    check("Dates moved again", dateOnlyUpdate.startDate?.toISOString() === dateOnlyNewStart.toISOString());
+    check(
+      "Assignee from the PREVIOUS (reassignment) step is still intact — a date-only write never cleared it",
+      dateOnlyUpdate.assignedUsers.length === 1 && dateOnlyUpdate.assignedUsers[0].id === targetAgentUser.id
+    );
   } finally {
     console.log("\nCleaning up test data...\n");
     const cleanupSteps: Array<[string, () => Promise<unknown>]> = [
@@ -184,7 +272,7 @@ async function main() {
           prisma.user.deleteMany({
             where: {
               id: {
-                in: [editorUser?.id, viewOnlyUser?.id, outsiderUser?.id].filter((id): id is string => !!id),
+                in: [editorUser?.id, viewOnlyUser?.id, outsiderUser?.id, targetAgentUser?.id].filter((id): id is string => !!id),
               },
             },
           }),

@@ -2,6 +2,8 @@ import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import type { Department } from "@prisma/client";
 import type { DepartmentSummary, DepartmentWithCounts } from "@/types/department";
+import { ensureStatusAndPriorityConfigForDepartment, ensureActivityProgressConfigForDepartment, ensureStarterPrioritiesForDepartment } from "@/lib/services/config-starter-data";
+import { logDepartmentConfigHealth } from "@/lib/services/config-health";
 
 // Slug of the department legacy (pre-Phase-1) rows fall back to for scoping
 // purposes — never a raw literal id, so it stays correct if the bootstrap
@@ -74,13 +76,32 @@ export interface CreateDepartmentInput {
 
 export async function createDepartment(input: CreateDepartmentInput): Promise<Department> {
   const slug = input.slug ? slugify(input.slug) : await generateUniqueSlug(input.name);
-  return prisma.department.create({
-    data: {
-      name: input.name,
-      slug,
-      description: input.description ?? null,
-      businessUnitId: input.businessUnitId ?? null,
-    },
+  // Department creation + its full starter configuration row set (terminal-
+  // status, priority-order, activity progress, SLA priorities) are one
+  // atomic operation — a department must never exist without them (see
+  // lib/services/config-starter-data.ts): lib/status-terminal.ts,
+  // lib/priority-config.ts, and lib/activities/activity-progress.ts's
+  // resolvers all treat a missing row as a real gap, never a hardcoded-
+  // default invitation.
+  return prisma.$transaction(async (tx) => {
+    const department = await tx.department.create({
+      data: {
+        name: input.name,
+        slug,
+        description: input.description ?? null,
+        businessUnitId: input.businessUnitId ?? null,
+      },
+    });
+    await ensureStatusAndPriorityConfigForDepartment(tx, department.id);
+    await ensureActivityProgressConfigForDepartment(tx, department.id);
+    await ensureStarterPrioritiesForDepartment(tx, department.id);
+    // Verifies the ensure-functions above actually left this brand-new
+    // department fully configured before the transaction commits — logs
+    // loudly (never silently) if not, so a regression here is caught
+    // immediately rather than surfacing later as a runtime configuration
+    // gap on some real activity/ticket.
+    await logDepartmentConfigHealth(tx, department.id, "department creation");
+    return department;
   });
 }
 

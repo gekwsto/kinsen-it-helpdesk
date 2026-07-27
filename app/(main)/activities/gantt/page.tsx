@@ -9,7 +9,8 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, GanttChartSquare, ShieldOff } from "lucide-react";
 import { GanttChart, GanttGroup, GanttDependency } from "@/components/gantt/gantt-chart";
-import { getProgressConfigsForDepartments, resolveProgress } from "@/lib/activities/activity-progress";
+import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "@/lib/activities/activity-progress";
+import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 
 interface SearchParams {
   status?: string;
@@ -124,17 +125,20 @@ export default async function ActivityGanttPage({
   // than trusting the possibly-stale stored column.
   const activityDepartmentIds = activities.map((a) => a.departmentId).filter((id): id is string => !!id);
   const progressConfigs = await getProgressConfigsForDepartments(activityDepartmentIds);
+  const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(activityDepartmentIds);
 
   for (const a of activities) {
     const child = {
       id: a.id,
       title: a.title,
       status: a.status,
+      statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
+      statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
       startDate: a.isMilestone
         ? (a.dueDate?.toISOString() ?? null)
         : (a.startDate?.toISOString() ?? null),
       endDate: a.dueDate?.toISOString() ?? null,
-      progress: resolveProgress(progressConfigs, a.departmentId, a.status),
+      progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
       href: `/activities/${a.id}`,
       priority: a.priority,
       assigneeName: a.assignedUsers[0]?.name ?? null,
@@ -207,7 +211,18 @@ export default async function ActivityGanttPage({
         </div>
       </div>
 
-      <GanttChart groups={groups} canEdit={isAdmin(session.user.role)} dependencies={dependencies} />
+      <GanttChart
+        groups={groups}
+        canEdit={isAdmin(session.user.role)}
+        dependencies={dependencies}
+        activityStatusLegendEntries={
+          effectiveDepartmentId
+            ? Object.entries(statusDisplayConfigs[effectiveDepartmentId] ?? {})
+                .sort(([, a], [, b]) => a!.sortOrder - b!.sortOrder)
+                .map(([key, row]) => ({ key, label: row!.label, color: row!.color }))
+            : undefined
+        }
+      />
     </div>
   );
 }

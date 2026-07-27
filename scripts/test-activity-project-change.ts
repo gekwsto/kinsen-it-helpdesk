@@ -156,7 +156,6 @@ async function main() {
 
     const { events: anyProjectEvents } = await getResourcePlanningEvents({
       departmentId: deptA.id,
-      resourceIds: [ownerUser.id],
       rangeStart,
       rangeEnd,
     });
@@ -165,7 +164,6 @@ async function main() {
     const { events: filteredByOtherProject } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       projectId: anotherProjectInA.id,
-      resourceIds: [ownerUser.id],
       rangeStart,
       rangeEnd,
     });
@@ -177,7 +175,6 @@ async function main() {
     const { events: filteredByOwnProject } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       projectId: projectInA.id,
-      resourceIds: [ownerUser.id],
       rangeStart,
       rangeEnd,
     });
@@ -186,7 +183,6 @@ async function main() {
     const { events: filteredByOtherProjectAfterMove } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       projectId: anotherProjectInA.id,
-      resourceIds: [ownerUser.id],
       rangeStart,
       rangeEnd,
     });

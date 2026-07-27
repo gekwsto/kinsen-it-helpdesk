@@ -9,7 +9,12 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, GanttChartSquare, ShieldOff } from "lucide-react";
 import { GanttChart, GanttGroup, GanttDependency } from "@/components/gantt/gantt-chart";
-import { getProgressConfigsForDepartments, resolveProgress } from "@/lib/activities/activity-progress";
+import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "@/lib/activities/activity-progress";
+import { getProjectTerminalConfigsForDepartments, getActivityTerminalConfigsForDepartments, resolveProjectTerminal, resolveActivityTerminal } from "@/lib/status-terminal";
+import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
+import { isProjectOverdue, isActivityOverdue } from "@/lib/overdue";
+import { projectPriorityKey } from "@/lib/project-priority";
+import { getActivityPriorityConfigsForDepartments, buildPriorityFilterOptions } from "@/lib/priority-config";
 
 interface SearchParams {
   status?: string;
@@ -125,33 +130,65 @@ export default async function ProjectGanttPage({
   // rather than trusting the possibly-stale stored column. Project progress
   // (below) has no such per-status formula — it stays the stored average.
   const activityDepartmentIds = projects.flatMap((p) => p.activities.map((a) => a.departmentId).filter((id): id is string => !!id));
+  const projectDepartmentIds = projects.map((p) => p.departmentId).filter((id): id is string => !!id);
   const progressConfigs = await getProgressConfigsForDepartments(activityDepartmentIds);
+  const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(activityDepartmentIds);
+
+  // Overdue (Part 2) — derived here once, from each entity's own department's
+  // terminal-status configuration (lib/status-terminal.ts), never stored.
+  // Project has no literal `dueDate` field; its functional due date is
+  // `endDate` (the project's own end-of-work date).
+  const [projectTerminalConfigs, activityTerminalConfigs] = await Promise.all([
+    getProjectTerminalConfigsForDepartments(projectDepartmentIds),
+    getActivityTerminalConfigsForDepartments(activityDepartmentIds),
+  ]);
+  const now = new Date();
+
+  // Priority filter options (Part 1 corrective) — the department's OWN
+  // configured order/enablement (ActivityPriorityConfig via
+  // lib/priority-config.ts), never the hardcoded canonical order. Only
+  // resolvable for a single specific department; "All Workspaces" (no
+  // single effectiveDepartmentId) has no one department's config to honor
+  // — GanttChart falls back to its own canonical-order constant in that
+  // case, the same documented limitation app/(main)/dashboard/page.tsx
+  // already accepts for "All Workspaces" ticket status/priority charts.
+  const priorityOptions = effectiveDepartmentId
+    ? buildPriorityFilterOptions(
+        await getActivityPriorityConfigsForDepartments([effectiveDepartmentId]),
+        effectiveDepartmentId
+      )
+    : undefined;
 
   const groups: GanttGroup[] = projects.map((p) => ({
     id: p.id,
     title: p.title,
     href: `/projects/${p.id}`,
     status: p.status,
+    priority: projectPriorityKey(p.priority),
     startDate: p.startDate?.toISOString() ?? null,
     endDate: p.endDate?.toISOString() ?? null,
     progress: p.progress,
     ownerName: p.owner.name,
     ownerImage: p.owner.image,
     type: "project",
+    overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(projectTerminalConfigs, p.departmentId, p.status), now),
     children: p.activities.map((a) => ({
       id: a.id,
       title: a.title,
       status: a.status,
+      statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
+      statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
       startDate: a.isMilestone
         ? (a.dueDate?.toISOString() ?? null)
         : (a.startDate?.toISOString() ?? null),
       endDate: a.dueDate?.toISOString() ?? null,
-      progress: resolveProgress(progressConfigs, a.departmentId, a.status),
+      progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
       href: `/activities/${a.id}`,
       priority: a.priority,
       assigneeName: a.assignedUsers[0]?.name ?? null,
       assigneeImage: a.assignedUsers[0]?.image ?? null,
       type: (a.isMilestone ? "milestone" : "activity") as "milestone" | "activity",
+      overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(activityTerminalConfigs, a.departmentId, a.status), now),
     })),
   }));
 
@@ -177,7 +214,19 @@ export default async function ProjectGanttPage({
         </div>
       </div>
 
-      <GanttChart groups={groups} canEdit={isAdmin(session.user.role)} dependencies={dependencies} />
+      <GanttChart
+        groups={groups}
+        canEdit={isAdmin(session.user.role)}
+        dependencies={dependencies}
+        priorityOptions={priorityOptions}
+        activityStatusLegendEntries={
+          effectiveDepartmentId
+            ? Object.entries(statusDisplayConfigs[effectiveDepartmentId] ?? {})
+                .sort(([, a], [, b]) => a!.sortOrder - b!.sortOrder)
+                .map(([key, row]) => ({ key, label: row!.label, color: row!.color }))
+            : undefined
+        }
+      />
     </div>
   );
 }

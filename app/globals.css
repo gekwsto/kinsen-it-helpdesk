@@ -67,6 +67,23 @@
   }
 }
 
+/* Number input spinner arrows — global removal, visual only. Applies to
+   every <input type="number"> app-wide (including components/ui/input.tsx,
+   the shared Input component, since this targets the element/attribute
+   selector, not a class) — no per-component styling needed. `type` stays
+   "number": min/max/step validation, numeric keyboard on mobile, and form
+   submission of a numeric value are all attribute/type behaviors untouched
+   by hiding the spin-button UI. Scoped to [type="number"] specifically, so
+   date pickers, selects and other controls are unaffected. */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;

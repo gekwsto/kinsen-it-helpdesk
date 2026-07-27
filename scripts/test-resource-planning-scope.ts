@@ -50,6 +50,31 @@
  *      range are all returned distinctly (not merged/deduped) by
  *      getResourcePlanningEvents.
  *
+ * Also covers a real regression fix: getResourcePlanningEvents used to
+ * require `assignedUsers: { some: { id: { in: resourceIds } } }` —
+ * resourceIds being the "currently assignable" users, NOT "who is actually
+ * assigned." That silently dropped (a) any activity assigned to a user
+ * whose assignable permission changed after the fact, entirely — not even
+ * into `unscheduled` — and (b) every activity with zero assignees at all
+ * (an empty relation can never satisfy `some`). Neither the query nor
+ * getResourcePlanningResources filter by "currently assignable" anymore:
+ *  18. An activity assigned to a user with NO activity.assignable/
+ *      project.assignable standing in this department still appears in
+ *      `events` (in range) under that user's id.
+ *  19. getResourcePlanningResources grows a row for that same user (tagged
+ *      assignableFor: [] — visible, but not offered as a new-assignment
+ *      drag target) even though they'd never appear via the assignable-
+ *      permission union alone.
+ *  20. An activity with zero assignees is no longer dropped — it appears in
+ *      `unscheduled` with unscheduledReason: "no-assignee", dates
+ *      preserved (not nulled out).
+ *  21. A date-less activity's unscheduledReason is "no-dates" (distinct
+ *      from the no-assignee case above) so the UI can show accurate copy
+ *      for each.
+ *  22. An activity outside the requested department (department/workspace
+ *      isolation) never appears in this department's events/resources,
+ *      confirming the broadened query still respects departmentId scoping.
+ *
  * Usage: npx tsx scripts/test-resource-planning-scope.ts
  * Requires a reachable DATABASE_URL — reports clearly and exits if unreachable.
  */
@@ -122,6 +147,8 @@ async function main() {
   let projectOnlyRole: { id: string; key: string } | undefined;
   let projectOnlyUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   let inactiveAgent: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
+  let unassignableAgent: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
+  let deptBUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   const activityIds: string[] = [];
   const membershipIds: string[] = [];
   const subMembershipIds: string[] = [];
@@ -266,15 +293,13 @@ async function main() {
       subScopedActivities.some((a) => a.id === inSubActivity.id) && !subScopedActivities.some((a) => a.id === outsideSubActivity.id)
     );
 
-    console.log("\nTesting an activity with zero assigned users doesn't break the query...\n");
+    console.log("\nTesting an activity with zero assigned users doesn't crash a plain department-wide query...\n");
     const allDeptAActivities = await prisma.projectActivity.findMany({
-      where: { departmentId: deptA.id, assignedUsers: { some: { id: { in: resources.map((r) => r.id) } } } },
+      where: { departmentId: deptA.id },
       include: { assignedUsers: { select: { id: true } } },
     });
-    check(
-      "Query with an unassigned activity present still succeeds and correctly excludes it",
-      !allDeptAActivities.some((a) => a.id === noAssigneeActivity.id) && allDeptAActivities.length > 0
-    );
+    check("Department-wide query succeeds with an unassigned activity present", allDeptAActivities.length > 0);
+    check("...and it's really unassigned (sanity check on the fixture itself)", allDeptAActivities.find((a) => a.id === noAssigneeActivity.id)?.assignedUsers.length === 0);
 
     console.log("\nTesting date fallback bucketing (start/end vs. Unscheduled)...\n");
     const fetchedNoDates = await prisma.projectActivity.findUnique({
@@ -328,21 +353,30 @@ async function main() {
 
     const viewRangeStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 3);
     const viewRangeEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 3);
-    const allResourceIds = (await getAssignableUsersForActivity(deptA.id)).map((r) => r.id);
 
-    const { events: unfiltered } = await getResourcePlanningEvents({
+    const { events: unfiltered, unscheduled: unfilteredUnscheduled } = await getResourcePlanningEvents({
       departmentId: deptA.id,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
     check("Unfiltered events include both project1 and project2 activities in range", unfiltered.some((e) => e.id === inSubActivity.id) && unfiltered.some((e) => e.id === project2Activity.id));
     check("Out-of-range activity is dropped entirely (not in events)", !unfiltered.some((e) => e.id === outOfRangeActivity.id));
 
+    console.log("\nTesting the actual regression fix: an unassigned activity is no longer dropped...\n");
+    const noAssigneeEntry = unfilteredUnscheduled.find((e) => e.id === noAssigneeActivity.id);
+    check("The zero-assignee activity is NOT silently dropped — it's in `unscheduled`", !!noAssigneeEntry);
+    check("...tagged unscheduledReason: 'no-assignee'", noAssigneeEntry?.unscheduledReason === "no-assignee");
+    check("...with an empty assignedUserIds array, not a fabricated one", noAssigneeEntry?.assignedUserIds.length === 0);
+
+    console.log("\nTesting unscheduledReason distinguishes 'no dates' from 'no assignee'...\n");
+    const noDatesEntry = unfilteredUnscheduled.find((e) => e.id === noDatesActivity.id);
+    check("The date-less (but assigned) activity is in `unscheduled` too", !!noDatesEntry);
+    check("...tagged unscheduledReason: 'no-dates' (distinct from the no-assignee case above)", noDatesEntry?.unscheduledReason === "no-dates");
+    check("...and still reports its real assignee", noDatesEntry?.assignedUserIds.includes(agentInSub!.id) ?? false);
+
     const { events: byProject, unscheduled: unscheduledByProject } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       projectId: project2.id,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -352,7 +386,6 @@ async function main() {
     const { events: byStatus } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       status: ActivityStatus.COMPLETED,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -413,7 +446,6 @@ async function main() {
     const { events: byPriority } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       priority: ActivityPriority.URGENT,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -422,7 +454,6 @@ async function main() {
 
     const { events: allInRange } = await getResourcePlanningEvents({
       departmentId: deptA.id,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -435,7 +466,6 @@ async function main() {
     const { events: byProjectExcludesStandalone } = await getResourcePlanningEvents({
       departmentId: deptA.id,
       projectId: project.id,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -448,7 +478,6 @@ async function main() {
       projectId: project.id,
       status: ActivityStatus.IN_PROGRESS,
       priority: ActivityPriority.URGENT,
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -460,7 +489,6 @@ async function main() {
       projectId: project.id,
       status: ActivityStatus.IN_PROGRESS,
       priority: ActivityPriority.LOW, // urgentActivity is URGENT, not LOW — AND semantics must exclude it
-      resourceIds: allResourceIds,
       rangeStart: viewRangeStart,
       rangeEnd: viewRangeEnd,
     });
@@ -521,6 +549,82 @@ async function main() {
     membershipIds.push(inactiveMembership.id);
     const resourcesAfterInactive = await getResourcePlanningResources(deptA.id);
     check("An inactive user never appears as a resource even with an otherwise-eligible active membership", !resourcesAfterInactive.some((r) => r.id === inactiveAgent!.id));
+
+    console.log("\nTesting the core regression fix: an activity assigned to a user with NO activity.assignable/project.assignable standing still shows up...\n");
+    // No DepartmentMembership at all in deptA — genuinely not "currently
+    // assignable" there by any path (not the union's core check, not an
+    // Admin/Director bypass). Simulates a user who WAS a valid assignee at
+    // the time the activity was assigned and has since lost that standing
+    // (left the department, role changed, etc.) — their existing assigned
+    // work must never become invisible just because a later permission
+    // snapshot no longer matches.
+    unassignableAgent = await prisma.user.create({
+      data: { email: `rp-unassignable-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true },
+    });
+    const orphanAssignedActivity = await prisma.projectActivity.create({
+      data: {
+        title: `Orphan Assigned Activity ${RUN_ID}`,
+        projectId: project.id,
+        departmentId: deptA.id,
+        status: ActivityStatus.TODO,
+        priority: ActivityPriority.MEDIUM,
+        startDate: now,
+        dueDate: now,
+        assignedUsers: { connect: [{ id: unassignableAgent.id }] },
+      },
+    });
+    activityIds.push(orphanAssignedActivity.id);
+
+    const { events: eventsWithOrphan, assignedUserIds: assignedUserIdsInScope } = await getResourcePlanningEvents({
+      departmentId: deptA.id,
+      rangeStart: viewRangeStart,
+      rangeEnd: viewRangeEnd,
+    });
+    check(
+      "The activity assigned to a non-assignable user still appears in `events` (in range)",
+      eventsWithOrphan.some((e) => e.id === orphanAssignedActivity.id && e.assignedUserIds.includes(unassignableAgent!.id))
+    );
+    check("getResourcePlanningEvents' own assignedUserIds output includes them", assignedUserIdsInScope.includes(unassignableAgent.id));
+
+    const resourcesWithoutReconciliation = await getResourcePlanningResources(deptA.id, undefined, []);
+    check(
+      "Without threading assignedUserIds back in, they correctly do NOT get a row (proves the fix is the reconciliation, not a general leak)",
+      !resourcesWithoutReconciliation.some((r) => r.id === unassignableAgent!.id)
+    );
+
+    const resourcesWithReconciliation = await getResourcePlanningResources(deptA.id, undefined, assignedUserIdsInScope);
+    const orphanResource = resourcesWithReconciliation.find((r) => r.id === unassignableAgent!.id);
+    check("Threading it back in (as getResourcePlanningData does) DOES grow a row for them", !!orphanResource);
+    check("...tagged assignableFor: [] (visible, but never offered as a NEW drag-and-drop assignment target)", JSON.stringify(orphanResource?.assignableFor) === "[]");
+
+    console.log("\nTesting department/workspace isolation still holds after broadening the query...\n");
+    deptBUser = await prisma.user.create({
+      data: { email: `rp-deptb-user-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true },
+    });
+    const deptBActivity = await prisma.projectActivity.create({
+      data: {
+        title: `Dept B Activity ${RUN_ID}`,
+        departmentId: deptB.id,
+        status: ActivityStatus.TODO,
+        priority: ActivityPriority.MEDIUM,
+        startDate: now,
+        dueDate: now,
+        assignedUsers: { connect: [{ id: deptBUser.id }] },
+      },
+    });
+    activityIds.push(deptBActivity.id);
+
+    const { events: deptAEventsAfterDeptBSetup, unscheduled: deptAUnscheduledAfterDeptBSetup } = await getResourcePlanningEvents({
+      departmentId: deptA.id,
+      rangeStart: viewRangeStart,
+      rangeEnd: viewRangeEnd,
+    });
+    check(
+      "deptB's activity never leaks into deptA's events, even unfiltered by resource",
+      !deptAEventsAfterDeptBSetup.some((e) => e.id === deptBActivity.id) && !deptAUnscheduledAfterDeptBSetup.some((e) => e.id === deptBActivity.id)
+    );
+    const deptAResourcesAfterDeptBSetup = await getResourcePlanningResources(deptA.id);
+    check("deptB's user never gets a row in deptA's resource list", !deptAResourcesAfterDeptBSetup.some((r) => r.id === deptBUser!.id));
   } finally {
     console.log("\nCleaning up test data...\n");
     const cleanupSteps: Array<[string, () => Promise<unknown>]> = [
@@ -550,6 +654,8 @@ async function main() {
                   agentOutsideSub?.id,
                   projectOnlyUser?.id,
                   inactiveAgent?.id,
+                  unassignableAgent?.id,
+                  deptBUser?.id,
                 ].filter((id): id is string => !!id),
               },
             },

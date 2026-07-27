@@ -3,12 +3,12 @@ import { redirect } from "next/navigation";
 import { isAdmin, requireAnyDepartmentPermission, hasDepartmentPermission } from "@/lib/permissions";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { listDepartments } from "@/lib/services/department-service";
-import { getDepartmentProgressConfig } from "@/lib/activities/activity-progress";
+import { getDepartmentProgressRows } from "@/lib/activities/activity-progress";
+import { getDepartmentActivityStatusRows } from "@/lib/services/activity-status-config";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { ActivityProgressConfigForm } from "@/components/admin/activity-progress-config-form";
-import { ActivityProgressDepartmentPicker } from "@/components/admin/activity-progress-department-picker";
 
-const ACTIVITY_PROGRESS_PERMISSION_KEYS = ["activityProgress.edit"];
+const ACTIVITY_PROGRESS_PERMISSION_KEYS = ["activityProgress.create", "activityProgress.edit", "activityProgress.delete"];
 
 export default async function ActivityProgressAdminPage({
   searchParams,
@@ -26,13 +26,21 @@ export default async function ActivityProgressAdminPage({
     if (!userIsAdmin) redirect("/dashboard");
     const departments = (await listDepartments()).map((d) => ({ id: d.id, name: d.name }));
     const selectedDepartmentId = params.departmentId ?? departments[0]?.id;
-    const config = selectedDepartmentId ? await getDepartmentProgressConfig(selectedDepartmentId) : null;
+    const rows = selectedDepartmentId ? await getDepartmentProgressRows(selectedDepartmentId) : null;
+    const statusDisplayRows = selectedDepartmentId ? await getDepartmentActivityStatusRows(selectedDepartmentId) : [];
 
     return (
       <PageShell>
-        <ActivityProgressDepartmentPicker departments={departments} selectedDepartmentId={selectedDepartmentId} />
-        {selectedDepartmentId && config && (
-          <ActivityProgressConfigForm departmentId={selectedDepartmentId} initialConfig={config} canEdit={true} />
+        {selectedDepartmentId && rows && (
+          <ActivityProgressConfigForm
+            departmentId={selectedDepartmentId}
+            initialRows={rows}
+            statusDisplayRows={statusDisplayRows}
+            canCreate
+            canEdit
+            canDelete
+            departmentOptions={departments}
+          />
         )}
       </PageShell>
     );
@@ -50,12 +58,19 @@ export default async function ActivityProgressAdminPage({
     redirect("/dashboard");
   }
 
-  const canEdit = access.isSystemAdmin || (await hasDepartmentPermission(access.membership!.role, "activityProgress.edit", access.membership!.customRoleId));
-  const config = await getDepartmentProgressConfig(departmentId);
+  const [canCreate, canEdit, canDelete] = access.isSystemAdmin
+    ? [true, true, true]
+    : await Promise.all([
+        hasDepartmentPermission(access.membership!.role, "activityProgress.create", access.membership!.customRoleId),
+        hasDepartmentPermission(access.membership!.role, "activityProgress.edit", access.membership!.customRoleId),
+        hasDepartmentPermission(access.membership!.role, "activityProgress.delete", access.membership!.customRoleId),
+      ]);
+  const rows = await getDepartmentProgressRows(departmentId);
+  const statusDisplayRows = await getDepartmentActivityStatusRows(departmentId);
 
   return (
     <PageShell>
-      <ActivityProgressConfigForm departmentId={departmentId} initialConfig={config} canEdit={canEdit} />
+      <ActivityProgressConfigForm departmentId={departmentId} initialRows={rows} statusDisplayRows={statusDisplayRows} canCreate={canCreate} canEdit={canEdit} canDelete={canDelete} />
     </PageShell>
   );
 }

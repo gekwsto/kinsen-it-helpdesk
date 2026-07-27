@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireAnyDepartmentPermission } from "@/lib/permissions";
-import { createCategorySchema } from "@/lib/validations";
+import { createCategorySchema, updateCategorySchema } from "@/lib/validations";
 import { buildCategoryWhere } from "@/lib/services/department-scope-service";
+import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 
 // Categories were originally gated only by the blanket department.manageSettings
 // key; category.manage is additive on top of it (never a replacement) so an
@@ -38,63 +39,83 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json(categories);
   } catch (error: any) {
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
+    if (error.message === "Unauthorized") return unauthorizedResponse();
+    return forbiddenResponse();
   }
 }
 
 export async function POST(req: NextRequest) {
+  let attemptedName: string | undefined;
   try {
     const body = await req.json();
-    const { departmentId, ...data } = createCategorySchema.parse(body);
+    const parsed = createCategorySchema.safeParse(body);
+    if (!parsed.success) return zodErrorResponse(parsed.error);
+    const { departmentId, ...data } = parsed.data;
+    attemptedName = data.name;
 
     // Every category belongs to exactly one department now — there is no
     // more global/shared category. requireAnyDepartmentPermission already
     // bypasses for System Admin, so this covers both "admin creating for
     // any department" and "department admin creating for their own" in one call.
     if (!departmentId) {
-      return NextResponse.json({ error: "A department is required.", code: "department_required" }, { status: 400 });
+      return NextResponse.json(apiError("department_required", "A department is required.", { field: "departmentId" }), { status: 400 });
     }
-    await requireAnyDepartmentPermission(departmentId, CATEGORY_PERMISSION_KEYS);
+
+    try {
+      await requireAnyDepartmentPermission(departmentId, CATEGORY_PERMISSION_KEYS);
+    } catch (error: any) {
+      if (error.message === "Unauthorized") return unauthorizedResponse();
+      return forbiddenResponse("You do not have permission to create categories in this department.");
+    }
+
+    const department = await prisma.department.findUnique({ where: { id: departmentId }, select: { id: true } });
+    if (!department) {
+      return NextResponse.json(apiError("invalid_department", "The selected department does not exist.", { field: "departmentId" }), { status: 400 });
+    }
 
     const category = await prisma.ticketCategory.create({ data: { ...data, departmentId } });
     return NextResponse.json(category, { status: 201 });
   } catch (error: any) {
-    if (error.name === "ZodError") {
-      return NextResponse.json({ error: error.errors }, { status: 422 });
-    }
     if (error.code === "P2002") {
-      return NextResponse.json({ error: "A category with this name already exists in this department.", code: "duplicate_name" }, { status: 409 });
+      const name = attemptedName ? `"${attemptedName}"` : "This name";
+      return NextResponse.json(apiError("duplicate_category_name", `${name} already exists as a category in this department.`, { field: "name" }), { status: 409 });
     }
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
-    return NextResponse.json({ error: "Internal error", code: "internal_error" }, { status: 500 });
+    if (error.code === "P2003") {
+      return NextResponse.json(apiError("invalid_department", "The selected department does not exist.", { field: "departmentId" }), { status: 400 });
+    }
+    return internalErrorResponse();
   }
 }
 
 export async function PATCH(req: NextRequest) {
   try {
-    const body = await req.json();
+    const raw = await req.json();
     // departmentId is deliberately never accepted here — moving a category
     // between departments isn't supported by this endpoint, only editing
     // name/description/color/isActive of an existing one.
-    const { id, departmentId: _ignored, ...data } = body;
-    if (!id) return NextResponse.json({ error: "ID required" }, { status: 400 });
+    const { id, departmentId: _ignored, ...body } = raw;
+    if (!id) return NextResponse.json(apiError("invalid_payload", "A category id is required."), { status: 400 });
 
     const existing = await prisma.ticketCategory.findUnique({ where: { id }, select: { departmentId: true } });
-    if (!existing) return NextResponse.json({ error: "Not found", code: "item_not_found" }, { status: 404 });
+    if (!existing) return NextResponse.json(apiError("item_not_found", "This category no longer exists."), { status: 404 });
 
-    await requireAnyDepartmentPermission(existing.departmentId, CATEGORY_PERMISSION_KEYS);
+    try {
+      await requireAnyDepartmentPermission(existing.departmentId, CATEGORY_PERMISSION_KEYS);
+    } catch (error: any) {
+      if (error.message === "Unauthorized") return unauthorizedResponse();
+      return forbiddenResponse("You do not have permission to edit categories in this department.");
+    }
 
-    const category = await prisma.ticketCategory.update({ where: { id }, data });
+    const parsed = updateCategorySchema.safeParse(body);
+    if (!parsed.success) return zodErrorResponse(parsed.error);
+
+    const category = await prisma.ticketCategory.update({ where: { id }, data: parsed.data });
     return NextResponse.json(category);
   } catch (error: any) {
     if (error.code === "P2002") {
-      return NextResponse.json({ error: "A category with this name already exists in this department.", code: "duplicate_name" }, { status: 409 });
+      return NextResponse.json(apiError("duplicate_category_name", "A category with this name already exists in this department.", { field: "name" }), { status: 409 });
     }
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
-    return NextResponse.json({ error: "Internal error", code: "internal_error" }, { status: 500 });
+    return internalErrorResponse();
   }
 }
 
@@ -102,22 +123,24 @@ export async function DELETE(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "ID required" }, { status: 400 });
+    if (!id) return NextResponse.json(apiError("invalid_payload", "A category id is required."), { status: 400 });
 
     const existing = await prisma.ticketCategory.findUnique({
       where: { id },
       include: { _count: { select: { tickets: true } } },
     });
-    if (!existing) return NextResponse.json({ error: "Not found", code: "item_not_found" }, { status: 404 });
+    if (!existing) return NextResponse.json(apiError("item_not_found", "This category no longer exists."), { status: 404 });
 
-    await requireAnyDepartmentPermission(existing.departmentId, CATEGORY_DELETE_PERMISSION_KEYS);
+    try {
+      await requireAnyDepartmentPermission(existing.departmentId, CATEGORY_DELETE_PERMISSION_KEYS);
+    } catch (error: any) {
+      if (error.message === "Unauthorized") return unauthorizedResponse();
+      return forbiddenResponse("You do not have permission to delete categories in this department.");
+    }
 
     if (existing._count.tickets > 0) {
       return NextResponse.json(
-        {
-          error: `This category is used by ${existing._count.tickets} ticket(s) and cannot be deleted. Deactivate it instead.`,
-          code: "item_in_use",
-        },
+        apiError("item_in_use", `This category is used by ${existing._count.tickets} ticket(s) and cannot be deleted. Deactivate it instead.`),
         { status: 409 }
       );
     }
@@ -125,9 +148,9 @@ export async function DELETE(req: NextRequest) {
     await prisma.ticketCategory.delete({ where: { id } });
     return new NextResponse(null, { status: 204 });
   } catch (error: any) {
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
-    if (error.code === "P2003") return NextResponse.json({ error: "This category is still referenced and cannot be deleted. Deactivate it instead.", code: "item_in_use" }, { status: 409 });
-    return NextResponse.json({ error: "Internal error", code: "internal_error" }, { status: 500 });
+    if (error.code === "P2003") {
+      return NextResponse.json(apiError("item_in_use", "This category is still referenced and cannot be deleted. Deactivate it instead."), { status: 409 });
+    }
+    return internalErrorResponse();
   }
 }

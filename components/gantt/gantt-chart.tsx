@@ -39,10 +39,28 @@ import {
   X,
   Maximize2,
   Minimize2,
+  AlertTriangle,
 } from "lucide-react";
 import { getInitials } from "@/lib/utils";
 import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
 import { StatusLegend } from "@/components/gantt/status-legend";
+import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
+import { ActivityPriority } from "@prisma/client";
+import { filterGanttGroups } from "@/lib/gantt-filters";
+import type { PriorityFilterOption } from "@/lib/priority-config";
+
+// Fallback ONLY for callers that don't pass priorityOptions (e.g. an "All
+// Workspaces" view spanning several departments with no single department's
+// config to honor — see app/(main)/projects/gantt/page.tsx's own comment on
+// this exact case). The department-specific case always gets a REAL
+// priorityOptions prop resolved from ActivityPriorityConfig
+// (lib/priority-config.ts) — never this constant.
+const CANONICAL_PRIORITY_OPTIONS: PriorityFilterOption[] = [
+  ActivityPriority.URGENT,
+  ActivityPriority.HIGH,
+  ActivityPriority.MEDIUM,
+  ActivityPriority.LOW,
+].map((value) => ({ value, label: ACTIVITY_PRIORITY_LABEL[value] }));
 
 export type ViewMode = "day" | "week" | "month";
 
@@ -60,14 +78,21 @@ export interface GanttItem {
   id: string;
   title: string;
   status: string;
+  /** This activity's department-resolved status display label — see lib/services/activity-status-config.ts. Always present for activity/milestone items; project (group) bars have none and fall back to the legacy STATUS_LABEL map (Project status isn't department-scoped by this system). */
+  statusLabel?: string;
+  /** This activity's department-resolved status color (#RRGGBB) — same fallback rule as statusLabel. */
+  statusColor?: string;
   priority?: string | null;
   startDate: string | null;
   endDate: string | null;
-  progress: number;
+  /** null means no ActivityProgressConfig row is configured/enabled for this activity's department+status — see lib/activities/activity-progress.ts. Never rendered as 0%. */
+  progress: number | null;
   href: string;
   assigneeName?: string | null;
   assigneeImage?: string | null;
   type: "activity" | "milestone";
+  /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
+  overdue?: boolean;
 }
 
 export interface GanttGroup {
@@ -75,6 +100,8 @@ export interface GanttGroup {
   title: string;
   href: string;
   status: string;
+  /** Project.priority (Int 1-3), mapped to the same LOW/MEDIUM/HIGH keys ActivityPriority uses — see lib/project-priority.ts. Null/undefined for a group whose priority can't be mapped. */
+  priority?: string | null;
   startDate: string | null;
   endDate: string | null;
   progress: number;
@@ -82,6 +109,8 @@ export interface GanttGroup {
   ownerImage?: string | null;
   type: "project" | "standalone";
   children: GanttItem[];
+  /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
+  overdue?: boolean;
 }
 
 export interface GanttDependency {
@@ -95,6 +124,10 @@ interface GanttChartProps {
   groups: GanttGroup[];
   canEdit?: boolean;
   dependencies?: GanttDependency[];
+  /** Department-scoped, order/enablement-resolved Priority filter options (lib/priority-config.ts) — falls back to CANONICAL_PRIORITY_OPTIONS only when the caller has no single department to scope to. */
+  priorityOptions?: PriorityFilterOption[];
+  /** Department-scoped Activity Status legend entries (label/color — see lib/services/activity-status-config.ts) — same "only resolvable for a single specific department" limitation as priorityOptions; falls back to the legacy static legend in "All Workspaces" (no single department). */
+  activityStatusLegendEntries?: { key: string; label: string; color: string }[];
 }
 
 const STUB = 12;
@@ -139,7 +172,7 @@ function applyDateChange(
   }));
 }
 
-export function GanttChart({ groups, canEdit = false, dependencies }: GanttChartProps) {
+export function GanttChart({ groups, canEdit = false, dependencies, priorityOptions = CANONICAL_PRIORITY_OPTIONS, activityStatusLegendEntries }: GanttChartProps) {
   const router = useRouter();
 
   // ── Optimistic local state ─────────────────────────────────────────────────
@@ -176,6 +209,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [priorityFilter, setPriorityFilter] = useState("ALL");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Drag state — refs only so pointer-move never triggers React re-renders
@@ -185,29 +219,19 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
   const today = useMemo(() => new Date(), []);
 
   // ── Client-side filtering (uses localGroups) ───────────────────────────────
-  const filteredGroups = useMemo(() => {
-    const q = search.toLowerCase();
-    return localGroups
-      .map((g) => ({
-        ...g,
-        children: g.children.filter((c) => {
-          if (q && !c.title.toLowerCase().includes(q)) return false;
-          if (statusFilter !== "ALL" && c.status !== statusFilter) return false;
-          return true;
-        }),
-      }))
-      .filter((g) => {
-        if (!q && statusFilter === "ALL") return true;
-        const groupMatch = !q || g.title.toLowerCase().includes(q);
-        const statusOk   = statusFilter === "ALL" || g.status === statusFilter;
-        return (groupMatch && statusOk) || g.children.length > 0;
-      });
-  }, [localGroups, search, statusFilter]);
+  // Search + Status + Priority combined filtering — see lib/gantt-filters.ts
+  // for the (independently unit-tested) shared rule both the Status and
+  // Priority (Part 1) filters follow.
+  const filteredGroups = useMemo(
+    () => filterGanttGroups(localGroups, search, statusFilter, priorityFilter),
+    [localGroups, search, statusFilter, priorityFilter]
+  );
 
   // ── Separate scheduled / unscheduled ──────────────────────────────────────
   const { scheduledGroups, unscheduledItems } = useMemo(() => {
     type UItem = {
       id: string; title: string; href: string; status: string;
+      statusColor?: string;
       priority?: string | null; isGroup: boolean; isMilestone: boolean;
     };
     const scheduled: GanttGroup[] = [];
@@ -227,7 +251,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
 
       for (const c of unscheduledKids) {
         unscheduled.push({
-          id: c.id, title: c.title, href: c.href, status: c.status,
+          id: c.id, title: c.title, href: c.href, status: c.status, statusColor: c.statusColor,
           priority: c.priority, isGroup: false, isMilestone: c.type === "milestone",
         });
       }
@@ -351,6 +375,11 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
     for (const g of localGroups) { s.add(g.status); for (const c of g.children) s.add(c.status); }
     return [...s].sort();
   }, [localGroups]);
+
+  // Same department-scoped label source as the legend — falls back to the
+  // static enum label only when unresolvable (e.g. a Project-status value,
+  // or "All Workspaces" with no single department to resolve against).
+  const statusLabelFor = (s: string) => activityStatusLegendEntries?.find((e) => e.key === s)?.label ?? STATUS_LABEL[s] ?? s;
 
   // ── Dependency arrow geometry ──────────────────────────────────────────────
 
@@ -538,10 +567,15 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
     item, barH, isGroup,
   }: {
     item: {
-      id: string; title: string; status: string; priority?: string | null;
-      startDate: string | null; endDate: string | null; progress: number; href: string;
+      id: string; title: string; status: string;
+      statusLabel?: string; statusColor?: string;
+      priority?: string | null;
+      startDate: string | null; endDate: string | null;
+      /** null means no ActivityProgressConfig row is configured/enabled for this activity's department+status — never rendered as 0%/hidden, shown as "Configuration required" in the tooltip instead. Always a real number for a project bar (group.progress, the stored rollup). */
+      progress: number | null; href: string;
       assigneeName?: string | null; assigneeImage?: string | null;
       ownerName?: string | null; ownerImage?: string | null;
+      overdue?: boolean;
     };
     barH: number;
     isGroup: boolean;
@@ -549,7 +583,15 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
     const m = barMetrics(item.startDate, item.endDate);
     if (!m) return null;
 
-    const barColor    = STATUS_BAR[item.status] ?? "bg-slate-400";
+    // An activity item always carries its own department-resolved
+    // label/color (lib/services/activity-status-config.ts) — used as an
+    // inline color instead of the legacy Tailwind-class map. A project
+    // (group) bar has neither and keeps the class-based STATUS_BAR lookup
+    // (ProjectStatus isn't part of this department-scoping system).
+    const hasCustomColor = !!item.statusColor;
+    const barColorClass = hasCustomColor ? "" : (STATUS_BAR[item.status] ?? "bg-slate-400");
+    const barInlineStyle = hasCustomColor ? { backgroundColor: item.statusColor } : undefined;
+    const displayLabel = item.statusLabel ?? STATUS_LABEL[item.status] ?? item.status;
     const top         = (ROW_H - barH) / 2;
     const personName  = item.assigneeName  ?? item.ownerName;
     const personImage = item.assigneeImage ?? item.ownerImage;
@@ -597,11 +639,12 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
           className={cn(
             "relative w-full h-full overflow-hidden transition-opacity",
             isGroup ? "rounded shadow-sm" : "rounded-sm",
-            barColor,
+            barColorClass,
             item.status === "CANCELLED" && "opacity-40",
           )}
+          style={barInlineStyle}
         >
-          {item.progress > 0 && (
+          {item.progress != null && item.progress > 0 && (
             <div
               className="absolute inset-y-0 left-0 bg-black/25"
               style={{ width: `${item.progress}%` }}
@@ -609,7 +652,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
           )}
           {m.width > 48 && (
             <span className="absolute inset-0 flex items-center px-2 text-[10px] font-medium text-white truncate pointer-events-none z-10 drop-shadow-sm">
-              {item.progress > 0 ? `${item.progress}%` : item.title}
+              {item.progress != null && item.progress > 0 ? `${item.progress}%` : item.title}
             </span>
           )}
           <div className="absolute inset-0 rounded ring-0 hover:ring-2 hover:ring-white/60 transition-all pointer-events-none" />
@@ -626,12 +669,18 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
             <p className="text-[11px] text-muted-foreground">{isGroup ? "Project" : "Activity"}</p>
           </div>
           <div className="flex flex-wrap gap-1.5">
-            <span className={cn("inline-flex items-center text-[11px] px-2 py-0.5 rounded-full font-medium text-white", barColor)}>
-              {STATUS_LABEL[item.status] ?? item.status}
+            <span className={cn("inline-flex items-center text-[11px] px-2 py-0.5 rounded-full font-medium text-white", barColorClass)} style={barInlineStyle}>
+              {displayLabel}
             </span>
             {item.priority && PRIORITY_CLS[item.priority] && (
               <span className={cn("text-[11px] px-2 py-0.5 rounded-full font-medium", PRIORITY_CLS[item.priority])}>
                 {item.priority}
+              </span>
+            )}
+            {item.overdue && (
+              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700">
+                <AlertTriangle className="h-2.5 w-2.5" />
+                Overdue
               </span>
             )}
           </div>
@@ -639,16 +688,19 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
             {item.startDate && <p><span className="text-muted-foreground">Start:</span>{" "}{format(new Date(item.startDate), "MMM d, yyyy")}</p>}
             {item.endDate   && <p><span className="text-muted-foreground">End:</span>{" "}{format(new Date(item.endDate),   "MMM d, yyyy")}</p>}
           </div>
-          {item.progress > 0 && (
+          {item.progress != null && item.progress > 0 && (
             <div className="space-y-1">
               <div className="flex justify-between text-xs">
                 <span className="text-muted-foreground">Progress</span>
                 <span className="font-semibold">{item.progress}%</span>
               </div>
               <div className="h-1.5 bg-muted rounded-full overflow-hidden">
-                <div className={cn("h-full rounded-full", barColor)} style={{ width: `${item.progress}%` }} />
+                <div className={cn("h-full rounded-full", barColorClass)} style={{ width: `${item.progress}%`, ...barInlineStyle }} />
               </div>
             </div>
+          )}
+          {item.progress === null && (
+            <p className="text-[11px] font-medium text-amber-700">Configuration required — no progress percentage configured for this status.</p>
           )}
           {personName && (
             <div className="flex items-center gap-1.5 text-xs">
@@ -677,7 +729,10 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
     const size        = Math.round(ROW_H * 0.45);
     const left        = centerX - size / 2;
     const top         = (ROW_H - size) / 2;
-    const barColor    = STATUS_BAR[item.status] ?? "bg-slate-400";
+    const hasCustomColor = !!item.statusColor;
+    const barColorClass = hasCustomColor ? "" : (STATUS_BAR[item.status] ?? "bg-slate-400");
+    const barInlineStyle = hasCustomColor ? { backgroundColor: item.statusColor } : undefined;
+    const displayLabel = item.statusLabel ?? STATUS_LABEL[item.status] ?? item.status;
     const isDraggable = canEdit && !!item.endDate;
 
     const markerEl = (
@@ -700,8 +755,8 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
         onClick={isDraggable ? undefined : () => router.push(item.href)}
       >
         <div
-          className={cn("w-full h-full shadow-sm", barColor, item.status === "CANCELLED" && "opacity-40")}
-          style={{ transform: "rotate(45deg)" }}
+          className={cn("w-full h-full shadow-sm", barColorClass, item.status === "CANCELLED" && "opacity-40")}
+          style={{ transform: "rotate(45deg)", ...barInlineStyle }}
         />
         <div
           className="absolute inset-0 hover:ring-2 hover:ring-white/60 transition-all pointer-events-none"
@@ -718,10 +773,16 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
             <p className="font-semibold text-sm leading-snug">{item.title}</p>
             <p className="text-[11px] text-muted-foreground">Milestone</p>
           </div>
-          <div>
-            <span className={cn("inline-flex items-center text-[11px] px-2 py-0.5 rounded-full font-medium text-white", barColor)}>
-              {STATUS_LABEL[item.status] ?? item.status}
+          <div className="flex flex-wrap gap-1.5">
+            <span className={cn("inline-flex items-center text-[11px] px-2 py-0.5 rounded-full font-medium text-white", barColorClass)} style={barInlineStyle}>
+              {displayLabel}
             </span>
+            {item.overdue && (
+              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700">
+                <AlertTriangle className="h-2.5 w-2.5" />
+                Overdue
+              </span>
+            )}
           </div>
           {item.endDate && (
             <p className="text-xs">
@@ -776,7 +837,19 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
               <SelectContent>
                 <SelectItem value="ALL">All statuses</SelectItem>
                 {allStatuses.map((s) => (
-                  <SelectItem key={s} value={s}>{STATUS_LABEL[s] ?? s}</SelectItem>
+                  <SelectItem key={s} value={s}>{statusLabelFor(s)}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Select value={priorityFilter} onValueChange={setPriorityFilter}>
+              <SelectTrigger className="h-9 w-[150px] text-xs">
+                <SelectValue placeholder="All priorities" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">All priorities</SelectItem>
+                {priorityOptions.map((p) => (
+                  <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -794,7 +867,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
         </div>
 
         {/* Legend */}
-        <StatusLegend />
+        <StatusLegend entries={activityStatusLegendEntries} />
 
         {/* Chart */}
         <div className="rounded-lg border overflow-hidden">
@@ -878,6 +951,9 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                                 <Link href={group.href} className="font-semibold text-xs truncate hover:text-primary transition-colors">
                                   {group.title}
                                 </Link>
+                                {group.overdue && (
+                                  <AlertTriangle className="h-3 w-3 text-red-600 flex-shrink-0" aria-label="Overdue" />
+                                )}
                                 {group.progress > 0 && (
                                   <span className="text-[10px] text-muted-foreground flex-shrink-0 ml-auto">{group.progress}%</span>
                                 )}
@@ -891,7 +967,7 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                                 <div className="absolute inset-y-0 w-0.5 bg-red-500/70 pointer-events-none z-10" style={{ left: todayPx }} />
                               )}
                               <Bar
-                                item={{ id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage }}
+                                item={{ id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue }}
                                 barH={24}
                                 isGroup
                               />
@@ -907,9 +983,9 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                               >
                                 <div className="flex items-center gap-1.5 pl-8 pr-2 h-full min-w-0">
                                   {child.type === "milestone" ? (
-                                    <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", STATUS_BAR[child.status] ?? "bg-slate-400")} />
+                                    <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", !child.statusColor && (STATUS_BAR[child.status] ?? "bg-slate-400"))} style={child.statusColor ? { backgroundColor: child.statusColor } : undefined} />
                                   ) : (
-                                    <span className={cn("h-1.5 w-1.5 rounded-full flex-shrink-0", STATUS_BAR[child.status] ?? "bg-slate-400")} />
+                                    <span className={cn("h-1.5 w-1.5 rounded-full flex-shrink-0", !child.statusColor && (STATUS_BAR[child.status] ?? "bg-slate-400"))} style={child.statusColor ? { backgroundColor: child.statusColor } : undefined} />
                                   )}
                                   {child.type !== "milestone" && child.assigneeImage !== undefined && (
                                     <Avatar className="h-4 w-4 flex-shrink-0">
@@ -920,6 +996,9 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                                   <Link href={child.href} className="text-xs truncate hover:text-primary transition-colors">
                                     {child.title}
                                   </Link>
+                                  {child.overdue && (
+                                    <AlertTriangle className="h-3 w-3 text-red-600 flex-shrink-0" aria-label="Overdue" />
+                                  )}
                                   {child.type === "milestone" && (
                                     <span className="text-[9px] px-1 py-0.5 rounded font-medium flex-shrink-0 ml-auto bg-violet-50 text-violet-700 border border-violet-200">
                                       M
@@ -968,9 +1047,9 @@ export function GanttChart({ groups, canEdit = false, dependencies }: GanttChart
                             >
                               <div className={cn("flex items-center gap-1.5 h-full min-w-0", item.isGroup ? "px-7" : "pl-8 pr-2")}>
                                 {item.isMilestone ? (
-                                  <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", STATUS_BAR[item.status] ?? "bg-slate-400")} />
+                                  <div className={cn("h-2 w-2 flex-shrink-0 rotate-45", !item.statusColor && (STATUS_BAR[item.status] ?? "bg-slate-400"))} style={item.statusColor ? { backgroundColor: item.statusColor } : undefined} />
                                 ) : (
-                                  <span className={cn("rounded-full flex-shrink-0", item.isGroup ? "h-2 w-2" : "h-1.5 w-1.5", STATUS_BAR[item.status] ?? "bg-slate-400")} />
+                                  <span className={cn("rounded-full flex-shrink-0", item.isGroup ? "h-2 w-2" : "h-1.5 w-1.5", !item.statusColor && (STATUS_BAR[item.status] ?? "bg-slate-400"))} style={item.statusColor ? { backgroundColor: item.statusColor } : undefined} />
                                 )}
                                 <Link href={item.href} className={cn("truncate hover:text-primary transition-colors text-muted-foreground/70", item.isGroup ? "text-xs font-semibold" : "text-xs")}>
                                   {item.title}

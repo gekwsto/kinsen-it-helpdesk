@@ -21,6 +21,7 @@ import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/service
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
 import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
+import { syncMicrosoftProfilePhoto } from "@/lib/services/microsoft-profile-photo-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -196,7 +197,6 @@ export interface HandleMicrosoftJwtSignInParams {
   providerAccountId: string;
   userEmail: string;
   userName?: string | null;
-  userImage?: string | null;
   fallbackGroups?: string[];
   fallbackRoles?: string[];
 }
@@ -220,7 +220,7 @@ export interface HandleMicrosoftJwtSignInParams {
 export async function handleMicrosoftJwtSignIn(
   params: HandleMicrosoftJwtSignInParams
 ): Promise<SyncEligibleDbUser> {
-  const { dbUser, accessToken, oid, providerAccountId, userEmail, userName, userImage, fallbackGroups, fallbackRoles } = params;
+  const { dbUser, accessToken, oid, providerAccountId, userEmail, userName, fallbackGroups, fallbackRoles } = params;
 
   console.log("[auth] microsoft jwt sign-in started", {
     userId: dbUser.id,
@@ -228,11 +228,10 @@ export async function handleMicrosoftJwtSignIn(
     oidPresent: !!oid,
   });
 
-  const profileUpdate: { microsoftUserId?: string; name?: string; image?: string } = {};
+  const profileUpdate: { microsoftUserId?: string; name?: string } = {};
   if (oid && dbUser.microsoftUserId !== oid) profileUpdate.microsoftUserId = oid;
-  // Backfill only — never overwrite an existing (possibly admin-set) name/image.
+  // Backfill only — never overwrite an existing (possibly admin-set) name.
   if (!dbUser.name && userName) profileUpdate.name = userName;
-  if (!dbUser.image && userImage) profileUpdate.image = userImage;
   if (Object.keys(profileUpdate).length > 0) {
     await prisma.user.update({ where: { id: dbUser.id }, data: profileUpdate });
   }
@@ -248,6 +247,21 @@ export async function handleMicrosoftJwtSignIn(
     fallbackRoles,
   });
 
+  // Runs for EVERY Microsoft sign-in — new user or existing, no branching
+  // needed here (see lib/services/microsoft-profile-photo-service.ts's own
+  // header comment for why). Never throws, never blocks/fails sign-in — a
+  // Graph failure here just means this login's photo check is skipped.
+  const photoResult = await syncMicrosoftProfilePhoto({ userId: dbUser.id, accessToken });
+  if (!photoResult.ok) {
+    console.warn("[auth] microsoft jwt sign-in photo sync skipped", {
+      userId: dbUser.id,
+      reason: photoResult.reason,
+      status: photoResult.status,
+    });
+  } else if (photoResult.updated) {
+    console.log("[auth] microsoft jwt sign-in photo sync updated", { userId: dbUser.id });
+  }
+
   // The critical step: read back what sync just wrote, so the caller builds
   // the token from fresh data instead of the pre-sync snapshot above.
   const refreshed = await prisma.user.findUnique({
@@ -260,6 +274,7 @@ export async function handleMicrosoftJwtSignIn(
     role: refreshed?.role ?? dbUser.role,
     departmentId: refreshed?.departmentId ?? dbUser.departmentId,
     globalRoleSource: refreshed?.globalRoleSource ?? dbUser.globalRoleSource,
+    photoUpdated: photoResult.ok && photoResult.updated,
   });
 
   // refreshed should always be non-null (we just wrote to this exact row) —

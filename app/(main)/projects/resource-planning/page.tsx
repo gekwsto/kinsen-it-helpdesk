@@ -10,11 +10,12 @@ import { CalendarRange, ShieldOff, Building2 } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { addDays, addWeeks, addMonths, startOfWeek, startOfMonth, endOfMonth, format } from "date-fns";
 import { ResourcePlanningFilters } from "@/components/resource-planning/resource-planning-filters";
+import { getActivityPriorityConfigsForDepartments, buildPriorityFilterOptions } from "@/lib/priority-config";
 import { ResourcePlanningToolbar, type ResourcePlanningView } from "@/components/resource-planning/resource-planning-toolbar";
 import { ResourceTimeline, type ResourceRow } from "@/components/resource-planning/resource-timeline";
 import { UnscheduledPanel } from "@/components/resource-planning/unscheduled-panel";
 import { StatusLegend } from "@/components/gantt/status-legend";
-import { ACTIVITY_STATUS_KEYS } from "@/components/gantt/status-colors";
+import { getDepartmentActivityStatusRows } from "@/lib/services/activity-status-config";
 
 interface SearchParams {
   departmentId?: string;
@@ -95,7 +96,7 @@ export default async function ResourcePlanningPage({
   const rangeLabel =
     view === "week" ? `${format(rangeStart, "d MMM")} – ${format(rangeEnd, "d MMM yyyy")}` : format(rangeStart, "MMMM yyyy");
 
-  const [result, projects, canEdit] = await Promise.all([
+  const [result, projects, canEdit, priorityConfigs] = await Promise.all([
     getResourcePlanningData(
       { userId: session.user.id, role: session.user.role, customRoleId: session.user.customRoleId },
       { departmentId, subDepartmentId, projectId, status, priority, rangeStart, rangeEnd }
@@ -106,7 +107,20 @@ export default async function ResourcePlanningPage({
     // itself re-validates, computed once for the single resolved department
     // this page always operates on.
     canActOnEntity(session.user.id, session.user.role, departmentId, "activity.edit"),
+    // Same scoped priority source (ActivityPriorityConfig) Project Gantt's
+    // own Priority filter reads (lib/priority-config.ts) — no separate
+    // hardcoded canonical-order constant here anymore.
+    getActivityPriorityConfigsForDepartments([departmentId]),
   ]);
+  const priorityOptions = buildPriorityFilterOptions(priorityConfigs, departmentId);
+  // This department's own real Activity Status rows — the same table/
+  // resolver Activity List/Grid/Gantt/Resource Planning bars all read
+  // (lib/services/activity-status-config.ts). Only ENABLED rows are offered
+  // for filtering/selecting; a disabled status's historical activities are
+  // still shown normally on the timeline itself, just not selectable here.
+  const activityStatusRows = await getDepartmentActivityStatusRows(departmentId);
+  const enabledStatusOptions = activityStatusRows.filter((r) => r.isEnabled).map((r) => ({ value: r.status, label: r.label }));
+  const statusLegendEntries = activityStatusRows.map((r) => ({ key: r.status, label: r.label, color: r.color }));
 
   if (result.denied) redirect("/dashboard");
 
@@ -172,6 +186,8 @@ export default async function ResourcePlanningPage({
           selectedProjectId={projectId}
           selectedStatus={status}
           selectedPriority={priority}
+          priorityOptions={priorityOptions}
+          statusOptions={enabledStatusOptions}
           unscheduled={unscheduled}
           resources={resources}
         />
@@ -179,7 +195,7 @@ export default async function ResourcePlanningPage({
         <div className="flex-1 min-w-0 space-y-3">
           <ResourcePlanningToolbar view={view} rangeStart={format(rangeStart, "yyyy-MM-dd")} rangeLabel={rangeLabel} />
 
-          <StatusLegend statusKeys={ACTIVITY_STATUS_KEYS} />
+          <StatusLegend entries={statusLegendEntries} />
 
           {resourceRows.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-3 rounded-lg border py-16 text-center text-muted-foreground">

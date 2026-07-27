@@ -22,6 +22,7 @@ import { ActivityStatus, ActivityPriority } from "@prisma/client";
 interface Project { id: string; title: string }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface SubDepartmentOption { id: string; name: string }
+interface StatusOption { status: ActivityStatus; label: string; color: string }
 
 interface ActivityNewFormProps {
   /** Active workspace department — drives which users are shown as eligible assignees; may be null (no workspace resolved yet), matching what POST /api/activities itself falls back to. */
@@ -44,6 +45,7 @@ export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
   const [dueDate, setDueDate] = useState("");
   const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
   const [subDepartmentId, setSubDepartmentId] = useState("");
+  const [statusOptions, setStatusOptions] = useState<StatusOption[]>([]);
 
   useEffect(() => {
     const assignableUrl = `/api/users?assignableFor=activity${departmentId ? `&departmentId=${departmentId}` : ""}`;
@@ -51,11 +53,19 @@ export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
       fetch("/api/projects?limit=100").then((r) => r.json()),
       fetch(assignableUrl).then((r) => (r.ok ? r.json() : [])),
       departmentId ? fetch(`/api/departments/${departmentId}/sub-departments`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+      departmentId ? fetch(`/api/departments/${departmentId}/activity-statuses`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
     ])
-      .then(([p, u, sd]) => {
+      .then(([p, u, sd, statuses]) => {
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setAssignableUsers(Array.isArray(u) ? u : []);
         setSubDepartments(Array.isArray(sd) ? sd : []);
+        const options: StatusOption[] = Array.isArray(statuses) ? statuses.map((row: any) => ({ status: row.status, label: row.label, color: row.color })) : [];
+        setStatusOptions(options);
+        // Default to the department's own lowest-sortOrder enabled status
+        // (e.g. its own "To Do" equivalent) instead of the raw enum's TODO —
+        // a department that renamed/reordered its statuses gets the right
+        // default, not a fixed guess.
+        if (options.length > 0) setStatus(options[0].status);
       })
       .catch(() => {});
   }, [departmentId]);
@@ -146,9 +156,9 @@ export function ActivityNewForm({ departmentId }: ActivityNewFormProps) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {Object.values(ActivityStatus).map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s.replace(/_/g, " ")}
+                    {statusOptions.map((s) => (
+                      <SelectItem key={s.status} value={s.status}>
+                        {s.label}
                       </SelectItem>
                     ))}
                   </SelectContent>

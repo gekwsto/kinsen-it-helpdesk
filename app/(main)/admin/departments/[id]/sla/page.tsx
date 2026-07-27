@@ -5,6 +5,7 @@ import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import { WorkspaceSlaManager } from "@/components/admin/workspace-sla-manager";
+import { resolveSlaHoursFromRelation } from "@/lib/services/sla-policy";
 
 const SLA_PERMISSION_KEYS = ["sla.create", "sla.edit", "sla.delete"];
 
@@ -27,17 +28,22 @@ export default async function DepartmentSlaPage({
   const department = await prisma.department.findUnique({ where: { id }, select: { id: true, name: true } });
   if (!department) notFound();
 
-  const [canEdit, canDelete] = await Promise.all([
+  const [canCreate, canEdit, canDelete] = await Promise.all([
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.create", access.membership!.customRoleId),
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.edit", access.membership!.customRoleId),
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.delete", access.membership!.customRoleId),
   ]);
 
   const [settings, priorities] = await Promise.all([
     prisma.slaSettings.findFirst(),
+    // Admin management view intentionally includes disabled levels too —
+    // an admin must be able to see, re-enable, or safely delete a disabled
+    // level here. Ticket-creation dropdowns filter to isActive:true on
+    // their own (see e.g. app/(main)/tickets/new).
     prisma.ticketPriority.findMany({
-      where: { isActive: true, departmentId: id },
+      where: { departmentId: id },
       orderBy: { level: "desc" },
-      include: { slaPolicy: true, department: { select: { id: true, name: true } } },
+      include: { slaPolicy: true, department: { select: { id: true, name: true } }, _count: { select: { tickets: true } } },
     }),
   ]);
 
@@ -64,20 +70,27 @@ export default async function DepartmentSlaPage({
 
       <WorkspaceSlaManager
         isEnabled={settings?.isEnabled ?? false}
-        priorities={priorities.map((p) => ({
-          id: p.id,
-          name: p.name,
-          color: p.color,
-          level: p.level,
-          departmentId: p.departmentId,
-          department: p.department ?? null,
-          firstResponseHours: p.slaPolicy?.firstResponseHours ?? 8,
-          resolutionHours: p.slaPolicy?.resolutionHours ?? 48,
-          hasPolicy: p.slaPolicy != null,
-        }))}
+        priorities={priorities.map((p) => {
+          const resolution = resolveSlaHoursFromRelation(p.slaPolicy, p.id);
+          return {
+            id: p.id,
+            name: p.name,
+            color: p.color,
+            level: p.level,
+            isActive: p.isActive,
+            departmentId: p.departmentId,
+            department: p.department ?? null,
+            // null means no SlaPolicy row exists — render "SLA not configured", never fabricate 8h/48h.
+            firstResponseHours: resolution.ok ? resolution.hours.firstResponseHours : null,
+            resolutionHours: resolution.ok ? resolution.hours.resolutionHours : null,
+            hasPolicy: resolution.ok,
+            ticketCount: p._count.tickets,
+          };
+        })}
         departmentOptions={[]}
         fixedDepartmentId={department.id}
         mode="scoped"
+        canCreate={canCreate}
         canEdit={canEdit}
         canDelete={canDelete}
       />

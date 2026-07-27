@@ -209,6 +209,24 @@ export default async function DepartmentDetailPage({
           </Link>
         )}
 
+        {canManageActivityProgress && (
+          <Link href={`/admin/departments/${department.id}/activity-statuses`}>
+            <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+              <CardHeader className="flex flex-row items-center gap-3 pb-2">
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50">
+                  <ListChecks className="h-4 w-4 text-blue-600" />
+                </div>
+                <div>
+                  <CardTitle className="text-base">Activity Statuses</CardTitle>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">Label, color, order, and enabled/terminal state per activity status for this department.</p>
+              </CardContent>
+            </Card>
+          </Link>
+        )}
+
         {canViewSubDepartments && (
           <Link href={`/admin/departments/${department.id}/sub-departments`}>
             <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">

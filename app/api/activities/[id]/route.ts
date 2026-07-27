@@ -7,7 +7,8 @@ import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateActivitySchema } from "@/lib/validations";
 import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
-import { getActivityProgressFromStatus } from "@/lib/activities/activity-progress";
+import { tryGetActivityProgressFromStatus, getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
+import { getActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { Role } from "@prisma/client";
 
 export async function GET(
@@ -37,9 +38,15 @@ export async function GET(
     // Recomputed fresh against the department's CURRENT config, not just the
     // last-written stored value — so an admin's later percentage edit shows
     // up immediately without needing the activity's status to change again.
-    const progress = await getActivityProgressFromStatus(activity.departmentId, activity.status);
+    // Never fabricated: a gap resolves to progress:null + progressConfigError,
+    // which the detail view renders as an explicit "Configuration required"
+    // state instead of a fake percentage.
+    const resolution = await tryGetActivityProgressFromStatus(activity.departmentId, activity.status);
+    const progress = resolution.ok ? resolution.percent : null;
+    const progressConfigError = resolution.ok ? null : { reason: resolution.reason };
+    const statusDisplay = await getActivityStatusDisplay(activity.departmentId, activity.status);
 
-    return NextResponse.json({ ...activity, progress });
+    return NextResponse.json({ ...activity, progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -171,9 +178,25 @@ export async function PATCH(
     // never accepted from the client (the "progress" field was removed from
     // updateActivitySchema entirely; see lib/validations.ts). Recomputed on
     // every write, not just when status itself changes, so it can never
-    // silently drift out of sync with the department's current config.
+    // silently drift out of sync with the department's current config. A
+    // missing/disabled config row for the target status/department rejects
+    // the whole update (configuration_required) rather than persisting a
+    // fabricated percentage — this also means a status can never be moved
+    // INTO a gap through a normal edit, PATCH-driven Gantt drag, or
+    // Resource Planning drag.
     const effectiveStatus = data.status ?? existing.status;
-    const derivedProgress = await getActivityProgressFromStatus(effectiveDepartmentId, effectiveStatus);
+    let derivedProgress: number;
+    try {
+      derivedProgress = await getActivityProgressFromStatus(effectiveDepartmentId, effectiveStatus);
+    } catch (err) {
+      if (err instanceof ActivityProgressConfigurationError) {
+        return NextResponse.json(
+          { error: `No progress configuration exists for status "${effectiveStatus}" in this department. Ask an admin to configure it under Activity Progress before using this status.`, code: "configuration_required" },
+          { status: 409 }
+        );
+      }
+      throw err;
+    }
 
     const activity = await prisma.projectActivity.update({
       where: { id },
@@ -210,7 +233,8 @@ export async function PATCH(
       });
     }
 
-    return NextResponse.json(activity);
+    const statusDisplay = await getActivityStatusDisplay(effectiveDepartmentId, effectiveStatus);
+    return NextResponse.json({ ...activity, statusLabel: statusDisplay.label, statusColor: statusDisplay.color });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { buildTicketListWhere, hasAnyFullTicketView } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { getProjectsDashboardData } from "@/lib/services/projects-dashboard-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { KpiCards } from "@/components/dashboard/kpi-cards";
 import { RecentTickets } from "@/components/dashboard/recent-tickets";
@@ -9,11 +10,22 @@ import { TicketsByStatusChart } from "@/components/dashboard/tickets-by-status-c
 import { TicketsByPriorityChart } from "@/components/dashboard/tickets-by-priority-chart";
 import { TicketsByCategoryChart } from "@/components/dashboard/tickets-by-category-chart";
 import { TicketsOverTimeChart } from "@/components/dashboard/tickets-over-time-chart";
+import { DashboardTabs, type DashboardTab } from "@/components/dashboard/dashboard-tabs";
+import { ProjectsKpiCards } from "@/components/dashboard/projects-kpi-cards";
+import { DashboardPieCard } from "@/components/dashboard/dashboard-pie-card";
+import { DashboardBarCard } from "@/components/dashboard/dashboard-bar-card";
+import { RecentProjects } from "@/components/dashboard/recent-projects";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { ShieldOff, FolderKanban } from "lucide-react";
 import { formatRelative, formatTicketNumber } from "@/lib/utils";
 import Link from "next/link";
 
 const TIMELINE_DAYS = 30;
+
+interface SearchParams {
+  tab?: string;
+}
 
 /**
  * Statuses/priorities/categories are strictly department-owned now (no more
@@ -40,13 +52,18 @@ function aggregateByName<T extends { name: string; color: string }>(
   return Array.from(byName.values());
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
   const session = await auth();
   if (!session?.user) return null;
 
   const userId = session.user.id;
   const role = session.user.role;
-  const isPersonalView = !(await hasAnyFullTicketView(userId, role));
+  const params = await searchParams;
+  const tab: DashboardTab = params.tab === "projects" ? "projects" : "tickets";
 
   const activeWorkspace = await getActiveWorkspace(userId, role);
   if (!activeWorkspace.departmentId && !activeWorkspace.isAllSelected) {
@@ -56,6 +73,91 @@ export default async function DashboardPage() {
       <ChooseWorkspaceState departments={activeWorkspace.departments} />
     );
   }
+
+  // Projects Dashboard (Part 3) — same page, same route, swapped via the
+  // `tab` query param (DashboardTabs). Only the selected tab's data is ever
+  // fetched: picking "projects" here returns before any ticket query runs,
+  // so the Ticket Dashboard's own queries/behavior below are completely
+  // unaffected by this branch existing at all.
+  if (tab === "projects") {
+    const effectiveDepartmentId = activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId;
+    const data = await getProjectsDashboardData(userId, role, effectiveDepartmentId ?? undefined);
+    if ("denied" in data) {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-[60vh] text-center gap-4">
+          <ShieldOff className="h-12 w-12 text-muted-foreground" />
+          <h1 className="text-xl font-semibold">Access denied</h1>
+          <p className="text-muted-foreground text-sm max-w-sm">
+            You don&apos;t have access to that department.
+          </p>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div>
+            <h1 className="text-2xl font-bold">Dashboard</h1>
+            <p className="text-muted-foreground mt-1">Projects overview</p>
+          </div>
+          <DashboardTabs active={tab} />
+        </div>
+
+        <ProjectsKpiCards
+          totalProjects={data.totalProjects}
+          activeProjects={data.activeProjects}
+          completedProjects={data.completedProjects}
+          overdueProjects={data.overdueProjects}
+          totalActivities={data.totalActivities}
+          completedActivities={data.completedActivities}
+          overdueActivities={data.overdueActivities}
+        />
+
+        <div className="grid gap-6 md:grid-cols-2">
+          <DashboardPieCard title="Projects by Status" data={data.byStatus} emptyLabel="No projects yet" />
+          <DashboardPieCard title="Projects by Priority" data={data.byPriority} emptyLabel="No projects yet" />
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <RecentProjects projects={data.recentProjects} />
+          </div>
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Due Soon</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {data.dueSoonProjects === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No active projects due within the next 7 days.
+                </p>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-50 flex-shrink-0">
+                    <FolderKanban className="h-5 w-5 text-amber-600" />
+                  </div>
+                  <div>
+                    <p className="text-2xl font-bold">{data.dueSoonProjects}</p>
+                    <p className="text-xs text-muted-foreground">
+                      project{data.dueSoonProjects !== 1 ? "s" : ""} due within 7 days
+                    </p>
+                  </div>
+                </div>
+              )}
+              <Button asChild variant="outline" size="sm" className="mt-4 w-full">
+                <Link href="/projects">View all projects</Link>
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+
+        <DashboardBarCard title="Projects by Owner" data={data.byOwner} emptyLabel="No projects yet" tooltipLabel="Projects" />
+      </div>
+    );
+  }
+
+  const isPersonalView = !(await hasAnyFullTicketView(userId, role));
 
   const scope = await buildTicketListWhere(
     userId,
@@ -190,15 +292,18 @@ export default async function DashboardPage() {
   return (
     <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="text-2xl font-bold">
-          {isPersonalView ? "My Dashboard" : "Dashboard"}
-        </h1>
-        <p className="text-muted-foreground mt-1">
-          {isPersonalView
-            ? "Your personal ticket overview"
-            : `Welcome back, ${session.user.name?.split(" ")[0]}`}
-        </p>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-2xl font-bold">
+            {isPersonalView ? "My Dashboard" : "Dashboard"}
+          </h1>
+          <p className="text-muted-foreground mt-1">
+            {isPersonalView
+              ? "Your personal ticket overview"
+              : `Welcome back, ${session.user.name?.split(" ")[0]}`}
+          </p>
+        </div>
+        <DashboardTabs active={tab} />
       </div>
 
       {/* Row 1 — KPI cards */}

@@ -13,7 +13,9 @@ import {
   ensurePriorityForDepartment,
   ensureStatusForDepartment,
   ensureActivityProgressConfigForDepartment,
+  ensureStatusAndPriorityConfigForDepartment,
 } from "@/lib/services/config-starter-data";
+import { checkAllDepartmentsConfigHealth } from "@/lib/services/config-health";
 
 const prisma = new PrismaClient();
 
@@ -130,7 +132,9 @@ const PERMISSIONS = [
   { key: "sla.create", description: "Create a department's SLA policy for a priority", module: "ticketConfig" },
   { key: "sla.edit", description: "Edit SLA response/resolution hours", module: "ticketConfig" },
   { key: "sla.delete", description: "Remove a department's SLA policy override", module: "ticketConfig" },
+  { key: "activityProgress.create", description: "Add a status row to this department's activity progress mapping", module: "ticketConfig" },
   { key: "activityProgress.edit", description: "Edit this department's status->progress% mapping for activities", module: "ticketConfig" },
+  { key: "activityProgress.delete", description: "Remove a status row from this department's activity progress mapping", module: "ticketConfig" },
 ];
 
 // Every new permission key introduced above, grouped by the roleKey that
@@ -146,7 +150,7 @@ const TICKET_CONFIG_PERMISSION_KEYS = [
   "status.create", "status.edit", "status.delete",
   "cancelReason.create", "cancelReason.edit", "cancelReason.delete",
   "sla.create", "sla.edit", "sla.delete",
-  "activityProgress.edit",
+  "activityProgress.create", "activityProgress.edit", "activityProgress.delete",
 ];
 
 const ROLE_PERMISSIONS: Record<string, string[]> = {
@@ -327,6 +331,18 @@ async function main() {
   }
   console.log("✓ Departments seeded");
 
+  // Terminal-status (Project/Activity) + priority-order config — every
+  // department must have a full row set (lib/status-terminal.ts and
+  // lib/priority-config.ts treat a missing row as a real gap, never a
+  // hardcoded-default fallback). createDepartment() seeds this for any
+  // department created through the app; this seed script bypasses that
+  // function (direct upsert, for idempotent re-seeding), so it seeds the
+  // same rows itself. skipDuplicates makes this safe to re-run.
+  for (const dept of departments) {
+    await ensureStatusAndPriorityConfigForDepartment(prisma, dept.id);
+  }
+  console.log("✓ Status-terminal and priority-order config seeded");
+
   // Ticket Categories/Priorities/Statuses — fully department-owned, every
   // department gets its own independent copy of the same starter set (no
   // more global/shared departmentId:null rows — see the
@@ -349,6 +365,17 @@ async function main() {
   }
   console.log("✓ Ticket categories/priorities/statuses seeded per department");
   console.log("✓ Activity progress-from-status config seeded per department");
+
+  // Verifies the backfill above actually left every department fully
+  // configured (every used ActivityStatus has one enabled progress row,
+  // every active SLA priority has one policy row, no duplicates, valid
+  // ranges, deterministic sort order) — logs loudly per department if not,
+  // never silently. Idempotent (safe to run on every seed invocation).
+  const healthResults = await checkAllDepartmentsConfigHealth(prisma, "seed");
+  const unhealthyCount = healthResults.filter((r) => !r.healthy).length;
+  console.log(unhealthyCount === 0
+    ? "✓ Configuration completeness verified for all departments"
+    : `⚠ Configuration completeness check found issues in ${unhealthyCount} department(s) — see [config-health] logs above`);
 
   // Microsoft Entra mapping examples — pure data, no code branches. These
   // are real, usable templates (not placeholders) demonstrating all three

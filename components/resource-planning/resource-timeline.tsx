@@ -20,6 +20,7 @@ import type { ResourceEvent, ResourcePlanningResource } from "@/lib/services/res
 import type { ResourcePlanningView } from "@/components/resource-planning/resource-planning-toolbar";
 import { assignLanes, BAR_H, LANE_GAP, LANE_TOP, BASE_ROW_H } from "@/lib/resource-planning-lanes";
 import { clampDragDelta } from "@/lib/resource-planning-drag-bounds";
+import { findHoveredResourceId, isReassignment, resolveDragOutcome, type RowBound } from "@/lib/resource-planning-drag-target";
 import { getClippedBarMetrics } from "@/lib/resource-planning-bar-metrics";
 import { computePxPerDay } from "@/lib/resource-planning-column-sizing";
 import { computeResourceRowHeights } from "@/lib/resource-planning-row-heights";
@@ -82,12 +83,19 @@ type DragMeta = {
   end: string;
   href: string;
   startX: number;
+  startY: number;
   originalLeft: number; // this bar's own static left, in day-grid-local px (excludes LEFT_W) — the drag boundary clamp below
   barWidth: number;
+  originResourceId: string;
+  originalAssignedUserIds: string[]; // snapshot for revert-on-failure of a cross-row reassignment
+  rowBounds: RowBound[]; // snapshotted once at drag-start, ONLY for resources eligible as an activity-assignment target — see findHoveredResourceId
+  hoverResourceId: string | null; // mutated during moveDrag (a ref field, not React state — no re-render per pointermove), read at drop
 };
 
-function applyDateChange(events: ResourceEvent[], id: string, newStart: string, newEnd: string): ResourceEvent[] {
-  return events.map((e) => (e.id === id ? { ...e, start: newStart, end: newEnd } : e));
+function applyMove(events: ResourceEvent[], id: string, newStart: string, newEnd: string, newAssignedUserIds?: string[]): ResourceEvent[] {
+  return events.map((e) =>
+    e.id === id ? { ...e, start: newStart, end: newEnd, ...(newAssignedUserIds ? { assignedUserIds: newAssignedUserIds } : {}) } : e
+  );
 }
 
 /**
@@ -98,7 +106,12 @@ function applyDateChange(events: ResourceEvent[], id: string, newStart: string, 
  * mechanics (DOM-ref transform during move, zero re-renders, <5px counts as
  * a click, day math, optimistic update + revert-on-failure) are ported from
  * components/gantt/gantt-chart.tsx's startDrag/moveDrag/endDrag — same
- * PATCH /api/activities/[id] target, same {startDate, dueDate} body shape.
+ * PATCH /api/activities/[id] target, same {startDate, dueDate} body shape,
+ * now also sending `assignedUserIds` when the drop lands on a different
+ * resource's row (see lib/resource-planning-drag-target.ts) — the bar
+ * itself never visually leaves its own row during the drag (its origin
+ * row's overflow-hidden would clip it if it did), the target row is
+ * indicated with an outline instead, snapped on drop.
  */
 export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view, canEdit }: ResourceTimelineProps) {
   const router = useRouter();
@@ -131,6 +144,15 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
   // different one moves."
   const barElRefs = useRef(new Map<string, HTMLDivElement>());
   const dragRef = useRef<DragMeta | null>(null);
+  // Each resource row's own day-grid container — used only to snapshot
+  // screen-space bounding boxes once at drag-start (see startDrag) for
+  // cross-row hit-testing; never read on every pointermove.
+  const rowContainerRefs = useRef(new Map<string, HTMLDivElement>());
+  // The row currently outlined as a drop target during an active
+  // cross-row drag — tracked so moveDrag can clear the PREVIOUS row's
+  // outline when the pointer moves to a new one, without React state/
+  // re-renders.
+  const highlightedRowElRef = useRef<HTMLDivElement | null>(null);
 
   const days = useMemo(() => {
     const totalDays = differenceInCalendarDays(rangeEnd, rangeStart) + 1;
@@ -234,7 +256,8 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
   }, [resources, laneCountByResource, minChartHeight]);
 
   // ── Drag handlers (DOM-direct, zero re-renders during move) — ported from
-  // components/gantt/gantt-chart.tsx's startDrag/moveDrag/endDrag/cancelDrag. ──
+  // components/gantt/gantt-chart.tsx's startDrag/moveDrag/endDrag/cancelDrag,
+  // extended with cross-row reassignment (lib/resource-planning-drag-target.ts). ──
   //
   // Horizontal movement is clamped to the date-grid's own coordinate space
   // (originalLeft/barWidth, both excluding LEFT_W) so a bar can never be
@@ -245,6 +268,12 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     return clampDragDelta(d.originalLeft, d.barWidth, totalWidth, rawDelta);
   }
 
+  function clearRowHighlight() {
+    const el = highlightedRowElRef.current;
+    if (el) el.style.outline = "";
+    highlightedRowElRef.current = null;
+  }
+
   function startDrag(
     e: React.PointerEvent<HTMLDivElement>,
     id: string,
@@ -253,7 +282,9 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     end: string,
     href: string,
     originalLeft: number,
-    barWidth: number
+    barWidth: number,
+    originResourceId: string,
+    originalAssignedUserIds: string[]
   ) {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
@@ -262,7 +293,37 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     // — bump it above everything else for the duration of the gesture so it
     // never visually disappears under a bar it's passing over.
     e.currentTarget.style.zIndex = "50";
-    dragRef.current = { id, barKey, start, end, href, startX: e.clientX, originalLeft, barWidth };
+
+    // Snapshotted ONCE per gesture (not re-measured on every pointermove) —
+    // only resources that are actually valid activity-assignment targets
+    // register as a droppable row at all, so hovering an ineligible row
+    // (e.g. a row shown only because of historical/legacy assigned work —
+    // see getResourcePlanningResources) never registers as a target; the
+    // PATCH route re-validates this server-side regardless either way.
+    const rowBounds: RowBound[] = [];
+    for (const r of resources) {
+      if (!r.assignableFor.includes("activity")) continue;
+      const el = rowContainerRefs.current.get(r.id);
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      rowBounds.push({ resourceId: r.id, top: rect.top, bottom: rect.bottom });
+    }
+
+    dragRef.current = {
+      id,
+      barKey,
+      start,
+      end,
+      href,
+      startX: e.clientX,
+      startY: e.clientY,
+      originalLeft,
+      barWidth,
+      originResourceId,
+      originalAssignedUserIds,
+      rowBounds,
+      hoverResourceId: originResourceId,
+    };
   }
 
   function moveDrag(e: React.PointerEvent<HTMLDivElement>, barKey: string) {
@@ -271,12 +332,34 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     const delta = clampDeltaToGrid(d, e.clientX - d.startX);
     const el = barElRefs.current.get(barKey);
     if (el) el.style.transform = `translateX(${delta}px)`;
+
+    // The bar itself stays visually inside its own row (translateX only —
+    // floating it to the pointer's Y position would require it to escape
+    // its origin row's overflow-hidden, which exists on purpose to keep a
+    // bar from ever visually entering the Agent column — see
+    // resource-planning-drag-bounds.ts). The candidate drop target is
+    // indicated by outlining that row instead, updated only when the
+    // hovered row actually changes so this stays cheap on every move.
+    const hovered = findHoveredResourceId(d.rowBounds, e.clientY);
+    if (hovered !== d.hoverResourceId) {
+      d.hoverResourceId = hovered;
+      clearRowHighlight();
+      if (isReassignment(d.originResourceId, hovered)) {
+        const rowEl = rowContainerRefs.current.get(hovered!);
+        if (rowEl) {
+          rowEl.style.outline = "2px solid hsl(var(--primary))";
+          rowEl.style.outlineOffset = "-2px";
+          highlightedRowElRef.current = rowEl;
+        }
+      }
+    }
   }
 
   async function endDrag(e: React.PointerEvent<HTMLDivElement>, barKey: string) {
     const d = dragRef.current;
     if (!d || d.barKey !== barKey) return;
     dragRef.current = null;
+    clearRowHighlight();
 
     const delta = clampDeltaToGrid(d, e.clientX - d.startX);
     const el = barElRefs.current.get(barKey);
@@ -285,51 +368,68 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
       el.style.zIndex = "";
     }
 
-    if (Math.abs(delta) < 5) {
+    const daysDelta = Math.round(delta / pxPerDay);
+    const totalMovementPx = Math.max(Math.abs(e.clientX - d.startX), Math.abs(e.clientY - d.startY));
+    const outcome = resolveDragOutcome({ totalMovementPx, daysDelta, originResourceId: d.originResourceId, hoveredResourceId: d.hoverResourceId });
+
+    if (outcome === "click") {
       router.push(d.href);
       return;
     }
-
-    const daysDelta = Math.round(delta / pxPerDay);
-    if (daysDelta === 0) return;
+    if (outcome === "no-op") return;
 
     const id = d.id;
+    const reassigning = isReassignment(d.originResourceId, d.hoverResourceId);
+    const targetResourceId = d.hoverResourceId; // non-null whenever reassigning is true
 
-    // Both fields always shift by the identical delta (whether the activity
-    // had a real range or was a single-day fallback — start===end in that
-    // case already), same as Gantt's milestone drag always sending both
-    // fields equal — no need to know which raw field was originally set.
+    // Both date fields always shift by the identical delta (whether the
+    // activity had a real range or was a single-day fallback — start===end
+    // in that case already, and 0 when this is a pure reassignment with no
+    // horizontal movement), same as Gantt's milestone drag always sending
+    // both fields equal — no need to know which raw field was originally set.
     const newStart = addDays(new Date(d.start), daysDelta).toISOString();
     const newEnd = addDays(new Date(d.end), daysDelta).toISOString();
+    const newAssignedUserIds = reassigning ? [targetResourceId!] : undefined;
 
     pendingSaves.current.add(id);
-    setLocalEvents((prev) => applyDateChange(prev, id, newStart, newEnd));
+    setLocalEvents((prev) => applyMove(prev, id, newStart, newEnd, newAssignedUserIds));
+
+    const targetName = reassigning ? resources.find((r) => r.id === targetResourceId)?.name ?? resources.find((r) => r.id === targetResourceId)?.email : undefined;
 
     try {
       const res = await fetch(`/api/activities/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ startDate: newStart, dueDate: newEnd }),
+        body: JSON.stringify({
+          startDate: newStart,
+          dueDate: newEnd,
+          ...(newAssignedUserIds && { assignedUserIds: newAssignedUserIds }),
+        }),
       });
       if (res.ok) {
-        toast.success(`Dates shifted ${daysDelta > 0 ? "+" : ""}${daysDelta}d`);
+        toast.success(
+          reassigning
+            ? `Reassigned to ${targetName ?? "new agent"}${daysDelta !== 0 ? ` — dates shifted ${daysDelta > 0 ? "+" : ""}${daysDelta}d` : ""}`
+            : `Dates shifted ${daysDelta > 0 ? "+" : ""}${daysDelta}d`
+        );
         pendingSaves.current.delete(id);
         router.refresh();
       } else {
         const err = await res.json().catch(() => ({}));
-        toast.error(err.error ?? "Failed to update dates");
+        toast.error(err.error ?? "Failed to update the activity");
         pendingSaves.current.delete(id);
-        setLocalEvents((prev) => applyDateChange(prev, id, d.start, d.end));
+        setLocalEvents((prev) => applyMove(prev, id, d.start, d.end, reassigning ? d.originalAssignedUserIds : undefined));
       }
     } catch {
-      toast.error("Failed to update dates");
+      toast.error("Failed to update the activity");
       pendingSaves.current.delete(id);
-      setLocalEvents((prev) => applyDateChange(prev, id, d.start, d.end));
+      setLocalEvents((prev) => applyMove(prev, id, d.start, d.end, reassigning ? d.originalAssignedUserIds : undefined));
     }
   }
 
   function cancelDrag(barKey: string) {
     if (dragRef.current?.barKey === barKey) dragRef.current = null;
+    clearRowHighlight();
     const el = barElRefs.current.get(barKey);
     if (el) {
       el.style.transform = "";
@@ -411,8 +511,17 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                   {/* overflow-hidden is a defense-in-depth clip on top of the
                       startDrag/moveDrag/endDrag boundary clamp below — a bar
                       must never render past this row's own box, into the
-                      Agent column to its left or past the last loaded day. */}
-                  <div className="relative overflow-hidden" style={{ width: totalWidth, height: rowHeight }}>
+                      Agent column to its left or past the last loaded day.
+                      Also registered in rowContainerRefs — a valid cross-row
+                      drop target's own box, outlined during a drag hover. */}
+                  <div
+                    ref={(el) => {
+                      if (el) rowContainerRefs.current.set(r.id, el);
+                      else rowContainerRefs.current.delete(r.id);
+                    }}
+                    className="relative overflow-hidden"
+                    style={{ width: totalWidth, height: rowHeight }}
+                  >
                     {days.map((d, i) => (
                       <div
                         key={i}
@@ -440,7 +549,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                       const barKey = `${r.id}:${e.id}`;
                       const lane = laneByEvent.get(barKey) ?? 0;
                       const top = LANE_TOP + lane * (BAR_H + LANE_GAP);
-                      const barColor = STATUS_BAR[e.status] ?? "bg-slate-400";
+                      const barColor = e.statusColor ? undefined : (STATUS_BAR[e.status] ?? "bg-slate-400");
                       // A clipped edge gets its rounding removed — a rounded
                       // corner sitting exactly at the grid boundary reads as
                       // "this is where the event ends," which is wrong when
@@ -461,6 +570,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                             barColor,
                             e.status === "CANCELLED" && "opacity-40"
                           )}
+                          style={e.statusColor ? { backgroundColor: e.statusColor } : undefined}
                         >
                           <span className="absolute inset-0 flex items-center px-2 text-[11px] font-medium text-white truncate pointer-events-none">
                             {e.projectTitle ? `${e.projectTitle} — ${e.title}` : e.title}
@@ -476,7 +586,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                           }}
                           className="absolute select-none outline-none cursor-grab active:cursor-grabbing"
                           style={{ left, width, top, height: BAR_H, touchAction: "none" }}
-                          onPointerDown={(ev) => startDrag(ev, e.id, barKey, e.start!, e.end!, `/activities/${e.id}`, left, width)}
+                          onPointerDown={(ev) => startDrag(ev, e.id, barKey, e.start!, e.end!, `/activities/${e.id}`, left, width, r.id, e.assignedUserIds)}
                           onPointerMove={(ev) => moveDrag(ev, barKey)}
                           onPointerUp={(ev) => endDrag(ev, barKey)}
                           onPointerCancel={() => cancelDrag(barKey)}
@@ -500,7 +610,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                             <p className="font-medium">{e.title}</p>
                             {e.projectTitle && <p className="text-xs text-muted-foreground">{e.projectTitle}</p>}
                             <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                              <span className="text-xs text-muted-foreground">{STATUS_LABEL[e.status] ?? e.status}</span>
+                              <span className="text-xs text-muted-foreground">{e.statusLabel ?? STATUS_LABEL[e.status] ?? e.status}</span>
                               {PRIORITY_CLS[e.priority] && (
                                 <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium", PRIORITY_CLS[e.priority])}>
                                   {ACTIVITY_PRIORITY_LABEL[e.priority as keyof typeof ACTIVITY_PRIORITY_LABEL] ?? e.priority}

@@ -7,20 +7,26 @@ import { listDepartments } from "@/lib/services/department-service";
 import { buildPriorityWhere } from "@/lib/services/department-scope-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { WorkspaceSlaManager } from "@/components/admin/workspace-sla-manager";
+import { resolveSlaHoursFromRelation } from "@/lib/services/sla-policy";
 
 const SLA_PERMISSION_KEYS = ["sla.create", "sla.edit", "sla.delete"];
 
 function toPriorityPolicy(p: any) {
+  const resolution = resolveSlaHoursFromRelation(p.slaPolicy, p.id);
   return {
     id: p.id,
     name: p.name,
     color: p.color,
     level: p.level,
+    isActive: p.isActive,
     departmentId: p.departmentId,
     department: p.department ?? null,
-    firstResponseHours: p.slaPolicy?.firstResponseHours ?? 8,
-    resolutionHours: p.slaPolicy?.resolutionHours ?? 48,
-    hasPolicy: p.slaPolicy != null,
+    // null means no SlaPolicy row exists — the UI MUST render "SLA not
+    // configured", never fabricate 8h/48h as if it were real data.
+    firstResponseHours: resolution.ok ? resolution.hours.firstResponseHours : null,
+    resolutionHours: resolution.ok ? resolution.hours.resolutionHours : null,
+    hasPolicy: resolution.ok,
+    ticketCount: p._count?.tickets ?? 0,
   };
 }
 
@@ -35,10 +41,13 @@ export default async function SlaAdminPage() {
     if (!userIsAdmin) redirect("/dashboard");
     const [settings, priorities, departments] = await Promise.all([
       prisma.slaSettings.findFirst(),
+      // Admin management view intentionally includes disabled levels too
+      // (not just active ones) — an admin must be able to see, re-enable,
+      // or safely delete a disabled level here. Ticket-creation dropdowns
+      // elsewhere already filter to isActive:true on their own.
       prisma.ticketPriority.findMany({
-        where: { isActive: true },
         orderBy: { level: "desc" },
-        include: { slaPolicy: true, department: { select: { id: true, name: true } } },
+        include: { slaPolicy: true, department: { select: { id: true, name: true } }, _count: { select: { tickets: true } } },
       }),
       listDepartments(),
     ]);
@@ -49,6 +58,7 @@ export default async function SlaAdminPage() {
           priorities={priorities.map(toPriorityPolicy)}
           departmentOptions={departments.map((d) => ({ id: d.id, name: d.name }))}
           mode="all"
+          canCreate={true}
           canEdit={true}
           canDelete={true}
         />
@@ -68,14 +78,15 @@ export default async function SlaAdminPage() {
     redirect("/dashboard");
   }
 
-  const [settings, priorities, departments, canEdit, canDelete] = await Promise.all([
+  const [settings, priorities, departments, canCreate, canEdit, canDelete] = await Promise.all([
     prisma.slaSettings.findFirst(),
     prisma.ticketPriority.findMany({
-      where: { AND: [{ isActive: true }, buildPriorityWhere(departmentId)] },
+      where: buildPriorityWhere(departmentId),
       orderBy: { level: "desc" },
-      include: { slaPolicy: true, department: { select: { id: true, name: true } } },
+      include: { slaPolicy: true, department: { select: { id: true, name: true } }, _count: { select: { tickets: true } } },
     }),
     userIsAdmin ? listDepartments() : Promise.resolve([]),
+    access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.create", access.membership!.customRoleId),
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.edit", access.membership!.customRoleId),
     access.isSystemAdmin || hasDepartmentPermission(access.membership!.role, "sla.delete", access.membership!.customRoleId),
   ]);
@@ -89,6 +100,7 @@ export default async function SlaAdminPage() {
         fixedDepartmentId={userIsAdmin ? undefined : departmentId}
         initialViewDepartmentId={departmentId}
         mode="scoped"
+        canCreate={canCreate}
         canEdit={canEdit}
         canDelete={canDelete}
       />

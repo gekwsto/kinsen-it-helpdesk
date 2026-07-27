@@ -246,6 +246,15 @@ export const createCategorySchema = z.object({
   departmentId: z.string().nullable().optional(),
 });
 
+// departmentId deliberately excluded — moving a category between
+// departments isn't supported by PATCH /api/admin/categories.
+export const updateCategorySchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters").optional(),
+  description: z.string().optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color").optional(),
+  isActive: z.boolean().optional(),
+});
+
 // ─── Department Membership Schemas (Phase 3) ────────────────────────────────────
 
 // Either a built-in DepartmentRole or a custom department role (CustomRole,
@@ -297,6 +306,15 @@ export const createPrioritySchema = z.object({
   departmentId: z.string().nullable().optional(),
 });
 
+// departmentId deliberately excluded — moving a priority between
+// departments isn't supported by PATCH /api/admin/priorities.
+export const updatePrioritySchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters").optional(),
+  level: z.number().int().min(1).max(10).optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color").optional(),
+  isActive: z.boolean().optional(),
+});
+
 export const createStatusSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color"),
@@ -307,6 +325,19 @@ export const createStatusSchema = z.object({
   // more global/shared status. Enforced (with a clean department_required
   // error code) in the route, not here.
   departmentId: z.string().nullable().optional(),
+});
+
+// departmentId deliberately excluded — moving a status between departments
+// isn't supported by PATCH /api/admin/statuses. Includes isActive (unlike
+// createStatusSchema, since new statuses always start active via Prisma's
+// own @default(true) and only PATCH ever needs to toggle it).
+export const updateStatusSchema = z.object({
+  name: z.string().min(2, "Name must be at least 2 characters").optional(),
+  color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Invalid color").optional(),
+  isDefault: z.boolean().optional(),
+  isClosed: z.boolean().optional(),
+  isActive: z.boolean().optional(),
+  order: z.number().int().optional(),
 });
 
 export const createCancelReasonSchema = z.object({

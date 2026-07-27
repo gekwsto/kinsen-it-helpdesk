@@ -157,7 +157,6 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
               providerAccountId: account.providerAccountId,
               userEmail: user.email,
               userName: user.name,
-              userImage: user.image,
               fallbackGroups: msProfile?.groups,
               fallbackRoles: msProfile?.roles,
             });
@@ -176,6 +175,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           token.microsoftUserId = dbUser.microsoftUserId;
           token.globalRoleSource = dbUser.globalRoleSource;
         }
+
+        // `image` is stored as a base64 data URI (a few KB for a typical
+        // Microsoft photo — see lib/services/microsoft-profile-photo-service.ts)
+        // and MUST NEVER end up in the JWT: measured with Auth.js's own
+        // encode(), a single typical ~2KB photo already pushes the encrypted
+        // token past the 4096-byte single-cookie limit, forcing Auth.js's
+        // auto-chunking into 2-4 separate Set-Cookie headers that are then
+        // resent on every single subsequent request for that session,
+        // indefinitely — real, measured risk of hitting proxy/header-size
+        // limits, not hypothetical. Auth.js's own core sets
+        // `token.picture = user.image` by default on EVERY sign-in path
+        // (confirmed in @auth/core/lib/actions/callback/index.js) before
+        // this callback even runs — including credentials sign-in for a
+        // hybrid user who also has a Microsoft-synced photo — so it must be
+        // stripped unconditionally here, not just for Microsoft sign-ins.
+        // The photo itself still lives in the database exactly as before;
+        // Topbar/header rendering now reads it via a fresh, cheap,
+        // indexed-by-id query in app/(main)/layout.tsx instead of the
+        // session — the same pattern Settings/Users-admin/assigned-avatar
+        // rendering already used even before this change.
+        delete token.picture;
       }
       return token;
     },
@@ -186,6 +206,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
         session.user.id = token.id as string;
         session.user.role = token.role as Role;
+        // Deliberately NEVER sourced from the token — see the jwt callback's
+        // `delete token.picture` comment above. Topbar reads the real photo
+        // via a fresh DB query instead.
+        session.user.image = null;
         session.user.mustChangePassword = (token.mustChangePassword as boolean) ?? false;
         session.user.departmentId = (token.departmentId as string | null) ?? undefined;
         session.user.businessUnitId = (token.businessUnitId as string | null) ?? undefined;

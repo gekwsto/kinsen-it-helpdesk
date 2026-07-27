@@ -21,15 +21,7 @@ import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
 import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
-
-const STATUS_COLORS: Record<ActivityStatus, string> = {
-  TODO: "bg-gray-100 text-gray-700",
-  IN_PROGRESS: "bg-blue-100 text-blue-700",
-  ON_HOLD: "bg-orange-100 text-orange-700",
-  BLOCKED: "bg-red-100 text-red-700",
-  COMPLETED: "bg-green-100 text-green-700",
-  CANCELLED: "bg-gray-100 text-gray-500",
-};
+import { StatusBadge } from "@/components/shared/activity-status-badge";
 
 const PRIORITY_COLORS: Record<ActivityPriority, string> = {
   LOW: "bg-green-50 text-green-700",
@@ -43,8 +35,14 @@ interface Activity {
   title: string;
   description?: string | null;
   status: ActivityStatus;
+  /** This activity's department-resolved status display label — see lib/services/activity-status-config.ts. */
+  statusLabel: string;
+  /** This activity's department-resolved status color (#RRGGBB). */
+  statusColor: string;
   priority: ActivityPriority;
-  progress: number;
+  /** null means no ActivityProgressConfig row is configured/enabled for this activity's department+status — see lib/activities/activity-progress.ts. Never rendered as 0%. */
+  progress: number | null;
+  progressConfigError?: { reason: "missing" | "disabled" } | null;
   isCompleted: boolean;
   completedAt?: string | null;
   startDate?: string | null;
@@ -228,11 +226,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
                   {activity.title}
                 </CardTitle>
                 <div className="flex items-center gap-2 mt-2">
-                  <span
-                    className={`text-xs font-medium px-2 py-0.5 rounded-full ${STATUS_COLORS[activity.status]}`}
-                  >
-                    {activity.status?.replace(/_/g, " ")}
-                  </span>
+                  <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
                   <span
                     className={`text-xs font-medium px-2 py-0.5 rounded-full ${PRIORITY_COLORS[activity.priority]}`}
                   >
@@ -281,18 +275,30 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
             <div className="flex items-center justify-between mb-1.5">
               <p className="text-xs text-muted-foreground">Progress</p>
               <div className="text-right">
-                <span className="text-xs font-medium">{activity.progress}%</span>
-                <p className="text-[10px] text-muted-foreground">
-                  Calculated automatically from status
-                </p>
+                {activity.progress === null ? (
+                  <p className="text-xs font-medium text-amber-700">Configuration required</p>
+                ) : (
+                  <>
+                    <span className="text-xs font-medium">{activity.progress}%</span>
+                    <p className="text-[10px] text-muted-foreground">
+                      Calculated automatically from status
+                    </p>
+                  </>
+                )}
               </div>
             </div>
-            <div className="h-1.5 bg-muted rounded-full">
-              <div
-                className="h-1.5 bg-primary rounded-full transition-all"
-                style={{ width: `${activity.progress}%` }}
-              />
-            </div>
+            {activity.progress === null ? (
+              <p className="text-[11px] text-amber-700">
+                No progress percentage is configured for status &quot;{activity.statusLabel}&quot; in this department. Ask an admin to configure it under Activity Progress.
+              </p>
+            ) : (
+              <div className="h-1.5 bg-muted rounded-full">
+                <div
+                  className="h-1.5 bg-primary rounded-full transition-all"
+                  style={{ width: `${activity.progress}%` }}
+                />
+              </div>
+            )}
           </div>
           <Separator />
           <div className="grid grid-cols-2 gap-4 text-sm">

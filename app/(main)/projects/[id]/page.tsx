@@ -10,10 +10,12 @@ import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target, Plus, Ticket, Pencil } from "lucide-react";
-import { ProjectStatus, ActivityStatus, GoalStatus, Role } from "@prisma/client";
+import { ProjectStatus, GoalStatus, Role } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ProjectDeleteButton } from "@/components/projects/project-delete-button";
 import { ActivityCompleteCheckbox } from "@/components/activities/activity-complete-checkbox";
+import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -21,15 +23,6 @@ const STATUS_COLORS: Record<ProjectStatus, string> = {
   ON_HOLD: "bg-orange-100 text-orange-700",
   COMPLETED: "bg-green-100 text-green-700",
   CANCELLED: "bg-gray-100 text-gray-700",
-};
-
-const ACTIVITY_STATUS_COLORS: Record<ActivityStatus, string> = {
-  TODO: "bg-gray-100 text-gray-700",
-  IN_PROGRESS: "bg-blue-100 text-blue-700",
-  ON_HOLD: "bg-orange-100 text-orange-700",
-  BLOCKED: "bg-red-100 text-red-700",
-  COMPLETED: "bg-green-100 text-green-700",
-  CANCELLED: "bg-gray-100 text-gray-500",
 };
 
 export default async function ProjectDetailPage({
@@ -83,6 +76,9 @@ export default async function ProjectDetailPage({
     },
   });
 
+  const activityStatusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(
+    project.activities.map((a) => a.departmentId).filter((d): d is string => !!d)
+  );
   const completedActivities = project.activities.filter((a) => a.isCompleted).length;
   const totalActivities = project.activities.length;
   const progress = project.progress;
@@ -208,11 +204,10 @@ export default async function ProjectDetailPage({
                             </AvatarFallback>
                           </Avatar>
                         ))}
-                        <span
-                          className={`text-xs font-medium px-2 py-0.5 rounded-full ${ACTIVITY_STATUS_COLORS[activity.status]}`}
-                        >
-                          {activity.status.replace("_", " ")}
-                        </span>
+                        <StatusBadge
+                          label={resolveActivityStatusDisplay(activityStatusDisplayConfigs, activity.departmentId, activity.status).label}
+                          color={resolveActivityStatusDisplay(activityStatusDisplayConfigs, activity.departmentId, activity.status).color}
+                        />
                       </div>
                     </Link>
                   ))}

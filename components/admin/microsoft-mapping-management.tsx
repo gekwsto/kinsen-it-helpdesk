@@ -269,6 +269,10 @@ export function MicrosoftMappingManagement({
         const err = await res.json();
         throw new Error(err.error ?? "Failed to delete mapping");
       }
+      // Drains the (empty, 204) response body — avoids a Chromium DevTools
+      // quirk where an unread fetch() response can be reported as
+      // net::ERR_ABORTED despite completing successfully.
+      await res.text().catch(() => {});
       setMappings((prev) => prev.filter((m) => m.id !== mapping.id));
       toast.success("Mapping deleted");
     } catch (error: any) {

@@ -4,6 +4,7 @@ import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { SessionProvider } from "next-auth/react";
 import { auth } from "@/lib/auth";
+import { NavigationLoader } from "@/components/layout/navigation-loader";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -25,6 +26,7 @@ export default async function RootLayout({
         <SessionProvider session={session}>
           {children}
           <Toaster richColors position="top-right" />
+          <NavigationLoader />
         </SessionProvider>
       </body>
     </html>

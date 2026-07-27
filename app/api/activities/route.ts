@@ -11,7 +11,7 @@ import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createActivitySchema } from "@/lib/validations";
-import { getActivityProgressFromStatus } from "@/lib/activities/activity-progress";
+import { getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 import { ActivityStatus } from "@prisma/client";
 
@@ -128,10 +128,27 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Computed BEFORE the create, and never caught-and-substituted: a
+    // missing/disabled ActivityProgressConfig row for this department+status
+    // rejects the whole request (configuration_required) rather than
+    // persisting an activity with a fabricated progress percentage.
+    let progress: number;
+    try {
+      progress = await getActivityProgressFromStatus(deptResolution.departmentId, rest.status);
+    } catch (err) {
+      if (err instanceof ActivityProgressConfigurationError) {
+        return NextResponse.json(
+          { error: `No progress configuration exists for status "${rest.status}" in this department. Ask an admin to configure it under Activity Progress before creating activities with this status.`, code: "configuration_required" },
+          { status: 409 }
+        );
+      }
+      throw err;
+    }
+
     const activity = await prisma.projectActivity.create({
       data: {
         ...rest,
-        progress: await getActivityProgressFromStatus(deptResolution.departmentId, rest.status),
+        progress,
         departmentId: deptResolution.departmentId,
         startDate: startDate ? new Date(startDate) : undefined,
         dueDate: dueDate ? new Date(dueDate) : undefined,

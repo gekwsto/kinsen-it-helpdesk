@@ -116,9 +116,12 @@ export interface WorkspaceConfigManagerProps {
 function renderFields(
   fields: ConfigField[],
   form: Record<string, unknown>,
-  setForm: (updater: (prev: Record<string, unknown>) => Record<string, unknown>) => void
+  setForm: (updater: (prev: Record<string, unknown>) => Record<string, unknown>) => void,
+  fieldErrors: Record<string, string>,
+  clearFieldError: (key: string) => void
 ) {
   return fields.map((field) => {
+    const error = fieldErrors[field.key];
     if (field.type === "checkbox") {
       return (
         <label key={field.key} className="flex items-center gap-2 text-sm">
@@ -126,7 +129,10 @@ function renderFields(
             type="checkbox"
             className="h-4 w-4 rounded border-input"
             checked={Boolean(form[field.key])}
-            onChange={(e) => setForm((p) => ({ ...p, [field.key]: e.target.checked }))}
+            onChange={(e) => {
+              setForm((p) => ({ ...p, [field.key]: e.target.checked }));
+              clearFieldError(field.key);
+            }}
           />
           {field.label}
           {field.helpText && <span className="text-xs text-muted-foreground">— {field.helpText}</span>}
@@ -144,8 +150,12 @@ function renderFields(
             id={field.key}
             placeholder={field.placeholder}
             value={(form[field.key] as string) ?? ""}
-            onChange={(e) => setForm((p) => ({ ...p, [field.key]: e.target.value }))}
+            onChange={(e) => {
+              setForm((p) => ({ ...p, [field.key]: e.target.value }));
+              clearFieldError(field.key);
+            }}
             rows={2}
+            className={error ? "border-destructive" : undefined}
           />
         ) : field.type === "color" ? (
           <div className="flex items-center gap-3">
@@ -153,13 +163,19 @@ function renderFields(
               type="color"
               id={field.key}
               value={(form[field.key] as string) ?? "#6366f1"}
-              onChange={(e) => setForm((p) => ({ ...p, [field.key]: e.target.value }))}
+              onChange={(e) => {
+                setForm((p) => ({ ...p, [field.key]: e.target.value }));
+                clearFieldError(field.key);
+              }}
               className="h-10 w-16 cursor-pointer rounded border"
             />
             <Input
               value={(form[field.key] as string) ?? ""}
-              onChange={(e) => setForm((p) => ({ ...p, [field.key]: e.target.value }))}
-              className="font-mono"
+              onChange={(e) => {
+                setForm((p) => ({ ...p, [field.key]: e.target.value }));
+                clearFieldError(field.key);
+              }}
+              className={`font-mono ${error ? "border-destructive" : ""}`}
               placeholder="#6366f1"
             />
           </div>
@@ -169,19 +185,38 @@ function renderFields(
             type={field.type}
             placeholder={field.placeholder}
             value={(form[field.key] as string | number) ?? ""}
-            onChange={(e) =>
-              setForm((p) => ({ ...p, [field.key]: field.type === "number" ? parseInt(e.target.value) : e.target.value }))
-            }
+            onChange={(e) => {
+              setForm((p) => ({ ...p, [field.key]: field.type === "number" ? parseInt(e.target.value) : e.target.value }));
+              clearFieldError(field.key);
+            }}
+            className={error ? "border-destructive" : undefined}
           />
         )}
+        {error && <p className="text-xs text-destructive">{error}</p>}
       </div>
     );
   });
 }
 
-function friendlyError(err: { error?: unknown; code?: string }, fallback: string): string {
+/** Reads the shared backend error contract (lib/api-errors.ts: code/error/message/field/fieldErrors) — `error`/`message` are always the same specific, human-readable string; this never falls back to a generic message unless the server genuinely sent nothing usable (a real unknown/unexpected failure). */
+function friendlyError(err: { error?: unknown; message?: unknown; code?: string }, fallback: string): string {
+  if (typeof err.message === "string" && err.message.trim()) return err.message;
   if (typeof err.error === "string" && err.error.trim()) return err.error;
   return fallback;
+}
+
+function extractFieldErrors(err: { field?: unknown; fieldErrors?: unknown; error?: unknown }): Record<string, string> {
+  if (err.fieldErrors && typeof err.fieldErrors === "object") {
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(err.fieldErrors as Record<string, unknown>)) {
+      if (typeof v === "string") out[k] = v;
+    }
+    return out;
+  }
+  if (typeof err.field === "string" && typeof err.error === "string") {
+    return { [err.field]: err.error };
+  }
+  return {};
 }
 
 function getNestedValue(obj: ConfigItem, path: string): unknown {
@@ -253,6 +288,8 @@ export function WorkspaceConfigManager({
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState<Record<string, unknown>>({});
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const clearFieldError = (key: string) => setFieldErrors((prev) => (prev[key] ? Object.fromEntries(Object.entries(prev).filter(([k]) => k !== key)) : prev));
   // Separate from viewDepartmentId — the create target is ALWAYS an explicit
   // choice, never silently inherited from whatever the list filter happens
   // to be set to (mode="all" requirement).
@@ -290,6 +327,7 @@ export function WorkspaceConfigManager({
 
   const openCreate = () => {
     setForm(defaultFormValues());
+    setFieldErrors({});
     setCreateDepartmentId(fixedDepartmentId ?? (viewDepartmentId || ""));
     setCreateOpen(true);
   };
@@ -297,6 +335,7 @@ export function WorkspaceConfigManager({
   const openEdit = (item: ConfigItem) => {
     setEditItem(item);
     setForm(Object.fromEntries(fields.map((f) => [f.key, item[f.key] ?? (f.type === "checkbox" ? false : "")])));
+    setFieldErrors({});
     setEditOpen(true);
   };
 
@@ -305,7 +344,7 @@ export function WorkspaceConfigManager({
     !fixedDepartmentId && createDepartmentId === "" /* forces an explicit department/global choice */;
 
   const handleCreate = async () => {
-    if (createDisabled) return;
+    if (createDisabled || creating) return;
     setCreating(true);
     try {
       const res = await fetch(apiEndpoint, {
@@ -315,8 +354,10 @@ export function WorkspaceConfigManager({
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
+        setFieldErrors(extractFieldErrors(err));
         throw new Error(friendlyError(err, `Failed to create ${entityLabel.toLowerCase()}`));
       }
+      setFieldErrors({});
       const created = await res.json();
       // Only splice into the visible list if it actually belongs to the
       // current filter — otherwise leave the list as-is (still correct,
@@ -335,7 +376,7 @@ export function WorkspaceConfigManager({
   };
 
   const handleEdit = async () => {
-    if (!editItem) return;
+    if (!editItem || saving) return;
     setSaving(true);
     try {
       const res = await fetch(apiEndpoint, {
@@ -345,8 +386,10 @@ export function WorkspaceConfigManager({
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
+        setFieldErrors(extractFieldErrors(err));
         throw new Error(friendlyError(err, `Failed to update ${entityLabel.toLowerCase()}`));
       }
+      setFieldErrors({});
       const updated = await res.json();
       setItems((prev) => prev.map((i) => (i.id === editItem.id ? { ...i, ...updated } : i)));
       toast.success(`${entityLabel} updated`);
@@ -573,7 +616,7 @@ export function WorkspaceConfigManager({
       </div>
 
       {/* Create dialog */}
-      <Dialog open={createOpen} onOpenChange={(o) => { setCreateOpen(o); if (!o) setForm({}); }}>
+      <Dialog open={createOpen} onOpenChange={(o) => { setCreateOpen(o); if (!o) { setForm({}); setFieldErrors({}); } }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add {entityLabel}</DialogTitle>
@@ -599,7 +642,7 @@ export function WorkspaceConfigManager({
                 </Select>
               </div>
             )}
-            {renderFields(fields, form, setForm)}
+            {renderFields(fields, form, setForm, fieldErrors, clearFieldError)}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setCreateOpen(false)}>Cancel</Button>
@@ -612,7 +655,7 @@ export function WorkspaceConfigManager({
       </Dialog>
 
       {/* Edit dialog — department is fixed to the record's own scope, never moved between departments */}
-      <Dialog open={editOpen} onOpenChange={setEditOpen}>
+      <Dialog open={editOpen} onOpenChange={(o) => { setEditOpen(o); if (!o) setFieldErrors({}); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit {entityLabel}</DialogTitle>
@@ -626,7 +669,7 @@ export function WorkspaceConfigManager({
                 </div>
               </div>
             )}
-            {renderFields(fields, form, setForm)}
+            {renderFields(fields, form, setForm, fieldErrors, clearFieldError)}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditOpen(false)}>Cancel</Button>

@@ -86,6 +86,20 @@ enum GlobalRoleSource {
   MICROSOFT_DEPARTMENT
 }
 
+// Provenance of User.image — same "never overwrite a manual decision"
+// protection model as MembershipSource/GlobalRoleSource above. MANUAL means
+// an admin or the user themself explicitly set the image (no such write path
+// exists yet in the app, but this flag is what any future upload feature
+// MUST set — see lib/services/microsoft-profile-photo-service.ts). Null
+// means "never explicitly tracked" (legacy rows from before this field
+// existed) — the sync service treats null the same as MICROSOFT for update
+// eligibility, since historically the only code path that ever wrote
+// User.image was the Microsoft sign-in flow.
+enum AvatarSource {
+  MICROSOFT
+  MANUAL
+}
+
 // Which kind of Microsoft/Entra signal a MicrosoftDepartmentMapping row
 // matches against.
 enum MicrosoftMappingSourceType {
@@ -187,6 +201,9 @@ model Department {
   statuses          TicketStatus[]
   cancelReasons     TicketCancelReason[]
   activityProgressConfigs ActivityProgressConfig[]
+  projectStatusConfigs    ProjectStatusConfig[]
+  activityStatusConfigs   ActivityStatusConfig[]
+  activityPriorityConfigs ActivityPriorityConfig[]
   createdAt         DateTime                     @default(now())
   updatedAt         DateTime                     @updatedAt
 }
@@ -336,6 +353,19 @@ model User {
   emailVerified                DateTime?
   name                         String?
   image                        String?
+  // Provenance of `image` — see AvatarSource. Protects a manually-uploaded
+  // avatar from ever being silently overwritten by Microsoft sync.
+  avatarSource                 AvatarSource?
+  // Graph photo ETag from the last successful sync — lets
+  // syncMicrosoftProfilePhoto() send If-None-Match and skip a redundant
+  // re-download/re-write when the Microsoft photo hasn't actually changed.
+  microsoftPhotoEtag           String?
+  // When `image` was last written by Microsoft sync — used as an optimistic
+  // concurrency guard so a slower/older sync request can never clobber a
+  // newer one (see the WHERE microsoftPhotoUpdatedAt < $fetchedAt guard in
+  // lib/services/microsoft-profile-photo-service.ts). Distinct from
+  // lastMicrosoftSyncAt below, which tracks the unrelated department sync.
+  microsoftPhotoUpdatedAt      DateTime?
   role                         Role                        @default(USER)
   isActive                     Boolean                     @default(true)
   passwordHash                 String?
@@ -803,19 +833,104 @@ model ProjectActivity {
 // Per-department, editable status->progress% mapping — Activity progress is
 // derived from status (see lib/activities/activity-progress.ts), never
 // manually entered, but each department may set its own percentages (e.g.
-// IT might treat BLOCKED as 50%, another department as 25%). All 6
-// ActivityStatus values always exist per department (seeded, never
-// create/delete from the UI — only the percentage is editable).
+// IT might treat BLOCKED as 50%, another department as 25%). Full CRUD via
+// /admin/activity-progress: a department may disable (isEnabled) or delete
+// a status's row entirely — the resolver treats either as a configuration
+// gap (logged, fail-safe), never a hardcoded per-status-name guess. Every
+// department is backfilled with all 6 rows (see the migration and
+// lib/services/config-starter-data.ts's ensureActivityProgressConfigForDepartment)
+// so this is only ever reached in practice via a deliberate admin delete.
 model ActivityProgressConfig {
   id              String         @id @default(cuid())
   department      Department     @relation(fields: [departmentId], references: [id], onDelete: Cascade)
   departmentId    String
   status          ActivityStatus
   progressPercent Int            @default(0)
+  isEnabled       Boolean        @default(true)
+  sortOrder       Int            @default(0)
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
 
   @@unique([departmentId, status])
+  @@index([departmentId, isEnabled])
+}
+
+// Which ProjectStatus/ActivityStatus values count as "terminal" (done/
+// closed, in the same sense TicketStatus.isClosed already captures for
+// tickets) — per department, since a status name alone (e.g. "Cancelled")
+// carries no terminal-ness signal on its own and no code should hardcode
+// that assumption. Same shape/precedent as ActivityProgressConfig directly
+// above: a department-scoped, status-keyed config row, admin-editable,
+// with hardcoded defaults (COMPLETED/CANCELLED = terminal, everything else
+// = not) as the fallback whenever no row exists yet — see
+// lib/status-terminal.ts, the single place that reads these with that
+// fallback baked in, and lib/overdue.ts, which is the only consumer that
+// needs "is this terminal" at all. Not all 5/6 status values need a row
+// per department up front (unlike ActivityProgressConfig's "always seed
+// all 6"): an absent row just means "use the default", which is exactly
+// today's implicit (hardcoded) behavior — so this migration changes
+// nothing observable for any existing department until an admin opts in.
+model ProjectStatusConfig {
+  id           String        @id @default(cuid())
+  department   Department    @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String
+  status       ProjectStatus
+  isTerminal   Boolean
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([departmentId, status])
+}
+
+// Department-scoped display metadata AND terminal-ness for ActivityStatus —
+// the SAME row/table the pre-existing isTerminal resolution
+// (lib/status-terminal.ts) already reads, extended rather than duplicated
+// (lib/services/activity-status-config.ts reads the new columns). The fixed
+// ActivityStatus enum key (TODO, IN_PROGRESS, ...) never changes — only its
+// department-specific label/color/sortOrder/isEnabled/isTerminal do, e.g.
+// IT's TODO can display "To Do" while Sales' TODO displays "New Activity",
+// independently, without ever touching the Prisma enum itself.
+model ActivityStatusConfig {
+  id           String         @id @default(cuid())
+  department   Department     @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String
+  status       ActivityStatus
+  // Backfilled from the previous app-wide hardcoded label
+  // (components/gantt/status-colors.ts's STATUS_LABEL) for all pre-existing
+  // rows — admin-editable per department afterward.
+  label        String
+  color        String         @default("#94a3b8")
+  sortOrder    Int            @default(0)
+  isEnabled    Boolean        @default(true)
+  isTerminal   Boolean
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@unique([departmentId, status])
+  @@index([departmentId, isEnabled])
+}
+
+// Department-scoped enablement + display order for ActivityPriority values
+// — the same "scoped configuration, admin-editable, full-backfilled row set"
+// precedent as ActivityProgressConfig/ProjectStatusConfig/ActivityStatusConfig
+// above, this time for priority. `sortOrder` is what "the configured order"
+// (Project Gantt's Priority filter, Resource Planning's own priority list)
+// actually reads — never a hardcoded URGENT>HIGH>MEDIUM>LOW constant.
+// `isEnabled` controls whether a value is offered as a NEW selectable filter
+// option; a record already carrying a disabled priority stays fully visible
+// everywhere it's shown (see lib/priority-config.ts) — disabling only
+// affects what's offered going forward, exactly like TicketPriority.isActive.
+model ActivityPriorityConfig {
+  id           String           @id @default(cuid())
+  department   Department       @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId String
+  priority     ActivityPriority
+  sortOrder    Int
+  isEnabled    Boolean          @default(true)
+  createdAt    DateTime         @default(now())
+  updatedAt    DateTime         @updatedAt
+
+  @@unique([departmentId, priority])
 }
 
 model ActivityDependency {

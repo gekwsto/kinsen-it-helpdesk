@@ -1,10 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { toast } from "sonner";
 import Link from "next/link";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -17,35 +16,29 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
-import { Calendar, Loader2 } from "lucide-react";
 import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
 import type { ViewMode } from "@/components/ui/view-toggle";
-
-const STATUS_COLORS: Record<ActivityStatus, string> = {
-  TODO: "bg-gray-100 text-gray-700",
-  IN_PROGRESS: "bg-blue-100 text-blue-700",
-  ON_HOLD: "bg-orange-100 text-orange-700",
-  BLOCKED: "bg-red-100 text-red-700",
-  COMPLETED: "bg-green-100 text-green-700",
-  CANCELLED: "bg-gray-100 text-gray-500",
-};
-
-const PRIORITY_COLORS: Record<ActivityPriority, string> = {
-  LOW: "bg-green-50 text-green-700",
-  MEDIUM: "bg-yellow-50 text-yellow-700",
-  HIGH: "bg-orange-50 text-orange-700",
-  URGENT: "bg-red-50 text-red-700",
-};
+import { OverdueBadge } from "@/components/shared/overdue-badge";
+import { ProgressConfigGapInline } from "@/components/shared/progress-display";
+import { ActivityCard, PRIORITY_COLORS } from "@/components/activities/activity-card";
+import { StatusBadge } from "@/components/shared/activity-status-badge";
 
 export interface SerializedActivity {
   id: string;
   title: string;
   status: ActivityStatus;
+  /** This department's own configured display label for `status` — see lib/services/activity-status-config.ts. Never the raw enum key or a hardcoded map; a Finance-renamed TODO shows its own label here, independent of IT/Sales. */
+  statusLabel: string;
+  /** This department's own configured color for `status`, as a #RRGGBB hex value. */
+  statusColor: string;
   priority: ActivityPriority;
   isCompleted: boolean;
   startDate: string | null;
   dueDate: string | null;
-  progress: number;
+  /** null means no ActivityProgressConfig row is configured/enabled for this department+status — render "Configuration required", never "0%". See lib/activities/activity-progress.ts. */
+  progress: number | null;
+  /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
+  overdue: boolean;
   project: { id: string; title: string } | null;
   department?: { id: string; name: string } | null;
   assignedUsers: {
@@ -61,7 +54,6 @@ interface ActivityListProps {
 }
 
 export function ActivityList({ activities: initialActivities }: ActivityListProps) {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const view = (searchParams.get("view") as ViewMode | null) ?? "grid";
   const [activities, setActivities] = useState(initialActivities);
@@ -75,8 +67,8 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
       prev.map((a) => (a.id === activity.id ? { ...a, isCompleted: !previous, status: !previous ? ActivityStatus.COMPLETED : ActivityStatus.IN_PROGRESS } : a))
     );
     try {
-      const { isCompleted, status, progress } = await toggleActivityComplete(activity.id, previous);
-      setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, isCompleted, status: status as ActivityStatus, progress } : a)));
+      const { isCompleted, status, progress, statusLabel, statusColor } = await toggleActivityComplete(activity.id, previous);
+      setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, isCompleted, status: status as ActivityStatus, progress, statusLabel, statusColor } : a)));
     } catch (error: any) {
       setActivities((prev) => prev.map((a) => (a.id === activity.id ? { ...a, isCompleted: previous, status: activity.status } : a)));
       toast.error(error.message ?? "Failed to update activity");
@@ -124,9 +116,7 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
                   {activity.department?.name ?? "—"}
                 </TableCell>
                 <TableCell>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_COLORS[activity.status]}`}>
-                    {activity.status.replace(/_/g, " ")}
-                  </span>
+                  <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
                 </TableCell>
                 <TableCell>
                   <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${PRIORITY_COLORS[activity.priority]}`}>
@@ -154,15 +144,22 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
                   {activity.startDate ? formatDate(activity.startDate) : "—"}
                 </TableCell>
                 <TableCell className="text-xs text-muted-foreground whitespace-nowrap">
-                  {activity.dueDate ? formatDate(activity.dueDate) : "—"}
+                  <div className="flex items-center gap-1.5">
+                    {activity.dueDate ? formatDate(activity.dueDate) : "—"}
+                    {activity.overdue && <OverdueBadge />}
+                  </div>
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-2 w-24">
-                    <div className="h-1.5 flex-1 bg-muted rounded-full">
-                      <div className="h-1.5 bg-primary rounded-full" style={{ width: `${activity.progress}%` }} />
+                  {activity.progress === null ? (
+                    <ProgressConfigGapInline />
+                  ) : (
+                    <div className="flex items-center gap-2 w-24">
+                      <div className="h-1.5 flex-1 bg-muted rounded-full">
+                        <div className="h-1.5 bg-primary rounded-full" style={{ width: `${activity.progress}%` }} />
+                      </div>
+                      <span className="text-xs text-muted-foreground w-8 text-right">{activity.progress}%</span>
                     </div>
-                    <span className="text-xs text-muted-foreground w-8 text-right">{activity.progress}%</span>
-                  </div>
+                  )}
                 </TableCell>
                 <TableCell>
                   <Button size="sm" variant="ghost" asChild>
@@ -177,106 +174,18 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
     );
   }
 
+  // Grid view — real Activity cards, same visual system as Project cards
+  // (components/projects/project-list.tsx's own grid: same breakpoints,
+  // same Card structure/spacing) rather than the old stacked-row layout.
   return (
-    <div className="space-y-2">
+    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
       {activities.map((activity) => (
-        <div
+        <ActivityCard
           key={activity.id}
-          className="cursor-pointer"
-          role="button"
-          tabIndex={0}
-          onClick={() => router.push(`/activities/${activity.id}`)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              router.push(`/activities/${activity.id}`);
-            }
-          }}
-        >
-          <Card className="hover:shadow-sm transition-shadow">
-            <CardContent className="py-3 px-4">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex items-center gap-3 min-w-0">
-                  {togglingId === activity.id ? (
-                    <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin text-muted-foreground" />
-                  ) : (
-                    <input
-                      type="checkbox"
-                      checked={activity.isCompleted}
-                      onChange={() => {}}
-                      className="h-4 w-4 rounded flex-shrink-0 cursor-pointer"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void handleToggle(activity);
-                      }}
-                    />
-                  )}
-                  <div className="min-w-0">
-                    <p
-                      className={`text-sm font-medium truncate ${
-                        activity.isCompleted
-                          ? "line-through text-muted-foreground"
-                          : ""
-                      }`}
-                    >
-                      {activity.title}
-                    </p>
-                    <div className="flex items-center gap-3 mt-0.5">
-                      {activity.project ? (
-                        <Link
-                          href={`/projects/${activity.project.id}`}
-                          className="text-xs text-primary hover:underline"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          {activity.project.title}
-                        </Link>
-                      ) : (
-                        <span className="text-xs text-muted-foreground italic">
-                          Standalone
-                        </span>
-                      )}
-                      {activity.dueDate && (
-                        <span className="text-xs text-muted-foreground flex items-center gap-1">
-                          <Calendar className="h-3 w-3" />
-                          {formatDate(activity.dueDate)}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  <span
-                    className={`text-xs font-medium px-2 py-0.5 rounded-full hidden sm:inline-flex ${PRIORITY_COLORS[activity.priority]}`}
-                  >
-                    {activity.priority}
-                  </span>
-                  {activity.assignedUsers.length > 0 && (
-                    <div className="flex items-center gap-1">
-                      {activity.assignedUsers.slice(0, 3).map((u) => (
-                        <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-                          <AvatarImage src={u.image ?? undefined} />
-                          <AvatarFallback className="text-[9px]">
-                            {getInitials(u.name)}
-                          </AvatarFallback>
-                        </Avatar>
-                      ))}
-                      {activity.assignedUsers.length > 3 && (
-                        <span className="text-xs text-muted-foreground ml-1">
-                          +{activity.assignedUsers.length - 3}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  <span
-                    className={`text-xs font-medium px-2 py-0.5 rounded-full ${STATUS_COLORS[activity.status]}`}
-                  >
-                    {activity.status.replace(/_/g, " ")}
-                  </span>
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
+          activity={activity}
+          toggling={togglingId === activity.id}
+          onToggleComplete={handleToggle}
+        />
       ))}
     </div>
   );

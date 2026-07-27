@@ -1,13 +1,14 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { requireAnyDepartmentPermission, hasDepartmentPermission } from "@/lib/permissions";
-import { getDepartmentProgressConfig } from "@/lib/activities/activity-progress";
+import { getDepartmentProgressRows } from "@/lib/activities/activity-progress";
+import { getDepartmentActivityStatusRows } from "@/lib/services/activity-status-config";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight } from "lucide-react";
 import { ActivityProgressConfigForm } from "@/components/admin/activity-progress-config-form";
 
-const ACTIVITY_PROGRESS_PERMISSION_KEYS = ["activityProgress.edit"];
+const ACTIVITY_PROGRESS_PERMISSION_KEYS = ["activityProgress.create", "activityProgress.edit", "activityProgress.delete"];
 
 export default async function DepartmentActivityProgressPage({
   params,
@@ -28,8 +29,15 @@ export default async function DepartmentActivityProgressPage({
   const department = await prisma.department.findUnique({ where: { id }, select: { id: true, name: true } });
   if (!department) notFound();
 
-  const canEdit = access.isSystemAdmin || (await hasDepartmentPermission(access.membership!.role, "activityProgress.edit", access.membership!.customRoleId));
-  const config = await getDepartmentProgressConfig(id);
+  const [canCreate, canEdit, canDelete] = access.isSystemAdmin
+    ? [true, true, true]
+    : await Promise.all([
+        hasDepartmentPermission(access.membership!.role, "activityProgress.create", access.membership!.customRoleId),
+        hasDepartmentPermission(access.membership!.role, "activityProgress.edit", access.membership!.customRoleId),
+        hasDepartmentPermission(access.membership!.role, "activityProgress.delete", access.membership!.customRoleId),
+      ]);
+  const rows = await getDepartmentProgressRows(id);
+  const statusDisplayRows = await getDepartmentActivityStatusRows(id);
 
   return (
     <div className="space-y-6">
@@ -52,7 +60,7 @@ export default async function DepartmentActivityProgressPage({
         </p>
       </div>
 
-      <ActivityProgressConfigForm departmentId={department.id} initialConfig={config} canEdit={canEdit} />
+      <ActivityProgressConfigForm departmentId={department.id} initialRows={rows} statusDisplayRows={statusDisplayRows} canCreate={canCreate} canEdit={canEdit} canDelete={canDelete} />
     </div>
   );
 }

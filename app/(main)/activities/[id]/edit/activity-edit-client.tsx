@@ -22,6 +22,7 @@ import { ActivityDeleteButton } from "@/components/activities/activity-delete-bu
 
 interface Project { id: string; title: string }
 interface AssignableUser { id: string; name: string | null; email: string }
+interface StatusOption { status: ActivityStatus; label: string; color: string }
 
 interface Props {
   id: string;
@@ -43,10 +44,11 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [startDate, setStartDate] = useState("");
   const [dueDate, setDueDate] = useState("");
-  const [progress, setProgress] = useState("0");
+  const [progress, setProgress] = useState<number | null>(0);
   const [isMilestone, setIsMilestone] = useState(false);
   const [subDepartments, setSubDepartments] = useState<{ id: string; name: string }[]>([]);
   const [subDepartmentId, setSubDepartmentId] = useState("");
+  const [statusOptions, setStatusOptions] = useState<StatusOption[]>([]);
 
   useEffect(() => {
     fetch(`/api/activities/${id}`)
@@ -61,7 +63,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           setSelectedUserIds((activity.assignedUsers ?? []).map((usr: any) => usr.id));
           setStartDate(activity.startDate ? activity.startDate.substring(0, 10) : "");
           setDueDate(activity.dueDate ? activity.dueDate.substring(0, 10) : "");
-          setProgress(String(activity.progress ?? 0));
+          setProgress(activity.progress);
           setIsMilestone(activity.isMilestone ?? false);
           setSubDepartmentId(activity.subDepartmentId ?? "");
 
@@ -82,6 +84,22 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
             fetch(`/api/projects?departmentId=${activity.departmentId}&limit=100`)
               .then((r) => (r.ok ? r.json() : null))
               .then((p) => setProjects(Array.isArray(p?.projects) ? p.projects : []));
+            // Only ENABLED statuses are offered for selection — but if this
+            // activity's CURRENT status has since been disabled, it must
+            // still appear (using its own historical label/color, already
+            // returned by GET /api/activities/[id] above) so the dropdown
+            // doesn't silently drop the activity's real, current value.
+            fetch(`/api/departments/${activity.departmentId}/activity-statuses`)
+              .then((r) => (r.ok ? r.json() : []))
+              .then((s) => {
+                const enabled: StatusOption[] = Array.isArray(s) ? s.map((row: any) => ({ status: row.status, label: row.label, color: row.color })) : [];
+                const hasCurrent = enabled.some((o) => o.status === activity.status);
+                setStatusOptions(
+                  hasCurrent || !activity.status
+                    ? enabled
+                    : [...enabled, { status: activity.status, label: activity.statusLabel ?? activity.status, color: activity.statusColor ?? "#94a3b8" }]
+                );
+              });
           } else {
             // Legacy deptless activity — no single department to scope by;
             // falls back to whatever the viewer can already see, same as
@@ -201,9 +219,9 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {Object.values(ActivityStatus).map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s.replace(/_/g, " ")}
+                    {statusOptions.map((s) => (
+                      <SelectItem key={s.status} value={s.status}>
+                        {s.label}
                       </SelectItem>
                     ))}
                   </SelectContent>
@@ -341,9 +359,15 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
             {!isMilestone && (
               <div className="space-y-2">
                 <Label>Progress</Label>
-                <p className="text-sm text-muted-foreground">
-                  {progress}% — calculated automatically from status
-                </p>
+                {progress === null ? (
+                  <p className="text-sm text-amber-700">
+                    Configuration required — no progress percentage is configured for this status in this department.
+                  </p>
+                ) : (
+                  <p className="text-sm text-muted-foreground">
+                    {progress}% — calculated automatically from status
+                  </p>
+                )}
               </div>
             )}
 

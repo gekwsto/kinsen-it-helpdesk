@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireAnyDepartmentPermission, requireDepartmentPermission } from "@/lib/permissions";
 import { createCancelReasonSchema, updateCancelReasonSchema } from "@/lib/validations";
 import { buildCancelReasonWhere } from "@/lib/services/department-scope-service";
+import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 
 const CANCEL_REASON_PERMISSION_KEYS = ["cancelReason.create", "cancelReason.edit", "cancelReason.delete"];
 
@@ -30,21 +31,39 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json(reasons);
   } catch (error: any) {
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
+    if (error.message === "Unauthorized") return unauthorizedResponse();
+    return forbiddenResponse();
   }
 }
 
 export async function POST(req: NextRequest) {
+  let attemptedName: string | undefined;
   try {
     const body = await req.json();
-    const data = createCancelReasonSchema.parse(body);
+    const parsed = createCancelReasonSchema.safeParse(body);
+    if (!parsed.success) return zodErrorResponse(parsed.error);
+    const data = parsed.data;
+    attemptedName = data.name;
 
     if (data.departmentId) {
-      await requireDepartmentPermission(data.departmentId, "cancelReason.create");
+      const department = await prisma.department.findUnique({ where: { id: data.departmentId }, select: { id: true } });
+      if (!department) {
+        return NextResponse.json(apiError("invalid_department", "The selected department does not exist.", { field: "departmentId" }), { status: 400 });
+      }
+      try {
+        await requireDepartmentPermission(data.departmentId, "cancelReason.create");
+      } catch (error: any) {
+        if (error.message === "Unauthorized") return unauthorizedResponse();
+        return forbiddenResponse("You do not have permission to create cancel reasons in this department.");
+      }
     } else {
       // Global reason (departmentId omitted/null) — System Admin only.
-      await requireAdmin();
+      try {
+        await requireAdmin();
+      } catch (error: any) {
+        if (error.message === "Unauthorized") return unauthorizedResponse();
+        return forbiddenResponse("Only a System Admin can create a global cancel reason.");
+      }
       // The DB's @@unique([departmentId, name]) can't catch this case:
       // Postgres treats every NULL departmentId as distinct from every other
       // NULL, so two global reasons named identically wouldn't collide at
@@ -55,37 +74,43 @@ export async function POST(req: NextRequest) {
         select: { id: true },
       });
       if (existingGlobal) {
-        return NextResponse.json({ error: "A global cancel reason with this name already exists.", code: "duplicate_name" }, { status: 409 });
+        return NextResponse.json(apiError("duplicate_cancel_reason_name", `"${data.name}" already exists as a global cancel reason.`, { field: "name" }), { status: 409 });
       }
     }
 
     const reason = await prisma.ticketCancelReason.create({ data });
     return NextResponse.json(reason, { status: 201 });
   } catch (error: any) {
-    if (error.name === "ZodError") {
-      return NextResponse.json({ error: error.errors }, { status: 422 });
-    }
     if (error.code === "P2002") {
-      return NextResponse.json({ error: "A cancel reason with this name already exists in this department.", code: "duplicate_name" }, { status: 409 });
+      const name = attemptedName ? `"${attemptedName}"` : "This name";
+      return NextResponse.json(apiError("duplicate_cancel_reason_name", `${name} already exists as a cancel reason in this department.`, { field: "name" }), { status: 409 });
     }
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
-    return NextResponse.json({ error: "Internal error", code: "internal_error" }, { status: 500 });
+    if (error.code === "P2003") {
+      return NextResponse.json(apiError("invalid_department", "The selected department does not exist.", { field: "departmentId" }), { status: 400 });
+    }
+    return internalErrorResponse();
   }
 }
 
 export async function PATCH(req: NextRequest) {
   try {
     const body = await req.json();
-    const { id, ...data } = updateCancelReasonSchema.parse(body);
+    const parsedBody = updateCancelReasonSchema.safeParse(body);
+    if (!parsedBody.success) return zodErrorResponse(parsedBody.error);
+    const { id, ...data } = parsedBody.data;
 
     const existing = await prisma.ticketCancelReason.findUnique({ where: { id }, select: { departmentId: true } });
-    if (!existing) return NextResponse.json({ error: "Not found", code: "item_not_found" }, { status: 404 });
+    if (!existing) return NextResponse.json(apiError("item_not_found", "This cancel reason no longer exists."), { status: 404 });
 
-    if (existing.departmentId) {
-      await requireDepartmentPermission(existing.departmentId, "cancelReason.edit");
-    } else {
-      await requireAdmin();
+    try {
+      if (existing.departmentId) {
+        await requireDepartmentPermission(existing.departmentId, "cancelReason.edit");
+      } else {
+        await requireAdmin();
+      }
+    } catch (error: any) {
+      if (error.message === "Unauthorized") return unauthorizedResponse();
+      return forbiddenResponse("You do not have permission to edit this cancel reason.");
     }
 
     if (data.name) {
@@ -93,19 +118,17 @@ export async function PATCH(req: NextRequest) {
         where: { departmentId: existing.departmentId, name: data.name, NOT: { id } },
       });
       if (dupe) {
-        return NextResponse.json({ error: "A cancel reason with this name already exists in this department.", code: "duplicate_name" }, { status: 409 });
+        return NextResponse.json(apiError("duplicate_cancel_reason_name", `A cancel reason named "${data.name}" already exists in this scope.`, { field: "name" }), { status: 409 });
       }
     }
 
     const updated = await prisma.ticketCancelReason.update({ where: { id }, data });
     return NextResponse.json(updated);
   } catch (error: any) {
-    if (error.name === "ZodError") {
-      return NextResponse.json({ error: "Invalid data" }, { status: 422 });
+    if (error.code === "P2002") {
+      return NextResponse.json(apiError("duplicate_cancel_reason_name", "A cancel reason with this name already exists in this scope.", { field: "name" }), { status: 409 });
     }
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
-    return NextResponse.json({ error: "Internal error", code: "internal_error" }, { status: 500 });
+    return internalErrorResponse();
   }
 }
 
@@ -113,26 +136,28 @@ export async function DELETE(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("id");
-    if (!id) return NextResponse.json({ error: "ID required" }, { status: 400 });
+    if (!id) return NextResponse.json(apiError("invalid_payload", "A cancel reason id is required."), { status: 400 });
 
     const reason = await prisma.ticketCancelReason.findUnique({
       where: { id },
       include: { _count: { select: { tickets: true } } },
     });
-    if (!reason) return NextResponse.json({ error: "Not found", code: "item_not_found" }, { status: 404 });
+    if (!reason) return NextResponse.json(apiError("item_not_found", "This cancel reason no longer exists."), { status: 404 });
 
-    if (reason.departmentId) {
-      await requireDepartmentPermission(reason.departmentId, "cancelReason.delete");
-    } else {
-      await requireAdmin();
+    try {
+      if (reason.departmentId) {
+        await requireDepartmentPermission(reason.departmentId, "cancelReason.delete");
+      } else {
+        await requireAdmin();
+      }
+    } catch (error: any) {
+      if (error.message === "Unauthorized") return unauthorizedResponse();
+      return forbiddenResponse("You do not have permission to delete this cancel reason.");
     }
 
     if (reason._count.tickets > 0) {
       return NextResponse.json(
-        {
-          error: `This cancel reason is used by ${reason._count.tickets} ticket${reason._count.tickets > 1 ? "s" : ""} and cannot be deleted. Deactivate it instead.`,
-          code: "item_in_use",
-        },
+        apiError("item_in_use", `This cancel reason is used by ${reason._count.tickets} ticket${reason._count.tickets > 1 ? "s" : ""} and cannot be deleted. Deactivate it instead.`),
         { status: 409 }
       );
     }
@@ -140,8 +165,9 @@ export async function DELETE(req: NextRequest) {
     await prisma.ticketCancelReason.delete({ where: { id } });
     return new NextResponse(null, { status: 204 });
   } catch (error: any) {
-    if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized", code: "unauthorized" }, { status: 401 });
-    if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
-    return NextResponse.json({ error: "Internal error", code: "internal_error" }, { status: 500 });
+    if (error.code === "P2003") {
+      return NextResponse.json(apiError("item_in_use", "This cancel reason is still referenced and cannot be deleted. Deactivate it instead."), { status: 409 });
+    }
+    return internalErrorResponse();
   }
 }
