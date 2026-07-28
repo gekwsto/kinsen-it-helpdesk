@@ -1,0 +1,650 @@
+{
+  "info": {
+    "name": "TicketApp API",
+    "description": "Βασισμένο αποκλειστικά στον πραγματικό κώδικα του TicketApp repository. Σχεδόν κάθε request εδώ απαιτεί ένα έγκυρο Auth.js `authjs.session-token` session cookie — δες docs/api/AUTHENTICATION.md. Το collection ΔΕΝ περιέχει κανένα πραγματικό cookie/secret. Δες τις οδηγίες στο τέλος αυτής της περιγραφής για το πώς να προσθέσεις το δικό σου session cookie τοπικά.\n\nΟδηγίες για local testing:\n1. Κάνε login στο TicketApp μέσω browser (http://localhost:3000/login).\n2. Άνοιξε τα DevTools → Application/Storage → Cookies → βρες το `authjs.session-token`.\n3. Αντίγραψε την τιμή του και βάλε την στο Postman environment variable `sessionCookie` (όχι εδώ στο collection).\n4. Το `sessionCookie` χρησιμοποιείται αυτόματα ως `Cookie: authjs.session-token={{sessionCookie}}` header σε κάθε request.\n\nΟι φάκελοι \"Gantt\" και \"Resource Planning\" περιλαμβάνονται σκόπιμα κενοί — αυτά τα features είναι αποκλειστικά server-rendered (Next.js Server Components), χωρίς κανένα πραγματικό JSON API endpoint σήμερα. Βλ. docs/api/EXTERNAL_API_READINESS.md.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000", "type": "string" },
+    { "key": "sessionCookie", "value": "", "type": "string" },
+    { "key": "departmentId", "value": "", "type": "string" },
+    { "key": "ticketId", "value": "", "type": "string" },
+    { "key": "projectId", "value": "", "type": "string" },
+    { "key": "activityId", "value": "", "type": "string" },
+    { "key": "userId", "value": "", "type": "string" },
+    { "key": "statusId", "value": "", "type": "string" },
+    { "key": "priorityId", "value": "", "type": "string" },
+    { "key": "categoryId", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "description": "Auth.js session/OAuth catch-all. Δεν υπάρχει κανένα endpoint εδώ για να δημιουργήσεις session προγραμματιστικά — μόνο interactive browser login. Αυτό το request επιβεβαιώνει ότι ένα ήδη υπάρχον sessionCookie είναι έγκυρο.",
+      "item": [
+        {
+          "name": "Get current session",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/auth/session", "host": ["{{baseUrl}}"], "path": ["api", "auth", "session"] },
+            "description": "Auth.js built-in route (μέρος του catch-all /api/auth/{nextauth}). Επιστρέφει το τρέχον session object, ή {} αν άκυρο/ληγμένο."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Tickets",
+      "item": [
+        {
+          "name": "List tickets",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/tickets?page=1&limit=20&departmentId={{departmentId}}",
+              "host": ["{{baseUrl}}"], "path": ["api", "tickets"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "20" },
+                { "key": "departmentId", "value": "{{departmentId}}" },
+                { "key": "search", "value": "", "disabled": true },
+                { "key": "statusId", "value": "{{statusId}}", "disabled": true },
+                { "key": "priorityId", "value": "{{priorityId}}", "disabled": true },
+                { "key": "myOnly", "value": "true", "disabled": true }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create ticket",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Δεν μπορώ να συνδεθώ στο VPN\",\n  \"description\": \"Το VPN client δίνει σφάλμα timeout από το πρωί.\",\n  \"departmentId\": \"{{departmentId}}\",\n  \"priorityId\": \"{{priorityId}}\",\n  \"categoryId\": \"{{categoryId}}\",\n  \"shareWithDepartment\": false\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/tickets", "host": ["{{baseUrl}}"], "path": ["api", "tickets"] }
+          }
+        },
+        {
+          "name": "Get ticket",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}"] }
+          }
+        },
+        {
+          "name": "Update ticket",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"priorityId\": \"{{priorityId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}"] }
+          }
+        },
+        {
+          "name": "Change status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"statusId\": \"{{statusId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}/status", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}", "status"] }
+          }
+        },
+        {
+          "name": "Assign agent",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"assignedAgentId\": \"{{userId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}/assign", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}", "assign"] }
+          }
+        },
+        {
+          "name": "Move department",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"departmentId\": \"{{departmentId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}/department", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}", "department"] }
+          }
+        },
+        {
+          "name": "Add reply/comment",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"body\": \"Ελέγχω το θέμα.\",\n  \"isInternal\": false\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}/reply", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}", "reply"] }
+          }
+        },
+        {
+          "name": "Cancel ticket",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"cancelReasonId\": \"<cancelReasonId>\",\n  \"note\": \"Λύθηκε από τον χρήστη.\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}/cancel", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}", "cancel"] }
+          }
+        },
+        {
+          "name": "Delete ticket (Administrator only)",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}"] }
+          }
+        },
+        {
+          "name": "Accept pending ticket",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"departmentId\": \"{{departmentId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/tickets/pending/<pendingTicketId>/accept", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "pending", "<pendingTicketId>", "accept"] }
+          }
+        },
+        {
+          "name": "Reject pending ticket",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/tickets/pending/<pendingTicketId>/reject", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "pending", "<pendingTicketId>", "reject"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Projects",
+      "item": [
+        {
+          "name": "List projects",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/projects?page=1&limit=20&departmentId={{departmentId}}",
+              "host": ["{{baseUrl}}"], "path": ["api", "projects"],
+              "query": [{ "key": "page", "value": "1" }, { "key": "limit", "value": "20" }, { "key": "departmentId", "value": "{{departmentId}}" }]
+            }
+          }
+        },
+        {
+          "name": "Create project",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Αναβάθμιση δικτύου\",\n  \"description\": \"Αντικατάσταση switches.\",\n  \"departmentId\": \"{{departmentId}}\",\n  \"status\": \"PLANNING\",\n  \"priority\": 2,\n  \"memberIds\": []\n}" },
+            "url": { "raw": "{{baseUrl}}/api/projects", "host": ["{{baseUrl}}"], "path": ["api", "projects"] }
+          }
+        },
+        {
+          "name": "Get project",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/projects/{{projectId}}", "host": ["{{baseUrl}}"], "path": ["api", "projects", "{{projectId}}"] }
+          }
+        },
+        {
+          "name": "Update project",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/projects/{{projectId}}", "host": ["{{baseUrl}}"], "path": ["api", "projects", "{{projectId}}"] }
+          }
+        },
+        {
+          "name": "Delete project (Administrator only)",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/projects/{{projectId}}", "host": ["{{baseUrl}}"], "path": ["api", "projects", "{{projectId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Activities",
+      "item": [
+        {
+          "name": "List activities (no pagination — returns everything)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/activities?departmentId={{departmentId}}",
+              "host": ["{{baseUrl}}"], "path": ["api", "activities"],
+              "query": [{ "key": "departmentId", "value": "{{departmentId}}" }, { "key": "projectId", "value": "{{projectId}}", "disabled": true }]
+            }
+          }
+        },
+        {
+          "name": "Create standalone activity",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Ετήσιος έλεγχος πυρασφάλειας\",\n  \"departmentId\": \"{{departmentId}}\",\n  \"status\": \"TODO\",\n  \"priority\": \"MEDIUM\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/activities", "host": ["{{baseUrl}}"], "path": ["api", "activities"] }
+          }
+        },
+        {
+          "name": "Create activity inside a project",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"Παραγγελία εξοπλισμού\",\n  \"projectId\": \"{{projectId}}\",\n  \"status\": \"TODO\",\n  \"priority\": \"HIGH\",\n  \"assignedUserIds\": [\"{{userId}}\"]\n}" },
+            "url": { "raw": "{{baseUrl}}/api/activities", "host": ["{{baseUrl}}"], "path": ["api", "activities"] }
+          }
+        },
+        {
+          "name": "Get activity",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/activities/{{activityId}}", "host": ["{{baseUrl}}"], "path": ["api", "activities", "{{activityId}}"] }
+          }
+        },
+        {
+          "name": "Update activity (status/dates/assignees — progress is never client-set)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"IN_PROGRESS\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/activities/{{activityId}}", "host": ["{{baseUrl}}"], "path": ["api", "activities", "{{activityId}}"] }
+          }
+        },
+        {
+          "name": "Clear activity's project (make standalone)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"projectId\": null\n}" },
+            "url": { "raw": "{{baseUrl}}/api/activities/{{activityId}}", "host": ["{{baseUrl}}"], "path": ["api", "activities", "{{activityId}}"] }
+          }
+        },
+        {
+          "name": "Delete activity (Administrator only)",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/activities/{{activityId}}", "host": ["{{baseUrl}}"], "path": ["api", "activities", "{{activityId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Users",
+      "item": [
+        {
+          "name": "List active users",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/users", "host": ["{{baseUrl}}"], "path": ["api", "users"] }
+          }
+        },
+        {
+          "name": "List assignable users for a ticket in a department",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/api/users?assignableFor=ticket&departmentId={{departmentId}}",
+              "host": ["{{baseUrl}}"], "path": ["api", "users"],
+              "query": [{ "key": "assignableFor", "value": "ticket" }, { "key": "departmentId", "value": "{{departmentId}}" }]
+            }
+          }
+        },
+        {
+          "name": "Admin: list all users",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/users", "host": ["{{baseUrl}}"], "path": ["api", "admin", "users"] }
+          }
+        },
+        {
+          "name": "Admin: create user",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Νέος Χρήστης\",\n  \"email\": \"user@example.com\",\n  \"password\": \"TempPass123!\",\n  \"role\": \"USER\",\n  \"primaryDepartmentId\": \"{{departmentId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/admin/users", "host": ["{{baseUrl}}"], "path": ["api", "admin", "users"] }
+          }
+        },
+        {
+          "name": "Admin: update user",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"role\": \"IT_AGENT\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/admin/users/{{userId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "users", "{{userId}}"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Departments",
+      "item": [
+        {
+          "name": "Admin: list all departments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/departments", "host": ["{{baseUrl}}"], "path": ["api", "admin", "departments"] }
+          }
+        },
+        {
+          "name": "Admin: create department",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"IT Support\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/admin/departments", "host": ["{{baseUrl}}"], "path": ["api", "admin", "departments"] }
+          }
+        },
+        {
+          "name": "Admin: get department",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/departments/{{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "departments", "{{departmentId}}"] }
+          }
+        },
+        {
+          "name": "Non-admin: department hierarchy",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/departments/{{departmentId}}/hierarchy", "host": ["{{baseUrl}}"], "path": ["api", "departments", "{{departmentId}}", "hierarchy"] }
+          }
+        },
+        {
+          "name": "Non-admin: active sub-departments",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/departments/{{departmentId}}/sub-departments", "host": ["{{baseUrl}}"], "path": ["api", "departments", "{{departmentId}}", "sub-departments"] }
+          }
+        },
+        {
+          "name": "Admin: grant department membership",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"userId\": \"{{userId}}\",\n  \"role\": \"AGENT_ASSIGNEE\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/admin/departments/{{departmentId}}/members", "host": ["{{baseUrl}}"], "path": ["api", "admin", "departments", "{{departmentId}}", "members"] }
+          }
+        },
+        {
+          "name": "Set active workspace",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"departmentId\": \"{{departmentId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/workspace/active", "host": ["{{baseUrl}}"], "path": ["api", "workspace", "active"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Configuration",
+      "description": "Ticket statuses/categories/priorities/cancel-reasons, SLA, Activity Progress/Status. Χρησιμοποιούν το structured error contract (lib/api-errors.ts) — μοναδικό cluster στο API με αυτό το σχήμα.",
+      "item": [
+        {
+          "name": "Statuses: list (department-scoped)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/statuses?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "statuses"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "Statuses: create",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Σε αναμονή\",\n  \"color\": \"#f59e0b\",\n  \"departmentId\": \"{{departmentId}}\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/admin/statuses", "host": ["{{baseUrl}}"], "path": ["api", "admin", "statuses"] }
+          }
+        },
+        {
+          "name": "Categories: list (department-scoped)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/categories?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "categories"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "Priorities: list (department-scoped)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/priorities?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "priorities"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "Cancel Reasons: list (department-scoped, includes global)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/cancel-reasons?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "cancel-reasons"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "SLA: read config",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/sla?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "sla"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "Activity Progress: read config",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/activity-progress?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "activity-progress"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "Activity Statuses: read config",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/activity-statuses?departmentId={{departmentId}}", "host": ["{{baseUrl}}"], "path": ["api", "admin", "activity-statuses"], "query": [{ "key": "departmentId", "value": "{{departmentId}}" }] }
+          }
+        },
+        {
+          "name": "Non-admin: enabled activity statuses for a department",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/departments/{{departmentId}}/activity-statuses", "host": ["{{baseUrl}}"], "path": ["api", "departments", "{{departmentId}}", "activity-statuses"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Attachments",
+      "description": "⚠️ POST εδώ απαιτεί μεν session, αλλά το αποθηκευμένο αρχείο σερβίρεται στη συνέχεια ως unauthenticated static file (public/uploads/...). Βλ. docs/api/EXTERNAL_API_READINESS.md §3.",
+      "item": [
+        {
+          "name": "Upload ticket attachment",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "file", "type": "file", "src": "" },
+                { "key": "messageId", "value": "", "type": "text", "disabled": true }
+              ]
+            },
+            "url": { "raw": "{{baseUrl}}/api/tickets/{{ticketId}}/attachments", "host": ["{{baseUrl}}"], "path": ["api", "tickets", "{{ticketId}}", "attachments"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Dashboard",
+      "item": [
+        {
+          "name": "Ticket dashboard aggregates",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/dashboard", "host": ["{{baseUrl}}"], "path": ["api", "dashboard"] },
+            "description": "Μόνο ticket-scoped — δεν υπάρχει ξεχωριστό Projects Dashboard API (server-rendered only)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Gantt",
+      "description": "⚠️ Καμία πραγματική JSON API δεν υπάρχει σήμερα για το Project Gantt ή το Activity Gantt — και τα δύο είναι αποκλειστικά server-rendered Next.js Server Components (/projects/gantt, /activities/gantt). Αυτός ο φάκελος αφήνεται σκόπιμα κενός αντί να περιέχει επινοημένα endpoints. Βλ. docs/api/WORKFLOWS.md.",
+      "item": []
+    },
+    {
+      "name": "Resource Planning",
+      "description": "⚠️ Καμία πραγματική JSON API δεν υπάρχει σήμερα (/projects/resource-planning είναι server-rendered). Αλλαγές ημερομηνιών μέσω αυτού του UI καταλήγουν στο ίδιο PATCH /api/activities/{id} που ήδη υπάρχει στον φάκελο Activities. Αυτός ο φάκελος αφήνεται σκόπιμα κενός.",
+      "item": []
+    },
+    {
+      "name": "Microsoft",
+      "item": [
+        {
+          "name": "Admin: list Microsoft mappings",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/microsoft-mappings", "host": ["{{baseUrl}}"], "path": ["api", "admin", "microsoft-mappings"] }
+          }
+        },
+        {
+          "name": "Admin: create Microsoft mapping",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"sourceType\": \"PROFILE_DEPARTMENT\",\n  \"microsoftValue\": \"IT\",\n  \"departmentId\": \"{{departmentId}}\",\n  \"departmentRole\": \"AGENT_ASSIGNEE\"\n}" },
+            "url": { "raw": "{{baseUrl}}/api/admin/microsoft-mappings", "host": ["{{baseUrl}}"], "path": ["api", "admin", "microsoft-mappings"] }
+          }
+        },
+        {
+          "name": "Admin: read cached directory values",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/microsoft-directory/values", "host": ["{{baseUrl}}"], "path": ["api", "admin", "microsoft-directory", "values"] }
+          }
+        },
+        {
+          "name": "Admin: sync directory values from Graph",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/microsoft-directory/values/sync", "host": ["{{baseUrl}}"], "path": ["api", "admin", "microsoft-directory", "values", "sync"] }
+          }
+        },
+        {
+          "name": "Admin: test Graph mailbox connection",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/email/test-connection", "host": ["{{baseUrl}}"], "path": ["api", "admin", "email", "test-connection"] }
+          }
+        },
+        {
+          "name": "Admin: poll email now",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Cookie", "value": "authjs.session-token={{sessionCookie}}" }],
+            "url": { "raw": "{{baseUrl}}/api/admin/email/poll", "host": ["{{baseUrl}}"], "path": ["api", "admin", "email", "poll"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "description": "Μοναδικό μη-session endpoint στο API. Fail-open (δέχεται τα πάντα) αν λείπουν ΚΑΙ τα δύο EMAIL_WEBHOOK_SECRET/CRON_SECRET — βλ. docs/api/AUTHENTICATION.md §4. Ρύθμισε το EMAIL_WEBHOOK_SECRET environment variable τοπικά πριν το χρησιμοποιήσεις.",
+      "item": [
+        {
+          "name": "Trigger email inbound polling",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{EMAIL_WEBHOOK_SECRET}}" }],
+            "url": { "raw": "{{baseUrl}}/api/email/inbound", "host": ["{{baseUrl}}"], "path": ["api", "email", "inbound"] }
+          }
+        }
+      ]
+    }
+  ]
+}

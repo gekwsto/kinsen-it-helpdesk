@@ -24,6 +24,7 @@ import { findHoveredResourceId, isReassignment, resolveDragOutcome, type RowBoun
 import { getClippedBarMetrics } from "@/lib/resource-planning-bar-metrics";
 import { computePxPerDay } from "@/lib/resource-planning-column-sizing";
 import { computeResourceRowHeights } from "@/lib/resource-planning-row-heights";
+import { shiftActivityDate } from "@/lib/resource-planning-date-math";
 import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
 import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
 
@@ -88,7 +89,7 @@ type DragMeta = {
   barWidth: number;
   originResourceId: string;
   originalAssignedUserIds: string[]; // snapshot for revert-on-failure of a cross-row reassignment
-  rowBounds: RowBound[]; // snapshotted once at drag-start, ONLY for resources eligible as an activity-assignment target — see findHoveredResourceId
+  rowBounds: RowBound[]; // snapshotted at drag-start, ONLY for resources eligible as an activity-assignment target — see findHoveredResourceId; re-snapshotted on scroll, see handleScrollDuringDrag
   hoverResourceId: string | null; // mutated during moveDrag (a ref field, not React state — no re-render per pointermove), read at drop
 };
 
@@ -122,6 +123,45 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
   // pendingSaves pattern gantt-chart.tsx uses).
   const [localEvents, setLocalEvents] = useState<ResourceEvent[]>(events);
   const pendingSaves = useRef(new Set<string>());
+  // Per-activity monotonic request counter. Two drags on the SAME activity
+  // in quick succession (e.g. the user nudges a bar, then immediately drags
+  // it again before the first PATCH's network round-trip finishes) each
+  // fire their own PATCH; nothing guarantees those responses arrive in the
+  // order the requests were sent. Without this guard, whichever response
+  // happens to arrive LAST wins — even if it belongs to the OLDER of the two
+  // requests — silently reverting the activity to a stale position after a
+  // newer drag already "succeeded" on screen. Each endDrag call claims the
+  // next sequence number for its activity id before firing the fetch; when
+  // the response comes back, it's only allowed to touch localEvents/
+  // pendingSaves/router.refresh if it still holds the CURRENT sequence
+  // number for that id — an outdated response is a no-op.
+  const activityRequestSeq = useRef(new Map<string, number>());
+  // The seq check above only protects the CLIENT's own state from a stale
+  // RESPONSE — it does nothing to stop the stale REQUEST itself from still
+  // reaching the server and overwriting the newer drag's already-committed
+  // write once its delayed round-trip finally completes (confirmed while
+  // investigating: without this, the DB itself silently regresses to the
+  // older drag's dates a couple seconds later, even though the client-side
+  // guard above hid the symptom from the UI). Aborting the previous
+  // in-flight PATCH for the same activity before firing a new one closes
+  // that window at its actual source — the browser drops the old request
+  // rather than letting two writes for the same activity race each other on
+  // the wire.
+  const activityAbortControllers = useRef(new Map<string, AbortController>());
+  // Guards the post-fetch state mutations in endDrag against firing after
+  // the component itself has unmounted (route navigation away mid-flight).
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // A drag in progress at unmount (route navigation away mid-gesture)
+      // would otherwise leak this listener — the DOM node itself is gone so
+      // no more pointer events fire to reach the endDrag/cancelDrag cleanup.
+      window.removeEventListener("scroll", stableScrollListener, { capture: true });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (pendingSaves.current.size === 0) {
@@ -145,8 +185,9 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
   const barElRefs = useRef(new Map<string, HTMLDivElement>());
   const dragRef = useRef<DragMeta | null>(null);
   // Each resource row's own day-grid container — used only to snapshot
-  // screen-space bounding boxes once at drag-start (see startDrag) for
-  // cross-row hit-testing; never read on every pointermove.
+  // screen-space bounding boxes at drag-start and on scroll (see startDrag /
+  // handleScrollDuringDrag) for cross-row hit-testing; never read on every
+  // pointermove.
   const rowContainerRefs = useRef(new Map<string, HTMLDivElement>());
   // The row currently outlined as a drop target during an active
   // cross-row drag — tracked so moveDrag can clear the PREVIOUS row's
@@ -274,6 +315,54 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     highlightedRowElRef.current = null;
   }
 
+  // Only resources that are actually valid activity-assignment targets
+  // register as a droppable row at all, so hovering an ineligible row (e.g.
+  // a row shown only because of historical/legacy assigned work — see
+  // getResourcePlanningResources) never registers as a target; the PATCH
+  // route re-validates this server-side regardless either way.
+  function snapshotRowBounds(): RowBound[] {
+    const rowBounds: RowBound[] = [];
+    for (const r of resources) {
+      if (!r.assignableFor.includes("activity")) continue;
+      const el = rowContainerRefs.current.get(r.id);
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      rowBounds.push({ resourceId: r.id, top: rect.top, bottom: rect.bottom });
+    }
+    return rowBounds;
+  }
+
+  // Row rects are captured once at drag-start (not re-measured on every
+  // pointermove — a real per-move getBoundingClientRect sweep would be a
+  // layout-thrash cost paid on every pixel of movement). But a scroll of any
+  // ancestor DURING an active drag — the page itself, or this component's
+  // own horizontally-scrolling wrapper, which per the CSS overflow-x/
+  // overflow-y coupling rule also becomes its own vertical scroll context
+  // once its content is tall enough — shifts every row's screen position,
+  // which would silently invalidate the snapshot for the rest of the
+  // gesture (confirmed while investigating: a scroll mid-drag desyncs the
+  // snapshot from the DOM's live position by exactly the scrolled amount,
+  // corrupting cross-row hit-testing for the remainder of that drag). A
+  // capturing `scroll` listener on the window re-snapshots on any such
+  // scroll, so cross-row hit-testing stays correct for the rest of the drag.
+  function handleScrollDuringDrag() {
+    const d = dragRef.current;
+    if (!d) return;
+    d.rowBounds = snapshotRowBounds();
+  }
+  // addEventListener/removeEventListener only pair up correctly when given
+  // the exact same function reference — but handleScrollDuringDrag above is
+  // a fresh closure every render. If a re-render happens between
+  // startDrag adding the listener and endDrag/cancelDrag removing it (e.g.
+  // triggered by an unrelated router.refresh() from a DIFFERENT bar's drag
+  // completing mid-gesture), removeEventListener with THAT render's closure
+  // would silently fail to find/remove the one actually attached, leaking
+  // it. This stable indirection is created once and never changes identity,
+  // while always delegating to whichever closure is current when it fires.
+  const scrollListenerRef = useRef<() => void>(() => {});
+  scrollListenerRef.current = handleScrollDuringDrag;
+  const stableScrollListener = useRef(() => scrollListenerRef.current()).current;
+
   function startDrag(
     e: React.PointerEvent<HTMLDivElement>,
     id: string,
@@ -294,20 +383,8 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     // never visually disappears under a bar it's passing over.
     e.currentTarget.style.zIndex = "50";
 
-    // Snapshotted ONCE per gesture (not re-measured on every pointermove) —
-    // only resources that are actually valid activity-assignment targets
-    // register as a droppable row at all, so hovering an ineligible row
-    // (e.g. a row shown only because of historical/legacy assigned work —
-    // see getResourcePlanningResources) never registers as a target; the
-    // PATCH route re-validates this server-side regardless either way.
-    const rowBounds: RowBound[] = [];
-    for (const r of resources) {
-      if (!r.assignableFor.includes("activity")) continue;
-      const el = rowContainerRefs.current.get(r.id);
-      if (!el) continue;
-      const rect = el.getBoundingClientRect();
-      rowBounds.push({ resourceId: r.id, top: rect.top, bottom: rect.bottom });
-    }
+    const rowBounds = snapshotRowBounds();
+    window.addEventListener("scroll", stableScrollListener, { capture: true, passive: true });
 
     dragRef.current = {
       id,
@@ -360,6 +437,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     if (!d || d.barKey !== barKey) return;
     dragRef.current = null;
     clearRowHighlight();
+    window.removeEventListener("scroll", stableScrollListener, { capture: true });
 
     const delta = clampDeltaToGrid(d, e.clientX - d.startX);
     const el = barElRefs.current.get(barKey);
@@ -387,12 +465,30 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     // in that case already, and 0 when this is a pure reassignment with no
     // horizontal movement), same as Gantt's milestone drag always sending
     // both fields equal — no need to know which raw field was originally set.
-    const newStart = addDays(new Date(d.start), daysDelta).toISOString();
-    const newEnd = addDays(new Date(d.end), daysDelta).toISOString();
+    // shiftActivityDate (lib/resource-planning-date-math.ts) is what makes
+    // this correct across a month/year boundary, every month length, leap
+    // years, and DST — see that module for why.
+    const newStart = shiftActivityDate(d.start, daysDelta);
+    const newEnd = shiftActivityDate(d.end, daysDelta);
     const newAssignedUserIds = reassigning ? [targetResourceId!] : undefined;
 
     pendingSaves.current.add(id);
     setLocalEvents((prev) => applyMove(prev, id, newStart, newEnd, newAssignedUserIds));
+    // Claim the next sequence number for this activity AFTER the optimistic
+    // update above (which intentionally always applies immediately — the
+    // bar must snap to wherever the user just dropped it) but BEFORE the
+    // fetch fires, so the response handler below can tell whether it's still
+    // the most recent request for this id by the time it comes back.
+    const mySeq = (activityRequestSeq.current.get(id) ?? 0) + 1;
+    activityRequestSeq.current.set(id, mySeq);
+    // Cancel any still-in-flight PATCH for this same activity before firing
+    // this one — otherwise the older request can still reach the server and
+    // overwrite this newer write once its own (possibly slower) round-trip
+    // eventually completes, regardless of what the response-side seq check
+    // does on the client.
+    activityAbortControllers.current.get(id)?.abort();
+    const abortController = new AbortController();
+    activityAbortControllers.current.set(id, abortController);
 
     const targetName = reassigning ? resources.find((r) => r.id === targetResourceId)?.name ?? resources.find((r) => r.id === targetResourceId)?.email : undefined;
 
@@ -405,7 +501,17 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
           dueDate: newEnd,
           ...(newAssignedUserIds && { assignedUserIds: newAssignedUserIds }),
         }),
+        signal: abortController.signal,
       });
+      // A newer drag on this same activity has since fired its own PATCH —
+      // this response is for a superseded request. Applying it now (success
+      // OR failure) would overwrite the newer drag's already-visible result
+      // with stale data, so it's discarded entirely: no toast, no
+      // pendingSaves/localEvents mutation, no refresh. pendingSaves stays
+      // set — it's still genuinely correct, since the newer request is
+      // presumably still in flight (or will resolve and clear it itself).
+      const isStale = activityRequestSeq.current.get(id) !== mySeq;
+      if (isStale || !isMountedRef.current) return;
       if (res.ok) {
         toast.success(
           reassigning
@@ -421,6 +527,8 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
         setLocalEvents((prev) => applyMove(prev, id, d.start, d.end, reassigning ? d.originalAssignedUserIds : undefined));
       }
     } catch {
+      const isStale = activityRequestSeq.current.get(id) !== mySeq;
+      if (isStale || !isMountedRef.current) return; // superseded by a newer drag — the abort above is expected, not a real failure
       toast.error("Failed to update the activity");
       pendingSaves.current.delete(id);
       setLocalEvents((prev) => applyMove(prev, id, d.start, d.end, reassigning ? d.originalAssignedUserIds : undefined));
@@ -430,6 +538,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
   function cancelDrag(barKey: string) {
     if (dragRef.current?.barKey === barKey) dragRef.current = null;
     clearRowHighlight();
+    window.removeEventListener("scroll", stableScrollListener, { capture: true });
     const el = barElRefs.current.get(barKey);
     if (el) {
       el.style.transform = "";
@@ -555,12 +664,18 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                       // "this is where the event ends," which is wrong when
                       // it actually continues off-screen.
                       const cornerClass = cn(continuesBefore ? "rounded-l-none" : "rounded-l-md", continuesAfter ? "rounded-r-none" : "rounded-r-md");
-                      // Dragging a bar that's only a clipped fragment of the
-                      // real event is confusing (its visible width doesn't
-                      // match the event's actual duration) — safer to fall
-                      // back to click-to-open for those, matching the
-                      // non-editable Link path below exactly.
-                      const canDrag = canEdit && !continuesBefore && !continuesAfter;
+                      // A clipped bar (continuesBefore/continuesAfter) is
+                      // just as draggable as a fully-visible one — only its
+                      // ON-SCREEN width is clipped to the current visible
+                      // range; startDrag/endDrag always read the activity's
+                      // REAL stored start/end (e.start!/e.end! below, not
+                      // the clipped metrics), so duration is preserved
+                      // exactly regardless of how much of the bar is
+                      // currently on screen. Only actual edit permission
+                      // gates dragging — an activity that starts before or
+                      // ends after the visible window must remain draggable
+                      // from whatever portion of it IS visible.
+                      const canDrag = canEdit;
 
                       const barInner = (
                         <div
@@ -623,18 +738,14 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                             {(continuesBefore || continuesAfter) && (
                               <p className="text-xs text-muted-foreground italic">
                                 {continuesBefore && continuesAfter
-                                  ? `Extends beyond both ends of the visible ${view}.`
+                                  ? `Extends beyond both ends of the visible ${view} — still draggable from the visible part; full duration is preserved.`
                                   : continuesBefore
-                                  ? `Starts before the visible ${view}.`
-                                  : `Continues after the visible ${view}.`}
+                                  ? `Starts before the visible ${view} — still draggable from the visible part; full duration is preserved.`
+                                  : `Continues after the visible ${view} — still draggable from the visible part; full duration is preserved.`}
                               </p>
                             )}
                             <p className="text-[10px] text-muted-foreground border-t pt-1.5 mt-1">
-                              {!canEdit
-                                ? "You do not have permission to update this activity."
-                                : canDrag
-                                ? "Drag to move dates"
-                                : "Open activity to edit dates"}
+                              {canDrag ? "Drag to move dates" : "You do not have permission to update this activity."}
                             </p>
                           </TooltipContent>
                         </Tooltip>
