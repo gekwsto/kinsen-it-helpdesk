@@ -25,6 +25,9 @@ enum Role {
 enum TicketSource {
   WEB
   EMAIL
+  // Created by a server-to-server call to POST /api/integrations/tickets,
+  // authenticated via an ExternalIntegration API key — see that model below.
+  API
 }
 
 enum MessageDirection {
@@ -175,37 +178,38 @@ model BusinessUnit {
 }
 
 model Department {
-  id                String                       @id @default(cuid())
-  name              String
-  slug              String                       @unique
-  description       String?
-  isActive          Boolean                      @default(true)
+  id                      String                       @id @default(cuid())
+  name                    String
+  slug                    String                       @unique
+  description             String?
+  isActive                Boolean                      @default(true)
   // Inbound mail routing address for the Pending Tickets flow — see
   // PendingTicket below. Normalized lowercase/trim before save (see
   // setDepartmentInboundEmail in lib/services/department-service.ts).
   // Null = not configured; unique across departments so one address can never
   // be claimed by two departments at once.
-  inboundEmail      String?                      @unique
-  businessUnit      BusinessUnit?                @relation(fields: [businessUnitId], references: [id])
-  businessUnitId    String?
-  subDepartments    SubDepartment[]
-  users             User[]
-  memberships       DepartmentMembership[]
-  microsoftMappings MicrosoftDepartmentMapping[]
-  tickets           Ticket[]
-  pendingTickets    PendingTicket[]
-  projects          Project[]
-  activities        ProjectActivity[]
-  categories        TicketCategory[]
-  priorities        TicketPriority[]
-  statuses          TicketStatus[]
-  cancelReasons     TicketCancelReason[]
+  inboundEmail            String?                      @unique
+  businessUnit            BusinessUnit?                @relation(fields: [businessUnitId], references: [id])
+  businessUnitId          String?
+  subDepartments          SubDepartment[]
+  users                   User[]
+  memberships             DepartmentMembership[]
+  microsoftMappings       MicrosoftDepartmentMapping[]
+  tickets                 Ticket[]
+  pendingTickets          PendingTicket[]
+  projects                Project[]
+  activities              ProjectActivity[]
+  categories              TicketCategory[]
+  priorities              TicketPriority[]
+  statuses                TicketStatus[]
+  cancelReasons           TicketCancelReason[]
   activityProgressConfigs ActivityProgressConfig[]
   projectStatusConfigs    ProjectStatusConfig[]
   activityStatusConfigs   ActivityStatusConfig[]
   activityPriorityConfigs ActivityPriorityConfig[]
-  createdAt         DateTime                     @default(now())
-  updatedAt         DateTime                     @updatedAt
+  externalIntegrations    ExternalIntegration[]        @relation("IntegrationDepartment")
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
 }
 
 // Per-user, per-department standing. Decoupled from User.departmentId (which
@@ -399,22 +403,23 @@ model User {
   departmentMemberships    DepartmentMembership[]
   subDepartmentMemberships SubDepartmentMembership[]
 
-  requestedTickets         Ticket[]             @relation("TicketRequester")
-  assignedTickets          Ticket[]             @relation("TicketAgent")
-  departmentChangedTickets Ticket[]             @relation("TicketDepartmentChangedBy")
+  requestedTickets         Ticket[]              @relation("TicketRequester")
+  assignedTickets          Ticket[]              @relation("TicketAgent")
+  departmentChangedTickets Ticket[]              @relation("TicketDepartmentChangedBy")
   ticketMessages           TicketMessage[]
   ticketAttachments        TicketAttachment[]
   ticketHistories          TicketHistory[]
-  pendingTicketsRequested  PendingTicket[]      @relation("PendingTicketRequester")
-  pendingTicketsAccepted   PendingTicket[]      @relation("PendingTicketAccepted")
-  pendingTicketsRejected   PendingTicket[]      @relation("PendingTicketRejected")
-  ownedProjects            Project[]            @relation("ProjectOwner")
-  projectMemberships       Project[]            @relation("ProjectMembers")
-  assignedActivities       ProjectActivity[]    @relation("ActivityAssignee")
-  activityAssignments      ProjectActivity[]    @relation("ActivityAssignees")
-  createdActivities        ProjectActivity[]    @relation("ActivityCreator")
-  createdDependencies      ActivityDependency[] @relation("ActivityDependenciesCreatedBy")
-  ownedGoals               YearlyGoal[]         @relation("GoalOwner")
+  pendingTicketsRequested  PendingTicket[]       @relation("PendingTicketRequester")
+  pendingTicketsAccepted   PendingTicket[]       @relation("PendingTicketAccepted")
+  createdIntegrations      ExternalIntegration[] @relation("IntegrationCreatedBy")
+  pendingTicketsRejected   PendingTicket[]       @relation("PendingTicketRejected")
+  ownedProjects            Project[]             @relation("ProjectOwner")
+  projectMemberships       Project[]             @relation("ProjectMembers")
+  assignedActivities       ProjectActivity[]     @relation("ActivityAssignee")
+  activityAssignments      ProjectActivity[]     @relation("ActivityAssignees")
+  createdActivities        ProjectActivity[]     @relation("ActivityCreator")
+  createdDependencies      ActivityDependency[]  @relation("ActivityDependenciesCreatedBy")
+  ownedGoals               YearlyGoal[]          @relation("GoalOwner")
   notifications            Notification[]
   pushSubscriptions        PushSubscription[]
   accounts                 Account[]
@@ -461,47 +466,49 @@ model VerificationToken {
 // ─── Ticket Config Tables ─────────────────────────────────────────────────────
 
 model TicketCategory {
-  id           String      @id @default(cuid())
-  name         String
-  description  String?
-  color        String      @default("#6366f1")
-  isActive     Boolean    @default(true)
+  id                  String                @id @default(cuid())
+  name                String
+  description         String?
+  color               String                @default("#6366f1")
+  isActive            Boolean               @default(true)
   // Always owned by exactly one department — there is no more global/shared
   // category. See the 20260727_retire_global_config migration and
   // scripts/retire-global-config.ts for the one-time data migration that
   // moved every pre-existing global row into a department before this
   // column became required.
-  department   Department @relation(fields: [departmentId], references: [id])
-  departmentId String
-  tickets      Ticket[]
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  department          Department            @relation(fields: [departmentId], references: [id])
+  departmentId        String
+  tickets             Ticket[]
+  integrationDefaults ExternalIntegration[] @relation("IntegrationDefaultCategory")
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
 
   @@unique([departmentId, name])
 }
 
 model TicketPriority {
-  id           String      @id @default(cuid())
-  name         String
-  level        Int
-  color        String
-  isActive     Boolean    @default(true)
+  id                  String                @id @default(cuid())
+  name                String
+  level               Int
+  color               String
+  isActive            Boolean               @default(true)
   // Always owned by exactly one department — there is no more global/shared
   // priority. Mirrors TicketCategory's departmentId. A department-owned
   // priority's SlaPolicy (below) is therefore department-scoped too, with
   // no extra field needed.
-  department   Department @relation(fields: [departmentId], references: [id])
-  departmentId String
-  tickets      Ticket[]
-  slaPolicy    SlaPolicy?
-  createdAt    DateTime   @default(now())
-  updatedAt    DateTime   @updatedAt
+  department          Department            @relation(fields: [departmentId], references: [id])
+  departmentId        String
+  tickets             Ticket[]
+  slaPolicy           SlaPolicy?
+  integrationDefaults ExternalIntegration[] @relation("IntegrationDefaultPriority")
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
 
   @@unique([departmentId, name])
 }
 
 model TicketStatus {
-  id           String      @id @default(cuid())
+  id           String     @id @default(cuid())
   name         String
   color        String
   // isDefault/isClosed remain simple booleans, per-department: each
@@ -600,10 +607,38 @@ model Ticket {
   // set for WEB-created or directly-appended-reply tickets.
   pendingTicketOrigin PendingTicket?
 
+  // Set only for source: API tickets — see POST /api/integrations/tickets
+  // and lib/services/ticket-creation-service.ts. onDelete: Restrict
+  // (explicit override of the implicit SetNull an optional relation would
+  // otherwise get) is deliberate: an ExternalIntegration with tickets
+  // attached to it can never be hard-deleted out from under them, so a
+  // ticket's "which application created this" provenance can never be
+  // silently lost — see the ExternalIntegration model's own doc comment.
+  // Disabling (isActive: false) is the supported way to retire an
+  // integration; deletion is intentionally not exposed by any admin route.
+  integration         ExternalIntegration? @relation("IntegrationTickets", fields: [integrationId], references: [id], onDelete: Restrict)
+  integrationId       String?
+  // The calling application's own idempotency key for the business event
+  // that created this ticket — always set together with integrationId,
+  // never independently. See the @@unique constraint below, which is the
+  // actual duplicate-ticket guard (not an application-level check alone).
+  externalReferenceId String?
+  // Deep link back to the exact screen/record in the source application —
+  // validated against ExternalIntegration.baseUrl's origin at creation time
+  // (see the endpoint), but stored as-is (full URL) since baseUrl itself is
+  // optional and a ticket must still remember its own link either way.
+  sourceUrl           String?
+  // Arbitrary caller-supplied structured context (e.g. { vehicleId, plate,
+  // environment }) — opaque to TicketApp beyond a server-side size cap
+  // enforced at write time (see the endpoint's validation); rendered as a
+  // compact key/value list in the UI, never dumped as raw HTML.
+  externalMetadata    Json?
+
   closedAt  DateTime?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
 
+  @@unique([integrationId, externalReferenceId])
   @@index([requesterId])
   @@index([assignedAgentId])
   @@index([statusId])
@@ -617,6 +652,85 @@ model Ticket {
   @@index([shareWithDepartment])
   @@index([shareWithSubDepartment])
   @@index([departmentChangedById])
+  @@index([integrationId])
+}
+
+// ─── External Integrations ─────────────────────────────────────────────────────
+//
+// One row per external application allowed to create real Tickets directly
+// via POST /api/integrations/tickets (server-to-server, API-key
+// authenticated — never a browser session/NextAuth cookie). Deliberately
+// NOT a User/session-based principal: an integration is a scoped credential,
+// not a person, so it never appears as a Ticket.requesterId — the real
+// human who hit the problem is resolved separately per-request from the
+// request body's requesterEmail (see resolveOrCreateRequester in
+// lib/services/requester-resolution-service.ts).
+//
+// Every integration is pinned to exactly one Department at creation time —
+// the incoming request can never choose or override this (see the
+// endpoint's Zod schema, which doesn't even accept a departmentId field) —
+// so a leaked/misused key's blast radius is a single department's ticket
+// queue, never "any department in the system."
+model ExternalIntegration {
+  id       String  @id @default(cuid())
+  name     String
+  slug     String  @unique
+  isActive Boolean @default(true)
+
+  department   Department @relation("IntegrationDepartment", fields: [departmentId], references: [id])
+  departmentId String
+
+  // Applied only when the incoming request omits its own categoryId/
+  // priorityId (or the incoming value fails department-ownership/active
+  // validation) — see resolveIntegrationTicketDefaults in
+  // lib/services/ticket-creation-service.ts. SetNull (not Restrict): a
+  // department admin deleting a category/priority that happens to be an
+  // integration's configured default must still succeed — the integration
+  // just falls back to resolveDefaultStatusId-style department defaults
+  // (priority) or no category at all, exactly as if it had never set one.
+  defaultCategory   TicketCategory? @relation("IntegrationDefaultCategory", fields: [defaultCategoryId], references: [id], onDelete: SetNull)
+  defaultCategoryId String?
+  defaultPriority   TicketPriority? @relation("IntegrationDefaultPriority", fields: [defaultPriorityId], references: [id], onDelete: SetNull)
+  defaultPriorityId String?
+
+  // Optional — when set, an incoming sourceUrl must share this exact origin
+  // (scheme + host + port, real URL parsing, never string prefix matching —
+  // see the endpoint). Left null, no origin check is enforced on sourceUrl.
+  baseUrl String?
+
+  // The raw API key is never stored — only enough to identify (prefix, for
+  // an O(1) indexed lookup with no ambiguity, since it's @unique) and verify
+  // (hash, compared with a constant-time algorithm) it. See
+  // lib/services/integration-key-service.ts for generation/hashing/
+  // verification — the raw value is shown to an admin exactly once, at
+  // creation or rotation time, and never persisted or logged anywhere.
+  apiKeyPrefix String @unique
+  apiKeyHash   String
+  // Optimistic-concurrency token for key rotation only (not read/checked by
+  // the ticket-creation auth path at all — that's by hash comparison).
+  // Incremented atomically by the rotate route's compare-and-swap update
+  // (WHERE id = ... AND keyVersion = <version read at the start of the
+  // request>). Two admins rotating the same integration at the same instant
+  // can no longer both "win": whichever request's conditional UPDATE
+  // matches zero rows loses the race and returns a controlled 409 with no
+  // raw key, instead of silently generating and displaying a key that next
+  // never actually becomes valid (a real gap found and fixed after an
+  // external hardening audit — see integration-key-rotation-conflict in the
+  // rotate route).
+  keyVersion   Int    @default(1)
+
+  lastUsedAt DateTime?
+
+  createdBy   User?   @relation("IntegrationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tickets Ticket[] @relation("IntegrationTickets")
+
+  @@index([departmentId])
+  @@index([isActive])
 }
 
 // ─── Pending Tickets (Department Email → Pending review flow) ─────────────────
@@ -1120,12 +1234,18 @@ model EmailPollRun {
 enum EmailNotificationType {
   REPLY
   CLOSED
+  CREATED
 }
 
 enum EmailNotificationStatus {
   SENT
   FAILED
   SKIPPED
+  // Claimed but not yet resolved — see eventKey below. A row is inserted
+  // with this status FIRST (the insert itself is the atomic ownership
+  // claim, via the unique constraint on eventKey), then updated to
+  // SENT/FAILED/SKIPPED once the actual send attempt resolves.
+  PENDING
 }
 
 model EmailNotificationLog {
@@ -1137,6 +1257,22 @@ model EmailNotificationLog {
   status         EmailNotificationStatus
   error          String?                 @db.Text
   createdAt      DateTime                @default(now())
+  // Database-backed idempotency for lifecycle events (CREATED/CLOSED) that
+  // must fire at most once per real transition, safe under concurrent or
+  // retried requests — a plain findFirst-before-create has a TOCTOU race
+  // under concurrency, so this unique constraint is the actual guard: the
+  // INSERT with a given eventKey either succeeds (this call now atomically
+  // owns the event) or fails with P2002 (some other call already claimed
+  // it), never both succeeding. Null for REPLY rows (unchanged, no
+  // eventKey-based dedupe requested for that type — its own
+  // messageId/direction check already prevents loops) — Postgres allows
+  // unlimited NULLs under a unique index, so this is fully backward
+  // compatible with existing REPLY log rows. Format: `ticket:{id}:created`
+  // for the one-time creation event; `ticket:{id}:closed:{closedAt ISO}`
+  // for a close transition, so a genuine reopen-then-reclose produces a new
+  // key (new closedAt) and is allowed to send a new email, while a retry of
+  // the SAME transition (same closedAt) collapses onto the same row.
+  eventKey       String?                 @unique
 
   @@index([ticketId])
   @@index([createdAt])

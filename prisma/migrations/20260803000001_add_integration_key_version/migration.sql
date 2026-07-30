@@ -1,0 +1,12 @@
+-- Timestamped after 20260803000000_add_user_email_case_insensitive_unique
+-- deliberately — see that migration's own header note on this repo's
+-- synthetic future-dated migration timestamps. Any migration added after
+-- this one must use a filename timestamp of 2026-08-03T00:00:02 or later.
+--
+-- Optimistic-concurrency column for ExternalIntegration API key rotation
+-- (see keyVersion's doc comment in prisma/schema.prisma and the
+-- compare-and-swap update in app/api/admin/integrations/[id]/rotate/route.ts).
+-- Purely additive: every existing row gets keyVersion = 1 via the column
+-- default, which is exactly the correct starting value for a key that has
+-- never been rotated since this column was introduced.
+ALTER TABLE "ExternalIntegration" ADD COLUMN IF NOT EXISTS "keyVersion" INTEGER NOT NULL DEFAULT 1;

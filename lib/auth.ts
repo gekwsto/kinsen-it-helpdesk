@@ -1,4 +1,5 @@
 import NextAuth, { CredentialsSignin } from "next-auth";
+import type { Adapter } from "next-auth/adapters";
 import Credentials from "next-auth/providers/credentials";
 import { PrismaAdapter } from "@auth/prisma-adapter";
 import { prisma } from "@/lib/prisma";
@@ -7,6 +8,34 @@ import bcrypt from "bcryptjs";
 import { authConfig } from "@/lib/auth.config";
 import { adminLoginSchema as credentialsLoginSchema } from "@/lib/validations";
 import { handleMicrosoftJwtSignIn, SYNC_ELIGIBLE_USER_SELECT } from "@/lib/services/microsoft-department-sync-service";
+import { normalizeEmail } from "@/lib/services/email-identity";
+
+/**
+ * PrismaAdapter's own createUser/getUserByEmail do an exact-match lookup
+ * and insert the email exactly as the OAuth provider returned it — with no
+ * normalization. Every OTHER User-creation path in this app (admin user
+ * create/edit, inbound email, integration-created requesters) normalizes
+ * via lib/services/email-identity.ts's normalizeEmail(); without this
+ * wrapper, Microsoft sign-in was the one path that didn't, so
+ * "User@Company.com" from Entra and an already-existing
+ * "user@company.com" row (e.g. created earlier by an integration) could
+ * become two separate identities instead of resolving to the same one.
+ * The database-level functional unique index on lower(email) (see the
+ * add_user_email_case_insensitive_unique migration) is the actual hard
+ * guarantee against a duplicate ever being persisted even if this wrapper
+ * is ever bypassed — this wrapper is what makes the *normal* case resolve
+ * correctly instead of erroring out against that constraint.
+ */
+// Exported so a test can exercise the exact wrapper this module wires up
+// (see scripts/test-email-canonicalization.ts) rather than re-deriving an
+// equivalent implementation to test against.
+export function withNormalizedEmail(adapter: Adapter): Adapter {
+  return {
+    ...adapter,
+    createUser: (user) => adapter.createUser!({ ...user, email: normalizeEmail(user.email) }),
+    getUserByEmail: (email) => adapter.getUserByEmail!(normalizeEmail(email)),
+  };
+}
 
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 const isDev = process.env.NODE_ENV === "development";
@@ -19,7 +48,7 @@ class InactiveUserError extends CredentialsSignin {
 export const { handlers, auth, signIn, signOut } = NextAuth({
   ...authConfig,
   trustHost: true,
-  adapter: PrismaAdapter(prisma),
+  adapter: withNormalizedEmail(PrismaAdapter(prisma)),
   providers: [
     ...authConfig.providers,
 
@@ -113,7 +142,9 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           // fall back to the old email lookup rather than silently
           // skipping sync, and log it so a real occurrence is visible.
           if (!user.id) console.warn("[auth] jwt callback: user.id missing on sign-in, falling back to email lookup", { email: user.email });
-          dbUser = await prisma.user.findUnique({ where: { email: user.email }, select: SYNC_ELIGIBLE_USER_SELECT });
+          dbUser = user.email
+            ? await prisma.user.findUnique({ where: { email: normalizeEmail(user.email) }, select: SYNC_ELIGIBLE_USER_SELECT })
+            : null;
         }
 
         if (dbUser) {

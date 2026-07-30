@@ -12,6 +12,7 @@ const SAFE_ERROR_MESSAGES: Record<string, string> = {
   server_error: "Microsoft Graph returned a server error — try again shortly.",
   network_error: "Could not reach Microsoft Graph — check network connectivity.",
   malformed_response: "Microsoft Graph returned an unexpected response shape.",
+  configuration_error: "Microsoft Graph is not configured on this server — GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET are missing or invalid.",
 };
 
 export async function POST() {

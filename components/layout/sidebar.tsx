@@ -167,6 +167,7 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
         { label: "Activity Progress", href: "/admin/activity-progress", roles: ["ADMIN"] as Role[] },
         { label: "Activity Statuses", href: "/admin/activity-statuses", roles: ["ADMIN"] as Role[] },
         { label: "Email Settings", href: "/admin/email", roles: ["ADMIN"] as Role[] },
+        { label: "Integrations", href: "/admin/integrations", roles: ["ADMIN"] as Role[] },
       ],
     },
   ];

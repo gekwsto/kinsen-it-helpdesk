@@ -9,6 +9,7 @@ import { formatTicketNumber } from "@/lib/utils";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { EmailLogAction } from "@prisma/client";
 import { matchDepartmentForRecipients, createPendingTicketFromEmail } from "@/lib/services/pending-ticket-service";
+import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import path from "path";
 import fs from "fs/promises";
 
@@ -270,12 +271,8 @@ async function appendEmailReply(
 // TicketMessage.authorId directly against a real Ticket.
 
 async function findOrCreateRequesterForReply(parsed: ParsedEmail): Promise<{ id: string }> {
-  const existing = await prisma.user.findUnique({ where: { email: parsed.fromEmail }, select: { id: true } });
-  if (existing) return existing;
-  return prisma.user.create({
-    data: { email: parsed.fromEmail, name: parsed.fromName || undefined },
-    select: { id: true },
-  });
+  const requester = await resolveOrCreateRequester(parsed.fromEmail, parsed.fromName || undefined);
+  return { id: requester.id };
 }
 
 // ── Save base64 attachments to disk ──────────────────────────────────────────

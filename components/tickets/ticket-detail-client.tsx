@@ -24,7 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatDateTime, formatBytes, getInitials } from "@/lib/utils";
-import { Paperclip, Trash2, Loader2, XCircle } from "lucide-react";
+import { Paperclip, Trash2, Loader2, XCircle, Plug, ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -94,6 +94,11 @@ export interface TicketDetailClientProps {
   ticketTitle: string;
   ticketDescription: string;
   ticketSource: string;
+  // Only set for source: API tickets — see POST /api/integrations/tickets.
+  integration: { name: string } | null;
+  externalReferenceId: string | null;
+  sourceUrl: string | null;
+  externalMetadata: Record<string, unknown> | null;
   ticketCreatedAt: string;
   requester: { id: string; name: string | null; email: string; image: string | null };
   department: { id: string; name: string } | null;
@@ -141,6 +146,10 @@ export function TicketDetailClient({
   ticketTitle,
   ticketDescription,
   ticketSource,
+  integration,
+  externalReferenceId,
+  sourceUrl,
+  externalMetadata,
   ticketCreatedAt,
   requester,
   department,
@@ -723,6 +732,58 @@ export function TicketDetailClient({
             )}
           </CardContent>
         </Card>
+
+        {/* Integration provenance — only rendered for source: API tickets */}
+        {integration && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Plug className="h-3.5 w-3.5 text-violet-600" />
+                Integration
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <div className="flex justify-between items-center">
+                <span className="text-muted-foreground">Source app</span>
+                <span className="font-medium">{integration.name}</span>
+              </div>
+              {externalReferenceId && (
+                <div className="flex justify-between items-center gap-2">
+                  <span className="text-muted-foreground shrink-0">Reference</span>
+                  <span className="font-mono text-xs truncate max-w-[160px]" title={externalReferenceId}>
+                    {externalReferenceId}
+                  </span>
+                </div>
+              )}
+              {sourceUrl && (
+                <a
+                  href={sourceUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-primary hover:underline text-xs"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Open in source application
+                </a>
+              )}
+              {externalMetadata && Object.keys(externalMetadata).length > 0 && (
+                <>
+                  <Separator />
+                  <div className="space-y-1.5">
+                    {Object.entries(externalMetadata).map(([key, value]) => (
+                      <div key={key} className="flex justify-between items-start gap-2">
+                        <span className="text-muted-foreground text-xs shrink-0">{key}</span>
+                        <span className="text-xs font-medium text-right break-all">
+                          {typeof value === "object" ? JSON.stringify(value) : String(value)}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

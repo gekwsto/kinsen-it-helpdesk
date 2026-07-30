@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
 import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink } from "@/lib/services/department-scope-service";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
+import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import path from "path";
@@ -166,8 +168,16 @@ export async function PATCH(
       description: string;
     }> = [];
 
+    // Hoisted out of the `if` below (rather than a block-scoped const) so
+    // the closedAt computation and the closed-notification gate further
+    // down can reuse the exact same fetch instead of re-querying — and so
+    // the notification gate can compare the REAL old/new isClosed values,
+    // not just "the new status happens to be closed" (see that comment).
+    let oldStatus: { name: string; isClosed: boolean } | null = null;
+    let newStatus: { name: string; isClosed: boolean } | null = null;
+
     if (data.statusId && data.statusId !== ticket.statusId) {
-      const [oldStatus, newStatus] = await Promise.all([
+      [oldStatus, newStatus] = await Promise.all([
         prisma.ticketStatus.findUnique({ where: { id: ticket.statusId } }),
         prisma.ticketStatus.findUnique({ where: { id: data.statusId } }),
       ]);
@@ -209,12 +219,7 @@ export async function PATCH(
       where: { id: id },
       data: {
         ...data,
-        closedAt:
-          data.statusId
-            ? await prisma.ticketStatus
-                .findUnique({ where: { id: data.statusId } })
-                .then((s) => (s?.isClosed ? new Date() : undefined))
-            : undefined,
+        closedAt: newStatus?.isClosed ? new Date() : undefined,
       },
       include: TICKET_INCLUDE,
     });
@@ -249,6 +254,22 @@ export async function PATCH(
       publishTicketEvent("TICKET_ASSIGNEE_CHANGED", id, session.user.id, {
         assignedAgent: updatedTicket.assignedAgent,
       });
+    }
+
+    // This generic edit endpoint can also move a ticket into a closed
+    // status (e.g. an admin "Edit Ticket" form), same as the dedicated
+    // /status and /cancel routes — only a real open->closed transition
+    // triggers the notification, never merely "the new status happens to
+    // be closed". Deferred via after(); see the /status route for the same
+    // reasoning.
+    if (oldStatus && !oldStatus.isClosed && newStatus?.isClosed) {
+      after(() =>
+        notifyRequesterClosed({
+          ticketId: id,
+          statusName: newStatus.name,
+          closingMessage: updatedTicket.cancelReason?.name,
+        })
+      );
     }
 
     return NextResponse.json(updatedTicket);

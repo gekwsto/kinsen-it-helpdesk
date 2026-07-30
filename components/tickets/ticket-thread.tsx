@@ -140,7 +140,17 @@ function MessageBubble({
 }) {
   const isOwn = message.author?.id === currentUserId;
   const isInternal = message.isInternal;
-  const isEmailInbound = message.direction === "INBOUND" && !isInternal;
+  // direction alone is NOT proof this body is genuine, already-HTML email
+  // content — a WEB or API-created ticket's initial message is ALSO
+  // direction: INBOUND (it's "inbound" in the sense of "from the
+  // requester," not "from a parsed email"). fromEmail is only ever set by
+  // the actual email pipeline (lib/services/pending-ticket-service.ts,
+  // lib/ticket-email-service.ts) — WEB and API-created messages never set
+  // it. Without this extra check, an API caller's plain-text `description`
+  // (or a WEB user's typed description) would be handed to
+  // dangerouslySetInnerHTML below as if it were trusted HTML — a real XSS
+  // vector, not a hypothetical one.
+  const isEmailInbound = message.direction === "INBOUND" && !isInternal && !!message.fromEmail;
 
   const authorName =
     message.author?.name ??

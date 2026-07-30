@@ -1,0 +1,48 @@
+-- NOTE ON THIS MIGRATION'S TIMESTAMP: this folder's name was authored and
+-- applied to the main development database on 2026-07-28, but carries a
+-- filename timestamp of 2026-08-03 — several days ahead of the real
+-- authoring date. This is a pre-existing convention already present
+-- throughout this repo's migration history (e.g. 20260801000000,
+-- 20260802000000, and others were likewise authored ahead of their nominal
+-- date across this project's development sessions) and matches how this
+-- codebase's synthetic environment dates have been advancing. It was left
+-- as-is (not renamed) after an explicit audit determined: (1) it is already
+-- applied and recorded in `_prisma_migrations` on the persistent
+-- development database, (2) Prisma's CLI has no supported way to rename an
+-- already-applied migration without either a destructive `migrate reset`
+-- or manually editing `_prisma_migrations` (neither acceptable here), and
+-- (3) `prisma migrate deploy` only requires filename-ascending order among
+-- migrations not yet applied — it does not require an already-applied
+-- migration's filename to match its true authoring date. Any migration
+-- added AFTER this one in this repo's history must use a filename
+-- timestamp of 2026-08-03T00:00:01 or later to preserve correct
+-- filename-sort ordering — never an earlier-sorting one, even if it more
+-- accurately reflects the real calendar date it was authored on.
+--
+-- Database-level guarantee that no two Users can ever share the same email
+-- differing only by case ("User@Example.com" vs "user@example.com").
+-- Application code normalizes (trim + lowercase, see
+-- lib/services/email-identity.ts) before every User create/lookup across
+-- every known path (Microsoft/NextAuth login via a wrapped PrismaAdapter,
+-- admin user create/edit, inbound email requester resolution, integration
+-- requester resolution) — but a functional unique index is the actual hard
+-- backstop: even a future code path that forgets to normalize can never
+-- successfully INSERT a case-variant duplicate, it will fail loudly with a
+-- unique-constraint violation instead of silently fragmenting one person's
+-- identity into two User rows.
+--
+-- Not a citext column change (would require the citext extension, which
+-- some managed Postgres environments don't allow enabling, and would be a
+-- much larger, riskier column-type change) — a plain functional index on
+-- lower(email) achieves the same enforcement with a purely additive,
+-- reversible migration and no extension dependency.
+--
+-- Safe to apply as-is: every existing User.email value in this application
+-- is already stored lowercase (confirmed via direct introspection before
+-- writing this migration — zero rows would violate this constraint), so no
+-- backfill/data change is needed. Prisma's schema DSL has no way to express
+-- a functional index directly, so this exists only as a hand-written
+-- migration; prisma/schema.prisma has no equivalent @@index for it,
+-- exactly like this repo's existing convention for objects Prisma's model
+-- language can't represent.
+CREATE UNIQUE INDEX IF NOT EXISTS "User_email_lower_key" ON "User" (lower(email));

@@ -43,6 +43,7 @@ export default async function TicketDetailPage({
       subDepartment: { select: { id: true, name: true } },
       project: { select: { id: true, title: true } },
       activity: { select: { id: true, title: true } },
+      integration: { select: { id: true, name: true } },
       cancelReason: true,
       messages: {
         orderBy: { createdAt: "asc" },
@@ -180,6 +181,10 @@ export default async function TicketDetailPage({
     ticketTitle: ticket.title,
     ticketDescription: ticket.description,
     ticketSource: ticket.source,
+    integration: ticket.integration ? { name: ticket.integration.name } : null,
+    externalReferenceId: ticket.externalReferenceId,
+    sourceUrl: ticket.sourceUrl,
+    externalMetadata: (ticket.externalMetadata as Record<string, unknown> | null) ?? null,
     isAdmin: isAdminUser,
     isRequester,
     initialCancelReasonId: ticket.cancelReasonId,

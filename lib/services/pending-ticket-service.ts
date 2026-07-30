@@ -3,13 +3,14 @@ import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { PendingTicketStatus } from "@prisma/client";
 import type { ParsedEmail } from "@/lib/email-ticket-parser";
-import { resolveDefaultStatusId, resolveDefaultPriorityId } from "@/lib/services/department-scope-service";
+import { resolveDefaultStatusId, resolveDefaultPriorityId, isDepartmentAcceptingTickets } from "@/lib/services/department-scope-service";
+import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
 
 export type AcceptPendingTicketResult =
   | { ok: true; ticket: { id: string; ticketNumber: number; title: string } }
-  | { ok: false; error: "ticket_not_found" | "already_accepted" | "already_rejected" | "invalid_department" };
+  | { ok: false; error: "ticket_not_found" | "already_accepted" | "already_rejected" | "invalid_department" | "department_inactive" };
 
 export type RejectPendingTicketResult =
   | { ok: true }
@@ -33,17 +34,19 @@ export async function matchDepartmentForRecipients(toEmails: string[]): Promise<
 }
 
 /**
- * Finds or creates the User a message's sender resolves to — same
- * find-or-create-by-email logic processInboundEmails always used inline,
- * extracted so both the pipeline and createTestEmailTicket share one copy.
+ * Finds or creates the User a message's sender resolves to. A thin
+ * {id}-only wrapper around the shared resolveOrCreateRequester (see
+ * requester-resolution-service.ts) — this used to be its own separate
+ * implementation with no email normalization, which meant an inbound email
+ * from "John.Doe@Company.com" and an already-existing "john.doe@company.com"
+ * User could silently become two different rows. Sharing one
+ * implementation across every "find or create a User by email" flow closes
+ * that gap for good, rather than needing every call site to remember to
+ * normalize itself.
  */
 async function findOrCreateRequester(fromEmail: string, fromName: string): Promise<{ id: string }> {
-  const existing = await prisma.user.findUnique({ where: { email: fromEmail }, select: { id: true } });
-  if (existing) return existing;
-  return prisma.user.create({
-    data: { email: fromEmail, name: fromName || undefined },
-    select: { id: true },
-  });
+  const requester = await resolveOrCreateRequester(fromEmail, fromName || undefined);
+  return { id: requester.id };
 }
 
 /**
@@ -139,6 +142,17 @@ export async function acceptPendingTicket(
   // (and no override supplied) has nothing to resolve them against.
   if (!departmentId) return { ok: false, error: "invalid_department" };
 
+  // Same shared gate WEB and integration ticket creation both go through —
+  // Accept is EMAIL's actual "new ticket intake" moment (the PendingTicket
+  // itself already existed as a review-queue row; it isn't yet a real
+  // Ticket), so this is the correct point to enforce it, not at the
+  // earlier inbound-email/PendingTicket-creation step. The PendingTicket
+  // itself is left untouched (still PENDING) so a reviewer can still see
+  // it and, once the department is reactivated, accept it normally.
+  if (!(await isDepartmentAcceptingTickets(departmentId))) {
+    return { ok: false, error: "department_inactive" };
+  }
+
   // The target department's own configured status/priority — see
   // resolveDefaultStatusId/resolveDefaultPriorityId in
   // department-scope-service.ts. Category has no isDefault concept (no
@@ -224,6 +238,11 @@ export async function acceptPendingTicket(
     },
   });
 
+  // Notifying the requester is the caller's job (app/api/tickets/pending/
+  // [id]/accept/route.ts schedules it via next/server's after()) — this
+  // function stays framework-context-agnostic on purpose: it's also called
+  // directly from scripts/test-pending-ticket-accept-reject.ts outside any
+  // Next.js request scope, where after() would throw.
   return { ok: true, ticket };
 }
 

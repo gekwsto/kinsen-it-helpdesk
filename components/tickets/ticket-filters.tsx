@@ -383,6 +383,7 @@ export function TicketFilters({
                   <SelectItem value="all">Any source</SelectItem>
                   <SelectItem value="WEB">Web</SelectItem>
                   <SelectItem value="EMAIL">Email</SelectItem>
+                  <SelectItem value="API">Integration</SelectItem>
                 </SelectContent>
               </Select>
             </div>

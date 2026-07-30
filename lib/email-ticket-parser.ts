@@ -70,7 +70,8 @@ function stripHtml(html: string): string {
     .trim();
 }
 
-function escapeHtml(text: string): string {
+/** Escapes a plain-text dynamic value before interpolating it into an HTML email template — every builder below must run every dynamic field (requester name, ticket title, status name, cancel/closing reason, etc.) through this first. Never used on values that are already-trusted HTML (e.g. a reply body composed elsewhere) — see buildTicketReplyNotificationHtml's own doc comment for that distinction. */
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -78,14 +79,28 @@ function escapeHtml(text: string): string {
     .replace(/\n/g, "<br>");
 }
 
-export function buildAutoReplyHtml(params: {
+/**
+ * The single template for the "ticket created" lifecycle notification —
+ * fired once a real Ticket exists with a real ticketNumber, for BOTH
+ * creation paths (POST /api/tickets, and acceptPendingTicket() once an
+ * emailed-in PendingTicket is accepted). Replaces the old, never-actually-
+ * wired-up buildAutoReplyHtml — this is the only creation-email template now
+ * ("δεν αφήνεις δύο templates που εξυπηρετούν το ίδιο lifecycle event").
+ * `requesterName` and `closingMessage`-style dynamic fields are always
+ * escaped before interpolation — see escapeHtml above.
+ */
+export function buildTicketCreatedNotificationHtml(params: {
+  ticketId: string;
   ticketNumber: number;
   ticketTitle: string;
-  requesterName: string;
+  requesterName: string | null;
+  statusName: string;
   appUrl: string;
 }): string {
-  const { ticketNumber, ticketTitle, requesterName, appUrl } = params;
+  const { ticketId, ticketNumber, ticketTitle, requesterName, statusName, appUrl } = params;
   const ref = formatTicketNumber(ticketNumber);
+  const greetingName = requesterName ? escapeHtml(requesterName) : "there";
+  const ticketUrl = `${appUrl}/tickets/${ticketId}`;
 
   return `
 <!DOCTYPE html>
@@ -96,15 +111,19 @@ export function buildAutoReplyHtml(params: {
     <h1 style="color: white; margin: 0; font-size: 20px;">Kinsen IT Support</h1>
   </div>
   <div style="background: #f9fafb; padding: 24px; border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 8px 8px;">
-    <p>Dear ${requesterName},</p>
+    <p>Dear ${greetingName},</p>
     <p>Thank you for contacting Kinsen IT Support. Your request has been received and a ticket has been created.</p>
     <div style="background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 16px; margin: 16px 0;">
       <p style="margin: 0 0 8px 0;"><strong>Ticket Reference:</strong> <span style="color: #3b82f6; font-weight: bold;">[${ref}]</span></p>
-      <p style="margin: 0 0 8px 0;"><strong>Subject:</strong> ${ticketTitle}</p>
-      <p style="margin: 0;"><strong>Status:</strong> Open</p>
+      <p style="margin: 0 0 8px 0;"><strong>Subject:</strong> ${escapeHtml(ticketTitle)}</p>
+      <p style="margin: 0;"><strong>Status:</strong> ${escapeHtml(statusName)}</p>
     </div>
     <p>Our IT team will review your request and get back to you as soon as possible.</p>
-    <p>You can track your ticket status by <a href="${appUrl}/tickets" style="color: #3b82f6;">logging into the IT Portal</a>.</p>
+    <p>
+      <a href="${ticketUrl}" style="background: #3b82f6; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; display: inline-block; font-weight: 500;">
+        View Your Ticket
+      </a>
+    </p>
     <p style="margin-top: 24px; color: #6b7280; font-size: 14px;">
       <strong>Important:</strong> When replying to this email, please keep <strong>[${ref}]</strong> in the subject line so your reply is linked to this ticket.
     </p>
@@ -207,14 +226,17 @@ export function buildTicketReplyNotificationHtml(params: {
 }
 
 export function buildTicketClosedNotificationHtml(params: {
+  ticketId: string;
   ticketNumber: number;
   ticketTitle: string;
   statusName: string;
   closingMessage?: string;
   appUrl: string;
 }): string {
-  const { ticketNumber, ticketTitle, statusName, closingMessage, appUrl } = params;
+  const { ticketId, ticketNumber, ticketTitle, statusName, closingMessage, appUrl } = params;
   const ref = formatTicketNumber(ticketNumber);
+  const ticketUrl = `${appUrl}/tickets/${ticketId}`;
+  const safeClosingMessage = closingMessage ? escapeHtml(closingMessage) : undefined;
 
   return `
 <!DOCTYPE html>
@@ -228,23 +250,23 @@ export function buildTicketClosedNotificationHtml(params: {
     <p>Your support ticket has been <strong>closed</strong>.</p>
     <div style="background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 16px; margin: 16px 0;">
       <p style="margin: 0 0 4px 0; color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;">Ticket</p>
-      <p style="margin: 0 0 12px 0; font-weight: 600;">[${ref}] ${ticketTitle}</p>
+      <p style="margin: 0 0 12px 0; font-weight: 600;">[${ref}] ${escapeHtml(ticketTitle)}</p>
       <p style="margin: 0 0 4px 0; color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;">Final Status</p>
-      <p style="margin: 0 ${closingMessage ? "0 12px 0" : ";"} color: #374151;">${statusName}</p>
-      ${closingMessage ? `
+      <p style="margin: 0 ${safeClosingMessage ? "0 12px 0" : ";"} color: #374151;">${escapeHtml(statusName)}</p>
+      ${safeClosingMessage ? `
       <p style="margin: 12px 0 4px 0; color: #6b7280; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;">Note</p>
-      <p style="margin: 0; color: #374151;">${closingMessage}</p>` : ""}
+      <p style="margin: 0; color: #374151;">${safeClosingMessage}</p>` : ""}
     </div>
     <p style="color: #374151;">
-      If you have further questions or need to reopen this issue, please submit a new ticket or reply to this email.
+      If you have further questions, you can reply to this email to add a comment to this ticket, or submit a new ticket for a separate issue.
     </p>
     <p>
-      <a href="${appUrl}/tickets/new" style="background: #3b82f6; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; display: inline-block; font-weight: 500;">
-        Open a New Ticket
+      <a href="${ticketUrl}" style="background: #3b82f6; color: white; padding: 10px 20px; border-radius: 6px; text-decoration: none; display: inline-block; font-weight: 500;">
+        View This Ticket
       </a>
       &nbsp;
-      <a href="${appUrl}/tickets" style="color: #3b82f6; padding: 10px 20px; text-decoration: none; display: inline-block;">
-        View All My Tickets
+      <a href="${appUrl}/tickets/new" style="color: #3b82f6; padding: 10px 20px; text-decoration: none; display: inline-block;">
+        Open a New Ticket
       </a>
     </p>
     <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 24px 0;">

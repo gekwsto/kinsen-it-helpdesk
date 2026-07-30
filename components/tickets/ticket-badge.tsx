@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Mail, Globe } from "lucide-react";
+import { Mail, Globe, Plug } from "lucide-react";
 
 interface ColorBadgeProps {
   name: string;
@@ -37,6 +37,14 @@ export function SourceBadge({ source }: { source: string }) {
       <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 text-[10px] font-medium">
         <Mail className="h-3 w-3" />
         Email
+      </span>
+    );
+  }
+  if (source === "API") {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 text-[10px] font-medium">
+        <Plug className="h-3 w-3" />
+        Integration
       </span>
     );
   }

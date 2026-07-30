@@ -39,7 +39,7 @@
  * login never requires Directory.Read.All.
  */
 import { prisma } from "@/lib/prisma";
-import { getAppOnlyGraphAccessToken } from "@/lib/microsoft-graph";
+import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
 
 const GRAPH_USERS_PAGE_URL =
   "https://graph.microsoft.com/v1.0/users?$select=id,department,jobTitle&$top=999";
@@ -52,7 +52,13 @@ export type DirectoryFetchFailureReason =
   | "rate_limited"
   | "server_error"
   | "network_error"
-  | "malformed_response";
+  | "malformed_response"
+  // Distinct from network_error: GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET
+  // are missing or fail format validation (see
+  // readAndValidateGraphCredentials in lib/microsoft-graph.ts) — no
+  // network request was even attempted. A caller/admin UI should point at
+  // fixing configuration for this reason, not "check your connection".
+  | "configuration_error";
 
 export interface DirectoryFetchValues {
   departments: string[];
@@ -81,7 +87,8 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
   let token: string;
   try {
     token = await getAppOnlyGraphAccessToken();
-  } catch {
+  } catch (err) {
+    if (err instanceof GraphConfigurationError) return { ok: false, reason: "configuration_error" };
     return { ok: false, reason: "network_error" };
   }
 

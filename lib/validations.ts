@@ -29,6 +29,82 @@ export const createTicketSchema = z.object({
   shareWithSubDepartment: z.boolean().default(false),
 });
 
+// POST /api/integrations/tickets — the server-to-server ticket-creation
+// contract for external applications (see lib/services/integration-key-
+// service.ts and lib/services/ticket-creation-service.ts). Deliberately
+// `.strict()`: an unknown field (e.g. a caller trying to sneak in
+// `departmentId`/`requesterId`/`statusId`) is a hard validation error
+// rather than being silently dropped, so a misbehaving integration caller
+// finds out immediately rather than assuming a field it sent was honored.
+export const MAX_INTEGRATION_METADATA_BYTES = 10 * 1024;
+
+export const createIntegrationTicketSchema = z
+  .object({
+    externalReferenceId: z.string().trim().min(1, "externalReferenceId is required").max(200),
+    requesterEmail: z.string().trim().email("requesterEmail must be a valid email address").max(320),
+    requesterName: z.string().trim().min(1).max(200).optional(),
+    // Same lower bound as createTicketSchema above. The upper bound is new
+    // here (createTicketSchema has none) — a human typing in the WEB form
+    // self-limits in practice, but an external API caller doesn't, so this
+    // endpoint bounds it explicitly rather than inheriting an unbounded field.
+    title: z.string().min(5, "Title must be at least 5 characters").max(200),
+    description: z.string().min(10, "Description must be at least 10 characters").max(50000, "Description must not exceed 50,000 characters"),
+    // Real WHATWG URL parsing (new URL()), not a regex — rejects malformed
+    // hosts/ports the same way the browser's own URL parser would, and
+    // normalizes IDN hosts to punycode automatically. Beyond "is this a
+    // valid URL", three explicit checks: only http/https (no javascript:,
+    // data:, file:, etc.), no embedded credentials (https://user:pass@host
+    // is rejected outright — never silently stripped), and a max length
+    // matching the DB column's practical bound. sourceUrl is never fetched
+    // server-side (it's only stored and later rendered as a clickable
+    // target="_blank" link — see ticket-detail-client.tsx), so this
+    // endpoint introduces no SSRF surface regardless of what host it
+    // points to; localhost/private-network URLs are therefore deliberately
+    // NOT blocked here (a self-hosted calling app on an internal address
+    // is a legitimate case, and there is nothing server-side that would
+    // ever dereference the URL). The URL's fragment (#...), if present, is
+    // kept as-is as part of the stored string — it's meaningful only to
+    // whatever the admin's own browser does when they click the link,
+    // never parsed or acted on server-side.
+    sourceUrl: z
+      .string()
+      .trim()
+      .max(2000)
+      .superRefine((value, ctx) => {
+        let parsed: URL;
+        try {
+          parsed = new URL(value);
+        } catch {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "sourceUrl must be a valid URL" });
+          return;
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "sourceUrl must use http or https" });
+        }
+        if (parsed.username || parsed.password) {
+          ctx.addIssue({ code: z.ZodIssueCode.custom, message: "sourceUrl must not contain embedded credentials" });
+        }
+      })
+      .optional(),
+    categoryId: z.string().min(1).optional(),
+    priorityId: z.string().min(1).optional(),
+    subDepartmentId: z.string().min(1).optional(),
+    // A plain JSON object (z.record already rejects arrays/primitives —
+    // they have a different "parsed type" than "object" in Zod), capped at
+    // ~10KB serialized so one caller's arbitrary metadata blob can never
+    // become a storage/row-size problem.
+    metadata: z
+      .record(z.unknown())
+      .optional()
+      .refine(
+        (value) => !value || Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_INTEGRATION_METADATA_BYTES,
+        { message: `metadata must not exceed ${MAX_INTEGRATION_METADATA_BYTES} bytes when serialized` }
+      ),
+  })
+  .strict();
+
+export type CreateIntegrationTicketInput = z.infer<typeof createIntegrationTicketSchema>;
+
 // departmentId/subDepartmentId are deliberately NOT here — moving a ticket's
 // department/sub-department goes through the dedicated, audited
 // PATCH /api/tickets/[id]/department route (changeTicketDepartmentSchema
@@ -223,6 +299,41 @@ export const updateDepartmentInboundEmailSchema = z.object({
     .nullable(),
 });
 
+// ─── External Integrations (admin) ─────────────────────────────────────────────
+
+// .strict() so a caller sending apiKeyHash/apiKeyPrefix/createdById/slug/
+// isActive gets an explicit 422 rather than those fields being silently
+// stripped (Zod's default for a plain z.object()) — createdById in
+// particular must only ever come from the authenticated session, never the
+// request body, and .strict() makes any attempt to smuggle it in visible
+// as a rejected request instead of a quietly-ignored no-op.
+export const createIntegrationSchema = z
+  .object({
+    name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
+    departmentId: z.string().min(1, "departmentId is required"),
+    defaultCategoryId: z.string().min(1).optional(),
+    defaultPriorityId: z.string().min(1).optional(),
+    baseUrl: z.string().trim().url("baseUrl must be a valid URL").max(2000).optional(),
+  })
+  .strict();
+
+// Deliberately excludes apiKeyPrefix/apiKeyHash (rotation is its own
+// dedicated endpoint, never a side effect of a general edit) and slug
+// (immutable once created, matching Department's own id/slug stability
+// convention — nothing else stores a slug-based reference to an
+// integration, but keeping it stable avoids surprising an admin who copied
+// it into their own notes/runbook).
+export const updateIntegrationSchema = z
+  .object({
+    name: z.string().trim().min(2, "Name must be at least 2 characters").max(100).optional(),
+    departmentId: z.string().min(1).optional(),
+    defaultCategoryId: z.string().min(1).nullable().optional(),
+    defaultPriorityId: z.string().min(1).nullable().optional(),
+    baseUrl: z.string().trim().url("baseUrl must be a valid URL").max(2000).nullable().optional(),
+    isActive: z.boolean().optional(),
+  })
+  .strict();
+
 export const createSubDepartmentSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   description: z.string().trim().min(1).optional(),
@@ -358,7 +469,11 @@ export const updateCancelReasonSchema = z.object({
 // ─── Auth Schemas ──────────────────────────────────────────────────────────────
 
 export const adminLoginSchema = z.object({
-  email: z.string().email("Invalid email address"),
+  // Normalized the same way every User row is stored (see
+  // lib/services/email-identity.ts) — without this, a credentials login
+  // typed as "Admin@Kinsen.gr" would fail to match the stored
+  // "admin@kinsen.gr" row even though the account genuinely exists.
+  email: z.string().trim().toLowerCase().email("Invalid email address"),
   password: z.string().min(1, "Password is required"),
 });
 

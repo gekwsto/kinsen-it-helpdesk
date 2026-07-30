@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
@@ -66,15 +67,22 @@ export async function PATCH(
       closedAt: updated.closedAt?.toISOString() ?? null,
     });
 
-    // Fire-and-forget closed notification to requester
-    if (newStatus?.isClosed) {
-      notifyRequesterClosed({
-        ticketId: id,
-        statusName: newStatus.name,
-        closingMessage: updated.cancelReason?.name,
-      }).catch((err) => {
-        console.error("[notification] Failed to send closed notification:", err);
-      });
+    // Only a REAL open->closed transition, never merely "the new status
+    // happens to be closed" — that distinction matters for a closed->closed
+    // change (e.g. "Closed" -> "Resolved-Closed", both isClosed: true),
+    // which must NOT re-send this email. Deferred via after(); the DB write
+    // above has already committed, so this can never fail or roll back the
+    // status change itself, and notifyRequesterClosed's own eventKey
+    // (scoped to this transition's persisted closedAt) is the actual
+    // duplicate-send guard even under a concurrent/retried request.
+    if (oldStatus && !oldStatus.isClosed && newStatus?.isClosed) {
+      after(() =>
+        notifyRequesterClosed({
+          ticketId: id,
+          statusName: newStatus.name,
+          closingMessage: updated.cancelReason?.name,
+        })
+      );
     }
 
     return NextResponse.json(updated);

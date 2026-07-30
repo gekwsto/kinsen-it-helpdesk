@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import {
@@ -11,7 +12,9 @@ import {
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
+import { createTicketAtomic } from "@/lib/services/ticket-creation-service";
 import { createTicketSchema } from "@/lib/validations";
+import { notifyRequesterCreated } from "@/lib/ticket-notification-service";
 import { Role } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
@@ -32,7 +35,7 @@ export async function GET(req: NextRequest) {
     const assignedAgentId = searchParams.get("assignedAgentId");
     const departmentId = searchParams.get("departmentId");
     const subDepartmentId = searchParams.get("subDepartmentId");
-    const source = searchParams.get("source"); // WEB | EMAIL
+    const source = searchParams.get("source"); // WEB | EMAIL | API
     const createdAfter = searchParams.get("createdAfter");
     const createdBefore = searchParams.get("createdBefore");
     const sortBy = searchParams.get("sortBy") ?? "createdAt"; // createdAt | updatedAt | priority | status
@@ -223,8 +226,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const ticket = await prisma.ticket.create({
-      data: {
+    const ticket = await createTicketAtomic(
+      {
         title: data.title,
         description: data.description,
         source: "WEB",
@@ -243,33 +246,30 @@ export async function POST(req: NextRequest) {
         shareWithDepartment: data.shareWithDepartment,
         shareWithSubDepartment: data.subDepartmentId ? data.shareWithSubDepartment : false,
       },
-      include: {
-        status: true,
-        priority: true,
-        category: true,
-        requester: { select: { id: true, name: true, email: true } },
-      },
-    });
+      { changedById: session.user.id, description: "Ticket created" }
+    );
 
-    // Record creation history
-    await prisma.ticketHistory.create({
-      data: {
-        ticketId: ticket.id,
-        changedById: session.user.id,
-        type: "CREATED",
-        description: "Ticket created",
-        newValue: "WEB",
-      },
-    });
+    // TEMPORARY development-only diagnostic tracing — see the matching
+    // notifyDiag() calls in lib/ticket-notification-service.ts.
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[notify-diag] POST /api/tickets:ticket-created", JSON.stringify({ ticketId: ticket.id, ticketNumber: ticket.ticketNumber }));
+    }
 
-    // Initial message (description as first message)
-    await prisma.ticketMessage.create({
-      data: {
-        ticketId: ticket.id,
-        authorId: session.user.id,
-        body: data.description,
-        direction: "INBOUND",
-      },
+    // Deferred, not blocking the response: the ticket itself is already
+    // fully committed above, so a slow/failed Graph call must never delay
+    // or fail this request. after() (Next.js 15) keeps this work alive
+    // until it completes even though the response has already been sent —
+    // unlike a bare fire-and-forget call, nothing here can be silently
+    // dropped if the platform would otherwise consider the request
+    // "finished" the moment the response streams out.
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[notify-diag] POST /api/tickets:before-after-schedule", JSON.stringify({ ticketId: ticket.id }));
+    }
+    after(() => {
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[notify-diag] POST /api/tickets:after-callback-start", JSON.stringify({ ticketId: ticket.id }));
+      }
+      return notifyRequesterCreated({ ticketId: ticket.id });
     });
 
     return NextResponse.json(ticket, { status: 201 });

@@ -4,7 +4,7 @@
 
 ## ⚠️ Πριν διαβάσεις οτιδήποτε άλλο
 
-**Το API σήμερα απαιτεί browser-session authentication (Auth.js cookie) για σχεδόν κάθε endpoint.** Δεν υπάρχει σήμερα API key, OAuth client-credentials flow, ή service-account μηχανισμός για machine-to-machine integration. Η μόνη εξαίρεση είναι το `/api/email/inbound` webhook, το οποίο δεν εκθέτει κανένα business entity — απλώς πυροδοτεί email polling. Διάβασε το [`AUTHENTICATION.md`](./AUTHENTICATION.md) και το [`EXTERNAL_API_READINESS.md`](./EXTERNAL_API_READINESS.md) πριν σχεδιάσεις οποιαδήποτε integration.
+**Το API σήμερα απαιτεί browser-session authentication (Auth.js cookie) για σχεδόν κάθε endpoint.** Δεν υπάρχει OAuth client-credentials flow ή γενικευμένο service-account μηχανισμό. Υπάρχουν πλέον **δύο** εξαιρέσεις: το `/api/email/inbound` webhook (δεν εκθέτει κανένα business entity, απλώς πυροδοτεί email polling), και το νέο, scoped `POST /api/integrations/tickets` — API-key-authenticated server-to-server ticket creation για μία, ρητά εγκεκριμένη εξωτερική εφαρμογή τη φορά. Δες το [`EXTERNAL_INTEGRATIONS.md`](./EXTERNAL_INTEGRATIONS.md) για αυτό το endpoint. Διάβασε το [`AUTHENTICATION.md`](./AUTHENTICATION.md) και το [`EXTERNAL_API_READINESS.md`](./EXTERNAL_API_READINESS.md) πριν σχεδιάσεις οποιαδήποτε άλλη integration — τα υπόλοιπα 108 endpoints παραμένουν session-only και ανεξάρτητα.
 
 ## Base URL
 
@@ -27,6 +27,7 @@
 |---|---|
 | [`README.md`](./README.md) | Αυτό το αρχείο — entry point |
 | [`ENDPOINT_INVENTORY.md`](./ENDPOINT_INVENTORY.md) | Συνοπτικός πίνακας όλων των 109 method/path combinations με classification |
+| [`EXTERNAL_INTEGRATIONS.md`](./EXTERNAL_INTEGRATIONS.md) | **Νέο**: `POST /api/integrations/tickets` — API key auth, request/response contract, error codes, idempotency, key rotation, curl/TypeScript examples |
 | [`API_REFERENCE.md`](./API_REFERENCE.md) | Αναλυτικό contract κάθε endpoint — body, response, errors, side effects |
 | [`AUTHENTICATION.md`](./AUTHENTICATION.md) | Auth.js session, Microsoft login, webhook secrets, τι μπορεί/δεν μπορεί να χρησιμοποιήσει μια εξωτερική εφαρμογή σήμερα |
 | [`WORKFLOWS.md`](./WORKFLOWS.md) | Ticket/Project/Activity lifecycle με πραγματικά `curl` examples |

@@ -24,7 +24,7 @@ import type { DepartmentSummary } from "@/types/department";
  */
 
 export type ScopeDenial = { denied: "invalid_department" };
-export type CreateDenial = { denied: "invalid_department" | "workspace_required" | "pending_setup" };
+export type CreateDenial = { denied: "invalid_department" | "workspace_required" | "pending_setup" | "department_inactive" };
 
 /** Consistent, human-readable message for a CreateDenial reason — used by every route so the client sees the same wording. */
 export function departmentDenialMessage(reason: CreateDenial["denied"]): string {
@@ -35,6 +35,8 @@ export function departmentDenialMessage(reason: CreateDenial["denied"]): string 
       return "You belong to multiple departments — specify which one this belongs to.";
     case "pending_setup":
       return "Your account isn't assigned to a department yet. Contact an administrator.";
+    case "department_inactive":
+      return "This department is inactive and is not accepting new tickets, projects, or activities. Existing items remain accessible.";
   }
 }
 
@@ -47,7 +49,30 @@ export function departmentDenialStatus(reason: CreateDenial["denied"]): number {
       return 400;
     case "pending_setup":
       return 403;
+    case "department_inactive":
+      return 409;
   }
+}
+
+/**
+ * The single, shared answer to "is this department currently open to new
+ * work being created in it" — Department.isActive is deliberately reused
+ * for both "hidden from selection dropdowns" (listDepartments already
+ * defaults to isActive: true) and "closed to new ticket/project/activity
+ * intake" (this function), rather than introducing a second field: no
+ * documented business need has ever called for a department that's hidden
+ * from selection but still silently open to intake, or vice versa — both
+ * meanings point the same direction (inactive = not operating), so one
+ * field correctly represents one concept. Existing items already created
+ * in a since-deactivated department are never affected by this check —
+ * only NEW-item creation consults it, and only at the exact moment of
+ * creation (never cached), so reactivating a department restores creation
+ * immediately with no other change needed (no integration key rotation, no
+ * membership changes).
+ */
+export async function isDepartmentAcceptingTickets(departmentId: string): Promise<boolean> {
+  const department = await prisma.department.findUnique({ where: { id: departmentId }, select: { isActive: true } });
+  return department?.isActive === true;
 }
 
 const NO_MATCH_WHERE = { id: { in: [] as string[] } };
@@ -503,27 +528,41 @@ export async function resolveDepartmentForCreate(
   requestedDepartmentId: string | null | undefined,
   permissionKey: string
 ): Promise<{ departmentId: string } | CreateDenial> {
+  let resolvedDepartmentId: string;
+
   if (requestedDepartmentId) {
-    if (canViewAllDepartments(role)) return { departmentId: requestedDepartmentId };
-    const membership = await getMembership(userId, requestedDepartmentId);
-    if (!membership) return { denied: "invalid_department" };
+    if (!canViewAllDepartments(role)) {
+      const membership = await getMembership(userId, requestedDepartmentId);
+      if (!membership) return { denied: "invalid_department" };
+      const allowed = await hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
+      if (!allowed) return { denied: "invalid_department" };
+    }
+    resolvedDepartmentId = requestedDepartmentId;
+  } else {
+    if (canViewAllDepartments(role)) return { denied: "workspace_required" };
+
+    const workspace = await resolveActiveWorkspace(userId, role);
+    if (!workspace.departmentId) {
+      return { denied: workspace.departments.length === 0 ? "pending_setup" : "workspace_required" };
+    }
+
+    const membership = await getMembership(userId, workspace.departmentId);
+    if (!membership) return { denied: "pending_setup" };
     const allowed = await hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
     if (!allowed) return { denied: "invalid_department" };
-    return { departmentId: requestedDepartmentId };
+    resolvedDepartmentId = workspace.departmentId;
   }
 
-  if (canViewAllDepartments(role)) return { denied: "workspace_required" };
-
-  const workspace = await resolveActiveWorkspace(userId, role);
-  if (!workspace.departmentId) {
-    return { denied: workspace.departments.length === 0 ? "pending_setup" : "workspace_required" };
+  // Checked last, after every access/permission branch above, so an
+  // inactive department reports the SAME "not accepting new work" reason
+  // regardless of how the caller reached it (ADMIN with an explicit id,
+  // or a regular member's own workspace) — one shared gate, not one per
+  // branch.
+  if (!(await isDepartmentAcceptingTickets(resolvedDepartmentId))) {
+    return { denied: "department_inactive" };
   }
 
-  const membership = await getMembership(userId, workspace.departmentId);
-  if (!membership) return { denied: "pending_setup" };
-  const allowed = await hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
-  if (!allowed) return { denied: "invalid_department" };
-  return { departmentId: workspace.departmentId };
+  return { departmentId: resolvedDepartmentId };
 }
 
 export type TicketLinkValidation =

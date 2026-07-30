@@ -354,23 +354,69 @@ async function main() {
     check("Case 4: cached value is active", cachedJobTitle?.isActive === true);
 
     console.log("\nCase 5: full tenant sync dedupes and skips empty department/jobTitle values\n");
+    // fetchAllGraphUserDirectoryValues (called via syncMicrosoftDirectoryValues)
+    // makes TWO Graph calls, not one: first getAppOnlyGraphAccessToken() hits
+    // Microsoft's OAuth token endpoint (login.microsoftonline.com), THEN the
+    // actual GET /users call hits graph.microsoft.com. Both go through the
+    // same global fetch — a mock that answers unconditionally would hand the
+    // token endpoint the /users fixture instead of a token, and (before
+    // reaching that) getAppOnlyGraphAccessToken's own credential validation
+    // (lib/microsoft-graph.ts) requires syntactically valid
+    // GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET before it ever calls fetch at
+    // all — this environment genuinely has none configured. Neither of those
+    // is a reason to skip Case 5 or relax production validation: this test
+    // supplies its own deterministic, syntactically-valid FAKE credentials
+    // (process.env, this process only — the real .env file is never read or
+    // written) and a URL-routing fetch mock that answers each endpoint with
+    // its own fixture, so the full real code path (credential validation +
+    // token exchange + paginated Graph read) runs against zero real network
+    // I/O and zero real secrets.
+    const FAKE_GRAPH_TENANT_ID = "00000000-0000-4000-8000-000000000001";
+    const FAKE_GRAPH_CLIENT_ID = "00000000-0000-4000-8000-000000000002";
+    const FAKE_GRAPH_CLIENT_SECRET = `hermetic-test-fixture-secret-${RUN_ID}`;
+    const savedGraphEnv = {
+      GRAPH_TENANT_ID: process.env.GRAPH_TENANT_ID,
+      GRAPH_CLIENT_ID: process.env.GRAPH_CLIENT_ID,
+      GRAPH_CLIENT_SECRET: process.env.GRAPH_CLIENT_SECRET,
+    };
+    process.env.GRAPH_TENANT_ID = FAKE_GRAPH_TENANT_ID;
+    process.env.GRAPH_CLIENT_ID = FAKE_GRAPH_CLIENT_ID;
+    process.env.GRAPH_CLIENT_SECRET = FAKE_GRAPH_CLIENT_SECRET;
+
     const case5DeptA = `Test Sync Dept A ${RUN_ID}`;
     const case5TitleA = `Test Sync Title A ${RUN_ID}`;
-    (global as unknown as { fetch: typeof fetch }).fetch = (async () =>
-      new Response(
-        JSON.stringify({
-          value: [
-            { department: case5DeptA, jobTitle: case5TitleA },
-            { department: case5DeptA, jobTitle: case5TitleA.toUpperCase() }, // duplicate dept, differently-cased title (department stays case-sensitive -> distinct value; matching behavior is separate from caching, which stores exact values)
-            { department: "  " + case5DeptA + "  ", jobTitle: null }, // same dept after trim, null title
-            { department: "", jobTitle: "" }, // empty values, must be skipped
-            { department: null, jobTitle: undefined },
-          ],
-        }),
-        { status: 200 }
-      )) as typeof fetch;
+    let case5TokenCalls = 0;
+    let case5UsersCalls = 0;
+    (global as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
+      if (url.startsWith("https://login.microsoftonline.com/")) {
+        case5TokenCalls++;
+        return new Response(
+          JSON.stringify({ token_type: "Bearer", expires_in: 3600, access_token: `fake-app-only-token-${RUN_ID}` }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (url.startsWith("https://graph.microsoft.com/v1.0/users")) {
+        case5UsersCalls++;
+        return new Response(
+          JSON.stringify({
+            value: [
+              { department: case5DeptA, jobTitle: case5TitleA },
+              { department: case5DeptA, jobTitle: case5TitleA.toUpperCase() }, // duplicate dept, differently-cased title (department stays case-sensitive -> distinct value; matching behavior is separate from caching, which stores exact values)
+              { department: "  " + case5DeptA + "  ", jobTitle: null }, // same dept after trim, null title
+              { department: "", jobTitle: "" }, // empty values, must be skipped
+              { department: null, jobTitle: undefined },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      throw new Error(`Case 5's fetch mock received an unexpected URL: ${url}`);
+    }) as typeof fetch;
+
     const syncResult = await syncMicrosoftDirectoryValues();
     check("Case 5: sync succeeded", syncResult.ok === true);
+    check("Case 5: no real network request was made (both calls hit the in-process mock)", case5TokenCalls === 1 && case5UsersCalls === 1);
     if (syncResult.ok) {
       check("Case 5: discovered exactly 1 distinct department (after trim)", syncResult.discoveredDepartments === 1);
       check("Case 5: discovered exactly 2 distinct job titles (case-sensitive cache storage)", syncResult.discoveredJobTitles === 2);
@@ -379,6 +425,36 @@ async function main() {
     const cachedTitleA = await prisma.microsoftDirectoryJobTitleValue.findUnique({ where: { value: case5TitleA } });
     check("Case 5: trimmed department value cached", cachedDeptA !== null && cachedDeptA.isActive);
     check("Case 5: job title value cached", cachedTitleA !== null && cachedTitleA.isActive);
+
+    console.log("\nCase 6: missing Graph credentials return a controlled configuration error, never a crash or a real request\n");
+    delete process.env.GRAPH_TENANT_ID;
+    delete process.env.GRAPH_CLIENT_ID;
+    delete process.env.GRAPH_CLIENT_SECRET;
+    let case6FetchCalls = 0;
+    (global as unknown as { fetch: typeof fetch }).fetch = (async () => {
+      case6FetchCalls++;
+      throw new Error("Case 6's fetch mock should never be called — credential validation must reject before any request is attempted.");
+    }) as typeof fetch;
+    let case6Threw = false;
+    let case6Result: Awaited<ReturnType<typeof syncMicrosoftDirectoryValues>> | undefined;
+    try {
+      case6Result = await syncMicrosoftDirectoryValues();
+    } catch {
+      case6Threw = true;
+    }
+    check("Case 6: missing credentials never throws an uncaught exception", !case6Threw);
+    check('Case 6: returns a controlled, distinctly-labeled result (ok:false, reason:"configuration_error")', case6Result?.ok === false && (case6Result as { reason?: string })?.reason === "configuration_error");
+    check("Case 6: no fetch call was attempted at all (fails before any network I/O)", case6FetchCalls === 0);
+
+    // Restore this process's env exactly as it was before Case 5/6 — never
+    // touches the real .env file on disk, only this process's in-memory
+    // environment. Assigning `undefined` to process.env.X would coerce it
+    // to the literal string "undefined" (Node only stores strings there),
+    // so an originally-unset var must be `delete`d, not reassigned.
+    for (const [key, value] of Object.entries(savedGraphEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
 
     console.log("\nScenario 9: explicit departmentRole is applied verbatim, never re-derived from globalRole\n");
     const TEST_VERBATIM_VALUE = `Test Verbatim Dept ${RUN_ID}`;

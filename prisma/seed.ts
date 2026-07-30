@@ -73,6 +73,12 @@ const PERMISSIONS = [
   { key: "admin.access", description: "Access admin panel", module: "admin" },
   { key: "user.manage", description: "Manage users", module: "admin" },
   { key: "role.manage", description: "Manage roles and permissions", module: "admin" },
+  // External Integrations — create/edit/rotate-key/disable ExternalIntegration
+  // rows (see app/(main)/admin/integrations and app/api/admin/integrations).
+  // Administrator-only in practice today (no admin UI exposes granting this
+  // to a custom role yet), but seeded as a real permission key rather than a
+  // hardcoded role check so it fits the existing custom-role architecture.
+  { key: "integration.manage", description: "Manage external integrations and their API keys", module: "admin" },
   // Department (Phase 3) — department-scoped admin capabilities, granted via
   // DepartmentRole membership rather than the global Role/CustomRole system.
   { key: "department.view", description: "View department details", module: "department" },
@@ -474,6 +480,12 @@ async function main() {
   const NEW_PERMISSION_DEFAULT_GRANTS: Record<string, string[]> = {
     DEPARTMENT_ADMIN: TICKET_CONFIG_PERMISSION_KEYS,
     DEPARTMENT_MANAGER: TICKET_CONFIG_PERMISSION_KEYS,
+    // ADMIN already bypasses hasPermission() unconditionally (see
+    // lib/permissions.ts), so this grant is cosmetic-only — it just keeps the
+    // /admin/roles Administrator matrix showing "integration.manage" as
+    // checked on an already-seeded database, matching how role.manage/
+    // user.manage already behave for that role.
+    ADMIN: ["integration.manage"],
   };
   for (const [roleKey, permKeys] of Object.entries(NEW_PERMISSION_DEFAULT_GRANTS)) {
     for (const permKey of permKeys) {

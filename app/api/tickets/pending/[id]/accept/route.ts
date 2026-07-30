@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission, requireDepartmentPermission } from "@/lib/permissions";
 import { acceptPendingTicket } from "@/lib/services/pending-ticket-service";
+import { notifyRequesterCreated } from "@/lib/ticket-notification-service";
 
 const acceptSchema = z.object({
   departmentId: z.string().nullable().optional(),
@@ -45,6 +47,13 @@ export async function POST(
       const status = result.error === "ticket_not_found" ? 404 : result.error === "invalid_department" ? 400 : 409;
       return NextResponse.json({ error: result.error, code: result.error }, { status });
     }
+
+    // Only now — a real Ticket with a real ticketNumber exists and the
+    // PendingTicket is durably marked accepted. Never fires merely because
+    // an email was received (that only ever creates a PendingTicket); only
+    // once a human has accepted it here. Deferred via after(), same
+    // reasoning as POST /api/tickets.
+    after(() => notifyRequesterCreated({ ticketId: result.ticket.id }));
 
     return NextResponse.json(result.ticket);
   } catch (error: any) {

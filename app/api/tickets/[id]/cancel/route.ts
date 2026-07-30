@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, isAdmin } from "@/lib/permissions";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
+import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
 import { z } from "zod";
 
 const cancelSchema = z.object({
@@ -110,6 +112,24 @@ export async function POST(
       status: result.status,
       closedAt: result.closedAt?.toISOString() ?? null,
     });
+
+    // The 409 guard above already required the ticket to have been OPEN
+    // (ticket.status.isClosed === false) before this ran, so this is a real
+    // open->closed transition — but only when a closed status actually
+    // existed for this department to move into (closedStatus above can be
+    // null, in which case cancelReasonId/closedAt were still set but the
+    // ticket's own status never actually became a closed one; nothing to
+    // notify as "closed" in that case). Deferred via after(), same
+    // reasoning as the status route.
+    if (result.status.isClosed) {
+      after(() =>
+        notifyRequesterClosed({
+          ticketId: id,
+          statusName: result.status.name,
+          closingMessage: cancelReason.name,
+        })
+      );
+    }
 
     return NextResponse.json({
       status: result.status,

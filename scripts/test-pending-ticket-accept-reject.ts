@@ -28,6 +28,7 @@ import { prisma } from "@/lib/prisma";
 import { Role, AuthProvider } from "@prisma/client";
 import { acceptPendingTicket, rejectPendingTicket } from "@/lib/services/pending-ticket-service";
 import { buildTicketListWhere } from "@/lib/services/department-scope-service";
+import { ensureStatusForDepartment, ensurePriorityForDepartment, STARTER_STATUSES, STARTER_PRIORITIES } from "@/lib/services/config-starter-data";
 
 let passed = 0;
 let failed = 0;
@@ -72,13 +73,6 @@ async function main() {
     return;
   }
 
-  const defaultStatus = await prisma.ticketStatus.findFirst({ where: { isDefault: true }, select: { id: true } });
-  if (!defaultStatus) {
-    check("A default TicketStatus is seeded (required for Accept to work at all)", false);
-    printSummaryAndExit();
-    return;
-  }
-
   let dept: { id: string } | undefined;
   let acceptingUser: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   const pendingTicketIds: string[] = [];
@@ -86,8 +80,17 @@ async function main() {
   const userEmails: string[] = [];
 
   try {
-    console.log("\nSetting up a department and an accepting user...\n");
+    console.log("\nSetting up an isolated department (with its own default status/priority — this test must never depend on the shared dev DB's own departments already having one) and an accepting user...\n");
     dept = await prisma.department.create({ data: { name: `AR Dept ${RUN_ID}`, slug: `ar-dept-${RUN_ID}` }, select: { id: true } });
+    // acceptPendingTicket requires a real, department-owned default
+    // TicketStatus to exist (resolveDefaultStatusId) — there is no global
+    // fallback (see the 20260722122518_retire_global_config_scope
+    // migration). A freshly created department has none by default, so
+    // this fixture must provision its own, exactly like a real admin
+    // would via /admin/statuses, rather than relying on some OTHER
+    // department already having one seeded.
+    await ensureStatusForDepartment(prisma, dept.id, STARTER_STATUSES[0]);
+    await ensurePriorityForDepartment(prisma, dept.id, STARTER_PRIORITIES[0]);
     acceptingUser = await prisma.user.create({
       data: { email: `ar-accepting-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true },
     });
@@ -116,6 +119,11 @@ async function main() {
       check("Created Ticket has source EMAIL", ticket?.source === "EMAIL");
       check("Created Ticket has the pending ticket's departmentId", ticket?.departmentId === dept.id);
       check("Created Ticket carries over the emailMessageId", ticket?.emailMessageId === pending.emailMessageId);
+      const initialMessage = await prisma.ticketMessage.findFirst({ where: { ticketId: acceptResult.ticket.id } });
+      check(
+        "The accepted ticket's initial message has fromEmail set (genuine email provenance — this is what ticket-thread.tsx checks before rendering it as raw HTML)",
+        initialMessage?.fromEmail === senderEmail
+      );
 
       const afterAccept = await prisma.pendingTicket.findUnique({ where: { id: pending.id } });
       check("PendingTicket status is now ACCEPTED", afterAccept?.status === "ACCEPTED");
@@ -208,6 +216,8 @@ async function main() {
             },
           }),
       ],
+      ["ticketStatuses", () => (dept ? prisma.ticketStatus.deleteMany({ where: { departmentId: dept.id } }) : Promise.resolve())],
+      ["ticketPriorities", () => (dept ? prisma.ticketPriority.deleteMany({ where: { departmentId: dept.id } }) : Promise.resolve())],
       ["department", () => (dept ? prisma.department.deleteMany({ where: { id: dept.id } }) : Promise.resolve())],
     ];
     for (const [label, step] of cleanupSteps) {
