@@ -10,6 +10,23 @@ const PUBLIC_PATHS = [
   "/api/email/inbound",
 ];
 
+// Exact-pathname bypass, checked separately from PUBLIC_PATHS's
+// startsWith() matching on purpose — a startsWith("/api/integrations")
+// entry would also make /api/admin/integrations* "public" at this layer
+// (admin integration management must stay session + integration.manage
+// protected, see app/api/admin/integrations/**). "Public" here means only
+// "skip the NextAuth browser-session redirect" — the route itself still
+// requires and strictly verifies its own server-to-server Bearer API key
+// (see verifyIntegrationKey in lib/services/integration-key-service.ts);
+// it is never unauthenticated. A session-less/invalid-key/disabled-
+// integration request must get this endpoint's own JSON error contract
+// (401/403/etc.), never an HTML /login redirect — Postman (and any real
+// integration caller) auto-following a redirect to a 200 HTML login page
+// is exactly the bug this fixes.
+const PUBLIC_API_TRANSPORT_PATHS = new Set<string>([
+  "/api/integrations/tickets",
+]);
+
 const TENANT_ID = process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID;
 
 // NOTE: the provider config key is `issuer`, not `tenantId` — the latter is
@@ -69,6 +86,7 @@ export const authConfig = {
         nextUrl.pathname.startsWith(p)
       );
       if (isPublic) return true;
+      if (PUBLIC_API_TRANSPORT_PATHS.has(nextUrl.pathname)) return true;
       if (!isLoggedIn) return false;
       const email = auth?.user?.email;
       if (
