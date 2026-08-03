@@ -34,6 +34,8 @@ import { Role } from "@prisma/client";
 import { Search, Pencil, Loader2, UserCheck, UserX, Plus, Ban, ShieldCheck, Trash2, Link2, X } from "lucide-react";
 import { UserDepartmentMemberships, type UserMembership } from "@/components/admin/user-department-memberships";
 import { MEMBERSHIP_SOURCE_COLORS } from "@/components/admin/department-role-info";
+import { PaginationControls } from "@/components/ui/pagination";
+import type { PaginationMeta } from "@/lib/pagination";
 
 interface CustomRole { id: string; key: string; name: string; isBuiltIn: boolean }
 
@@ -83,6 +85,10 @@ interface UserManagementProps {
   currentUserId: string;
   /** "all" or a department id — the server already filtered `users` accordingly; this just drives the Select's displayed value. */
   selectedDepartmentId?: string;
+  /** The server-applied search term (already reflected in `users`) — drives the search input's displayed value, e.g. after a refresh or direct URL navigation. */
+  search: string;
+  /** Pagination metadata for the CURRENT, already-server-paginated `users` slice — never recomputed client-side. */
+  pagination: PaginationMeta;
 }
 
 const ROLE_LABELS: Record<Role, string> = {
@@ -118,13 +124,49 @@ export function UserManagement({
   businessUnits,
   currentUserId,
   selectedDepartmentId = "all",
+  search: serverSearch,
+  pagination,
 }: UserManagementProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const [users, setUsers] = useState(initialUsers);
-  const [search, setSearch] = useState("");
+  // Local, instantly-editable draft — debounced into the URL (and, from
+  // there, the actual Prisma query) below, so typing doesn't push a new
+  // route on every keystroke. Re-synced from the server-confirmed value on
+  // navigation (back/forward, a bookmarked/shared URL, or the debounce
+  // itself landing) rather than only ever being set once at mount.
+  const [searchDraft, setSearchDraft] = useState(serverSearch);
   const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
+
+  useEffect(() => {
+    setSearchDraft(serverSearch);
+  }, [serverSearch]);
+
+  // Shared "update the URL, preserving every other param" helper — search,
+  // department filter, and pagination controls all funnel through this so
+  // none of them can accidentally drop one another's state. Changing
+  // search/department resets page to 1 (a filter change invalidates
+  // whatever the current page meant); page-size changes also reset to 1
+  // (same reason); a plain page change does not touch anything else.
+  const updateParams = (updates: Record<string, string | null>, opts: { resetPage?: boolean } = {}) => {
+    const params = new URLSearchParams(searchParams.toString());
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === null || value === "") params.delete(key);
+      else params.set(key, value);
+    }
+    if (opts.resetPage) params.delete("page");
+    router.push(`${pathname}?${params.toString()}`);
+  };
+
+  useEffect(() => {
+    if (searchDraft === serverSearch) return;
+    const timeout = setTimeout(() => {
+      updateParams({ search: searchDraft || null }, { resetPage: true });
+    }, 400);
+    return () => clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchDraft]);
 
   const [editUser, setEditUser] = useState<User | null>(null);
   const [editOpen, setEditOpen] = useState(false);
@@ -201,10 +243,15 @@ export function UserManagement({
   }, [initialUsers]);
 
   const handleDepartmentFilterChange = (value: string) => {
-    const params = new URLSearchParams(searchParams.toString());
-    if (value === "all") params.delete("departmentId");
-    else params.set("departmentId", value);
-    router.push(`${pathname}?${params.toString()}`);
+    updateParams({ departmentId: value === "all" ? null : value }, { resetPage: true });
+  };
+
+  const handlePageChange = (page: number) => {
+    updateParams({ page: page === 1 ? null : String(page) });
+  };
+
+  const handlePageSizeChange = (pageSize: number) => {
+    updateParams({ pageSize: pageSize === 20 ? null : String(pageSize) }, { resetPage: true });
   };
 
   // Build unified role options: built-in enum roles first, then custom non-built-in roles
@@ -232,12 +279,6 @@ export function UserManagement({
     }
     return { label: ROLE_LABELS[user.role], color: ROLE_COLORS[user.role] };
   };
-
-  const filtered = users.filter(
-    (u) =>
-      u.name?.toLowerCase().includes(search.toLowerCase()) ||
-      u.email.toLowerCase().includes(search.toLowerCase())
-  );
 
   const resetCreate = () => {
     setCreateName("");
@@ -291,8 +332,13 @@ export function UserManagement({
         const err = await res.json();
         throw new Error(err.error ?? "Failed to create user");
       }
-      const newUser = await res.json();
-      setUsers((prev) => [...prev, newUser]);
+      // No optimistic local append: under server-side pagination/sorting,
+      // the new user may not even belong on the currently-viewed page (it
+      // might sort elsewhere, or fall outside the active department/search
+      // filter) — router.refresh() re-runs the Server Component's own
+      // query, which is the only thing that actually knows where (or
+      // whether) this user shows up in the current view.
+      await res.json();
       toast.success("User created successfully");
       setCreateOpen(false);
       resetCreate();
@@ -317,8 +363,15 @@ export function UserManagement({
         throw new Error(err.error ?? "Failed to update");
       }
       const updated = await res.json();
+      // Optimistic local update for instant feedback — safe here (unlike
+      // create) because blocking/unblocking never changes which users
+      // match the current filters or their sort position, so it can never
+      // put the page out of sync. Still followed by router.refresh() so
+      // every other derived value (e.g. a future active/inactive filter)
+      // stays correct too.
       setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, ...updated } : u)));
       toast.success(user.isActive ? "User blocked" : "User unblocked");
+      router.refresh();
     } catch (error: any) {
       toast.error(error.message ?? "Failed to update user");
     } finally {
@@ -339,6 +392,11 @@ export function UserManagement({
       toast.success("User deleted");
       setEditOpen(false);
       setDeleteConfirm(false);
+      // Re-runs the Server Component's query for the current URL — if this
+      // was the last user on the last page, its own out-of-range check
+      // (app/(main)/admin/users/page.tsx) redirects to the new last valid
+      // page automatically; no special-casing needed here.
+      router.refresh();
     } catch (error: any) {
       toast.error(error.message ?? "Failed to delete user");
       setDeleting(false);
@@ -408,8 +466,8 @@ export function UserManagement({
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search users..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
+            value={searchDraft}
+            onChange={(e) => setSearchDraft(e.target.value)}
             className="pl-9"
           />
         </div>
@@ -424,8 +482,8 @@ export function UserManagement({
             ))}
           </SelectContent>
         </Select>
-        <span className="text-sm text-muted-foreground">
-          {filtered.length} users
+        <span className="text-sm text-muted-foreground whitespace-nowrap">
+          {pagination.totalCount} users
         </span>
         <Button onClick={() => setCreateOpen(true)} size="sm">
           <Plus className="h-4 w-4 mr-1.5" />
@@ -447,7 +505,14 @@ export function UserManagement({
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map((user) => {
+            {users.length === 0 && (
+              <TableRow>
+                <TableCell colSpan={7} className="text-center text-sm text-muted-foreground py-10">
+                  No users match your search or filters.
+                </TableCell>
+              </TableRow>
+            )}
+            {users.map((user) => {
               const { label, color } = getUserRoleDisplay(user);
               return (
                 <TableRow key={user.id}>
@@ -569,6 +634,13 @@ export function UserManagement({
           </TableBody>
         </Table>
       </div>
+
+      <PaginationControls
+        pagination={pagination}
+        onPageChange={handlePageChange}
+        onPageSizeChange={handlePageSizeChange}
+        itemLabel="users"
+      />
 
       {/* Create User Dialog */}
       <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreate(); }}>
