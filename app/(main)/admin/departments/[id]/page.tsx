@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { requireAnyDepartmentPermission, isAdmin, hasDepartmentPermission, hasAnyDepartmentPermission } from "@/lib/permissions";
+import { requireAnyDepartmentPermission, isAdmin, hasDepartmentPermission, hasAnyDepartmentPermission, hasPermission } from "@/lib/permissions";
 import { redirect, notFound } from "next/navigation";
 import Link from "next/link";
 import { ChevronRight, Users, Tag, Building2, Flag, ListChecks, XCircle, Timer, TrendingUp } from "lucide-react";
@@ -48,6 +48,23 @@ export default async function DepartmentDetailPage({
   });
   if (!department) notFound();
 
+  // Business Unit reassignment requires the same two global permissions the
+  // PATCH route itself enforces (department.update AND businessUnit.update)
+  // — a stronger gate than department.manageSettings alone, since this
+  // changes the department's whole organizational ancestry. The business
+  // units list is only fetched when this is true, so a caller without the
+  // permission never even receives the full list in the page payload.
+  const canChangeBusinessUnit =
+    access.isSystemAdmin ||
+    ((await hasPermission(session.user.role, "department.update", session.user.customRoleId)) &&
+      (await hasPermission(session.user.role, "businessUnit.update", session.user.customRoleId)));
+  const businessUnits = canChangeBusinessUnit
+    ? await prisma.businessUnit.findMany({
+        orderBy: { name: "asc" },
+        include: { company: { select: { id: true, name: true } } },
+      })
+    : [];
+
   return (
     <div className="space-y-6 max-w-3xl">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -73,8 +90,11 @@ export default async function DepartmentDetailPage({
             slug: department.slug,
             description: department.description,
             isActive: department.isActive,
+            businessUnitId: department.businessUnit?.id ?? null,
           }}
           canToggleActive={isAdmin(session.user.role)}
+          canChangeBusinessUnit={canChangeBusinessUnit}
+          businessUnits={businessUnits}
         />
       )}
 

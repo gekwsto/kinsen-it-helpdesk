@@ -51,6 +51,22 @@ export function unauthorizedResponse() {
   return NextResponse.json(apiError("unauthorized", "You must be signed in to do this."), { status: 401 });
 }
 
+/**
+ * Distinct, stable 401 contract for a session that existed but whose
+ * absolute 8h window has passed — `code: "SESSION_EXPIRED"`, never the
+ * generic `"unauthorized"` — so a caller (or the client-side session
+ * controller) can tell "you were never signed in" apart from "you were
+ * signed in, and it's been 8 hours" without guessing from a message string.
+ * See lib/permissions.ts's `SessionExpiredError` for where this is thrown
+ * from; middleware (lib/auth.config.ts) returns the same JSON shape
+ * directly for every route it matches, which is the primary enforcement
+ * path — this is the route-level equivalent for any call site that wants
+ * to surface the same contract explicitly.
+ */
+export function sessionExpiredResponse() {
+  return NextResponse.json(apiError("SESSION_EXPIRED", "Your session has expired after 8 hours. Please sign in again."), { status: 401 });
+}
+
 export function forbiddenResponse(message = "You do not have permission to manage this in this department.") {
   return NextResponse.json(apiError("missing_permission", message), { status: 403 });
 }

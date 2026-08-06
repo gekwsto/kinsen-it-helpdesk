@@ -25,6 +25,9 @@ import {
   ChevronUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { TICKET_STATUS_GROUP_LABEL, type TicketStatusGroup } from "@/lib/services/ticket-status-groups";
+
+const STATUS_GROUP_OPTIONS: TicketStatusGroup[] = ["open", "in_progress", "closed", "all"];
 
 export interface FilterOptions {
   statuses: { id: string; name: string; color: string }[];
@@ -99,6 +102,14 @@ export function TicketFilters({
     push({ [key]: value === "all" ? null : value });
   };
 
+  // Deliberately NOT handleSelect: this list's baseline default is "open"
+  // (not "all" — see app/(main)/tickets/page.tsx), so "all" must be written
+  // into the URL explicitly (status=all) rather than stripped as a no-op,
+  // or picking "All statuses" would silently fall back to open-only again.
+  const handleStatusGroupSelect = (value: string) => {
+    push({ status: value === "open" ? null : value });
+  };
+
   const handleDepartmentSelect = (value: string) => {
     // The old sub-department (if any) belongs to the previous department —
     // never valid for a new one, so it's cleared in the same navigation.
@@ -137,6 +148,7 @@ export function TicketFilters({
 
   // Count active filters (excluding sort/search)
   const activeFilterCount = [
+    isAllTickets ? get("status") : "",
     get("statusId"),
     get("priorityId"),
     get("categoryId"),
@@ -220,7 +232,31 @@ export function TicketFilters({
 
       {/* Row 2: Quick filters */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* Status */}
+        {/* Status group (all/open/in progress/closed) — All Tickets only; the
+            underlying dashboard KPI cards deep-link here via the same
+            `?status=` values (see lib/services/ticket-status-groups.ts), and
+            this select lets a user pick the same views manually. Distinct
+            from the department-owned "Status" select below (statusId), which
+            picks one specific status row rather than a group. */}
+        {isAllTickets && (
+          <Select
+            value={get("status") || "open"}
+            onValueChange={handleStatusGroupSelect}
+          >
+            <SelectTrigger className="h-8 w-[140px] text-xs">
+              <SelectValue placeholder="Status view" />
+            </SelectTrigger>
+            <SelectContent>
+              {STATUS_GROUP_OPTIONS.map((g) => (
+                <SelectItem key={g} value={g}>
+                  {TICKET_STATUS_GROUP_LABEL[g]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
+
+        {/* Status (one specific department-owned status row) */}
         <Select
           value={get("statusId") || "all"}
           onValueChange={(v) => handleSelect("statusId", v)}

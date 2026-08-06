@@ -4,6 +4,7 @@ import { signOut } from "next-auth/react";
 import { LogOut, User, ChevronDown } from "lucide-react";
 import { getInitials } from "@/lib/utils";
 import { Role } from "@prisma/client";
+import { getSessionSyncChannel, broadcastLogout } from "@/lib/client-session-broadcast";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -98,7 +99,13 @@ export function Topbar({ user }: TopbarProps) {
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
-              onClick={() => signOut({ callbackUrl: "/login" })}
+              onClick={() => {
+                // Same cross-tab channel components/auth/session-expiry-controller.tsx
+                // listens on — a manual sign-out here must also end every
+                // other open tab's session, not just this one.
+                broadcastLogout(getSessionSyncChannel());
+                signOut({ callbackUrl: "/login" });
+              }}
               className="text-destructive focus:text-destructive"
             >
               <LogOut className="mr-2 h-4 w-4" />

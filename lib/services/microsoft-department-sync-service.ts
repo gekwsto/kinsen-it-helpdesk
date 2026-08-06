@@ -262,6 +262,23 @@ export async function handleMicrosoftJwtSignIn(
     console.log("[auth] microsoft jwt sign-in photo sync updated", { userId: dbUser.id });
   }
 
+  // Deliberately NO organization/manager Graph call happens during login.
+  // `GET /users/{id}/manager` does not support Application permissions at
+  // all (see lib/services/organization-manager-sync-service.ts's header
+  // comment for the full Graph-contract explanation) — an earlier version
+  // of this code path made exactly that unsupported call here, bounded to
+  // 5 seconds, which would have failed against a real tenant on every
+  // single login. `managerId` is read from the local, already-synchronized
+  // organization snapshot wherever it's needed (e.g.
+  // lib/services/organization-tree-service.ts's getOrganizationContext,
+  // called on demand by GET /api/organization/me) — never fetched live at
+  // sign-in time. If that snapshot is stale or missing for this user, it's
+  // surfaced as `syncStatus: "NEVER_SYNCED"` there, computed purely from
+  // `organizationSyncedAt`/`managerId` being null — nothing to refresh here.
+  // Freshening it is the job of the existing, separate, admin-triggered
+  // `RELATIONSHIP_REFRESH` sync (lib/services/organization-sync-orchestrator.ts),
+  // never an implicit side effect of a user logging in.
+
   // The critical step: read back what sync just wrote, so the caller builds
   // the token from fresh data instead of the pre-sync snapshot above.
   const refreshed = await prisma.user.findUnique({

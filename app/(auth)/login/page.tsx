@@ -55,6 +55,12 @@ export default async function LoginPage({
             </div>
           )}
 
+          {message === "session_expired" && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-sm text-amber-400">
+              Η συνεδρία σας έληξε μετά από 8 ώρες. Συνδεθείτε ξανά.
+            </div>
+          )}
+
           {/* Primary: Microsoft SSO */}
           <form
             action={async () => {

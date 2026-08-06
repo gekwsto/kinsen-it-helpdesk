@@ -2,7 +2,9 @@ import { DepartmentRole, Role, RoleScope } from "@prisma/client";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { cache } from "react";
+import { headers } from "next/headers";
 import { getMembership } from "@/lib/services/department-membership-service";
+import { readRawSessionExpiryState } from "@/lib/session-expiry";
 import type { DepartmentAccessResult } from "@/types/department";
 
 export const ROLES = {
@@ -177,9 +179,49 @@ export async function requirePermission(permissionKey: string): Promise<void> {
 
 // ─── Server-side auth guards ──────────────────────────────────────────────────
 
+/**
+ * Thrown by `requireAuth()` specifically when a session existed but its
+ * absolute 8h window has passed — distinct from the generic "Unauthorized"
+ * (never signed in at all), so callers that want the more specific
+ * `SESSION_EXPIRED` API contract (see lib/api-errors.ts's
+ * `sessionExpiredResponse()`) can `instanceof`-check for it. Defense-in-depth
+ * only: middleware's `authorized()` callback (lib/auth.config.ts) already
+ * returns the same distinction for every route it matches (effectively all
+ * of them), so in normal operation a request rarely reaches this far while
+ * actually expired — this exists for the rare/future code path middleware
+ * doesn't cover, not as the primary enforcement mechanism.
+ */
+export class SessionExpiredError extends Error {
+  constructor() {
+    super("SessionExpired");
+    this.name = "SessionExpiredError";
+  }
+}
+
 export async function requireAuth() {
   const session = await auth();
   if (!session?.user) {
+    // `auth()` resolves to `null` for both "never signed in" and "signed
+    // in, but absolute-expired" (lib/auth.ts's jwt callback returns `null`
+    // once expired) — recover the distinction the same way
+    // lib/auth.config.ts's middleware does, via a raw, non-re-signing
+    // token decode, purely to throw the more specific error type. Wrapped
+    // in its own try/catch (on top of readRawSessionExpiryState's own
+    // internal one) because `headers()` itself throws when called outside
+    // a real Next.js request scope — e.g. scripts/test-integration-admin-authz.ts
+    // and similar tests that invoke route handlers directly with a mocked
+    // `auth()`, bypassing the real request pipeline entirely. In that case
+    // this always falls back to the exact pre-existing "Unauthorized"
+    // behavior, never a new failure mode.
+    let rawState: Awaited<ReturnType<typeof readRawSessionExpiryState>> | null = null;
+    try {
+      rawState = await readRawSessionExpiryState({ headers: await headers() });
+    } catch {
+      rawState = null;
+    }
+    if (rawState?.hasToken && rawState.isExpired) {
+      throw new SessionExpiredError();
+    }
     throw new Error("Unauthorized");
   }
   return session;

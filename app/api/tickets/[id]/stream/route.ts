@@ -3,6 +3,7 @@ import { requireAuth, canViewAllTickets, hasPermission } from "@/lib/permissions
 import { prisma } from "@/lib/prisma";
 import { ticketEventBus } from "@/lib/realtime/event-bus";
 import type { TicketRealtimeEvent } from "@/lib/realtime/types";
+import { isAbsoluteSessionExpired } from "@/lib/session-expiry";
 
 export const dynamic = "force-dynamic";
 
@@ -33,6 +34,10 @@ export async function GET(
   if (!canView) return new Response("Forbidden", { status: 403 });
 
   const canSeeInternal = await hasPermission(session.user.role, "ticket.internalNote", session.user.customRoleId);
+  // Captured once at connection-open — never re-read from a fresh session
+  // lookup later, so a long-lived stream can never have its own enforcement
+  // window silently extended by anything happening elsewhere.
+  const expiresAt = session.user.absoluteSessionExpiresAt;
   const encoder = new TextEncoder();
   let isClosed = false;
 
@@ -72,10 +77,29 @@ export async function GET(
         }
       );
 
-      // Heartbeat every 20 s to keep connection alive through proxies
+      // Heartbeat every 20 s to keep connection alive through proxies — also
+      // the only enforcement point for the absolute 8h session boundary on
+      // THIS connection: an SSE stream is long-lived and, unlike a normal
+      // request, only ever authenticates once (at connection-open, above)
+      // — without an active check here, a connection opened at, say, 07:00
+      // would keep silently delivering ticket events straight through the
+      // 8h mark with no further authorization check at all. `expiresAt` is
+      // captured once, from the connection-open session, and never
+      // re-read/extended — closing here never depends on whether the
+      // client has independently noticed and signed out yet.
       const heartbeat = setInterval(() => {
         if (isClosed) {
           clearInterval(heartbeat);
+          return;
+        }
+        if (isAbsoluteSessionExpired(expiresAt)) {
+          send({ type: "SESSION_EXPIRED", ticketId: id, createdAt: new Date().toISOString(), actorId: session.user.id, payload: null });
+          isClosed = true;
+          unsubscribe();
+          clearInterval(heartbeat);
+          try {
+            controller.close();
+          } catch {}
           return;
         }
         try {

@@ -22,6 +22,15 @@ declare module "next-auth" {
       // refreshed on every Microsoft sign-in (see
       // lib/services/microsoft-department-sync-service.ts).
       globalRoleSource?: GlobalRoleSource;
+      // Absolute (non-sliding) application-session boundary — set once at
+      // sign-in, epoch milliseconds (UTC), never recomputed by activity,
+      // page refreshes, or Microsoft token refresh. See
+      // lib/session-expiry.ts and lib/auth.ts's jwt/session callbacks.
+      // Exposed to the client specifically so
+      // components/auth/session-expiry-controller.tsx never has to
+      // hardcode the 8h duration itself.
+      loginAt?: number;
+      absoluteSessionExpiresAt?: number;
     } & DefaultSession["user"];
   }
 
@@ -42,5 +51,10 @@ declare module "next-auth/jwt" {
     customRoleId?: string | null;
     microsoftUserId?: string | null;
     globalRoleSource?: GlobalRoleSource | null;
+    // Set exactly once, on the initial sign-in branch of the jwt callback —
+    // every subsequent invocation of that callback must preserve these
+    // unchanged. See lib/session-expiry.ts.
+    loginAt?: number;
+    absoluteSessionExpiresAt?: number;
   }
 }

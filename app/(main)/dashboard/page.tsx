@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { buildTicketListWhere, hasAnyFullTicketView } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getProjectsDashboardData } from "@/lib/services/projects-dashboard-service";
+import { buildTicketStatusGroupCondition } from "@/lib/services/ticket-status-groups";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { KpiCards } from "@/components/dashboard/kpi-cards";
 import { RecentTickets } from "@/components/dashboard/recent-tickets";
@@ -182,13 +183,13 @@ export default async function DashboardPage({
     recentTickets,
     recentActivity,
   ] = await Promise.all([
-    // KPI counts
+    // KPI counts — each condition comes from buildTicketStatusGroupCondition,
+    // the exact same function the All Tickets list's `?status=` filter uses,
+    // so a card's count and what clicking it shows can never disagree.
     prisma.ticket.count({ where: ticketWhere }),
-    prisma.ticket.count({ where: { ...ticketWhere, status: { isClosed: false } } }),
-    prisma.ticket.count({
-      where: { ...ticketWhere, status: { name: { contains: "Progress", mode: "insensitive" } } },
-    }),
-    prisma.ticket.count({ where: { ...ticketWhere, status: { isClosed: true } } }),
+    prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("open") } }),
+    prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("in_progress") } }),
+    prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("closed") } }),
     prisma.ticket.count({ where: { ...ticketWhere, source: "EMAIL" } }),
 
     // Chart: by status — scoped to the active workspace's own department.

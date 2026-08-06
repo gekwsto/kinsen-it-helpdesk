@@ -1,5 +1,6 @@
 import type { NextAuthConfig } from "next-auth";
 import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
+import { SESSION_ABSOLUTE_DURATION_SECONDS, readRawSessionExpiryState, isAbsoluteSessionExpired } from "@/lib/session-expiry";
 
 const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 
@@ -80,14 +81,70 @@ export const authConfig = {
     },
   ],
   callbacks: {
-    authorized({ auth, request: { nextUrl } }) {
+    // CRITICAL: middleware.ts constructs its OWN `NextAuth(authConfig)`
+    // instance (edge runtime, no Prisma) — separate from the full app
+    // config in lib/auth.ts (`NextAuth({ ...authConfig, callbacks: {...} })`
+    // REPLACES the whole `callbacks` object via spread, it does not merge
+    // per-key). Without a `jwt` callback defined HERE too, middleware's own
+    // session resolution would use Auth.js's default passthrough jwt
+    // callback — which never checks `absoluteSessionExpiresAt` at all —
+    // meaning `auth.user` below would still look "logged in" for an
+    // absolute-expired token, and the `authorized` callback's expired-
+    // session branch could never be reached. This is the SAME rejection
+    // check as lib/auth.ts's jwt callback (kept in sync manually since one
+    // lives in an edge-safe config and the other doesn't need to be), minus
+    // the sign-in/stamping logic — middleware only ever needs to REJECT an
+    // already-expired token, never to stamp a new one (that only happens
+    // during the real sign-in flow, handled entirely by lib/auth.ts).
+    async jwt({ token }) {
+      if (isAbsoluteSessionExpired(token.absoluteSessionExpiresAt)) return null;
+      return token;
+    },
+    async authorized({ auth, request }) {
+      const { nextUrl } = request;
       const isLoggedIn = !!auth?.user;
       const isPublic = PUBLIC_PATHS.some((p) =>
         nextUrl.pathname.startsWith(p)
       );
       if (isPublic) return true;
       if (PUBLIC_API_TRANSPORT_PATHS.has(nextUrl.pathname)) return true;
-      if (!isLoggedIn) return false;
+
+      if (!isLoggedIn) {
+        // `auth` resolves to `null` for BOTH "never signed in" and "signed
+        // in, but the absolute 8h session window has passed" (see
+        // lib/auth.ts's jwt callback — it returns `null` once expired,
+        // which is indistinguishable from no-session-at-all by the time it
+        // reaches here). Recover the distinction with a raw, non-re-signing
+        // token decode purely to pick the right response contract below —
+        // this ONLY adds new handling for the genuinely-new "expired" case;
+        // the pre-existing "never authenticated" `return false` path a few
+        // lines down is completely unchanged.
+        const rawState = await readRawSessionExpiryState({ headers: request.headers });
+        if (rawState.hasToken && rawState.isExpired) {
+          const isApiRequest = nextUrl.pathname.startsWith("/api/");
+          if (isApiRequest) {
+            // Central, single-point enforcement for every API route this
+            // middleware matches (which is effectively all of them — see
+            // `config.matcher` in middleware.ts) — a stale/expired session
+            // can never reach an individual route handler at all, so there
+            // is no per-route code to keep in sync with this contract.
+            return new Response(
+              JSON.stringify({
+                code: "SESSION_EXPIRED",
+                error: "Your session has expired after 8 hours. Please sign in again.",
+                message: "Your session has expired after 8 hours. Please sign in again.",
+              }),
+              { status: 401, headers: { "content-type": "application/json" } }
+            );
+          }
+          const loginUrl = new URL("/login", nextUrl);
+          loginUrl.searchParams.set("message", "session_expired");
+          loginUrl.searchParams.set("callbackUrl", nextUrl.href);
+          return Response.redirect(loginUrl);
+        }
+        return false;
+      }
+
       const email = auth?.user?.email;
       if (
         email &&
@@ -104,5 +161,18 @@ export const authConfig = {
   },
   session: {
     strategy: "jwt",
+    // Absolute upper bound for the session cookie's own technical
+    // lifetime — necessary hygiene (also directly requested), but NOT the
+    // primary enforcement mechanism: Auth.js's JWT-session implementation
+    // re-signs (and re-extends) this cookie on every session read
+    // regardless of this value, which is exactly the sliding-expiration
+    // behavior lib/auth.ts's jwt/session callbacks explicitly override via
+    // the separate, non-sliding `absoluteSessionExpiresAt` field. Setting
+    // maxAge here just means that override can never even need to reach
+    // further than 8h in the first place.
+    maxAge: SESSION_ABSOLUTE_DURATION_SECONDS,
+  },
+  jwt: {
+    maxAge: SESSION_ABSOLUTE_DURATION_SECONDS,
   },
 } satisfies NextAuthConfig;

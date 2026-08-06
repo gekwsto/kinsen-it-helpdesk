@@ -90,6 +90,17 @@ const PERMISSIONS = [
   { key: "department.create", description: "Create departments", module: "department" },
   { key: "department.update", description: "Edit department settings (structural — name/slug/active)", module: "department" },
   { key: "department.delete", description: "Delete or disable departments", module: "department" },
+  // Company / Business Unit — the two levels above Department in the
+  // organization hierarchy (Company -> BusinessUnit -> Department ->
+  // SubDepartment). Global, structural admin actions, same shape as the
+  // department.* keys above — Administrator bypasses hasPermission()
+  // unconditionally either way.
+  { key: "company.create", description: "Create companies", module: "company" },
+  { key: "company.update", description: "Edit company name/domain", module: "company" },
+  { key: "company.delete", description: "Delete a company (only if it has no business units or users)", module: "company" },
+  { key: "businessUnit.create", description: "Create business units", module: "businessUnit" },
+  { key: "businessUnit.update", description: "Edit business unit name/company", module: "businessUnit" },
+  { key: "businessUnit.delete", description: "Delete a business unit (only if it has no departments/users/projects/activities)", module: "businessUnit" },
   { key: "department.user.assign", description: "Assign users to a department", module: "department" },
   { key: "department.user.unassign", description: "Remove users from a department", module: "department" },
   { key: "department.email.manage", description: "Set/change a department's inbound email address", module: "department" },
@@ -141,6 +152,15 @@ const PERMISSIONS = [
   { key: "activityProgress.create", description: "Add a status row to this department's activity progress mapping", module: "ticketConfig" },
   { key: "activityProgress.edit", description: "Edit this department's status->progress% mapping for activities", module: "ticketConfig" },
   { key: "activityProgress.delete", description: "Remove a status row from this department's activity progress mapping", module: "ticketConfig" },
+  // Organization sync/visualization — see lib/services/organization-sync-orchestrator.ts
+  // and app/(main)/admin/organization/page.tsx. Trigger stays Administrator-only
+  // (ADMIN bypasses hasPermission() anyway); tree.view is the finer-grained
+  // key a custom role can be granted for full-org visibility without
+  // granting the ability to kick off a Graph sync run — canViewAllDepartments
+  // (Admin/Director) already grants tree.view implicitly, see
+  // lib/services/organization-scope-service.ts.
+  { key: "organization.sync", description: "Trigger a full/incremental Microsoft organization sync", module: "organization" },
+  { key: "organization.tree.view", description: "View the full organization department/people tree (beyond one's own slice)", module: "organization" },
 ];
 
 // Every new permission key introduced above, grouped by the roleKey that
@@ -206,6 +226,11 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "goal.view",
     "department.view", "subdepartment.view",
     "ticket.pending.view",
+    // Cosmetic-consistency only, same rationale as ADMIN's integration.manage
+    // grant below — canViewAllDepartments(DIRECTOR) already grants full-tree
+    // visibility in code (lib/services/organization-scope-service.ts)
+    // regardless of this row; seeded so /admin/roles shows it checked.
+    "organization.tree.view",
   ],
   // ─── DepartmentRole keys (Phase 1 multi-department RBAC) ──────────────────
   // Full control of one department's projects/tickets/activities/goals.
@@ -485,7 +510,18 @@ async function main() {
     // /admin/roles Administrator matrix showing "integration.manage" as
     // checked on an already-seeded database, matching how role.manage/
     // user.manage already behave for that role.
-    ADMIN: ["integration.manage"],
+    ADMIN: [
+      "integration.manage",
+      "organization.sync",
+      "organization.tree.view",
+      "company.create",
+      "company.update",
+      "company.delete",
+      "businessUnit.create",
+      "businessUnit.update",
+      "businessUnit.delete",
+    ],
+    DIRECTOR: ["organization.tree.view"],
   };
   for (const [roleKey, permKeys] of Object.entries(NEW_PERMISSION_DEFAULT_GRANTS)) {
     for (const permKey of permKeys) {

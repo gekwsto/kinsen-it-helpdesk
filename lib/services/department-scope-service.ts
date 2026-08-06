@@ -5,6 +5,7 @@ import { getDefaultLegacyDepartmentId, listDepartments, toDepartmentSummary } fr
 import { getUserSubDepartmentIds, getSubDepartmentMembership } from "@/lib/services/sub-department-membership-service";
 import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
 import { hasDepartmentPermission, hasPermission, canViewAllDepartments } from "@/lib/permissions";
+import { canViewFullOrganizationTree } from "@/lib/services/organization-scope-service";
 import type { DepartmentSummary } from "@/types/department";
 
 /**
@@ -377,6 +378,8 @@ export interface NavVisibilityFlags {
   canViewMySubDepartments: boolean;
   /** Gates the "Pending Tickets" sidebar entry — mirrors ticket.pending.view, department-scoped or global. */
   canViewPendingTickets: boolean;
+  /** Gates the "Organization Chart" admin nav entry — the page itself is reachable by any authenticated user (own-slice view), but only full-tree-access roles get a nav shortcut into it, matching every other Administration entry's role-gated visibility. */
+  canViewOrganizationChart: boolean;
 }
 
 export async function getNavVisibilityFlags(
@@ -390,10 +393,11 @@ export async function getNavVisibilityFlags(
       canViewMyDepartments: true,
       canViewMySubDepartments: true,
       canViewPendingTickets: true,
+      canViewOrganizationChart: true,
     };
   }
 
-  const [accessibleSubDeptDepartments, memberships, subDeptIds, pendingTicketDepartmentIds, globalPendingView] = await Promise.all([
+  const [accessibleSubDeptDepartments, memberships, subDeptIds, pendingTicketDepartmentIds, globalPendingView, canViewOrgChart] = await Promise.all([
     getAccessibleDepartmentSummaries(userId, role, "subdepartment.view"),
     getUserDepartmentMemberships(userId),
     getUserSubDepartmentIds(userId),
@@ -402,6 +406,7 @@ export async function getNavVisibilityFlags(
     // membership — checked in addition to, not instead of, the
     // membership-based check above (which covers AGENT_ASSIGNEE etc.).
     hasPermission(role, "ticket.pending.view", customRoleId),
+    canViewFullOrganizationTree(role, customRoleId),
   ]);
 
   return {
@@ -409,6 +414,7 @@ export async function getNavVisibilityFlags(
     canViewMyDepartments: memberships.length > 0,
     canViewMySubDepartments: accessibleSubDeptDepartments.length > 0 || subDeptIds.length > 0,
     canViewPendingTickets: pendingTicketDepartmentIds.length > 0 || globalPendingView,
+    canViewOrganizationChart: canViewOrgChart,
   };
 }
 

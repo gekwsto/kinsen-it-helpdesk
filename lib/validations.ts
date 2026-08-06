@@ -265,6 +265,32 @@ export const resetPasswordSchema = z.object({
   password: z.string().min(8, "Password must be at least 8 characters"),
 });
 
+// Deliberately not a full URL/hostname validator — just enough to catch
+// obvious mistakes (spaces, missing a dot) while accepting anything a real
+// registrar could issue, same permissiveness level as the rest of this
+// file's domain-shaped fields.
+const domainRegex = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
+
+export const createCompanySchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters"),
+  domain: z.string().trim().toLowerCase().regex(domainRegex, "Enter a valid domain, e.g. company.com"),
+});
+
+export const updateCompanySchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").optional(),
+  domain: z.string().trim().toLowerCase().regex(domainRegex, "Enter a valid domain, e.g. company.com").optional(),
+});
+
+export const createBusinessUnitSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters"),
+  companyId: z.string().min(1, "Company is required"),
+});
+
+export const updateBusinessUnitSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").optional(),
+  companyId: z.string().min(1, "Company is required").optional(),
+});
+
 export const createDepartmentSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   description: z.string().trim().min(1).optional(),
@@ -281,7 +307,11 @@ export const updateDepartmentSchema = z.object({
     .regex(/^[a-z0-9-]+$/, "Slug may only contain lowercase letters, numbers and hyphens")
     .optional(),
   description: z.string().trim().nullable().optional(),
-  businessUnitId: z.string().nullable().optional(),
+  // Deliberately not `.nullable()` — a department must always belong to
+  // exactly one Business Unit (Company -> BusinessUnit -> Department ->
+  // SubDepartment), so this edit path can narrow WHICH one but never clear
+  // it. `.min(1)` also rejects an empty-string payload outright.
+  businessUnitId: z.string().min(1, "Select a business unit").optional(),
   isActive: z.boolean().optional(),
 });
 

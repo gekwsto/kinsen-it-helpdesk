@@ -112,6 +112,30 @@ enum MicrosoftMappingSourceType {
   ENTRA_APP_ROLE
 }
 
+// RUNNING = no `completedAt` yet. SUCCEEDED = completed, errorCount stayed 0.
+// PARTIAL = completed, some per-user records were skipped/errored but the run
+// itself finished (see OrganizationSyncRun.errorCount) — never a hard
+// all-or-nothing failure for one bad record. FAILED = the run itself aborted
+// (e.g. lost the Graph token mid-run, permission revoked).
+enum OrganizationSyncStatus {
+  RUNNING
+  SUCCEEDED
+  PARTIAL
+  FAILED
+}
+
+// FULL = paginated tenant-wide user directory scan + manager/directReports
+// traversal. INCREMENTAL = user property refresh only (no manager traversal)
+// — cheaper, safe to run more often. RELATIONSHIP_REFRESH = manager/
+// directReports traversal only, skips the directory property scan — for
+// periodically refreshing reporting lines without re-scanning every profile
+// field.
+enum OrganizationSyncType {
+  FULL
+  INCREMENTAL
+  RELATIONSHIP_REFRESH
+}
+
 enum ProjectStatus {
   PLANNING
   IN_PROGRESS
@@ -349,6 +373,46 @@ model SubDepartmentMembership {
   @@index([departmentId])
 }
 
+// One row per organization-sync attempt (full tenant scan, incremental
+// property refresh, or a manager/directReports-only relationship refresh).
+// Mirrors EmailPollRun's shape (prisma/schema.prisma, EmailPollRun) but adds
+// what that model lacks: an explicit status enum (EmailPollRun only has
+// finishedAt/succeeded) — needed here because a run can legitimately finish
+// PARTIAL (some bad records skipped) rather than a flat succeeded/failed.
+model OrganizationSyncRun {
+  id            String                 @id @default(cuid())
+  type          OrganizationSyncType
+  status        OrganizationSyncStatus @default(RUNNING)
+  startedAt     DateTime               @default(now())
+  completedAt   DateTime?
+  usersScanned  Int                    @default(0)
+  usersUpdated  Int                    @default(0)
+  usersSkipped  Int                    @default(0)
+  errorCount    Int                    @default(0)
+  // Sanitized only — never a raw stack trace, never a token/secret value.
+  lastError     String?                @db.Text
+  deltaLink     String?                @db.Text
+  // Admin User.id for a manual "Sync organization" click; null for any
+  // future scheduled/automated trigger.
+  triggeredById String?
+
+  @@index([startedAt])
+  @@index([status])
+}
+
+// Singleton row (always id="singleton") used as an atomic compare-and-set
+// mutual-exclusion lock so two organization syncs can never run
+// concurrently — see acquireOrganizationSyncLock in
+// lib/services/organization-sync-orchestrator.ts. There is no locking
+// precedent elsewhere in this schema (EmailPollRun has none) so this is
+// deliberately its own minimal table rather than overloading another model.
+model OrganizationSyncLock {
+  id       String    @id @default("singleton")
+  isLocked Boolean   @default(false)
+  lockedAt DateTime?
+  runId    String?
+}
+
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
 
 model User {
@@ -397,6 +461,50 @@ model User {
   subDepartment                SubDepartment?              @relation(fields: [subDepartmentId], references: [id])
   subDepartmentId              String?
 
+  // People/reporting-line hierarchy — deliberately separate from the
+  // Department/SubDepartment (organizational-unit) hierarchy above; the two
+  // are not guaranteed to align (see docs on the organization-sync feature).
+  // Sourced exclusively from Microsoft Graph's manager/directReports
+  // navigation properties (lib/services/organization-manager-sync-service.ts)
+  // — there is no admin-editable manual override, since Entra is the sole
+  // authoritative source for reporting lines per the feature's design.
+  manager                      User?                       @relation("UserManager", fields: [managerId], references: [id], onDelete: SetNull)
+  managerId                    String?
+  directReports                User[]                      @relation("UserManager")
+  // True when the most recent manager sync (organization-manager-sync-service.ts,
+  // directReports inversion) found this user AS a direct report of some
+  // manager in Entra, but that manager was itself excluded from the synced
+  // set (guest/service account, invalid record) — so `managerId` above is
+  // null NOT because this user has no manager, but because their real
+  // manager isn't a usable local row. Distinct from a genuine root (no
+  // manager relationship exists in Entra at all) — see
+  // lib/services/organization-unmapped-report-service.ts's
+  // MANAGER_NOT_SYNCED classification, which reads this flag directly
+  // rather than re-deriving it (the signal only exists transiently during a
+  // sync run's Graph responses, so it must be persisted here to be
+  // reportable afterward without another Graph call).
+  managerExcludedFromSync      Boolean                     @default(false)
+  // Entra `employeeId`/`employeeType` — diagnostic/organization-context
+  // fields only; not used by any RBAC/department-mapping decision today.
+  employeeId                   String?
+  employeeType                 String?
+  // Entra `accountEnabled`/`userType` at last sync — distinct from this
+  // app's own `isActive` (a TicketApp-local decision, never overwritten by
+  // sync). Used only to flag/report a mismatch (e.g. an Entra-disabled
+  // account that's still `isActive` locally), never to auto-disable a user.
+  entraAccountEnabled          Boolean?
+  entraUserType                String?
+  // Entra `jobTitle` at last sync — was previously only ever transient
+  // (read from Graph at login, used for mapping resolution, then discarded).
+  // Stored now so the organization-context API/visualization can display it
+  // without an extra Graph call.
+  jobTitle                     String?
+  // Set on every successful organization-sync write for this user (full
+  // tenant scan, incremental refresh, or the per-user login-time manager
+  // lookup) — distinct from `lastMicrosoftSyncAt` above, which tracks the
+  // unrelated department/global-role sync.
+  organizationSyncedAt         DateTime?
+
   customRole   CustomRole? @relation("UserCustomRole", fields: [customRoleId], references: [id])
   customRoleId String?
 
@@ -427,6 +535,8 @@ model User {
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  @@index([managerId])
 }
 
 model Account {

@@ -9,6 +9,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { HelpGuideProvider } from "@/components/help/help-guide-provider";
 import { HelpGuideWidget } from "@/components/help/help-guide-widget";
+import { SessionExpiryController } from "@/components/auth/session-expiry-controller";
 
 export default async function MainLayout({
   children,
@@ -51,6 +52,9 @@ export default async function MainLayout({
         </div>
         <HelpGuideWidget />
       </HelpGuideProvider>
+      {/* Central, single mount point for absolute-8h session enforcement —
+          never one per page. See components/auth/session-expiry-controller.tsx. */}
+      <SessionExpiryController />
     </ActiveWorkspaceProvider>
   );
 }

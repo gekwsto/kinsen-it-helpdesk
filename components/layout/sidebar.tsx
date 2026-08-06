@@ -139,7 +139,19 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
     },
     {
+      // Full company tree + reporting-lines chart (department tree / people
+      // tree, search, sync) — promoted here from Administration -> Organization
+      // Chart, canonical route now /organization (/admin/organization
+      // permanently redirects). Distinct from "My Department" below, which is
+      // each user's own department/subdepartment membership view, not the
+      // company-wide chart.
       label: "Organization",
+      href: "/organization",
+      icon: Building2,
+      visible: navFlags.canViewOrganizationChart,
+    },
+    {
+      label: "My Department",
       href: "/my-departments",
       icon: Network,
       visible: navFlags.canViewMyDepartments || navFlags.canViewMySubDepartments,
@@ -156,6 +168,8 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       children: [
         { label: "Users", href: "/admin/users", roles: ["ADMIN"] as Role[] },
         { label: "Role Permissions", href: "/admin/roles", roles: ["ADMIN"] as Role[] },
+        { label: "Companies", href: "/admin/companies", roles: ["ADMIN"] as Role[] },
+        { label: "Business Units", href: "/admin/business-units", roles: ["ADMIN"] as Role[] },
         { label: "Departments", href: "/admin/departments", roles: ["ADMIN"] as Role[] },
         { label: "Sub Departments", href: "/admin/sub-departments", visible: navFlags.canViewAdminSubDepartments },
         { label: "Microsoft Mappings", href: "/admin/microsoft-mappings", roles: ["ADMIN"] as Role[] },

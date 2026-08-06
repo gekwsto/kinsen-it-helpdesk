@@ -9,6 +9,7 @@ import { authConfig } from "@/lib/auth.config";
 import { adminLoginSchema as credentialsLoginSchema } from "@/lib/validations";
 import { handleMicrosoftJwtSignIn, SYNC_ELIGIBLE_USER_SELECT } from "@/lib/services/microsoft-department-sync-service";
 import { normalizeEmail } from "@/lib/services/email-identity";
+import { isAbsoluteSessionExpired, stampAbsoluteSessionExpiryIfAbsent } from "@/lib/session-expiry";
 
 /**
  * PrismaAdapter's own createUser/getUserByEmail do an exact-match lookup
@@ -119,6 +120,23 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     },
 
     async jwt({ token, user, account, profile }) {
+      // Absolute (non-sliding) 8h application-session enforcement — checked
+      // FIRST, on every single invocation of this callback (not just first
+      // sign-in), using whatever `token.absoluteSessionExpiresAt` was
+      // stamped at the ORIGINAL sign-in (set once, below, and never
+      // recomputed after that). Returning `null` here is what actually
+      // terminates the session: Auth.js's own session action
+      // (@auth/core's lib/actions/session.ts) treats a `null` jwt()
+      // result as "no valid session" and clears the session cookie —
+      // this runs identically whether triggered by a page navigation, an
+      // API request, a middleware pass, or a SessionProvider focus-refetch,
+      // so there is no path that can read a live session past the 8h mark.
+      // Never recompute/extend `absoluteSessionExpiresAt` here — only ever
+      // read it.
+      if (isAbsoluteSessionExpired(token.absoluteSessionExpiresAt)) {
+        return null;
+      }
+
       // Runs only on first sign-in; subsequent requests reuse the existing token
       if (user?.email) {
         // Look up by `user.id`, not a fresh findUnique-by-email: on this
@@ -227,6 +245,17 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // session — the same pattern Settings/Users-admin/assigned-avatar
         // rendering already used even before this change.
         delete token.picture;
+
+        // Absolute session boundary — stamped exactly once, right here, at
+        // the real moment of sign-in (this whole branch runs only when
+        // `user?.email` is truthy, which Auth.js guarantees only on an
+        // actual sign-in, never on a token-refresh/session-read request —
+        // see the comment at the top of this callback). See
+        // stampAbsoluteSessionExpiryIfAbsent's own doc comment for the full
+        // "never re-stamped" guarantee this relies on. `Date.now()` is
+        // inherently UTC (epoch milliseconds) — no timezone is involved or
+        // needed anywhere in this calculation.
+        stampAbsoluteSessionExpiryIfAbsent(token);
       }
       return token;
     },
@@ -234,6 +263,14 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async session({ session, token }) {
       if (session.user) {
         if (token.isActive === false) return null as any;
+        // Defense-in-depth mirror of the jwt callback's own check — in the
+        // normal path jwt() already returned `null` before this callback
+        // would even run for an expired token (see @auth/core's session
+        // action: `callbacks.session` is only invoked when `callbacks.jwt`
+        // did NOT return null), so this should be unreachable in practice.
+        // Kept anyway, exactly like the `isActive === false` check above it,
+        // as a second, independent layer that costs nothing.
+        if (isAbsoluteSessionExpired(token.absoluteSessionExpiresAt)) return null as any;
 
         session.user.id = token.id as string;
         session.user.role = token.role as Role;
@@ -247,6 +284,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         session.user.customRoleId = (token.customRoleId as string | null) ?? undefined;
         session.user.microsoftUserId = (token.microsoftUserId as string | null) ?? undefined;
         session.user.globalRoleSource = (token.globalRoleSource as GlobalRoleSource) ?? undefined;
+        // The authoritative absolute-expiry boundary, exposed to the client
+        // exactly as computed at sign-in — components/auth/session-expiry-controller.tsx
+        // reads this instead of ever hardcoding the 8h duration itself.
+        session.user.loginAt = token.loginAt;
+        session.user.absoluteSessionExpiresAt = token.absoluteSessionExpiresAt;
       }
       return session;
     },

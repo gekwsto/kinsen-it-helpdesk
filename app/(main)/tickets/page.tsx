@@ -15,10 +15,13 @@ import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
 import { Role } from "@prisma/client";
+import { parseTicketStatusGroup, buildTicketStatusGroupCondition } from "@/lib/services/ticket-status-groups";
 
 interface SearchParams {
   page?: string;
   search?: string;
+  /** Status GROUP (all/open/in_progress/closed) — see lib/services/ticket-status-groups.ts. Distinct from statusId below, which picks one specific department-owned TicketStatus row. Defaults to "open", preserving this page's original always-open-only behavior when absent. */
+  status?: string;
   statusId?: string;
   priorityId?: string;
   categoryId?: string;
@@ -110,8 +113,15 @@ export default async function AllTicketsPage({
     );
   }
 
-  // Base filter: only open (non-closed, non-cancelled) tickets
-  const andConditions: any[] = [scope, { status: { isClosed: false } }, { cancelReasonId: null }];
+  // Base filter: status GROUP (defaults to "open", matching this page's
+  // original always-open-only behavior when ?status= is absent/invalid) plus
+  // never-cancelled. buildTicketStatusGroupCondition is the exact same
+  // function the Tickets Dashboard's KPI counts use, so a card's count and
+  // this list's result count for the same group can never disagree.
+  const statusGroup = parseTicketStatusGroup(params.status) ?? "open";
+  const andConditions: any[] = [scope, { cancelReasonId: null }];
+  const statusGroupCondition = buildTicketStatusGroupCondition(statusGroup);
+  if (statusGroupCondition) andConditions.push(statusGroupCondition);
 
   if (params.myOnly === "true") {
     andConditions.push({ requesterId: session.user.id });
