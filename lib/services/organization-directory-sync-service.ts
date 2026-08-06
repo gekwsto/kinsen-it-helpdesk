@@ -26,12 +26,12 @@
  * parallel mapping logic.
  */
 import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
 import { AuthProvider } from "@prisma/client";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { fetchWithGraphRetry } from "@/lib/microsoft-graph-retry";
 import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
 import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
+import { normalizeEmail } from "@/lib/services/email-identity";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 const GRAPH_USERS_SELECT = [
@@ -52,7 +52,15 @@ const GRAPH_USERS_SELECT = [
 const GRAPH_USERS_PAGE_URL = `https://graph.microsoft.com/v1.0/users?$select=${GRAPH_USERS_SELECT}&$top=999`;
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_PAGES = 200; // same guard as microsoft-directory-service.ts — ~200k users at $top=999
-const BATCH_SIZE = 200; // per-transaction batch — one bad batch never aborts the whole run
+// Purely a chunking size for predictable memory/logging during a large
+// tenant scan — NOT a transactional unit. Each user is its own fully
+// independent write (see upsertOneDirectoryUser's header comment for why a
+// shared per-batch transaction was a real production incident: Postgres
+// aborts an ENTIRE transaction on the first failing statement — 25P02 on
+// every subsequent query — so one user hitting the lower(email) unique
+// constraint silently rolled back everyone else's already-"successful"
+// writes in the same batch too).
+const BATCH_SIZE = 200;
 
 export interface GraphDirectoryUser {
   id: string;
@@ -187,77 +195,165 @@ export interface DirectoryBatchSyncCounts {
   syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; name: string | null; department: string | null; jobTitle: string | null }>;
 }
 
+export type DirectoryUserSyncAction = "created" | "updated" | "linked" | "skipped";
+
+interface DirectoryUserSyncResult {
+  action: DirectoryUserSyncAction;
+  dbUserId: string | null;
+  name: string | null;
+  department: string | null;
+  jobTitle: string | null;
+  skipReason?: string;
+}
+
 /**
- * Upserts one batch of already-validated users by `microsoftUserId` (the
- * stable Entra `oid` — never creates a duplicate account for an existing
- * user, matches the identity-anchor convention already established at
- * login). A brand-new tenant member with no prior TicketApp row gets a real
- * User row created here (authProvider MICROSOFT, no passwordHash) so the
- * organization tree can represent the whole tenant, not just people who've
- * already signed in — `isActive` is seeded from Entra's `accountEnabled` at
- * CREATE time only; an EXISTING row's `isActive` (a TicketApp-local
- * decision) is never touched by sync, mirroring how `avatarSource`/
- * `globalRoleSource` already protect their own fields from being silently
- * overwritten.
+ * Upserts ONE already-validated directory user — a real bug, seen in
+ * production, is why this is no longer done inside a shared
+ * `prisma.$transaction` across a whole batch of users (see BATCH_SIZE's
+ * comment above): Postgres aborts an ENTIRE transaction on the first
+ * failing statement (a user hitting the `User_email_lower_key` functional
+ * unique index via the bug fixed below) — every subsequent query in that
+ * SAME transaction then fails with `25P02 current transaction is aborted`,
+ * and because the per-user JS try/catch swallowed each of those errors
+ * without re-throwing, Prisma went on to attempt a COMMIT on an aborted
+ * transaction, silently rolling back every OTHER user's already-"successful"
+ * write in that batch too — while the in-memory counts/syncedForMembership
+ * still claimed they'd been persisted. That's what later surfaced as
+ * `[organization-manager-sync] ... No record was found for an update`: the
+ * manager-sync stage was handed dbUserIds for rows that were never actually
+ * committed. Each call here now runs as its own independent statement
+ * sequence against the plain `prisma` client (no shared tx), so a failure
+ * for one user can never poison another's write.
+ *
+ * Identity resolution order — never trusts microsoftUserId alone:
+ *   1. `microsoftUserId` (the stable Entra oid) — the primary anchor,
+ *      exactly as before.
+ *   2. Not found by oid? Fall back to a case-insensitive email match
+ *      (lib/services/email-identity.ts's normalizeEmail — the same
+ *      normalization every other User create/lookup path in this app
+ *      already uses). This is the actual root-cause fix: a user who already
+ *      exists locally (manual account, prior credentials sign-in, or a
+ *      previous partial/failed sync) with this same email but no
+ *      microsoftUserId linked yet is now LINKED (found + updated), never
+ *      duplicated via `create`.
+ *   3. Found by email but that row is already linked to a DIFFERENT
+ *      microsoftUserId? A genuine data conflict (email reuse/migration, or
+ *      bad tenant data) — NEVER silently reassigned (could merge two
+ *      different people's history under one account). Skipped, logged with
+ *      a safe reason for manual review, never a crash.
+ *   4. Not found by oid or email — create.
+ *
+ * `isActive` is seeded from Entra's `accountEnabled` at CREATE time only; an
+ * EXISTING row's `isActive` (a TicketApp-local decision) is never touched by
+ * sync, mirroring how `avatarSource`/`globalRoleSource` already protect
+ * their own fields from being silently overwritten.
+ */
+async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string): Promise<DirectoryUserSyncResult> {
+  const email = normalizeEmail(rawEmail);
+  const department = user.department ?? null;
+  const jobTitle = user.jobTitle ?? null;
+
+  try {
+    let existing = await prisma.user.findUnique({ where: { microsoftUserId: user.id }, select: { id: true, name: true, microsoftUserId: true } });
+    let action: DirectoryUserSyncAction = "updated";
+
+    if (!existing) {
+      const byEmail = await prisma.user.findUnique({ where: { email }, select: { id: true, name: true, microsoftUserId: true } });
+      if (byEmail) {
+        if (byEmail.microsoftUserId && byEmail.microsoftUserId !== user.id) {
+          console.warn("[organization-directory-sync] user sync skipped", {
+            microsoftUserId: user.id,
+            email,
+            action: "skipped",
+            reason: "email_linked_to_different_microsoft_user",
+          });
+          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, skipReason: "email_linked_to_different_microsoft_user" };
+        }
+        existing = byEmail;
+        action = "linked";
+      }
+    }
+
+    const commonFields = {
+      name: user.displayName ?? undefined,
+      jobTitle: user.jobTitle ?? undefined,
+      employeeId: user.employeeId ?? undefined,
+      employeeType: user.employeeType ?? undefined,
+      entraAccountEnabled: user.accountEnabled ?? undefined,
+      entraUserType: user.userType ?? undefined,
+      organizationSyncedAt: new Date(),
+    };
+
+    if (existing) {
+      // microsoftUserId is written unconditionally here (a no-op when action
+      // is "updated" — it already matched; the actual backfill when action
+      // is "linked").
+      const updated = await prisma.user.update({
+        where: { id: existing.id },
+        data: { ...commonFields, microsoftUserId: user.id },
+        select: { id: true, name: true },
+      });
+      console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action });
+      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle };
+    }
+
+    const created = await prisma.user.create({
+      data: {
+        email,
+        name: user.displayName ?? null,
+        microsoftUserId: user.id,
+        authProvider: AuthProvider.MICROSOFT,
+        isActive: user.accountEnabled ?? true,
+        jobTitle: user.jobTitle ?? null,
+        employeeId: user.employeeId ?? null,
+        employeeType: user.employeeType ?? null,
+        entraAccountEnabled: user.accountEnabled ?? null,
+        entraUserType: user.userType ?? null,
+        organizationSyncedAt: new Date(),
+      },
+      select: { id: true, name: true },
+    });
+    console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action: "created" });
+    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle };
+  } catch (err) {
+    // Isolated to THIS user only (see the function header) — never runs
+    // inside a transaction shared with any other user's writes, so this can
+    // never cascade into 25P02 failures for the rest of the batch. Still a
+    // real, unexpected failure (e.g. a genuine race, a transient DB error) —
+    // counted and logged, never silently dropped.
+    const reason = err instanceof Error ? err.message : String(err);
+    console.warn("[organization-directory-sync] user sync failed", { microsoftUserId: user.id, email, action: "skipped", reason });
+    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, skipReason: reason };
+  }
+}
+
+/**
+ * Sequentially upserts a chunk of already-validated users — sequential
+ * (never Promise.all) to keep DB connection usage predictable during a
+ * potentially large tenant scan, matching this service's existing
+ * department-membership-resolution loop below. See BATCH_SIZE's comment and
+ * upsertOneDirectoryUser's header for why this is no longer wrapped in a
+ * shared transaction.
  */
 async function upsertDirectoryUserBatch(
-  tx: Prisma.TransactionClient,
   validated: Array<{ user: GraphDirectoryUser; email: string }>
 ): Promise<DirectoryBatchSyncCounts> {
   const counts: DirectoryBatchSyncCounts = { updated: 0, created: 0, skipped: 0, errors: 0, syncedForMembership: [] };
 
   for (const { user, email } of validated) {
-    try {
-      const existing = await tx.user.findUnique({ where: { microsoftUserId: user.id }, select: { id: true, name: true } });
-      const commonFields = {
-        name: user.displayName ?? undefined,
-        jobTitle: user.jobTitle ?? undefined,
-        employeeId: user.employeeId ?? undefined,
-        employeeType: user.employeeType ?? undefined,
-        entraAccountEnabled: user.accountEnabled ?? undefined,
-        entraUserType: user.userType ?? undefined,
-        organizationSyncedAt: new Date(),
-      };
+    const result = await upsertOneDirectoryUser(user, email);
+    if (result.action === "created") counts.created++;
+    else if (result.action === "updated" || result.action === "linked") counts.updated++;
+    else counts.errors++; // identity-resolution/write failure — a real problem to investigate, distinct from the pre-batch validation `skipped` counter (guest/service accounts, missing email)
 
-      let dbUserId: string;
-      let name: string | null;
-      if (existing) {
-        await tx.user.update({ where: { id: existing.id }, data: commonFields });
-        counts.updated++;
-        dbUserId = existing.id;
-        name = user.displayName ?? existing.name;
-      } else {
-        const created = await tx.user.create({
-          data: {
-            email,
-            name: user.displayName ?? null,
-            microsoftUserId: user.id,
-            authProvider: AuthProvider.MICROSOFT,
-            isActive: user.accountEnabled ?? true,
-            jobTitle: user.jobTitle ?? null,
-            employeeId: user.employeeId ?? null,
-            employeeType: user.employeeType ?? null,
-            entraAccountEnabled: user.accountEnabled ?? null,
-            entraUserType: user.userType ?? null,
-            organizationSyncedAt: new Date(),
-          },
-          select: { id: true, name: true },
-        });
-        counts.created++;
-        dbUserId = created.id;
-        name = created.name;
-      }
-      counts.syncedForMembership.push({ dbUserId, microsoftUserId: user.id, email, name, department: user.department ?? null, jobTitle: user.jobTitle ?? null });
-    } catch (err) {
-      // A single bad record (e.g. a race against a concurrent email-uniqueness
-      // conflict) is isolated and counted, never aborts the whole batch — the
-      // outer per-batch transaction still commits everything else that
-      // succeeded before this row, since each user is its own try/catch, not
-      // a single all-or-nothing statement.
-      counts.errors++;
-      console.warn("[organization-directory-sync] Failed to upsert directory user", {
+    if (result.dbUserId) {
+      counts.syncedForMembership.push({
+        dbUserId: result.dbUserId,
         microsoftUserId: user.id,
-        reason: err instanceof Error ? err.message : String(err),
+        email: normalizeEmail(email),
+        name: result.name,
+        department: result.department,
+        jobTitle: result.jobTitle,
       });
     }
   }
@@ -323,26 +419,18 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
     validatedUsers.push({ user: result.user, email: result.email });
   }
 
+  // No shared transaction across a batch (see BATCH_SIZE's comment and
+  // upsertOneDirectoryUser's header for the production incident this fixed)
+  // — upsertDirectoryUserBatch/upsertOneDirectoryUser never throw, every
+  // per-user outcome (including a failure) is already captured in `counts`,
+  // so no try/catch is needed here.
   for (let i = 0; i < validatedUsers.length; i += BATCH_SIZE) {
     const batch = validatedUsers.slice(i, i + BATCH_SIZE);
-    try {
-      const counts = await prisma.$transaction(async (tx) => upsertDirectoryUserBatch(tx, batch));
-      usersUpdated += counts.updated;
-      usersCreated += counts.created;
-      errorCount += counts.errors;
-      syncedForMembership.push(...counts.syncedForMembership);
-    } catch (err) {
-      // The whole batch's transaction failed to commit at all (vs. an
-      // isolated per-row error inside a committed batch, handled above) —
-      // count every user in this batch as an error and move on to the next
-      // batch, never aborting the entire tenant-wide run for one bad batch.
-      errorCount += batch.length;
-      console.warn("[organization-directory-sync] Batch transaction failed", {
-        batchStart: i,
-        batchSize: batch.length,
-        reason: err instanceof Error ? err.message : String(err),
-      });
-    }
+    const counts = await upsertDirectoryUserBatch(batch);
+    usersUpdated += counts.updated;
+    usersCreated += counts.created;
+    errorCount += counts.errors;
+    syncedForMembership.push(...counts.syncedForMembership);
   }
 
   // Department-membership resolution — reuses the exact same functions the

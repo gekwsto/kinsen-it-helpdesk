@@ -16,7 +16,7 @@ process.env.GRAPH_CLIENT_ID = "bbbbbbbb-1111-2222-3333-444444444444";
 process.env.GRAPH_CLIENT_SECRET = "mock-graph-client-secret-1234567890";
 
 import { prisma } from "@/lib/prisma";
-import { OrganizationSyncType } from "@prisma/client";
+import { OrganizationSyncType, AuthProvider } from "@prisma/client";
 import { fetchWithGraphRetry } from "@/lib/microsoft-graph-retry";
 import { validateDirectoryUser, fetchAllTenantUsers, runOrganizationDirectorySync, type DirectoryRawUserRecord } from "@/lib/services/organization-directory-sync-service";
 import { runOrganizationManagerSync } from "@/lib/services/organization-manager-sync-service";
@@ -192,6 +192,120 @@ async function section4_directorySyncDbWrites() {
     if (createdUser) await prisma.user.delete({ where: { id: createdUser.id } });
   } finally {
     restoreFetch();
+  }
+}
+
+/**
+ * Regression test for a real production incident: runOrganizationDirectorySync
+ * used to look up existing users ONLY by microsoftUserId, then unconditionally
+ * `create()` when not found — which threw the User_email_lower_key unique
+ * constraint for anyone who already existed under the same email with a
+ * missing/different microsoftUserId, and (because every user in a batch
+ * shared ONE Postgres transaction) cascaded into 25P02 "current transaction
+ * is aborted" for every subsequent user in that same batch, silently rolling
+ * back everyone else's already-"successful" writes too. Covers all 5 identity-
+ * resolution outcomes (found by oid / linked by email / conflict-skipped /
+ * created / duplicate-email-in-one-batch-skipped) AND proves a user processed
+ * AFTER a conflict still syncs normally — the actual regression check.
+ */
+async function section4b_identityResolution() {
+  console.log("\n=== runOrganizationDirectorySync: identity resolution (oid -> email -> link/skip/create) ===\n");
+  let connected = true;
+  try {
+    await prisma.$connect();
+  } catch {
+    connected = false;
+  }
+  if (!connected) {
+    console.log("No reachable DATABASE_URL — skipping.");
+    return;
+  }
+
+  const oidByOid = `idres-byoid-${RUN_ID}`;
+  const oidLinkTarget = `idres-link-${RUN_ID}`;
+  const oidConflict = `idres-conflict-${RUN_ID}`;
+  const oidConflictOwner = `idres-conflict-owner-${RUN_ID}`;
+  const oidNew = `idres-new-${RUN_ID}`;
+  const oidDupA = `idres-dupa-${RUN_ID}`;
+  const oidDupB = `idres-dupb-${RUN_ID}`;
+  const oidAfterDup = `idres-afterdup-${RUN_ID}`;
+
+  const emailByOid = `${oidByOid}@x.com`;
+  const emailLinkTarget = `idres-link-target-${RUN_ID}@x.com`;
+  const emailConflict = `idres-conflict-target-${RUN_ID}@x.com`;
+  const emailNew = `${oidNew}@x.com`;
+  const emailDup = `idres-dup-shared-${RUN_ID}@x.com`; // shared by dupA and dupB on purpose — a real Entra data anomaly
+  const emailAfterDup = `${oidAfterDup}@x.com`;
+
+  const userIds: string[] = [];
+  try {
+    const preByOid = await prisma.user.create({ data: { email: emailByOid, microsoftUserId: oidByOid, name: "Pre ByOid" } });
+    userIds.push(preByOid.id);
+
+    // Pre-existing user with the email the sync will see, but no microsoftUserId — e.g. a manual/credentials account created before this person ever signed in via Microsoft.
+    const preLinkTarget = await prisma.user.create({ data: { email: emailLinkTarget, name: "Pre Link Target", authProvider: AuthProvider.CREDENTIALS } });
+    userIds.push(preLinkTarget.id);
+
+    // Pre-existing user with the SAME email but a DIFFERENT microsoftUserId already linked — a genuine identity conflict, must never be silently reassigned.
+    const preConflict = await prisma.user.create({ data: { email: emailConflict, microsoftUserId: oidConflictOwner, name: "Pre Conflict" } });
+    userIds.push(preConflict.id);
+
+    installTokenMock(() =>
+      jsonResponse(200, {
+        value: [
+          { id: oidByOid, userType: "Member", mail: emailByOid, displayName: "By Oid Updated" },
+          { id: oidLinkTarget, userType: "Member", mail: emailLinkTarget, displayName: "Link Target Updated" },
+          { id: oidConflict, userType: "Member", mail: emailConflict, displayName: "Conflict Attempt" },
+          { id: oidNew, userType: "Member", mail: emailNew, displayName: "Brand New" },
+          { id: oidDupA, userType: "Member", mail: emailDup, displayName: "Dup A" },
+          { id: oidDupB, userType: "Member", mail: emailDup, displayName: "Dup B" },
+          { id: oidAfterDup, userType: "Member", mail: emailAfterDup, displayName: "After Dup" },
+        ],
+      })
+    );
+
+    const outcome = await runOrganizationDirectorySync();
+    check("sync completes ok despite identity conflicts inside it (never a hard failure)", outcome.ok === true);
+
+    const afterByOid = await prisma.user.findUnique({ where: { id: preByOid.id } });
+    check("1. existing user found by microsoftUserId is updated in place", afterByOid?.name === "By Oid Updated");
+    check("   no duplicate row for this microsoftUserId", (await prisma.user.count({ where: { microsoftUserId: oidByOid } })) === 1);
+
+    const afterLink = await prisma.user.findUnique({ where: { id: preLinkTarget.id } });
+    check("2. existing user found by email with null microsoftUserId is LINKED (not duplicated)", afterLink?.microsoftUserId === oidLinkTarget);
+    check("   the linked row's fields were actually refreshed", afterLink?.name === "Link Target Updated");
+    check("   exactly one row exists for this email", (await prisma.user.count({ where: { email: emailLinkTarget } })) === 1);
+
+    const afterConflict = await prisma.user.findUnique({ where: { id: preConflict.id } });
+    check("3. email already linked to a DIFFERENT microsoftUserId is left completely untouched", afterConflict?.name === "Pre Conflict" && afterConflict?.microsoftUserId === oidConflictOwner);
+    check("   no row was created for the conflicting attempt's own oid", (await prisma.user.findUnique({ where: { microsoftUserId: oidConflict } })) === null);
+
+    const created = await prisma.user.findUnique({ where: { microsoftUserId: oidNew } });
+    check("4. brand-new user (new oid, new email) is created", created !== null && created?.email === emailNew);
+    if (created) userIds.push(created.id);
+
+    const dupWinner = await prisma.user.findUnique({ where: { microsoftUserId: oidDupA } });
+    check("5. first of two same-email records in one Graph batch is created normally", dupWinner !== null);
+    if (dupWinner) userIds.push(dupWinner.id);
+    const dupLoser = await prisma.user.findUnique({ where: { microsoftUserId: oidDupB } });
+    check("   second of two same-email records in one batch is safely skipped, never a duplicate", dupLoser === null);
+    check("   exactly one row exists for the shared email", (await prisma.user.count({ where: { email: emailDup } })) === 1);
+
+    const afterDupUser = await prisma.user.findUnique({ where: { microsoftUserId: oidAfterDup } });
+    check(
+      "6. REGRESSION CHECK: a user processed AFTER a conflicting one still syncs successfully (no 25P02 cascade from a shared transaction — there is no shared transaction anymore)",
+      afterDupUser !== null
+    );
+    if (afterDupUser) userIds.push(afterDupUser.id);
+
+    check("errorCount reflects exactly the 2 skipped identity conflicts (conflict + dup-loser)", outcome.errorCount === 2);
+  } finally {
+    restoreFetch();
+    try {
+      if (userIds.length > 0) await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    } catch (err) {
+      console.warn("Cleanup failed (non-fatal):", err instanceof Error ? err.message : err);
+    }
   }
 }
 
@@ -398,6 +512,76 @@ async function section5b_atomicPublishOnPartialFailure() {
   }
 }
 
+async function section5d_missingManagerAndSelfManager() {
+  console.log("\n=== Manager sync: manager not in the synced set, and an explicit self-manager edge ===\n");
+  let connected = true;
+  try {
+    await prisma.$connect();
+  } catch {
+    connected = false;
+  }
+  if (!connected) {
+    console.log("No reachable DATABASE_URL — skipping.");
+    return;
+  }
+
+  const oidGhostManager = `mgrsync-ghost-mgr-${RUN_ID}`; // a real, non-excluded candidate whose OWN directory-sync upsert never produced a local row (e.g. it hit the identity-conflict skip above) — "manager που δεν υπάρχει" locally.
+  const oidGhostReport = `mgrsync-ghost-report-${RUN_ID}`;
+  const oidSelfManager = `mgrsync-selfmgr-${RUN_ID}`; // reports itself as its own direct report — a real Entra data anomaly.
+
+  const userIds: string[] = [];
+  try {
+    const ghostReport = await prisma.user.create({ data: { email: `${oidGhostReport}@x.com`, microsoftUserId: oidGhostReport, name: "GhostReport" } });
+    const selfManager = await prisma.user.create({ data: { email: `${oidSelfManager}@x.com`, microsoftUserId: oidSelfManager, name: "SelfManager" } });
+    userIds.push(ghostReport.id, selfManager.id);
+
+    const candidateManagers: DirectoryRawUserRecord[] = [
+      // Validated (not excluded) but dbUserId is null — the directory-sync
+      // stage never actually persisted a row for this candidate manager
+      // (distinct from isExcluded: true, which means "known guest/service
+      // account, never even attempted").
+      { microsoftUserId: oidGhostManager, isExcluded: false, dbUserId: null },
+      { microsoftUserId: oidGhostReport, isExcluded: false, dbUserId: ghostReport.id },
+      { microsoftUserId: oidSelfManager, isExcluded: false, dbUserId: selfManager.id },
+    ];
+
+    installTokenMock((url) => {
+      const decoded = decodeURIComponent(url);
+      const match = decoded.match(/\/users\/([^/]+)\/directReports/);
+      const managerOid = match?.[1];
+      if (managerOid === oidGhostManager) return jsonResponse(200, { value: [{ id: oidGhostReport }] });
+      if (managerOid === oidSelfManager) return jsonResponse(200, { value: [{ id: oidSelfManager }] }); // reports itself
+      return jsonResponse(200, { value: [] });
+    });
+
+    const outcome = await runOrganizationManagerSync(candidateManagers);
+    check("manager sync still succeeds and publishes despite these anomalies", outcome.ok === true && outcome.published === true);
+
+    const refreshed = await prisma.user.findMany({
+      where: { id: { in: userIds } },
+      select: { id: true, microsoftUserId: true, managerId: true, managerExcludedFromSync: true },
+    });
+    const byOid = new Map(refreshed.map((u) => [u.microsoftUserId, u]));
+
+    check(
+      "manager that doesn't exist locally: report's managerId stays null, managerExcludedFromSync is true (safe skip, not a crash)",
+      byOid.get(oidGhostReport)?.managerId === null && byOid.get(oidGhostReport)?.managerExcludedFromSync === true
+    );
+    check(
+      "self-manager edge is rejected — the user is never recorded as their own manager",
+      byOid.get(oidSelfManager)?.managerId === null
+    );
+    check("both anomalies are counted in errorCount, never silently dropped", outcome.errorCount >= 2);
+  } finally {
+    restoreFetch();
+    try {
+      if (userIds.length > 0) await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+    } catch (err) {
+      console.warn("Cleanup failed (non-fatal):", err instanceof Error ? err.message : err);
+    }
+  }
+}
+
 function section5c_permissionMessaging() {
   console.log("\n=== Permission error messaging: no false User.Read.All blocker ===\n");
   const noPermissionMessage = describeOrganizationSyncFailure("Directory sync failed: no_permission");
@@ -468,8 +652,10 @@ async function main() {
   await section2_retryBackoff();
   await section3_pagination();
   await section4_directorySyncDbWrites();
+  await section4b_identityResolution();
   await section5_managerSyncViaDirectReports();
   await section5b_atomicPublishOnPartialFailure();
+  await section5d_missingManagerAndSelfManager();
   section5c_permissionMessaging();
   await section6_concurrentSyncPrevention();
 
