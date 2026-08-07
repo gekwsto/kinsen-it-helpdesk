@@ -22,7 +22,7 @@ import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft
 import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
 import { syncMicrosoftProfilePhoto } from "@/lib/services/microsoft-profile-photo-service";
-import { getOrganizationDirectoryEligibility } from "@/lib/services/organization-directory-eligibility-service";
+import { getOrganizationDirectoryEligibility, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
 import { createOrganizationResolutionCache, resolveOrganizationPlacement } from "@/lib/services/organization-company-department-resolver";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
@@ -162,6 +162,15 @@ export async function syncMicrosoftUserDepartment(
     mail: result.profile.mail ?? claims.email,
     userPrincipalName: result.profile.userPrincipalName,
   });
+  // FIND-006: the SAME matched domain that gates organizational placement
+  // below now also flows into the (secondary-membership/global-role)
+  // MicrosoftDepartmentMapping resolution further down — a domain-scoped
+  // PROFILE_JOB_TITLE mapping can only ever match under the exact domain
+  // eligibility already confirmed, never re-derived or guessed separately.
+  // null when not eligible at all — buildCandidates (microsoft-mapping-service.ts)
+  // then simply never builds a PROFILE_JOB_TITLE candidate for this login,
+  // exactly like "no eligible domain" should behave.
+  const eligibleDomain = eligibility.eligible ? extractEmailDomain(eligibility.matchedEmail) : null;
   let primaryDepartmentSynced = false;
   if (eligibility.eligible) {
     try {
@@ -197,7 +206,7 @@ export async function syncMicrosoftUserDepartment(
   // lookup), and syncDepartmentMemberships never touches an isPrimary row
   // (see its own header comment) — the two are fully independent from this
   // point on.
-  let resolved = await resolveDepartmentMemberships(claims);
+  let resolved = await resolveDepartmentMemberships(claims, eligibleDomain);
 
   if (claims.department) {
     const hasMapping = await hasActiveProfileDepartmentMapping(claims.department);
@@ -217,7 +226,7 @@ export async function syncMicrosoftUserDepartment(
   // System Admin status protects them (shouldSyncGlobalRole). Completely
   // independent of the primary department placement above (no `department`
   // connect here anymore).
-  const primaryMapping = await resolvePrimaryMicrosoftMapping(claims);
+  const primaryMapping = await resolvePrimaryMicrosoftMapping(claims, eligibleDomain);
   const globalRoleUpdate: Prisma.UserUpdateInput = { lastMicrosoftSyncAt: new Date() };
   let globalRoleSynced = false;
   if (primaryMapping) {

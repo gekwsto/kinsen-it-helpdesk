@@ -16,7 +16,7 @@
 import { prisma } from "@/lib/prisma";
 import { DepartmentRole, GlobalRoleSource, MembershipSource, MicrosoftMappingSourceType, Role, AuthProvider } from "@prisma/client";
 import { syncMicrosoftUserDepartment, handleMicrosoftJwtSignIn } from "@/lib/services/microsoft-department-sync-service";
-import { syncMicrosoftDirectoryValues } from "@/lib/services/microsoft-directory-service";
+import { syncMicrosoftDirectoryValues, normalizeJobTitleValue } from "@/lib/services/microsoft-directory-service";
 import { createMapping, updateMapping, MicrosoftMappingValidationError } from "@/lib/services/microsoft-mapping-service";
 import { normalizeDepartmentName } from "@/lib/services/organization-normalization";
 
@@ -114,10 +114,23 @@ async function main() {
     // have produced, so Scenarios 1-8 below keep asserting the same expected
     // end values as before this change. Scenario 9 below is the one that
     // actually proves departmentRole is applied verbatim, not re-derived.
+    // FIND-006 (docs/roadmap-handoff-register.md): MicrosoftDepartmentMapping's
+    // canonical identity is now (sourceType, domain, normalizedMicrosoftValue)
+    // — every raw `.create()` below (bypassing the createMapping() service,
+    // which computes these two fields automatically) must set them
+    // explicitly, or every PROFILE_DEPARTMENT row here would collide on the
+    // shared domain="" / normalizedMicrosoftValue="" default. PROFILE_DEPARTMENT
+    // stays global (domain: "", normalizedMicrosoftValue: an exact copy of
+    // microsoftValue); PROFILE_JOB_TITLE is domain-scoped (domain: "kinsen.gr"
+    // — this file's users are all @kinsen.gr — normalizedMicrosoftValue via
+    // the SAME normalizeJobTitleValue the discovery catalog and
+    // microsoft-mapping-service.ts's createMapping both use).
     const mapping = await prisma.microsoftDepartmentMapping.create({
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
         microsoftValue: TEST_MAPPING_VALUE,
+        domain: "",
+        normalizedMicrosoftValue: TEST_MAPPING_VALUE,
         departmentId: department.id,
         role: Role.DEPARTMENT_MANAGER,
         departmentRole: DepartmentRole.DEPARTMENT_MANAGER,
@@ -134,6 +147,8 @@ async function main() {
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
         microsoftValue: TEST_LOW_PRIORITY_DEPT_VALUE,
+        domain: "",
+        normalizedMicrosoftValue: TEST_LOW_PRIORITY_DEPT_VALUE,
         departmentId: department.id,
         role: Role.USER,
         departmentRole: DepartmentRole.REQUESTER,
@@ -144,6 +159,8 @@ async function main() {
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
         microsoftValue: TEST_JOB_TITLE_MANAGER_VALUE,
+        domain: "kinsen.gr",
+        normalizedMicrosoftValue: normalizeJobTitleValue(TEST_JOB_TITLE_MANAGER_VALUE),
         departmentId: department.id,
         role: Role.DEPARTMENT_MANAGER,
         departmentRole: DepartmentRole.DEPARTMENT_MANAGER,
@@ -154,6 +171,8 @@ async function main() {
       data: {
         sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
         microsoftValue: TEST_JOB_TITLE_ASSISTANT_VALUE,
+        domain: "kinsen.gr",
+        normalizedMicrosoftValue: normalizeJobTitleValue(TEST_JOB_TITLE_ASSISTANT_VALUE),
         departmentId: department.id,
         role: Role.IT_AGENT,
         departmentRole: DepartmentRole.AGENT_ASSIGNEE,

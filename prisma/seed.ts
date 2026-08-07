@@ -428,11 +428,23 @@ async function main() {
     { sourceType: "PROFILE_DEPARTMENT", microsoftValue: "Human Resources", departmentId: "dept-hr", role: "USER", departmentRole: DepartmentRole.REQUESTER },
   ];
 
+  // FIND-006 (docs/roadmap-handoff-register.md): canonical mapping identity
+  // is (sourceType, domain, normalizedMicrosoftValue). None of these seed
+  // examples use PROFILE_JOB_TITLE (the only domain-scoped sourceType — see
+  // MicrosoftDepartmentMapping's own schema comment), so domain is always
+  // the global "" sentinel and normalizedMicrosoftValue is an exact,
+  // untouched copy of microsoftValue for every one of them.
   for (const mapping of microsoftMappings) {
     await prisma.microsoftDepartmentMapping.upsert({
-      where: { sourceType_microsoftValue: { sourceType: mapping.sourceType, microsoftValue: mapping.microsoftValue } },
+      where: {
+        sourceType_domain_normalizedMicrosoftValue: {
+          sourceType: mapping.sourceType,
+          domain: "",
+          normalizedMicrosoftValue: mapping.microsoftValue,
+        },
+      },
       update: { departmentId: mapping.departmentId, role: mapping.role, departmentRole: mapping.departmentRole },
-      create: mapping,
+      create: { ...mapping, domain: "", normalizedMicrosoftValue: mapping.microsoftValue },
     });
   }
   console.log("✓ Microsoft department mapping examples seeded");

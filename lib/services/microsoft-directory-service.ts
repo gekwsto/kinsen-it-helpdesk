@@ -51,7 +51,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
-import { getOrganizationDirectoryEligibility, ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
+import { getOrganizationDirectoryEligibility, extractEmailDomain, ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
 
 const GRAPH_USERS_PAGE_URL =
   "https://graph.microsoft.com/v1.0/users?$select=id,department,jobTitle,userType,mail,userPrincipalName&$top=999";
@@ -127,13 +127,6 @@ export function normalizeJobTitleValue(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-/** Domain portion of an email-shaped string, lowercased — null if not email-shaped. */
-function extractDomain(emailLike: string): string | null {
-  const at = emailLike.lastIndexOf("@");
-  if (at < 0 || at === emailLike.length - 1) return null;
-  return emailLike.slice(at + 1).toLowerCase();
-}
-
 /**
  * Pages through the tenant's users in ONE combined scan, collecting
  * distinct, trimmed, non-empty `department` AND `jobTitle` values —
@@ -198,7 +191,7 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
         // "not_member") tells us nothing useful about tenant domains.
         if (eligibility.reason === "no_matching_domain") {
           const candidate = user.mail?.trim() || user.userPrincipalName?.trim() || "";
-          const domain = candidate ? extractDomain(candidate.toLowerCase()) : null;
+          const domain = candidate ? extractEmailDomain(candidate) : null;
           if (domain) otherDomainsObserved.add(domain);
         }
         continue;

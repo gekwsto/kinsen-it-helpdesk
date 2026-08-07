@@ -3,6 +3,8 @@
  * feature. Never writes. Usage: npx tsx scripts/audit-job-title-directory-invariants.ts
  */
 import { prisma } from "@/lib/prisma";
+import { normalizeJobTitleValue } from "@/lib/services/microsoft-directory-service";
+import { listJobTitleDirectoryForAdmin } from "@/lib/services/microsoft-job-title-directory-service";
 
 let passed = 0;
 let failed = 0;
@@ -74,6 +76,57 @@ async function main() {
   //    row has a non-empty domain — none left at the schema default "".
   const blankDomain = all.filter((r) => r.domain === "");
   console.log(`\n  (info) rows with blank domain (never touched by any write path yet — expected 0 post-migration+first sync, informational): ${blankDomain.length}`);
+
+  console.log("\n=== MicrosoftDepartmentMapping domain invariants (FIND-006) ===\n");
+
+  const mappings = await prisma.microsoftDepartmentMapping.findMany();
+
+  // 7. No duplicate (sourceType, domain, normalizedMicrosoftValue) — the DB
+  //    unique index already guarantees this structurally, but proving it
+  //    from data (not just trusting the constraint exists) is the point.
+  const mappingSeen = new Map<string, number>();
+  for (const m of mappings) {
+    const key = `${m.sourceType}::${m.domain}::${m.normalizedMicrosoftValue}`;
+    mappingSeen.set(key, (mappingSeen.get(key) ?? 0) + 1);
+  }
+  const mappingDupes = Array.from(mappingSeen.entries()).filter(([, count]) => count > 1);
+  check("No duplicate (sourceType, domain, normalizedMicrosoftValue) mappings", mappingDupes.length === 0, JSON.stringify(mappingDupes));
+
+  // 8. Every PROFILE_JOB_TITLE mapping has a REAL (non-empty) domain —
+  //    "" is the global sentinel, never valid for this sourceType.
+  const jobTitleMappingsNoDomain = mappings.filter((m) => m.sourceType === "PROFILE_JOB_TITLE" && !m.domain);
+  check("Every PROFILE_JOB_TITLE mapping has a non-empty domain", jobTitleMappingsNoDomain.length === 0, JSON.stringify(jobTitleMappingsNoDomain.map((m) => m.id)));
+
+  // 9. Every non-PROFILE_JOB_TITLE mapping is global (domain === "") — no
+  //    accidental domain-scoping ever applied to a source type that
+  //    shouldn't have one.
+  const nonJobTitleWithDomain = mappings.filter((m) => m.sourceType !== "PROFILE_JOB_TITLE" && m.domain !== "");
+  check("Every non-PROFILE_JOB_TITLE mapping stays global (domain='')", nonJobTitleWithDomain.length === 0, JSON.stringify(nonJobTitleWithDomain.map((m) => m.id)));
+
+  // 10. normalizedMicrosoftValue matches the per-sourceType computation rule
+  //     exactly (PROFILE_JOB_TITLE: normalizeJobTitleValue; everything else:
+  //     an exact copy of microsoftValue) — never drifted from what
+  //     createMapping/updateMapping would compute today.
+  const mismatchedNormalization = mappings.filter((m) => {
+    const expected = m.sourceType === "PROFILE_JOB_TITLE" ? normalizeJobTitleValue(m.microsoftValue) : m.microsoftValue;
+    return m.normalizedMicrosoftValue !== expected;
+  });
+  check("normalizedMicrosoftValue matches the per-sourceType computation rule for every mapping", mismatchedNormalization.length === 0, JSON.stringify(mismatchedNormalization.map((m) => m.id)));
+
+  // 11. Discovery catalog's Configured/Not-Configured join
+  //     (listJobTitleDirectoryForAdmin) never disagrees with a direct query
+  //     of active PROFILE_JOB_TITLE mappings for the SAME domain.
+  const { domain: discoveryDomain, rows: discoveryRows } = await listJobTitleDirectoryForAdmin();
+  const activeDomainMappingsByNormalized = new Map(
+    mappings.filter((m) => m.sourceType === "PROFILE_JOB_TITLE" && m.domain === discoveryDomain && m.isActive).map((m) => [m.normalizedMicrosoftValue, m])
+  );
+  const configuredJoinMismatches = discoveryRows.filter((row) => {
+    const directMatch = activeDomainMappingsByNormalized.get(normalizeJobTitleValue(row.value));
+    return row.configured !== !!directMatch;
+  });
+  check("Discovery Configured/Not-Configured join matches a direct query for every row (0 mismatches)", configuredJoinMismatches.length === 0, JSON.stringify(configuredJoinMismatches.map((r) => r.value)));
+
+  console.log(`\nTotal MicrosoftDepartmentMapping rows: ${mappings.length} (${mappings.filter((m) => m.sourceType === "PROFILE_JOB_TITLE").length} PROFILE_JOB_TITLE, domain-scoped)`);
 
   console.log(`\nTotal MicrosoftDirectoryJobTitleValue rows: ${all.length}`);
   console.log(`\n==================================\n${passed} checks passed, ${failed} checks failed\n`);

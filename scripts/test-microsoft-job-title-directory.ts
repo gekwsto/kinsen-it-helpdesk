@@ -252,6 +252,9 @@ async function section5_adminListingConfiguredStatus() {
     departmentId: dept.id,
     role: Role.USER,
     departmentRole: DepartmentRole.REQUESTER,
+    // FIND-006 (docs/roadmap-handoff-register.md): PROFILE_JOB_TITLE is now
+    // domain-scoped — required.
+    domain: "kinsen.gr",
   });
 
   const { domain, rows } = await listJobTitleDirectoryForAdmin();
@@ -300,56 +303,23 @@ async function section6_crossDomainDirectoryIdentity() {
   if (rowAt) await prisma.microsoftDirectoryJobTitleValue.delete({ where: { id: rowAt.id } });
 }
 
-async function section7_permissionMappingIsStillGlobalNotDomainScoped() {
-  console.log("\n=== KNOWN ARCHITECTURAL LIMITATION: MicrosoftDepartmentMapping is global-per-string, NOT domain-scoped (FIND-006, OPEN) ===\n");
-  // This is a DELIBERATE, DOCUMENTED negative test — it proves today's real
-  // behavior, it does NOT claim multi-domain-ready permission mapping. See
-  // docs/roadmap-handoff-register.md FIND-006. MicrosoftDepartmentMapping has
-  // no `domain` column at all; its uniqueness is @@unique([sourceType,
-  // microsoftValue]) — a job title string is one global identity across
-  // every domain, unlike the directory catalog fixed in section6 above.
-  const dept = await prisma.department.create({ data: { name: `${NAME_TAG}-mapping-scope-dept`, slug: `${NAME_TAG}-mapping-scope-dept-${RUN_ID}` } });
-  const TITLE = `Director-DomainScopeLimitation-${RUN_ID}`;
-
-  const mappingA = await createMapping({
-    sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
-    microsoftValue: TITLE,
-    departmentId: dept.id,
-    role: Role.USER,
-    departmentRole: DepartmentRole.REQUESTER,
-  });
-  check("Mapping A ('conceptually kinsen.gr Director') created", !!mappingA.id);
-
-  let mappingBRejected = false;
-  let rejectionCode: string | undefined;
-  try {
-    await createMapping({
-      sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
-      microsoftValue: TITLE, // SAME raw string — no domain column exists to distinguish a "kinsen.at Director" from this
-      departmentId: dept.id,
-      role: Role.USER,
-      departmentRole: DepartmentRole.VIEWER,
-    });
-  } catch (err: any) {
-    mappingBRejected = true;
-    rejectionCode = err?.code;
-  }
-  check(
-    "Mapping B ('conceptually kinsen.at Director', same raw title) is REJECTED, not independently created — proves mapping resolution is global-per-string today, not domain-scoped",
-    mappingBRejected && rejectionCode === "P2002"
-  );
-
-  await prisma.microsoftDepartmentMapping.deleteMany({ where: { microsoftValue: TITLE } });
-  await prisma.ticketPriority.deleteMany({ where: { departmentId: dept.id } });
-  await prisma.ticketStatus.deleteMany({ where: { departmentId: dept.id } });
-  await prisma.department.delete({ where: { id: dept.id } });
-}
+// A prior revision of this file had a section7 here documenting
+// MicrosoftDepartmentMapping as a KNOWN, deliberate architectural
+// limitation (global-per-string, not domain-scoped) — that limitation is
+// now FIXED (FIND-006, docs/roadmap-handoff-register.md): PROFILE_JOB_TITLE
+// mappings are domain-scoped, `domain` is now a REQUIRED input for them,
+// and the same raw title independently resolves per domain. That coverage
+// now lives in scripts/test-microsoft-mapping-domain-scope.ts (multi-domain
+// isolated fixture, resolver convergence, admin CRUD domain validation,
+// MANUAL/ADMIN protection, job-title-change semantics) — not duplicated
+// here, since this file's own scope is the discovery catalog (sections 1-6
+// above), not the permission-mapping engine.
 
 async function main() {
   section1_normalize();
 
   if (!(await dbReachable())) {
-    console.log("\nDATABASE_URL unreachable — skipping DB-backed sections 2-7 (this is a skip, not a failure).\n");
+    console.log("\nDATABASE_URL unreachable — skipping DB-backed sections 2-6 (this is a skip, not a failure).\n");
   } else {
     try {
       await cleanup();
@@ -358,7 +328,6 @@ async function main() {
       await section4_operationALoginCacheFillSafety();
       await section5_adminListingConfiguredStatus();
       await section6_crossDomainDirectoryIdentity();
-      await section7_permissionMappingIsStillGlobalNotDomainScoped();
     } finally {
       restoreFetch();
       await cleanup().catch(() => {});

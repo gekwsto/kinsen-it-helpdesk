@@ -93,6 +93,10 @@ async function main() {
       departmentId: deptB.id,
       role: Role.DEPARTMENT_MANAGER,
       departmentRole: DepartmentRole.DEPARTMENT_MANAGER,
+      // FIND-006 (docs/roadmap-handoff-register.md): PROFILE_JOB_TITLE is
+      // now domain-scoped — required, and this file's users are all
+      // @kinsen.gr (see mockGraphMe/test users below).
+      domain: "kinsen.gr",
     });
     mappingIds.push(m2.id);
 
@@ -187,6 +191,13 @@ async function main() {
       ["departmentMembership", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: testUserIds } } })],
       ["user", () => prisma.user.deleteMany({ where: { id: { in: testUserIds } } })],
       ["microsoftDepartmentMapping", () => (mappingIds.length > 0 ? prisma.microsoftDepartmentMapping.deleteMany({ where: { id: { in: mappingIds } } }) : Promise.resolve())],
+      // Operation A (syncMicrosoftUserDepartment's opportunistic cache-fill,
+      // microsoft-directory-service.ts) creates a MicrosoftDirectoryJobTitleValue
+      // row for DEPT_B_JOB_TITLE on every mockGraphMe(...) call above — never
+      // cleaned before this fix, the source of accumulating
+      // "Test Conflict B Job Title <RUN_ID>" debris rows across repeated
+      // full-suite runs (found during FIND-006's follow-up debris audit).
+      ["microsoftDirectoryJobTitleValue", () => prisma.microsoftDirectoryJobTitleValue.deleteMany({ where: { value: { contains: RUN_ID.toString() } } })],
       ["resolved-department priorities", () => (resolvedDeptIds.length > 0 ? prisma.ticketPriority.deleteMany({ where: { departmentId: { in: resolvedDeptIds } } }) : Promise.resolve())],
       ["resolved-department statuses", () => (resolvedDeptIds.length > 0 ? prisma.ticketStatus.deleteMany({ where: { departmentId: { in: resolvedDeptIds } } }) : Promise.resolve())],
       ["department", () => prisma.department.deleteMany({ where: { id: { in: [deptA?.id, deptB?.id, ...resolvedDeptIds].filter((x): x is string => !!x) } } })],

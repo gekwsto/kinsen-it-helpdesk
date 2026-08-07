@@ -35,6 +35,18 @@ export async function PATCH(
       if (error.code === "DEPARTMENT_NOT_FOUND") {
         return NextResponse.json({ error: "Department not found.", code: "department_not_found" }, { status: 404 });
       }
+      if (error.code === "DOMAIN_REQUIRED_FOR_SOURCE_TYPE") {
+        return NextResponse.json(
+          { error: "This mapping type requires a domain.", code: "domain_required" },
+          { status: 400 }
+        );
+      }
+      if (error.code === "DOMAIN_NOT_ALLOWED") {
+        return NextResponse.json(
+          { error: "This domain is not enabled for organization sync — only the configured ALLOWED_EMAIL_DOMAIN is accepted today.", code: "domain_not_allowed" },
+          { status: 400 }
+        );
+      }
     }
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
       if (error.code === "P2002") {

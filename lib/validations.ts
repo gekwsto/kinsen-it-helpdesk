@@ -426,6 +426,11 @@ export const createMicrosoftMappingSchema = z.object({
   // independent of `role` above (see department-role-translation.ts).
   // Required: an admin must make an explicit choice, no silent default.
   departmentRole: z.nativeEnum(DepartmentRole),
+  // FIND-006: required (and server-validated against the allowed-domain
+  // set) only when sourceType is domain-scoped (today: PROFILE_JOB_TITLE) —
+  // ignored for every other sourceType. See
+  // lib/services/microsoft-mapping-service.ts's isDomainScopedMicrosoftMappingSourceType.
+  domain: z.string().trim().min(1).optional(),
 });
 
 export const updateMicrosoftMappingSchema = z.object({
@@ -435,6 +440,7 @@ export const updateMicrosoftMappingSchema = z.object({
   role: z.nativeEnum(Role).optional(),
   departmentRole: z.nativeEnum(DepartmentRole).optional(),
   isActive: z.boolean().optional(),
+  domain: z.string().trim().min(1).optional(),
 });
 
 export const createPrioritySchema = z.object({

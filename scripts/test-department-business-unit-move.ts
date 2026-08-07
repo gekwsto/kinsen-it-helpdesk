@@ -130,8 +130,14 @@ async function main() {
     const subDept = await prisma.subDepartment.create({ data: { name: `BU Move SubDept ${RUN_ID}`, departmentId: dept.id } });
     subDepartmentIds.push(subDept.id);
 
+    // FIND-006 (docs/roadmap-handoff-register.md): canonical identity is
+    // (sourceType, domain, normalizedMicrosoftValue) — domain/normalizedMicrosoftValue
+    // must be set explicitly on a raw create (bypassing the createMapping()
+    // service, which computes them automatically), or this would collide
+    // with any other row sharing the empty-string schema default for both.
+    const mappingValue = `bu-move-mapping-${RUN_ID}`;
     const mapping = await prisma.microsoftDepartmentMapping.create({
-      data: { sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT, microsoftValue: `bu-move-mapping-${RUN_ID}`, departmentId: dept.id, departmentRole: DepartmentRole.AGENT_ASSIGNEE },
+      data: { sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT, microsoftValue: mappingValue, domain: "", normalizedMicrosoftValue: mappingValue, departmentId: dept.id, departmentRole: DepartmentRole.AGENT_ASSIGNEE },
     });
     mappingIds.push(mapping.id);
 

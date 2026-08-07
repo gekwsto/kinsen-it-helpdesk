@@ -347,9 +347,11 @@ engine**, and found one real bug in the discovery catalog itself:
 - **Closure status:** **CLOSED, WITH QUALIFICATION.** The discovered-value
   catalog (`MicrosoftDirectoryJobTitleValue`) is genuinely domain-scoped and
   multi-domain-ready with zero further schema change — proven, not assumed.
-  The permission-mapping engine (`MicrosoftDepartmentMapping`) is **not**
-  domain-scoped — that gap is real, was not silently claimed closed, and is
-  tracked as its own OPEN finding (FIND-006). `ALLOWED_EMAIL_DOMAIN` still
+  The permission-mapping engine (`MicrosoftDepartmentMapping`) was **not**
+  domain-scoped at the time this entry was written — that gap was real, not
+  silently claimed closed, and was tracked as its own finding (FIND-006,
+  below — since CLOSED, in this same session, immediately after this entry).
+  `ALLOWED_EMAIL_DOMAIN` still
   enables only `kinsen.gr`; no other domain was activated. **Not verified
   against a real Microsoft tenant** — this environment's Graph credentials
   remain dummy values (see `docs/microsoft-production-readiness-audit.md`);
@@ -392,19 +394,106 @@ engine**, and found one real bug in the discovery catalog itself:
   functionality (a schema change to the model that drives
   `DepartmentMembership` creation and `User.role`, plus resolution-logic and
   admin-UI changes), which this audit turn was explicitly scoped to avoid.
-- **Acceptance test:** not yet written — closing this would need a `domain`
-  column on `MicrosoftDepartmentMapping` (nullable/optional, defaulting to
-  "any domain" for backward compatibility with today's `kinsen.gr`-only
-  mappings — so existing mappings keep resolving identically with zero
-  admin action), a compound uniqueness that includes it, `MicrosoftIdentityClaims`
-  extended with a derived domain signal, and
-  `resolveDepartmentMemberships`/`resolvePrimaryMicrosoftMapping` updated to
-  filter/prefer by domain — each of which needs its own regression coverage
-  (existing single-domain mappings unaffected; two same-string mappings on
-  different domains both resolve correctly and independently; a mapping
-  with no domain set still matches any domain, for compatibility).
+### Implementation (this session, immediately following) — domain-scoped Job Title permission mapping
+
+- **New canonical identity:** `(sourceType, domain, normalizedMicrosoftValue)`
+  — replaces `(sourceType, microsoftValue)`. Only `PROFILE_JOB_TITLE` is
+  REALLY domain-scoped (`domain` required, validated against
+  `organization-directory-eligibility-service.ts`'s single enabled domain
+  today); `PROFILE_DEPARTMENT`/`ENTRA_GROUP`/`ENTRA_APP_ROLE` deliberately
+  stay global (`domain: ""`, the sentinel — never SQL `NULL`, so the compound
+  unique index still fully protects them from duplicates; see
+  `MicrosoftDepartmentMapping`'s own schema comment for the full
+  per-sourceType reasoning — no source type was changed mechanically just
+  because Job Title needed it).
+- **Schema/migration:** additive migration
+  `prisma/migrations/20260807170000_mapping_domain_scoped_identity/` adds
+  `domain`/`normalizedMicrosoftValue`, backfills every pre-existing row
+  (`PROFILE_JOB_TITLE`: `domain='kinsen.gr'` — zero such rows existed at
+  migration time, verified by direct query, so this is written correctly
+  for any OTHER deployment's real data too, not skipped; every other
+  sourceType: `domain=''`, `normalizedMicrosoftValue` = an exact copy of
+  `microsoftValue`, preserving today's exact-match semantics byte-for-byte),
+  drops the old 2-column unique index, adds the new 3-column one. Verified:
+  all 4 pre-existing seed mappings (`prisma/seed.ts`) kept their exact `id`s
+  and `role`/`departmentRole` config across the migration (direct DB check
+  + `scripts/test-microsoft-mapping-domain-scope.ts`'s own assertion).
+- **Resolution (full sync + first login, ONE shared engine):** `resolveDepartmentMemberships`/
+  `resolvePrimaryMicrosoftMapping` (`microsoft-mapping-service.ts`) now take
+  an explicit `domain: string | null` parameter — the caller's own
+  already-computed eligible domain (`extractEmailDomain(eligibility.matchedEmail)`,
+  a new shared helper in `organization-directory-eligibility-service.ts`,
+  reused by both `microsoft-department-sync-service.ts`'s login path and
+  `organization-directory-sync-service.ts`'s full-sync path — never
+  re-derived independently, never guessed from `companyName`). A `null`
+  domain (not eligible) means a `PROFILE_JOB_TITLE` candidate is never even
+  built — "ineligible" and "no matching mapping" behave identically, never a
+  silent fallback to either domain.
+- **Admin CRUD:** `createMapping`/`updateMapping` compute
+  `domain`/`normalizedMicrosoftValue` server-side (never trust a client
+  value) — a `PROFILE_JOB_TITLE` mapping with no domain is rejected
+  (`DOMAIN_REQUIRED_FOR_SOURCE_TYPE`); one for a domain outside the
+  allowed-domain set is rejected (`DOMAIN_NOT_ALLOWED` — today, anything
+  other than `kinsen.gr`); editing an existing mapping without touching
+  `sourceType`/`microsoftValue`/`domain` leaves its domain completely
+  untouched. Admin UI (`microsoft-mapping-management.tsx`): new Domain
+  column in the mapping list; the discovered-Job-Title panel's "Map"
+  quick-action and the Source Type dropdown both auto-fill the domain — the
+  admin never types one; no domain-selector/multi-domain UI was added (out
+  of scope, not requested).
+- **Discovery Configured/Not-Configured join is domain-aware:**
+  `listJobTitleDirectoryForAdmin` now filters candidate mappings by
+  `domain` too, not just `sourceType` — a `kinsen.at` mapping (once/if that
+  domain is ever enabled) can never make a `kinsen.gr` discovered title
+  show as Configured, or vice versa.
+- **A real bug found and fixed while writing tests for this:** several
+  pre-existing tests (`test-microsoft-first-login-sync.ts`,
+  `test-department-business-unit-move.ts`) create `MicrosoftDepartmentMapping`
+  rows via raw `prisma.microsoftDepartmentMapping.create()`, bypassing
+  `createMapping()`'s new identity computation — left unfixed, two such raw
+  `PROFILE_DEPARTMENT` creates in the same file would both default to
+  `domain=""`/`normalizedMicrosoftValue=""` and collide on the new unique
+  index (a real, 100%-deterministic crash, not a flake — confirmed by
+  reproducing it directly). Fixed by setting `domain`/`normalizedMicrosoftValue`
+  explicitly at every such call site (test-only changes, zero application
+  code involved).
+- **MANUAL/ADMIN protection, job-title-change semantics, idempotency:** all
+  proven unaffected by domain-scoping —
+  `scripts/test-microsoft-mapping-domain-scope.ts` items 15-22.
+- **Reproduction/evidence:** `scripts/test-microsoft-mapping-domain-scope.ts`
+  (34/34 — dedup within a domain, case/whitespace normalization, cross-domain
+  coexistence with zero leakage in both directions, `domain=null` matches
+  nothing, discovery join domain-awareness, edit-preserves-domain, admin CRUD
+  domain validation, `PROFILE_DEPARTMENT` no-regression, MANUAL/ADMIN
+  protection, job-title-change across two configured mappings and into an
+  unconfigured one, idempotent re-sync), full regression suite 108/108
+  (twice consecutively, zero known flakes),
+  `scripts/audit-job-title-directory-invariants.ts` extended with 5 new
+  `MicrosoftDepartmentMapping` domain invariants (11/11 total),
+  `scripts/audit-user-department-membership-invariants.ts` (4/4, unaffected),
+  both `scripts/browser-verify-microsoft-job-title-directory.ts` (18/18,
+  including a new Domain-auto-fill and Domain-column assertion) and
+  `scripts/browser-verify-microsoft-mapping-admin.ts` (11/11) against a real
+  running admin UI.
 - **Source artifact:** `prisma/schema.prisma` (`MicrosoftDepartmentMapping`),
-  `lib/services/microsoft-mapping-service.ts`.
-- **Closure status:** **OPEN** — new finding from this session's FIND-005
-  follow-up audit. `kinsen.gr`-only behavior today has zero regression from
-  this gap; it only matters once a second domain is actually enabled.
+  `prisma/migrations/20260807170000_mapping_domain_scoped_identity/`,
+  `lib/services/microsoft-mapping-service.ts`,
+  `lib/services/organization-directory-eligibility-service.ts`
+  (`extractEmailDomain`), `lib/services/microsoft-department-sync-service.ts`,
+  `lib/services/organization-directory-sync-service.ts`,
+  `lib/services/microsoft-job-title-directory-service.ts`,
+  `components/admin/microsoft-mapping-management.tsx`.
+- **Closure status:** **CLOSED.** All 7 closure criteria met: (1) the same
+  Job Title can have an independent mapping per domain — proven; (2)
+  resolution is domain-aware in both full sync and first login via one
+  shared engine — proven; (3) discovery Configured status is domain-aware —
+  proven; (4) full sync + first login use the identical resolver — proven,
+  same function calls, same domain-derivation helper; (5) existing
+  `kinsen.gr` mappings (ids, config) are preserved — proven; (6) MANUAL/ADMIN
+  ownership protection is unaffected — proven; (7) full regression suite is
+  green, twice, with zero known flakes — proven. `ALLOWED_EMAIL_DOMAIN`
+  still enables only `kinsen.gr`; no other domain was activated for real
+  organization sync. **Not verified against a real Microsoft tenant** — same
+  disclosure as FIND-003/FIND-005: this environment's Graph credentials are
+  dummy values; every Graph interaction in the tests above is a mocked
+  `global.fetch`.

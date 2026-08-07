@@ -37,7 +37,7 @@ import {
   resolveOrganizationPlacement,
   type OrganizationResolutionCache,
 } from "@/lib/services/organization-company-department-resolver";
-import { getOrganizationDirectoryEligibility } from "@/lib/services/organization-directory-eligibility-service";
+import { getOrganizationDirectoryEligibility, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 const GRAPH_USERS_SELECT = [
@@ -176,7 +176,7 @@ export type DirectoryUserValidationFailureReason =
   | "missing_email_and_upn";
 
 export type DirectoryUserValidationResult =
-  | { valid: true; user: GraphDirectoryUser; email: string }
+  | { valid: true; user: GraphDirectoryUser; email: string; domain: string }
   | { valid: false; reason: DirectoryUserValidationFailureReason; userId?: string };
 
 /**
@@ -213,7 +213,16 @@ export function validateDirectoryUser(raw: GraphDirectoryUser): DirectoryUserVal
 
   const email = raw.mail?.trim() || raw.userPrincipalName?.trim() || "";
   if (!email) return { valid: false, reason: "missing_email_and_upn", userId: raw.id };
-  return { valid: true, user: raw, email };
+  // FIND-006: derived from `eligibility.matchedEmail` specifically — NOT
+  // from `email` above, which prefers `mail` even when `mail` itself didn't
+  // match the allowed domain (eligibility can legitimately have matched via
+  // `userPrincipalName` instead) — matchedEmail is the one value guaranteed
+  // to actually end with an allowed domain. Threaded through to the
+  // domain-scoped MicrosoftDepartmentMapping resolution below (this file's
+  // membership-resolution loop) and, later, organization-directory-eligibility-service.ts's
+  // extractEmailDomain never re-derives it a second, possibly-different way.
+  const domain = extractEmailDomain(eligibility.matchedEmail) ?? "";
+  return { valid: true, user: raw, email, domain };
 }
 
 export interface DirectoryBatchSyncCounts {
@@ -221,8 +230,8 @@ export interface DirectoryBatchSyncCounts {
   created: number;
   skipped: number;
   errors: number;
-  /** dbUserId + the raw Graph fields needed for department-membership resolution below — captured here (not re-queried afterward) since User has no persisted scalar column for Entra's raw `department` string (only the resolved Department relation). resolvedDepartmentId is the primary-organizational placement (organization-company-department-resolver.ts's result) used for the canonical setPrimaryDepartmentMembership call. */
-  syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; name: string | null; department: string | null; jobTitle: string | null; resolvedDepartmentId: string | null }>;
+  /** dbUserId + the raw Graph fields needed for department-membership resolution below — captured here (not re-queried afterward) since User has no persisted scalar column for Entra's raw `department` string (only the resolved Department relation). resolvedDepartmentId is the primary-organizational placement (organization-company-department-resolver.ts's result) used for the canonical setPrimaryDepartmentMembership call. `domain` (FIND-006) is this user's own already-validated eligible domain (validateDirectoryUser's result) — passed to resolveDepartmentMemberships/resolvePrimaryMicrosoftMapping below so a domain-scoped PROFILE_JOB_TITLE mapping resolves under the SAME domain eligibility already confirmed for this exact user, never a global assumption. */
+  syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; domain: string; name: string | null; department: string | null; jobTitle: string | null; resolvedDepartmentId: string | null }>;
 }
 
 export type DirectoryUserSyncAction = "created" | "updated" | "linked" | "skipped";
@@ -401,12 +410,12 @@ async function upsertOneDirectoryUser(
  * shared transaction.
  */
 async function upsertDirectoryUserBatch(
-  validated: Array<{ user: GraphDirectoryUser; email: string }>,
+  validated: Array<{ user: GraphDirectoryUser; email: string; domain: string }>,
   placementCache: OrganizationResolutionCache
 ): Promise<DirectoryBatchSyncCounts> {
   const counts: DirectoryBatchSyncCounts = { updated: 0, created: 0, skipped: 0, errors: 0, syncedForMembership: [] };
 
-  for (const { user, email } of validated) {
+  for (const { user, email, domain } of validated) {
     const result = await upsertOneDirectoryUser(user, email, placementCache);
     if (result.action === "created") counts.created++;
     else if (result.action === "updated" || result.action === "linked") counts.updated++;
@@ -417,6 +426,7 @@ async function upsertDirectoryUserBatch(
         dbUserId: result.dbUserId,
         microsoftUserId: user.id,
         email: normalizeEmail(email),
+        domain,
         name: result.name,
         department: result.department,
         jobTitle: result.jobTitle,
@@ -489,7 +499,7 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
   let errorCount = 0;
   const syncedForMembership: DirectoryBatchSyncCounts["syncedForMembership"] = [];
 
-  const validatedUsers: Array<{ user: GraphDirectoryUser; email: string }> = [];
+  const validatedUsers: Array<{ user: GraphDirectoryUser; email: string; domain: string }> = [];
   const excludedMicrosoftUserIds = new Set<string>();
   for (const raw of fetchResult.users) {
     const result = validateDirectoryUser(raw);
@@ -500,7 +510,7 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
       if (raw.id) excludedMicrosoftUserIds.add(raw.id);
       continue;
     }
-    validatedUsers.push({ user: result.user, email: result.email });
+    validatedUsers.push({ user: result.user, email: result.email, domain: result.domain });
   }
   const usersEligible = validatedUsers.length;
 
@@ -581,7 +591,7 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
         department: synced.department,
         jobTitle: synced.jobTitle,
       };
-      const resolved = await resolveDepartmentMemberships(claims);
+      const resolved = await resolveDepartmentMemberships(claims, synced.domain);
       await syncDepartmentMemberships(synced.dbUserId, resolved);
     } catch (err) {
       errorCount++;

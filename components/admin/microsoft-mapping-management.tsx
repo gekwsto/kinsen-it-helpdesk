@@ -60,6 +60,8 @@ interface Mapping {
   id: string;
   sourceType: MicrosoftMappingSourceType;
   microsoftValue: string;
+  /** "" (global) for every non-domain-scoped sourceType; a real Entra domain (e.g. "kinsen.gr") for PROFILE_JOB_TITLE — see microsoft-mapping-service.ts's isDomainScopedMicrosoftMappingSourceType. */
+  domain: string;
   departmentId: string;
   role: Role;
   departmentRole: DepartmentRole;
@@ -138,6 +140,13 @@ export function MicrosoftMappingManagement({
   const [manualEntry, setManualEntry] = useState(false);
   const [sourceType, setSourceType] = useState<MicrosoftMappingSourceType>(MicrosoftMappingSourceType.ENTRA_GROUP);
   const [value, setValue] = useState("");
+  // FIND-006: "" for every global sourceType; a real domain only for
+  // PROFILE_JOB_TITLE. Never a free-text input today (no domain selector UI
+  // yet, per explicit scope) — always auto-set to jobTitleDiscoveryDomain
+  // when sourceType becomes PROFILE_JOB_TITLE (see the Source Type
+  // onValueChange handler and openCreateFromJobTitle below), or restored
+  // verbatim from the mapping being edited.
+  const [domain, setDomain] = useState("");
   const [departmentId, setDepartmentId] = useState(departments[0]?.id ?? "");
   const [role, setRole] = useState<Role>(Role.USER);
   const [departmentRole, setDepartmentRole] = useState<DepartmentRole>(translateGlobalRoleToDepartmentRole(Role.USER));
@@ -171,6 +180,7 @@ export function MicrosoftMappingManagement({
     setEditingMapping(null);
     setSourceType(MicrosoftMappingSourceType.ENTRA_GROUP);
     setValue("");
+    setDomain("");
     setDepartmentId(departments[0]?.id ?? "");
     setRole(Role.USER);
     setDepartmentRole(translateGlobalRoleToDepartmentRole(Role.USER));
@@ -187,6 +197,9 @@ export function MicrosoftMappingManagement({
     setEditingMapping(mapping);
     setSourceType(mapping.sourceType);
     setValue(mapping.microsoftValue);
+    // Preserved verbatim, never re-derived or reset — "edit existing
+    // mapping preserves domain" (FIND-006).
+    setDomain(mapping.domain);
     setDepartmentId(mapping.departmentId);
     setRole(mapping.role);
     setDepartmentRole(mapping.departmentRole);
@@ -274,6 +287,11 @@ export function MicrosoftMappingManagement({
     resetForm();
     setSourceType(MicrosoftMappingSourceType.PROFILE_JOB_TITLE);
     setValue(value);
+    // FIND-006: the discovered row's domain is passed automatically — the
+    // admin never re-types it (every row in this panel already shares
+    // jobTitleDiscoveryDomain, since listJobTitleDirectoryForAdmin is itself
+    // scoped to one domain at a time).
+    setDomain(jobTitleDiscoveryDomain);
     setDialogOpen(true);
   };
 
@@ -281,7 +299,18 @@ export function MicrosoftMappingManagement({
     if (!value.trim() || !departmentId) return;
     setSaving(true);
     try {
-      const payload = { sourceType, microsoftValue: value.trim(), departmentId, role, departmentRole };
+      // domain is only meaningful for PROFILE_JOB_TITLE — omitted (not sent
+      // as "") for every other source type, so the server's own
+      // isDomainScopedMicrosoftMappingSourceType logic is the single source
+      // of truth for whether a domain applies, never a client assumption.
+      const payload = {
+        sourceType,
+        microsoftValue: value.trim(),
+        departmentId,
+        role,
+        departmentRole,
+        ...(isProfileJobTitle ? { domain } : {}),
+      };
       const res = await fetch(
         editingMapping ? `/api/admin/microsoft-mappings/${editingMapping.id}` : "/api/admin/microsoft-mappings",
         {
@@ -375,6 +404,7 @@ export function MicrosoftMappingManagement({
           <TableHeader>
             <TableRow className="bg-muted/50">
               <TableHead>Source Type</TableHead>
+              <TableHead>Domain</TableHead>
               <TableHead>Microsoft Value</TableHead>
               <TableHead>Maps To</TableHead>
               <TableHead>Active</TableHead>
@@ -388,6 +418,15 @@ export function MicrosoftMappingManagement({
                   <span className="text-xs font-medium px-2 py-0.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200">
                     {MAPPING_SOURCE_TYPE_LABELS[m.sourceType]}
                   </span>
+                </TableCell>
+                <TableCell>
+                  {m.domain ? (
+                    <span className="text-xs font-medium px-2 py-0.5 rounded-full border bg-purple-50 text-purple-700 border-purple-200">
+                      {m.domain}
+                    </span>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">Global</span>
+                  )}
                 </TableCell>
                 <TableCell>
                   <code className="text-xs bg-muted px-1.5 py-0.5 rounded">{m.microsoftValue}</code>
@@ -430,7 +469,7 @@ export function MicrosoftMappingManagement({
             ))}
             {mappings.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-8">
+                <TableCell colSpan={6} className="text-center text-sm text-muted-foreground py-8">
                   No Microsoft mappings yet.
                 </TableCell>
               </TableRow>
@@ -526,7 +565,16 @@ export function MicrosoftMappingManagement({
               <Label>Source Type</Label>
               <Select
                 value={sourceType}
-                onValueChange={(v) => { setSourceType(v as MicrosoftMappingSourceType); setManualEntry(false); }}
+                onValueChange={(v) => {
+                  const next = v as MicrosoftMappingSourceType;
+                  setSourceType(next);
+                  setManualEntry(false);
+                  // FIND-006: switching TO the one domain-scoped source type
+                  // auto-fills the (today, only) enabled domain — never left
+                  // blank for the admin to guess; switching AWAY clears it,
+                  // since every other source type is global.
+                  setDomain(next === MicrosoftMappingSourceType.PROFILE_JOB_TITLE ? jobTitleDiscoveryDomain : "");
+                }}
               >
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
@@ -540,6 +588,16 @@ export function MicrosoftMappingManagement({
                 <p className="text-xs text-amber-700">
                   Directory discovery isn&apos;t implemented for this source type yet — enter the exact
                   {sourceType === MicrosoftMappingSourceType.ENTRA_GROUP ? " group name or object id" : " app role value"} manually.
+                </p>
+              )}
+              {isProfileJobTitle && domain && (
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  Domain:
+                  <span className="rounded-full border bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 border-blue-200">
+                    {domain}
+                  </span>
+                  — applied automatically, only <code className="bg-muted px-1 rounded">@{domain}</code> is enabled for
+                  organization sync today.
                 </p>
               )}
             </div>
@@ -717,7 +775,7 @@ export function MicrosoftMappingManagement({
             <Button variant="outline" className="w-full sm:w-auto" onClick={() => { setDialogOpen(false); resetForm(); }}>
               Cancel
             </Button>
-            <Button className="w-full sm:w-auto" onClick={handleSave} disabled={saving || !value.trim() || !departmentId}>
+            <Button className="w-full sm:w-auto" onClick={handleSave} disabled={saving || !value.trim() || !departmentId || (isProfileJobTitle && !domain)}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               {editingMapping ? "Save Changes" : "Create Mapping"}
             </Button>

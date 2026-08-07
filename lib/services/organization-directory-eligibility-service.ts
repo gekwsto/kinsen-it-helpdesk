@@ -97,6 +97,29 @@ export function getOrganizationDirectoryEligibility(
   return { eligible: false, reason: "no_matching_domain" };
 }
 
+/**
+ * The domain portion of an already-validated eligible email — e.g.
+ * `extractEligibleDomain(eligibility.matchedEmail)` after
+ * `getOrganizationDirectoryEligibility` returned `eligible: true`. This is
+ * the ONE place that turns "this user is eligible" into "this is the
+ * specific domain they're eligible under" — used by FIND-006's
+ * domain-scoped Job Title permission mapping (microsoft-mapping-service.ts)
+ * and by the discovery catalog's tenant scan (microsoft-directory-service.ts,
+ * for `otherDomainsObserved`) — so both features derive a domain the exact
+ * same way, never two slightly different implementations. Deliberately NOT
+ * exported as "the current domain" — always call this on a specific
+ * matched/observed email, never assume `ORGANIZATION_SYNC_ALLOWED_DOMAIN` is
+ * the only domain that will ever appear here (that constant is what's
+ * ALLOWED; this function reads what a specific email ACTUALLY is, which is
+ * how a future multi-domain deployment stays correct with zero changes to
+ * this function).
+ */
+export function extractEmailDomain(email: string): string | null {
+  const at = email.lastIndexOf("@");
+  if (at < 0 || at === email.length - 1) return null;
+  return email.slice(at + 1).trim().toLowerCase();
+}
+
 /** Convenience boolean-only wrapper for call sites that don't need the reason. */
 export function isEligibleOrganizationDirectoryUser(input: OrganizationDirectoryEligibilityInput): boolean {
   return getOrganizationDirectoryEligibility(input).eligible;

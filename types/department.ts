@@ -66,7 +66,7 @@ export interface MicrosoftIdentityClaims {
 
 export type MicrosoftMappingView = Pick<
   MicrosoftDepartmentMapping,
-  "id" | "sourceType" | "microsoftValue" | "departmentId" | "role" | "departmentRole" | "isActive"
+  "id" | "sourceType" | "microsoftValue" | "domain" | "departmentId" | "role" | "departmentRole" | "isActive"
 > & {
   department: Pick<Department, "id" | "name" | "slug">;
 };

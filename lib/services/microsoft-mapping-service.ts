@@ -5,11 +5,54 @@ import {
   isDepartmentRoleAllowedForMicrosoftMapping,
   isGlobalRoleAllowedForMicrosoftMapping,
 } from "@/lib/services/department-role-translation";
+import { normalizeJobTitleValue } from "@/lib/services/microsoft-directory-service";
+import { ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
 import type {
   MicrosoftIdentityClaims,
   MicrosoftMappingView,
   ResolvedMembership,
 } from "@/types/department";
+
+// FIND-006 (docs/roadmap-handoff-register.md): only PROFILE_JOB_TITLE is
+// REALLY domain-scoped — see MicrosoftDepartmentMapping's own schema
+// comment in prisma/schema.prisma for the full per-sourceType reasoning
+// (ENTRA_GROUP/ENTRA_APP_ROLE have no domain semantics at all; PROFILE_DEPARTMENT
+// stays global for now, no reported multi-domain need). This is the ONE
+// place that decides which source types require a real domain vs always use
+// the "" global sentinel — every other function in this file reads this,
+// never re-derives it.
+const DOMAIN_SCOPED_SOURCE_TYPES: ReadonlySet<MicrosoftMappingSourceType> = new Set([
+  MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
+]);
+
+export function isDomainScopedMicrosoftMappingSourceType(sourceType: MicrosoftMappingSourceType): boolean {
+  return DOMAIN_SCOPED_SOURCE_TYPES.has(sourceType);
+}
+
+const GLOBAL_MAPPING_DOMAIN = "";
+
+/**
+ * The one normalization function per sourceType, used identically at
+ * mapping create/update time (below) and at candidate-matching time
+ * (buildCandidates) — so a stored row and an incoming Microsoft signal are
+ * always compared the exact same way. PROFILE_JOB_TITLE reuses
+ * normalizeJobTitleValue (microsoft-directory-service.ts) — the SAME
+ * function the discovery catalog (MicrosoftDirectoryJobTitleValue) already
+ * uses, so a discovered value and a configured mapping always agree on
+ * whether they're "the same" title. Every other sourceType is an exact,
+ * untouched copy — see MicrosoftDepartmentMapping's schema comment for why.
+ */
+function normalizeMicrosoftMappingValue(sourceType: MicrosoftMappingSourceType, microsoftValue: string): string {
+  return sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE ? normalizeJobTitleValue(microsoftValue) : microsoftValue;
+}
+
+/** Domain a mapping row of this sourceType should be stored/matched under — "" (global sentinel) unless the sourceType is domain-scoped, in which case a real domain is required. */
+function resolveMappingDomain(sourceType: MicrosoftMappingSourceType, domain: string | null | undefined): string {
+  if (!isDomainScopedMicrosoftMappingSourceType(sourceType)) return GLOBAL_MAPPING_DOMAIN;
+  const trimmed = domain?.trim().toLowerCase();
+  if (!trimmed) throw new MicrosoftMappingValidationError("DOMAIN_REQUIRED_FOR_SOURCE_TYPE");
+  return trimmed;
+}
 
 // Maps a MicrosoftDepartmentMapping.sourceType to the MembershipSource used
 // on the resulting DepartmentMembership row — kept as an explicit table
@@ -37,42 +80,75 @@ const SOURCE_TYPE_PRIORITY: Record<MicrosoftMappingSourceType, number> = {
   [MicrosoftMappingSourceType.PROFILE_DEPARTMENT]: 1,
 };
 
-function buildCandidates(
-  claims: MicrosoftIdentityClaims
-): { sourceType: MicrosoftMappingSourceType; microsoftValue: string }[] {
-  const candidates: { sourceType: MicrosoftMappingSourceType; microsoftValue: string }[] = [];
+interface MappingCandidate {
+  sourceType: MicrosoftMappingSourceType;
+  /** "" for a global-source-type candidate; a real domain for a domain-scoped one (see resolveMappingDomain). Never re-derived downstream — computed once, here. */
+  domain: string;
+  normalizedMicrosoftValue: string;
+}
+
+/**
+ * FIND-006: `domain` is the caller's already-resolved, ALREADY-ELIGIBLE
+ * Entra domain for this login/sync (e.g. "kinsen.gr") — see
+ * organization-directory-eligibility-service.ts's extractEmailDomain,
+ * called by both microsoft-department-sync-service.ts (login) and
+ * organization-directory-sync-service.ts (full sync) on the SAME
+ * eligibility result that already gated organizational placement. Passed
+ * explicitly (never re-derived from claims.email here) so this function
+ * never has to duplicate eligibility logic and can never silently disagree
+ * with it. `null` means "no eligible domain for this signal" (e.g. this
+ * login didn't pass organization-sync eligibility at all) — in that case NO
+ * PROFILE_JOB_TITLE candidate is built at all (a domain-scoped source type
+ * can never match without a real domain), while every domain-agnostic
+ * candidate (department/group/role) is still built exactly as before —
+ * those never depended on eligibility to begin with.
+ */
+function buildCandidates(claims: MicrosoftIdentityClaims, domain: string | null): MappingCandidate[] {
+  const candidates: MappingCandidate[] = [];
 
   if (claims.department) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT, microsoftValue: claims.department });
+    candidates.push({
+      sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
+      domain: GLOBAL_MAPPING_DOMAIN,
+      normalizedMicrosoftValue: normalizeMicrosoftMappingValue(MicrosoftMappingSourceType.PROFILE_DEPARTMENT, claims.department),
+    });
   }
-  if (claims.jobTitle) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE, microsoftValue: claims.jobTitle });
+  if (claims.jobTitle && domain) {
+    candidates.push({
+      sourceType: MicrosoftMappingSourceType.PROFILE_JOB_TITLE,
+      domain,
+      normalizedMicrosoftValue: normalizeMicrosoftMappingValue(MicrosoftMappingSourceType.PROFILE_JOB_TITLE, claims.jobTitle),
+    });
   }
   for (const group of claims.groups ?? []) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_GROUP, microsoftValue: group });
+    candidates.push({
+      sourceType: MicrosoftMappingSourceType.ENTRA_GROUP,
+      domain: GLOBAL_MAPPING_DOMAIN,
+      normalizedMicrosoftValue: normalizeMicrosoftMappingValue(MicrosoftMappingSourceType.ENTRA_GROUP, group),
+    });
   }
   for (const role of claims.roles ?? []) {
-    candidates.push({ sourceType: MicrosoftMappingSourceType.ENTRA_APP_ROLE, microsoftValue: role });
+    candidates.push({
+      sourceType: MicrosoftMappingSourceType.ENTRA_APP_ROLE,
+      domain: GLOBAL_MAPPING_DOMAIN,
+      normalizedMicrosoftValue: normalizeMicrosoftMappingValue(MicrosoftMappingSourceType.ENTRA_APP_ROLE, role),
+    });
   }
   return candidates;
 }
 
-async function findActiveMappingsForClaims(claims: MicrosoftIdentityClaims): Promise<MicrosoftDepartmentMapping[]> {
-  const candidates = buildCandidates(claims);
+async function findActiveMappingsForClaims(claims: MicrosoftIdentityClaims, domain: string | null): Promise<MicrosoftDepartmentMapping[]> {
+  const candidates = buildCandidates(claims, domain);
   if (candidates.length === 0) return [];
 
+  // Uniform shape for every sourceType now — no per-source-type branching
+  // needed here anymore (case-insensitivity for job titles is already baked
+  // into normalizedMicrosoftValue above, computed once, not at query time).
   return prisma.microsoftDepartmentMapping.findMany({
     where: {
       isActive: true,
       department: { isActive: true },
-      // Job title matches are trimmed + case-insensitive (explicit design
-      // choice — see docs/microsoft-graph-directory-sync.md); every other
-      // source type stays exact-match, unchanged from today.
-      OR: candidates.map((c) =>
-        c.sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE
-          ? { sourceType: c.sourceType, microsoftValue: { equals: c.microsoftValue, mode: "insensitive" as const } }
-          : { sourceType: c.sourceType, microsoftValue: c.microsoftValue }
-      ),
+      OR: candidates.map((c) => ({ sourceType: c.sourceType, domain: c.domain, normalizedMicrosoftValue: c.normalizedMicrosoftValue })),
     },
   });
 }
@@ -91,11 +167,18 @@ async function findActiveMappingsForClaims(claims: MicrosoftIdentityClaims): Pro
  * /admin/roles) and the DepartmentRole (`departmentRole`) independently — an
  * admin picks both explicitly in the mapping form, so this reads
  * `departmentRole` directly rather than deriving it from `role`.
+ *
+ * `domain` (FIND-006): the caller's already-resolved eligible Entra domain
+ * for this signal (or `null`) — see buildCandidates' own doc comment. Both
+ * call sites (full sync, first login) pass the exact same
+ * extractEmailDomain(eligibility.matchedEmail) value used for organizational
+ * placement, so this can never disagree with eligibility.
  */
 export async function resolveDepartmentMemberships(
-  claims: MicrosoftIdentityClaims
+  claims: MicrosoftIdentityClaims,
+  domain: string | null
 ): Promise<ResolvedMembership[]> {
-  const matches = await findActiveMappingsForClaims(claims);
+  const matches = await findActiveMappingsForClaims(claims, domain);
 
   // Same department reachable via multiple signals -> keep the highest-priority one.
   const bestByDepartment = new Map<string, MicrosoftDepartmentMapping>();
@@ -120,11 +203,15 @@ export async function resolveDepartmentMemberships(
  * decision, not one per department. Returns null if no active mapping
  * matched anything this login. Ties (same priority) break deterministically
  * on microsoftValue so behavior never depends on DB row ordering.
+ *
+ * `domain` — same FIND-006 parameter as resolveDepartmentMemberships above;
+ * see its doc comment.
  */
 export async function resolvePrimaryMicrosoftMapping(
-  claims: MicrosoftIdentityClaims
+  claims: MicrosoftIdentityClaims,
+  domain: string | null
 ): Promise<MicrosoftDepartmentMapping | null> {
-  const matches = await findActiveMappingsForClaims(claims);
+  const matches = await findActiveMappingsForClaims(claims, domain);
   if (matches.length === 0) return null;
 
   return matches.reduce((best, current) => {
@@ -164,6 +251,7 @@ function toView(
     id: m.id,
     sourceType: m.sourceType,
     microsoftValue: m.microsoftValue,
+    domain: m.domain,
     departmentId: m.departmentId,
     role: m.role,
     departmentRole: m.departmentRole,
@@ -183,7 +271,22 @@ export async function listMappings(): Promise<MicrosoftMappingView[]> {
 // Thrown by createMapping/updateMapping so API routes can map each distinct
 // failure to its own JSON error code instead of a single generic 400/404.
 export class MicrosoftMappingValidationError extends Error {
-  constructor(public code: "ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING" | "DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING" | "DEPARTMENT_NOT_FOUND") {
+  constructor(
+    public code:
+      | "ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING"
+      | "DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING"
+      | "DEPARTMENT_NOT_FOUND"
+      // FIND-006: a domain-scoped sourceType (today, only PROFILE_JOB_TITLE)
+      // was given no domain at all.
+      | "DOMAIN_REQUIRED_FOR_SOURCE_TYPE"
+      // FIND-006: a domain-scoped sourceType was given a domain that isn't
+      // in organization-directory-eligibility-service.ts's allowed-domain
+      // set — today that set is exactly one domain (ORGANIZATION_SYNC_ALLOWED_DOMAIN),
+      // so this rejects any OTHER domain string, keeping "only kinsen.gr is
+      // enabled" enforced at the mapping layer too, not just at sync/login
+      // eligibility.
+      | "DOMAIN_NOT_ALLOWED"
+  ) {
     super(code);
     this.name = "MicrosoftMappingValidationError";
   }
@@ -194,6 +297,31 @@ async function assertDepartmentExists(departmentId: string): Promise<void> {
   if (!department) throw new MicrosoftMappingValidationError("DEPARTMENT_NOT_FOUND");
 }
 
+/**
+ * FIND-006: computes the actual `domain`/`normalizedMicrosoftValue` to
+ * persist for a mapping row, and validates a domain-scoped sourceType's
+ * domain against the allowed-domain set. The ONLY place createMapping/
+ * updateMapping derive these two columns — never trust a client-supplied
+ * normalizedMicrosoftValue (there isn't one in the public input shape at
+ * all) and never silently accept a domain for a global sourceType (ignored,
+ * not merely unused, so a stray client-sent domain on e.g. an ENTRA_GROUP
+ * mapping can never accidentally scope it).
+ */
+function resolveMappingIdentity(
+  sourceType: MicrosoftMappingSourceType,
+  microsoftValue: string,
+  domainInput: string | null | undefined
+): { domain: string; normalizedMicrosoftValue: string } {
+  if (!isDomainScopedMicrosoftMappingSourceType(sourceType)) {
+    return { domain: GLOBAL_MAPPING_DOMAIN, normalizedMicrosoftValue: normalizeMicrosoftMappingValue(sourceType, microsoftValue) };
+  }
+  const domain = resolveMappingDomain(sourceType, domainInput);
+  if (domain !== ORGANIZATION_SYNC_ALLOWED_DOMAIN) {
+    throw new MicrosoftMappingValidationError("DOMAIN_NOT_ALLOWED");
+  }
+  return { domain, normalizedMicrosoftValue: normalizeMicrosoftMappingValue(sourceType, microsoftValue) };
+}
+
 export interface CreateMappingInput {
   sourceType: MicrosoftMappingSourceType;
   microsoftValue: string;
@@ -202,6 +330,8 @@ export interface CreateMappingInput {
   role?: Role;
   /** DepartmentRole granted on the resulting DepartmentMembership — independent of `role` above. */
   departmentRole: DepartmentRole;
+  /** Required (and validated against the allowed-domain set) when sourceType is domain-scoped (today: PROFILE_JOB_TITLE only) — ignored entirely for every other sourceType. See isDomainScopedMicrosoftMappingSourceType. */
+  domain?: string;
 }
 
 export async function createMapping(input: CreateMappingInput): Promise<MicrosoftDepartmentMapping> {
@@ -213,10 +343,13 @@ export async function createMapping(input: CreateMappingInput): Promise<Microsof
     throw new MicrosoftMappingValidationError("DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
   }
   await assertDepartmentExists(input.departmentId);
+  const { domain, normalizedMicrosoftValue } = resolveMappingIdentity(input.sourceType, input.microsoftValue, input.domain);
   return prisma.microsoftDepartmentMapping.create({
     data: {
       sourceType: input.sourceType,
       microsoftValue: input.microsoftValue,
+      domain,
+      normalizedMicrosoftValue,
       departmentId: input.departmentId,
       role,
       departmentRole: input.departmentRole,
@@ -233,6 +366,8 @@ export interface UpdateMappingInput {
   /** DepartmentRole granted on the resulting DepartmentMembership — independent of `role` above. */
   departmentRole?: DepartmentRole;
   isActive?: boolean;
+  /** Only meaningful (and only re-validated) when sourceType is part of THIS patch and is domain-scoped, or when explicitly provided — see updateMapping's own comment. Omitting it never clears an existing mapping's domain. */
+  domain?: string;
 }
 
 export async function updateMapping(id: string, patch: UpdateMappingInput): Promise<MicrosoftDepartmentMapping> {
@@ -245,7 +380,40 @@ export async function updateMapping(id: string, patch: UpdateMappingInput): Prom
   if (patch.departmentId !== undefined) {
     await assertDepartmentExists(patch.departmentId);
   }
-  return prisma.microsoftDepartmentMapping.update({ where: { id }, data: patch });
+
+  const data: Record<string, unknown> = { ...patch };
+
+  // FIND-006: `domain`/`normalizedMicrosoftValue` are only ever recomputed
+  // when something that could change the mapping's IDENTITY is actually
+  // part of this patch (sourceType, microsoftValue, or an explicit new
+  // domain) — editing just role/departmentRole/isActive on an existing
+  // mapping leaves its domain/normalizedMicrosoftValue completely untouched
+  // (requirement: "edit existing mapping preserves domain"). When identity
+  // DOES need recomputing, the row's CURRENT sourceType/microsoftValue/domain
+  // fill in whatever this patch didn't explicitly change.
+  if (patch.sourceType !== undefined || patch.microsoftValue !== undefined || patch.domain !== undefined) {
+    const existing = await prisma.microsoftDepartmentMapping.findUnique({
+      where: { id },
+      select: { sourceType: true, microsoftValue: true, domain: true },
+    });
+    if (!existing) {
+      // Let the update below hit its own P2025 — never invent a row here.
+    } else {
+      const sourceType = patch.sourceType ?? existing.sourceType;
+      const microsoftValue = patch.microsoftValue ?? existing.microsoftValue;
+      const domainInput = patch.domain !== undefined ? patch.domain : existing.domain;
+      const identity = resolveMappingIdentity(sourceType, microsoftValue, domainInput);
+      data.domain = identity.domain;
+      data.normalizedMicrosoftValue = identity.normalizedMicrosoftValue;
+    }
+  } else {
+    // Neither identity input changed — never send a stray `domain` field
+    // through to Prisma even if the caller passed one (shouldn't happen
+    // given the branch above, but keeps `data` exactly patch-shaped).
+    delete data.domain;
+  }
+
+  return prisma.microsoftDepartmentMapping.update({ where: { id }, data });
 }
 
 export async function deleteMapping(id: string): Promise<void> {

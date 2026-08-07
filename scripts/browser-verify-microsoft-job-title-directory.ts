@@ -119,6 +119,10 @@ async function main() {
 
     const valueInput = page.locator('input, [role="combobox"]').filter({ hasText: "" });
     check("Value field is prefilled with the discovered title", (await page.locator(`text=${TITLE}`).count()) > 0);
+    // FIND-006: opening "Map" from a discovered Job Title auto-fills the
+    // domain — the admin never types it (no domain input field exists at
+    // all yet, per explicit scope: no domain-selector UI enabled today).
+    check("Domain is auto-filled (kinsen.gr) — admin never types it", (await page.locator("text=/Domain:\\s*kinsen\\.gr/").count()) > 0);
 
     const dept = await prisma.department.findFirst({ where: { isActive: true }, select: { id: true, name: true } });
     check("A real active department exists to target", dept !== null);
@@ -151,6 +155,10 @@ async function main() {
     const rowAfter = page.locator("tr", { hasText: TITLE });
     check("Row now shows 'Configured' after reload", (await rowAfter.locator("text=/Configured/").count()) > 0);
     check("'Map' quick action no longer shown for a configured title", (await rowAfter.locator('button:has-text("Map")').count()) === 0);
+
+    console.log("\nVerifying the new mapping's row in the main mapping list shows its Domain...\n");
+    const anyMappingRowWithTitle = page.locator("tr", { hasText: TITLE });
+    check("Mapping list shows a kinsen.gr Domain badge for the new PROFILE_JOB_TITLE mapping", (await anyMappingRowWithTitle.locator("text=kinsen.gr").count()) > 0);
 
     console.log("\nClicking 'Sync Microsoft Job Titles' — expecting the documented graceful-failure error against this environment's dummy Azure credentials...\n");
     const syncButton = page.locator('button:has-text("Sync Microsoft Job Titles")');

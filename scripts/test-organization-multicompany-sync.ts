@@ -234,14 +234,23 @@ async function main() {
     check("20. Company-level user counts are correct (sum of everything placed under it)", typeof kinsenNode?.totalUserCount === "number" && kinsenNode.totalUserCount >= 4);
 
     // ── 16. Second run of the SAME snapshot: zero duplicates, predictable ──
-    const companyCountBefore = await prisma.company.count();
-    const departmentCountBefore = await prisma.department.count();
-    const userCountBefore = await prisma.user.count();
+    // Scoped to THIS run's own RUN_ID-tagged fixtures, never a global,
+    // unscoped table count — a global count is vulnerable to any unrelated
+    // concurrent activity (this exact fragility caused a real, confirmed
+    // one-off flake in the full regression suite, see docs/roadmap-handoff-register.md
+    // FIND-006's follow-up section: two consecutive standalone runs of this
+    // file passed cleanly, isolating the cause to the unscoped count()
+    // pattern, not application behavior). Departments are scoped via their
+    // parent company's RUN_ID-tagged name (department names themselves,
+    // like "IT"/"Sales", are deliberately generic, not RUN_ID-tagged).
+    const companyCountBefore = await prisma.company.count({ where: { name: { contains: RUN_ID.toString() } } });
+    const departmentCountBefore = await prisma.department.count({ where: { company: { name: { contains: RUN_ID.toString() } } } });
+    const userCountBefore = await prisma.user.count({ where: { email: { contains: RUN_ID.toString() } } });
     const outcome2 = await runOrganizationDirectorySync();
     check("16. Second (repeated) run of the identical snapshot also succeeds", outcome2.ok === true);
-    check("    No duplicate companies were created on the repeat run", (await prisma.company.count()) === companyCountBefore);
-    check("    No duplicate departments were created on the repeat run", (await prisma.department.count()) === departmentCountBefore);
-    check("    No duplicate users were created on the repeat run", (await prisma.user.count()) === userCountBefore);
+    check("    No duplicate companies were created on the repeat run", (await prisma.company.count({ where: { name: { contains: RUN_ID.toString() } } })) === companyCountBefore);
+    check("    No duplicate departments were created on the repeat run", (await prisma.department.count({ where: { company: { name: { contains: RUN_ID.toString() } } } })) === departmentCountBefore);
+    check("    No duplicate users were created on the repeat run", (await prisma.user.count({ where: { email: { contains: RUN_ID.toString() } } })) === userCountBefore);
     const stillOneKinsenIt = await prisma.department.count({ where: { companyId: kinsenCompany?.id, normalizedName: normalizeDepartmentName("IT") } });
     check("    Still exactly one Kinsen IT department after the repeat run", stillOneKinsenIt === 1);
 

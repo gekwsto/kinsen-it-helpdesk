@@ -26,7 +26,6 @@
 import { prisma } from "@/lib/prisma";
 import { DepartmentRole, Role } from "@prisma/client";
 import {
-  normalizeJobTitleValue,
   syncMicrosoftDirectoryValues,
   type DirectoryFetchFailureReason,
 } from "@/lib/services/microsoft-directory-service";
@@ -99,17 +98,22 @@ export async function listJobTitleDirectoryForAdmin(): Promise<{ domain: string;
       where: { domain },
       orderBy: { value: "asc" },
     }),
+    // FIND-006: filtered by THIS domain too, not just sourceType — a
+    // kinsen.at mapping (once/if that domain is ever enabled) must never
+    // make a kinsen.gr discovered title show as "Configured", and vice
+    // versa. Matches this table's own `where: {domain}` above exactly.
     prisma.microsoftDepartmentMapping.findMany({
-      where: { sourceType: "PROFILE_JOB_TITLE" },
+      where: { sourceType: "PROFILE_JOB_TITLE", domain },
       include: { department: { select: { id: true, name: true } } },
     }),
   ]);
 
-  // Same case/whitespace-insensitive comparison as
-  // microsoft-mapping-service.ts's findActiveMappingsForClaims — an admin
-  // must see the exact same "is this configured" answer that login/sync
-  // would actually apply, never a stricter or looser one computed here.
-  const mappingByNormalized = new Map(mappings.map((m) => [normalizeJobTitleValue(m.microsoftValue), m]));
+  // normalizedMicrosoftValue is precomputed with the exact same
+  // normalizeJobTitleValue function the discovery catalog uses (see
+  // MicrosoftDepartmentMapping's schema comment) — an admin must see the
+  // exact same "is this configured" answer that login/sync would actually
+  // apply, never a stricter or looser one computed here.
+  const mappingByNormalized = new Map(mappings.map((m) => [m.normalizedMicrosoftValue, m]));
 
   const rows: JobTitleDirectoryRow[] = values.map((v) => {
     const mapping = mappingByNormalized.get(v.normalizedValue) ?? null;

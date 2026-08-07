@@ -313,10 +313,77 @@ model DepartmentMembership {
 // Pure data table: maps a Microsoft/Entra signal (profile department string,
 // group name/id, or app role value) to an internal department + role, so the
 // login-sync logic never hardcodes a department name in code.
+// DOMAIN SCOPE (FIND-006, docs/roadmap-handoff-register.md): canonical
+// mapping identity is `(sourceType, domain, normalizedMicrosoftValue)` —
+// NOT `(sourceType, microsoftValue)` alone (the pre-FIND-006 constraint,
+// dropped by migration 20260807170000_mapping_domain_scoped_identity).
+//
+// Only PROFILE_JOB_TITLE is REALLY domain-aware today: `domain` holds the
+// Entra domain (e.g. "kinsen.gr") the mapping applies to, required and
+// validated against organization-directory-eligibility-service.ts's
+// allowed-domain set whenever this sourceType is created/updated
+// (microsoft-mapping-service.ts). This lets the SAME raw job title (e.g.
+// "Director") have independent mappings per domain once a second domain is
+// ever enabled — `kinsen.gr` is the only one enabled today
+// (ALLOWED_EMAIL_DOMAIN) — with zero further schema change needed then.
+//
+// Every OTHER sourceType (PROFILE_DEPARTMENT, ENTRA_GROUP, ENTRA_APP_ROLE)
+// deliberately stays GLOBAL — `domain` is always the empty-string sentinel
+// `""` for these, never a real domain, and neither the admin UI nor
+// createMapping/updateMapping ever let one be set. Reasoning per source
+// type (see docs/roadmap-handoff-register.md FIND-006 for the full
+// write-up):
+//   - ENTRA_GROUP / ENTRA_APP_ROLE: a group id or app role value is a
+//     tenant-wide Entra construct, never derived from a user's own
+//     domain/email at all (buildCandidates in microsoft-mapping-service.ts
+//     never looks at email for these) — "domain-scoping" them would be
+//     meaningless, not just unnecessary.
+//   - PROFILE_DEPARTMENT: also a per-user profile string like job title,
+//     but organizational PLACEMENT (which department/company a user
+//     belongs to) is already handled by an entirely separate, actually
+//     domain-aware mechanism — organization-company-department-resolver.ts
+//     — for the PRIMARY department. This mapping type exists only for
+//     SECONDARY membership/global-role granting, has no reported
+//     multi-domain requirement, and changing its matching semantics now
+//     was explicitly out of scope. `domain`/`normalizedMicrosoftValue` still
+//     exist on every row for a uniform storage/query shape — enabling it
+//     later needs no further schema change, only a code change mirroring
+//     what PROFILE_JOB_TITLE already does.
+//
+// `""` (empty string), not SQL NULL, is deliberately the "no domain / global"
+// sentinel — same convention as MicrosoftDirectoryJobTitleValue.domain
+// (see that model's comment). NULL would make the compound unique index
+// silently stop preventing duplicate global mappings (Postgres treats every
+// NULL as distinct from every other NULL in a unique index), which would be
+// a real regression for ENTRA_GROUP/ENTRA_APP_ROLE/PROFILE_DEPARTMENT's
+// existing "one mapping per raw value" guarantee.
+//
+// `normalizedMicrosoftValue` mirrors the discovery catalog's approach
+// (MicrosoftDirectoryJobTitleValue.normalizedValue) so matching is
+// deterministic and identical across BOTH tables — never two different
+// normalization rules for the same feature:
+//   - PROFILE_JOB_TITLE: normalizeJobTitleValue(microsoftValue) — trim +
+//     collapse-whitespace + lowercase (microsoft-directory-service.ts),
+//     the exact function the discovery catalog already uses. This also
+//     means creating both "Director" and "director" as two separate
+//     PROFILE_JOB_TITLE mappings for the same domain is now a real,
+//     enforced duplicate (rejected at the DB level) — previously only
+//     prevented informally by a query-time case-insensitive match, not a
+//     stored/enforced identity.
+//   - every other sourceType: an EXACT copy of `microsoftValue`, untouched
+//     — preserves today's exact-match semantics byte-for-byte; this column
+//     exists there purely so one uniform compound index/query shape covers
+//     every sourceType, not because those values are normalized in any way.
+// `microsoftValue` itself remains the raw, admin-entered display value —
+// never the lookup key on its own anymore.
 model MicrosoftDepartmentMapping {
   id             String                     @id @default(cuid())
   sourceType     MicrosoftMappingSourceType
   microsoftValue String
+  /** "" (global, every non-PROFILE_JOB_TITLE row) or a real Entra domain (PROFILE_JOB_TITLE only) — see this model's header comment. */
+  domain         String                     @default("")
+  /** Deterministic match key — see this model's header comment for the per-sourceType computation rule. */
+  normalizedMicrosoftValue String            @default("")
   department     Department                 @relation(fields: [departmentId], references: [id])
   departmentId   String
   // The GLOBAL role (matches /admin/roles / User.role) — so this dropdown
@@ -335,8 +402,9 @@ model MicrosoftDepartmentMapping {
 
   usersWithGlobalRoleFromThisMapping User[] @relation("UserGlobalRoleMapping")
 
-  @@unique([sourceType, microsoftValue])
+  @@unique([sourceType, domain, normalizedMicrosoftValue])
   @@index([departmentId])
+  @@index([domain])
 }
 
 // Local cache of distinct `department` profile values seen across the
