@@ -59,24 +59,35 @@ function restoreFetch() {
 
 async function section1_validateDirectoryUser() {
   console.log("\n=== validateDirectoryUser (pure, no mocks) ===\n");
-  check("valid Member with mail -> valid", validateDirectoryUser({ id: "u1", userType: "Member", mail: "a@x.com" }).valid === true);
+  check("valid Member with mail -> valid", validateDirectoryUser({ id: "u1", userType: "Member", mail: "a@kinsen.gr" }).valid === true);
   check("Guest userType -> guest_or_service_account", (() => {
-    const r = validateDirectoryUser({ id: "u2", userType: "Guest", mail: "a@x.com" });
+    const r = validateDirectoryUser({ id: "u2", userType: "Guest", mail: "a@kinsen.gr" });
     return !r.valid && r.reason === "guest_or_service_account";
   })());
   check("missing id -> missing_id", (() => {
-    const r = validateDirectoryUser({ id: "", userType: "Member", mail: "a@x.com" });
+    const r = validateDirectoryUser({ id: "", userType: "Member", mail: "a@kinsen.gr" });
     return !r.valid && r.reason === "missing_id";
   })());
   check("no mail but has userPrincipalName -> valid, uses UPN as email", (() => {
-    const r = validateDirectoryUser({ id: "u3", userType: "Member", mail: null, userPrincipalName: "u3@x.com" });
-    return r.valid && r.email === "u3@x.com";
+    const r = validateDirectoryUser({ id: "u3", userType: "Member", mail: null, userPrincipalName: "u3@kinsen.gr" });
+    return r.valid && r.email === "u3@kinsen.gr";
   })());
-  check("neither mail nor UPN -> missing_email_and_upn", (() => {
+  // FIND-003 (docs/roadmap-handoff-register.md): a record with neither mail
+  // nor userPrincipalName can never pass the @kinsen.gr domain eligibility
+  // check (nothing to match a domain suffix against), so it's now correctly
+  // diagnosed as "domain_not_eligible" — the domain check runs BEFORE the
+  // generic missing-email safety net, which is unreachable for this exact
+  // input shape (kept in validateDirectoryUser as defensive dead code, not
+  // removed, per this session's "don't rip out working safety nets" rule).
+  check("neither mail nor UPN -> domain_not_eligible (no domain-matching identity to check at all)", (() => {
     const r = validateDirectoryUser({ id: "u4", userType: "Member", mail: null, userPrincipalName: null });
-    return !r.valid && r.reason === "missing_email_and_upn";
+    return !r.valid && r.reason === "domain_not_eligible";
   })());
-  check("missing userType (not rejected, absence isn't evidence of guest) -> valid", validateDirectoryUser({ id: "u5", mail: "a@x.com" }).valid === true);
+  check("missing userType (not rejected, absence isn't evidence of guest) -> valid", validateDirectoryUser({ id: "u5", mail: "a@kinsen.gr" }).valid === true);
+  check("non-@kinsen.gr mail and UPN -> domain_not_eligible", (() => {
+    const r = validateDirectoryUser({ id: "u6", userType: "Member", mail: "a@other.com", userPrincipalName: "a@tenant.onmicrosoft.com" });
+    return !r.valid && r.reason === "domain_not_eligible";
+  })());
 }
 
 async function section2_retryBackoff() {
@@ -126,13 +137,13 @@ async function section3_pagination() {
   installTokenMock(async (url) => {
     if (url === page2Url) {
       page2Calls++;
-      return jsonResponse(200, { value: [{ id: `p2-${RUN_ID}`, userType: "Member", mail: `p2-${RUN_ID}@x.com` }] });
+      return jsonResponse(200, { value: [{ id: `p2-${RUN_ID}`, userType: "Member", mail: `p2-${RUN_ID}@kinsen.gr` }] });
     }
     page1Calls++;
     return jsonResponse(200, {
       value: [
-        { id: `p1a-${RUN_ID}`, userType: "Member", mail: `p1a-${RUN_ID}@x.com` },
-        { id: `p1b-${RUN_ID}`, userType: "Member", mail: `p1b-${RUN_ID}@x.com` },
+        { id: `p1a-${RUN_ID}`, userType: "Member", mail: `p1a-${RUN_ID}@kinsen.gr` },
+        { id: `p1b-${RUN_ID}`, userType: "Member", mail: `p1b-${RUN_ID}@kinsen.gr` },
       ],
       "@odata.nextLink": page2Url,
     });
@@ -165,8 +176,8 @@ async function section4_directorySyncDbWrites() {
   installTokenMock(() =>
     jsonResponse(200, {
       value: [
-        { id: validId, userType: "Member", mail: `${validId}@x.com`, displayName: "Valid User", jobTitle: "Engineer" },
-        { id: guestId, userType: "Guest", mail: `${guestId}@x.com`, displayName: "Guest User" },
+        { id: validId, userType: "Member", mail: `${validId}@kinsen.gr`, displayName: "Valid User", jobTitle: "Engineer" },
+        { id: guestId, userType: "Guest", mail: `${guestId}@kinsen.gr`, displayName: "Guest User" },
         { id: missingEmailId, userType: "Member", mail: null, userPrincipalName: null, displayName: "No Email User" },
       ],
     })
@@ -230,12 +241,12 @@ async function section4b_identityResolution() {
   const oidDupB = `idres-dupb-${RUN_ID}`;
   const oidAfterDup = `idres-afterdup-${RUN_ID}`;
 
-  const emailByOid = `${oidByOid}@x.com`;
-  const emailLinkTarget = `idres-link-target-${RUN_ID}@x.com`;
-  const emailConflict = `idres-conflict-target-${RUN_ID}@x.com`;
-  const emailNew = `${oidNew}@x.com`;
-  const emailDup = `idres-dup-shared-${RUN_ID}@x.com`; // shared by dupA and dupB on purpose — a real Entra data anomaly
-  const emailAfterDup = `${oidAfterDup}@x.com`;
+  const emailByOid = `${oidByOid}@kinsen.gr`;
+  const emailLinkTarget = `idres-link-target-${RUN_ID}@kinsen.gr`;
+  const emailConflict = `idres-conflict-target-${RUN_ID}@kinsen.gr`;
+  const emailNew = `${oidNew}@kinsen.gr`;
+  const emailDup = `idres-dup-shared-${RUN_ID}@kinsen.gr`; // shared by dupA and dupB on purpose — a real Entra data anomaly
+  const emailAfterDup = `${oidAfterDup}@kinsen.gr`;
 
   const userIds: string[] = [];
   try {
@@ -334,13 +345,13 @@ async function section5_managerSyncViaDirectReports() {
 
   const userIds: string[] = [];
   try {
-    const top = await prisma.user.create({ data: { email: `${oidTop}@x.com`, microsoftUserId: oidTop, name: "Top" } });
-    const top2 = await prisma.user.create({ data: { email: `${oidTop2}@x.com`, microsoftUserId: oidTop2, name: "Top2" } });
-    const mid = await prisma.user.create({ data: { email: `${oidMid}@x.com`, microsoftUserId: oidMid, name: "Mid" } });
-    const leaf = await prisma.user.create({ data: { email: `${oidLeaf}@x.com`, microsoftUserId: oidLeaf, name: "Leaf" } });
-    const cycleA = await prisma.user.create({ data: { email: `${oidCycleA}@x.com`, microsoftUserId: oidCycleA, name: "CycleA" } });
-    const cycleB = await prisma.user.create({ data: { email: `${oidCycleB}@x.com`, microsoftUserId: oidCycleB, name: "CycleB" } });
-    const excludedReport = await prisma.user.create({ data: { email: `${oidExcludedReport}@x.com`, microsoftUserId: oidExcludedReport, name: "ExcludedReport" } });
+    const top = await prisma.user.create({ data: { email: `${oidTop}@kinsen.gr`, microsoftUserId: oidTop, name: "Top" } });
+    const top2 = await prisma.user.create({ data: { email: `${oidTop2}@kinsen.gr`, microsoftUserId: oidTop2, name: "Top2" } });
+    const mid = await prisma.user.create({ data: { email: `${oidMid}@kinsen.gr`, microsoftUserId: oidMid, name: "Mid" } });
+    const leaf = await prisma.user.create({ data: { email: `${oidLeaf}@kinsen.gr`, microsoftUserId: oidLeaf, name: "Leaf" } });
+    const cycleA = await prisma.user.create({ data: { email: `${oidCycleA}@kinsen.gr`, microsoftUserId: oidCycleA, name: "CycleA" } });
+    const cycleB = await prisma.user.create({ data: { email: `${oidCycleB}@kinsen.gr`, microsoftUserId: oidCycleB, name: "CycleB" } });
+    const excludedReport = await prisma.user.create({ data: { email: `${oidExcludedReport}@kinsen.gr`, microsoftUserId: oidExcludedReport, name: "ExcludedReport" } });
     userIds.push(top.id, top2.id, mid.id, leaf.id, cycleA.id, cycleB.id, excludedReport.id);
 
     const candidateManagers: DirectoryRawUserRecord[] = [
@@ -445,8 +456,8 @@ async function section5b_atomicPublishOnPartialFailure() {
   const userIds: string[] = [];
 
   try {
-    const b = await prisma.user.create({ data: { email: `${oidB}@x.com`, microsoftUserId: oidB, name: "B" } });
-    const a = await prisma.user.create({ data: { email: `${oidA}@x.com`, microsoftUserId: oidA, name: "A" } });
+    const b = await prisma.user.create({ data: { email: `${oidB}@kinsen.gr`, microsoftUserId: oidB, name: "B" } });
+    const a = await prisma.user.create({ data: { email: `${oidA}@kinsen.gr`, microsoftUserId: oidA, name: "A" } });
     userIds.push(b.id, a.id);
 
     // Run 1: B -> A (B manages A). Succeeds and publishes — this becomes
@@ -472,7 +483,7 @@ async function section5b_atomicPublishOnPartialFailure() {
     // managing A) — specifically to prove that even though B's fetch
     // itself succeeds and returns DIFFERENT data, none of it is published
     // because C's fetch hard-failed elsewhere in the same run.
-    const c = await prisma.user.create({ data: { email: `${oidC}@x.com`, microsoftUserId: oidC, name: "C" } });
+    const c = await prisma.user.create({ data: { email: `${oidC}@kinsen.gr`, microsoftUserId: oidC, name: "C" } });
     userIds.push(c.id);
 
     installTokenMock((url) => {
@@ -531,8 +542,8 @@ async function section5d_missingManagerAndSelfManager() {
 
   const userIds: string[] = [];
   try {
-    const ghostReport = await prisma.user.create({ data: { email: `${oidGhostReport}@x.com`, microsoftUserId: oidGhostReport, name: "GhostReport" } });
-    const selfManager = await prisma.user.create({ data: { email: `${oidSelfManager}@x.com`, microsoftUserId: oidSelfManager, name: "SelfManager" } });
+    const ghostReport = await prisma.user.create({ data: { email: `${oidGhostReport}@kinsen.gr`, microsoftUserId: oidGhostReport, name: "GhostReport" } });
+    const selfManager = await prisma.user.create({ data: { email: `${oidSelfManager}@kinsen.gr`, microsoftUserId: oidSelfManager, name: "SelfManager" } });
     userIds.push(ghostReport.id, selfManager.id);
 
     const candidateManagers: DirectoryRawUserRecord[] = [

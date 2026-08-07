@@ -355,19 +355,57 @@ model MicrosoftDirectoryDepartmentValue {
   updatedAt   DateTime @updatedAt
 }
 
-// Same shape and purpose as MicrosoftDirectoryDepartmentValue, but for
-// distinct `jobTitle` profile values — backs the Microsoft Value dropdown
-// when a MicrosoftDepartmentMapping's sourceType is PROFILE_JOB_TITLE.
-// Deliberately no userId column: this is a distinct-value cache for
-// dropdown/mapping purposes, not a per-user snapshot.
+// Started as the same shape/purpose as MicrosoftDirectoryDepartmentValue
+// (a distinct `jobTitle` profile value cache backing the Microsoft Value
+// dropdown when a MicrosoftDepartmentMapping's sourceType is
+// PROFILE_JOB_TITLE — still true, unchanged), then extended for domain-aware
+// Job Title auto-discovery (lib/services/microsoft-job-title-directory-service.ts).
+//
+// CANONICAL IDENTITY is `(domain, normalizedValue)` — enforced by the
+// compound unique index below — NOT `value`. `value` is display/source data
+// only (the first-seen raw casing/spacing) and is deliberately NOT globally
+// unique: the exact same raw text (e.g. "IT Manager") must be able to exist
+// once per domain once multiple domains are enabled (kinsen.gr today only,
+// via ALLOWED_EMAIL_DOMAIN — see organization-directory-eligibility-service.ts).
+// A prior revision of this migration kept a leftover global `@unique` on
+// `value` (inherited by copy-paste from MicrosoftDirectoryDepartmentValue,
+// which never got this domain extension) — that was a real bug blocking
+// exactly this multi-domain scenario, closed by
+// 20260807153000_job_title_value_domain_scoped_identity, which drops that
+// index without touching any row's data/id.
+//   - `domain` + `normalizedValue` + `userCount` are owned by the
+//     domain-explicit discovery sync
+//     (microsoft-job-title-directory-service.ts's syncMicrosoftJobTitleDirectory
+//     and microsoft-directory-service.ts's Operation A/B), which both
+//     upsert/lookup exclusively by the compound (domain, normalizedValue)
+//     key — ready for a future multi-domain tenant without a further schema
+//     change, since each domain gets its own row even when the raw text
+//     collides. normalizedValue = trim + collapse-internal-whitespace +
+//     lowercase; `value` keeps the first-seen human-readable casing for
+//     display only, never used as a lookup/identity key anywhere in the
+//     codebase (confirmed by audit — grep for `where: { value` against this
+//     model turns up only this file's own header comment and read-only test
+//     assertions, both value-non-unique-safe).
+// Rows are never deleted, only marked inactive if a later sync no longer
+// sees them, so history isn't lost.
 model MicrosoftDirectoryJobTitleValue {
-  id          String   @id @default(cuid())
-  value       String   @unique
-  firstSeenAt DateTime @default(now())
-  lastSeenAt  DateTime @default(now())
-  isActive    Boolean  @default(true)
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id             String   @id @default(cuid())
+  /** Display-only — first-seen raw casing/spacing. NOT unique (see this model's header comment) — (domain, normalizedValue) below is the real identity. */
+  value          String
+  /** Backfilled to the then-current ALLOWED_EMAIL_DOMAIN for every pre-existing row at migration time (see 20260807110000_job_title_directory_domain_scope) — never left blank, since it's part of a unique key. */
+  domain         String   @default("")
+  /** trim + collapse-whitespace + lowercase of `value`; also backfilled at migration time for pre-existing rows. */
+  normalizedValue String  @default("")
+  /** Eligible (@<domain>, userType=Member) users seen with this exact job title as of the last domain-aware sync — 0 for legacy rows never touched by it. */
+  userCount      Int      @default(0)
+  firstSeenAt    DateTime @default(now())
+  lastSeenAt     DateTime @default(now())
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([domain, normalizedValue])
+  @@index([domain])
 }
 
 model SubDepartment {

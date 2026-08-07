@@ -3,9 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireAuth, hasPermission, canAssignUserToDepartment } from "@/lib/permissions";
 import { createUserSchema } from "@/lib/validations";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
-import { ensurePrimaryDepartmentMembership, grantManualMembership } from "@/lib/services/department-membership-service";
+import { setPrimaryDepartmentMembership, grantManualMembership } from "@/lib/services/department-membership-service";
 import bcrypt from "bcryptjs";
-import { AuthProvider } from "@prisma/client";
+import { AuthProvider, MembershipSource } from "@prisma/client";
 
 const USER_INCLUDE = {
   department: { select: { id: true, name: true } },
@@ -157,6 +157,10 @@ export async function POST(req: NextRequest) {
     const passwordHash = await bcrypt.hash(data.password, 12);
 
     const created = await prisma.$transaction(async (tx) => {
+      // departmentId is deliberately NOT set here — User.departmentId is a
+      // mirror of the active primary DepartmentMembership, written only by
+      // setPrimaryDepartmentMembership below, never independently here (see
+      // the User/Department/Member canonical-membership architecture).
       const newUser = await tx.user.create({
         data: {
           name: data.name,
@@ -164,7 +168,6 @@ export async function POST(req: NextRequest) {
           passwordHash,
           role: data.role,
           isActive: data.isActive,
-          departmentId: resolvedPrimaryId,
           businessUnitId: data.businessUnitId || null,
           authProvider: AuthProvider.CREDENTIALS,
           mustChangePassword: true,
@@ -184,13 +187,18 @@ export async function POST(req: NextRequest) {
     });
 
     // The primary department is a UI convenience over the real source of
-    // truth (DepartmentMembership) — if it wasn't already covered by one of
-    // the explicit rows above, ensure a matching membership exists too
-    // (translated from the global role, same as the single-department flow
-    // this replaces).
-    if (resolvedPrimaryId && !seenDeptIds.has(resolvedPrimaryId)) {
+    // truth (DepartmentMembership) — setPrimaryDepartmentMembership is the
+    // single atomic write path for it, always called when a primary was
+    // resolved (whether or not that department was ALSO one of the explicit
+    // membership rows above — it's idempotent-safe either way: reuses the
+    // row grantManualMembership may have just created, or creates a fresh
+    // one, then marks it primary and mirrors User.departmentId in one
+    // transaction). A bounded transaction of its own, run after the outer
+    // one commits — matches this app's established "never one giant shared
+    // transaction across a multi-step write" rule.
+    if (resolvedPrimaryId) {
       const desiredRole = translateGlobalRoleToDepartmentRole(data.role);
-      await ensurePrimaryDepartmentMembership(created.id, resolvedPrimaryId, desiredRole);
+      await setPrimaryDepartmentMembership(created.id, resolvedPrimaryId, MembershipSource.MANUAL, { role: desiredRole });
     }
 
     const user = await prisma.user.findUnique({ where: { id: created.id }, include: USER_INCLUDE });

@@ -81,14 +81,32 @@ interface DeptUserAssociation {
   subDepartmentId: string | null;
 }
 
+/**
+ * Department-level counts here are PRIMARY-ONLY — `User.departmentId`,
+ * which is now a canonically-maintained mirror of each user's single active
+ * primary DepartmentMembership (see setPrimaryDepartmentMembership in
+ * lib/services/department-membership-service.ts), never a second
+ * independent source. This is a deliberate choice, not an oversight: the
+ * Organization tree is an ORGANIZATIONAL PLACEMENT chart (one node per
+ * person, matching a real org chart), not a permissions/membership view — a
+ * director with secondary access to Finance/IT/Sales/HR shows up ONCE,
+ * under their actual primary department, never duplicated across every
+ * department they merely have access to. Full active-membership visibility
+ * (primary + secondary) is the Department Members page's job
+ * (getDepartmentMemberships in department-membership-service.ts) and
+ * authorization's job (getUserDepartmentMemberships in
+ * department-scope-service.ts) — deliberately NOT unioned in here anymore.
+ * SubDepartment associations are unrelated to this change and still use
+ * SubDepartmentMembership as before (SubDepartment has no primary/secondary
+ * concept of its own).
+ */
 async function loadDepartmentUserAssociations(): Promise<{
   byDepartment: Map<string, Set<string>>;
   bySubDepartment: Map<string, Set<string>>;
   activeUserIds: Set<string>;
 }> {
-  const [users, activeMemberships, activeSubMemberships] = await Promise.all([
+  const [users, activeSubMemberships] = await Promise.all([
     prisma.user.findMany({ select: { id: true, isActive: true, departmentId: true, subDepartmentId: true } }),
-    prisma.departmentMembership.findMany({ where: { isActive: true }, select: { userId: true, departmentId: true } }),
     prisma.subDepartmentMembership.findMany({ where: { isActive: true }, select: { userId: true, subDepartmentId: true } }),
   ]);
 
@@ -105,7 +123,6 @@ async function loadDepartmentUserAssociations(): Promise<{
     if (u.departmentId) addTo(byDepartment, u.departmentId, u.id);
     if (u.subDepartmentId) addTo(bySubDepartment, u.subDepartmentId, u.id);
   }
-  for (const m of activeMemberships) addTo(byDepartment, m.departmentId, m.userId);
   for (const m of activeSubMemberships) addTo(bySubDepartment, m.subDepartmentId, m.userId);
 
   return { byDepartment, bySubDepartment, activeUserIds };

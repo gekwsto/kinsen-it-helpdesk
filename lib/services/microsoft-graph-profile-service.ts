@@ -9,16 +9,31 @@
  * their own delegated User.Read permission).
  */
 
+// companyName/userType/givenName/surname added for FIND-003 (see
+// docs/roadmap-handoff-register.md) — the same shared organization
+// placement + eligibility signals the full Directory Sync already fetches
+// via the application-permission `/users` endpoint
+// (organization-directory-sync-service.ts's GRAPH_USERS_SELECT), now also
+// available to the per-login delegated path so both entry points resolve
+// to the same organizational state. All are standard basic-profile
+// properties readable via the already-consented delegated `User.Read`
+// scope for the signed-in user's own `/me` — no new Azure/Entra permission
+// required. NOT verified against a real tenant in this environment (see
+// docs/microsoft-production-readiness-audit.md — dummy Graph credentials).
 const GRAPH_ME_URL =
-  "https://graph.microsoft.com/v1.0/me?$select=id,displayName,mail,userPrincipalName,department,jobTitle";
+  "https://graph.microsoft.com/v1.0/me?$select=id,displayName,givenName,surname,mail,userPrincipalName,userType,companyName,department,jobTitle";
 
 const REQUEST_TIMEOUT_MS = 5000;
 
 export interface GraphUserProfile {
   id: string;
   displayName: string | null;
+  givenName: string | null;
+  surname: string | null;
   mail: string | null;
   userPrincipalName: string | null;
+  userType: string | null;
+  companyName: string | null;
   department: string | null;
   jobTitle: string | null;
 }
@@ -51,8 +66,12 @@ function toGraphUserProfile(data: Record<string, unknown> & { id: string }): Gra
   return {
     id: data.id,
     displayName: str(data.displayName),
+    givenName: str(data.givenName),
+    surname: str(data.surname),
     mail: str(data.mail),
     userPrincipalName: str(data.userPrincipalName),
+    userType: str(data.userType),
+    companyName: str(data.companyName),
     department: str(data.department),
     jobTitle: str(data.jobTitle),
   };

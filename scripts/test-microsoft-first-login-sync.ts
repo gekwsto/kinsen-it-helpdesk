@@ -18,6 +18,7 @@ import { DepartmentRole, GlobalRoleSource, MembershipSource, MicrosoftMappingSou
 import { syncMicrosoftUserDepartment, handleMicrosoftJwtSignIn } from "@/lib/services/microsoft-department-sync-service";
 import { syncMicrosoftDirectoryValues } from "@/lib/services/microsoft-directory-service";
 import { createMapping, updateMapping, MicrosoftMappingValidationError } from "@/lib/services/microsoft-mapping-service";
+import { normalizeDepartmentName } from "@/lib/services/organization-normalization";
 
 let passed = 0;
 let failed = 0;
@@ -39,6 +40,8 @@ const TEST_LOW_PRIORITY_DEPT_VALUE = `Test Systems Operations Low ${RUN_ID}`;
 const TEST_JOB_TITLE_MANAGER_VALUE = `Test Systems Operations Manager ${RUN_ID}`;
 const TEST_JOB_TITLE_ASSISTANT_VALUE = `Test IT Operations Assistant ${RUN_ID}`;
 const testUserIds: string[] = [];
+/** Raw Graph department-string values that resolveOrganizationPlacement will have created a real (companyId: null) Department for — tracked here so `finally` can clean them up too. */
+const resolvedDeptNames = new Set<string>();
 
 function mockGraphMeOnce(department: string | null, oid = `test-oid-${RUN_ID}`, jobTitle: string | null = null) {
   (global as unknown as { fetch: typeof fetch }).fetch = (async () =>
@@ -53,6 +56,25 @@ function mockGraphMeOnce(department: string | null, oid = `test-oid-${RUN_ID}`, 
       }),
       { status: 200 }
     )) as typeof fetch;
+}
+
+/**
+ * FIND-003 (docs/roadmap-handoff-register.md): PRIMARY department placement
+ * now comes from organization-company-department-resolver.ts's
+ * name-based, company-scoped resolution (using the raw Graph `department`
+ * string directly), never from a MicrosoftDepartmentMapping row — a Graph
+ * `department` value can still ALSO have a MicrosoftDepartmentMapping
+ * pointing at a completely different, arbitrarily-named Department for
+ * SECONDARY-membership/global-role purposes (that mechanism is unchanged).
+ * This looks up the department the resolver would have created/found for a
+ * given raw Graph department string, mirroring exactly what
+ * resolveOrganizationPlacement does (no companyName in this file's mocks ->
+ * companyId: null).
+ */
+async function findResolvedPrimaryDepartment(rawDepartmentName: string) {
+  return prisma.department.findFirst({
+    where: { companyId: null, normalizedName: normalizeDepartmentName(rawDepartmentName) },
+  });
 }
 
 async function createTestUser(data: Partial<Parameters<typeof prisma.user.create>[0]["data"]> = {}) {
@@ -150,18 +172,29 @@ async function main() {
       name: "Test User",
     });
     const afterFirstLogin = await prisma.user.findUnique({ where: { id: user1.id } });
-    const membership1 = await prisma.departmentMembership.findUnique({
+    // PRIMARY placement (FIND-003): resolved by name from the raw Graph
+    // `department` string (TEST_MAPPING_VALUE), NOT department.id — that
+    // fixture is now purely a SECONDARY-membership/global-role target via
+    // its MicrosoftDepartmentMapping row (see the checks below).
+    const resolvedPrimaryDept = await findResolvedPrimaryDepartment(TEST_MAPPING_VALUE);
+    resolvedDeptNames.add(TEST_MAPPING_VALUE);
+    const primaryMembership1 = resolvedPrimaryDept
+      ? await prisma.departmentMembership.findUnique({ where: { userId_departmentId: { userId: user1.id, departmentId: resolvedPrimaryDept.id } } })
+      : null;
+    // SECONDARY membership, via the pre-configured MicrosoftDepartmentMapping — unchanged mechanism.
+    const secondaryMembership1 = await prisma.departmentMembership.findUnique({
       where: { userId_departmentId: { userId: user1.id, departmentId: department.id } },
     });
     check("User.role === DEPARTMENT_MANAGER on first login", afterFirstLogin?.role === Role.DEPARTMENT_MANAGER);
     check("User.globalRoleSource === MICROSOFT_DEPARTMENT", afterFirstLogin?.globalRoleSource === GlobalRoleSource.MICROSOFT_DEPARTMENT);
     check("User.globalRoleMicrosoftMappingId === mapping.id", afterFirstLogin?.globalRoleMicrosoftMappingId === mapping.id);
-    check("User.departmentId === department.id", afterFirstLogin?.departmentId === department.id);
+    check("User.departmentId === resolved PRIMARY department (name-resolved, not the MicrosoftDepartmentMapping target)", resolvedPrimaryDept !== null && afterFirstLogin?.departmentId === resolvedPrimaryDept.id);
     check("User.lastMicrosoftSyncAt is set", afterFirstLogin?.lastMicrosoftSyncAt != null);
-    check("DepartmentMembership exists on first login", membership1 !== null);
-    check("DepartmentMembership.role === DEPARTMENT_MANAGER", membership1?.role === DepartmentRole.DEPARTMENT_MANAGER);
-    check("DepartmentMembership.source === MICROSOFT_DEPARTMENT", membership1?.source === MembershipSource.MICROSOFT_DEPARTMENT);
-    check("DepartmentMembership.isActive === true", membership1?.isActive === true);
+    check("PRIMARY DepartmentMembership exists on first login", primaryMembership1 !== null && primaryMembership1.isPrimary === true && primaryMembership1.isActive === true);
+    check("SECONDARY DepartmentMembership (via MicrosoftDepartmentMapping) ALSO exists, not primary", secondaryMembership1 !== null && secondaryMembership1.isPrimary === false);
+    check("SECONDARY DepartmentMembership.role === DEPARTMENT_MANAGER", secondaryMembership1?.role === DepartmentRole.DEPARTMENT_MANAGER);
+    check("SECONDARY DepartmentMembership.source === MICROSOFT_DEPARTMENT", secondaryMembership1?.source === MembershipSource.MICROSOFT_DEPARTMENT);
+    check("SECONDARY DepartmentMembership.isActive === true", secondaryMembership1?.isActive === true);
 
     console.log("\nScenario 2: same user logs in again — idempotent, no duplicates\n");
     mockGraphMeOnce(TEST_MAPPING_VALUE);
@@ -173,7 +206,12 @@ async function main() {
       name: "Test User",
     });
     const membershipCount = await prisma.departmentMembership.count({ where: { userId: user1.id } });
-    check("exactly one DepartmentMembership row after second login", membershipCount === 1);
+    // Two rows are correct and expected: one PRIMARY (organizational
+    // placement, resolver-created department) + one SECONDARY (via the
+    // pre-configured MicrosoftDepartmentMapping) — the assertion is about
+    // idempotency (no NEW/duplicate rows on a second identical login), not
+    // about there being exactly one row overall.
+    check("still exactly two DepartmentMembership rows after second login (1 primary + 1 secondary, no duplicates created)", membershipCount === 2);
 
     console.log("\nScenario 3: existing local/credentials user, first Microsoft login\n");
     const localUser = await createTestUser({ authProvider: AuthProvider.CREDENTIALS, passwordHash: "irrelevant" });
@@ -239,9 +277,10 @@ async function main() {
     check("MANUAL membership role untouched (still VIEWER, not DEPARTMENT_MANAGER)", manualMembership?.role === DepartmentRole.VIEWER);
     check("MANUAL membership source untouched", manualMembership?.source === MembershipSource.MANUAL);
 
-    console.log("\nScenario 7: no matching mapping — no promotion, no membership\n");
+    console.log("\nScenario 7: no matching MicrosoftDepartmentMapping — no role/secondary-membership promotion, but PRIMARY placement still resolves (FIND-003, independent mechanism)\n");
+    const unmappedDeptValue = `Unmapped Department ${RUN_ID}`;
     const unmappedUser = await createTestUser();
-    mockGraphMeOnce(`Unmapped Department ${RUN_ID}`);
+    mockGraphMeOnce(unmappedDeptValue);
     await syncMicrosoftUserDepartment({
       accessToken: "fake-token",
       userId: unmappedUser.id,
@@ -251,9 +290,15 @@ async function main() {
     });
     const afterUnmapped = await prisma.user.findUnique({ where: { id: unmappedUser.id } });
     const unmappedMembershipCount = await prisma.departmentMembership.count({ where: { userId: unmappedUser.id } });
-    check("no role promotion when no mapping matches", afterUnmapped?.role === Role.USER);
+    const unmappedResolvedDept = await findResolvedPrimaryDepartment(unmappedDeptValue);
+    resolvedDeptNames.add(unmappedDeptValue);
+    check("no role promotion when no MicrosoftDepartmentMapping matches", afterUnmapped?.role === Role.USER);
     check("globalRoleSource stays SYSTEM (untouched) when no mapping matches", afterUnmapped?.globalRoleSource === GlobalRoleSource.SYSTEM);
-    check("no DepartmentMembership created when no mapping matches", unmappedMembershipCount === 0);
+    // PRIMARY placement is a SEPARATE mechanism from MicrosoftDepartmentMapping
+    // (FIND-003) — it resolves/creates a department purely from the raw Graph
+    // `department` string, with or without any admin-configured mapping.
+    check("exactly ONE DepartmentMembership exists (the PRIMARY one, resolver-created — no mapping needed for this)", unmappedMembershipCount === 1);
+    check("that membership is primary and points at the resolver-created department", unmappedResolvedDept !== null && afterUnmapped?.departmentId === unmappedResolvedDept.id);
     check("lastMicrosoftSyncAt still set (Graph call itself succeeded)", afterUnmapped?.lastMicrosoftSyncAt != null);
 
     console.log("\nScenario 8: handleMicrosoftJwtSignIn returns FRESH token fields, not the stale pre-sync snapshot\n");
@@ -285,8 +330,9 @@ async function main() {
       userEmail: jwtUser.email,
       userName: "Test User",
     });
+    const scenario8ResolvedDept = await findResolvedPrimaryDepartment(TEST_MAPPING_VALUE);
     check("returned object has the MAPPED role, not the stale pre-sync USER", postSync.role === Role.DEPARTMENT_MANAGER);
-    check("returned object has the mapped departmentId", postSync.departmentId === department.id);
+    check("returned object has the resolved PRIMARY departmentId (name-resolved, FIND-003)", scenario8ResolvedDept !== null && postSync.departmentId === scenario8ResolvedDept.id);
     check("returned object has globalRoleSource MICROSOFT_DEPARTMENT", postSync.globalRoleSource === GlobalRoleSource.MICROSOFT_DEPARTMENT);
     check("pre-sync snapshot object itself is untouched (still role USER)", preSyncSnapshot.role === Role.USER);
 
@@ -349,7 +395,10 @@ async function main() {
       email: case4User.email,
       name: "Test User",
     });
-    const cachedJobTitle = await prisma.microsoftDirectoryJobTitleValue.findUnique({ where: { value: case4JobTitleValue } });
+    // `value` is display-only, not a unique key (see the model's schema
+    // comment — canonical identity is (domain, normalizedValue)) — findFirst,
+    // not findUnique.
+    const cachedJobTitle = await prisma.microsoftDirectoryJobTitleValue.findFirst({ where: { value: case4JobTitleValue } });
     check("Case 4: MicrosoftDirectoryJobTitleValue upserted with the exact jobTitle value", cachedJobTitle !== null);
     check("Case 4: cached value is active", cachedJobTitle?.isActive === true);
 
@@ -398,14 +447,23 @@ async function main() {
       }
       if (url.startsWith("https://graph.microsoft.com/v1.0/users")) {
         case5UsersCalls++;
+        // Operation B's tenant scan now only collects department/jobTitle
+        // values from eligible (`userType: "Member"`,
+        // `@<ALLOWED_EMAIL_DOMAIN>`) users — see
+        // organization-directory-eligibility-service.ts / FIND-003. Every
+        // fixture row here must be eligibility-shaped, or it's silently
+        // excluded before ever reaching the dedup/trim logic under test.
         return new Response(
           JSON.stringify({
             value: [
-              { department: case5DeptA, jobTitle: case5TitleA },
-              { department: case5DeptA, jobTitle: case5TitleA.toUpperCase() }, // duplicate dept, differently-cased title (department stays case-sensitive -> distinct value; matching behavior is separate from caching, which stores exact values)
-              { department: "  " + case5DeptA + "  ", jobTitle: null }, // same dept after trim, null title
-              { department: "", jobTitle: "" }, // empty values, must be skipped
-              { department: null, jobTitle: undefined },
+              { userType: "Member", mail: `case5-a-${RUN_ID}@kinsen.gr`, department: case5DeptA, jobTitle: case5TitleA },
+              { userType: "Member", mail: `case5-b-${RUN_ID}@kinsen.gr`, department: case5DeptA, jobTitle: case5TitleA.toUpperCase() }, // duplicate dept, differently-cased title (department stays case-sensitive -> distinct value; matching behavior is separate from caching, which stores exact values)
+              { userType: "Member", mail: `case5-c-${RUN_ID}@kinsen.gr`, department: "  " + case5DeptA + "  ", jobTitle: null }, // same dept after trim, null title
+              { userType: "Member", mail: `case5-d-${RUN_ID}@kinsen.gr`, department: "", jobTitle: "" }, // empty values, must be skipped
+              { userType: "Member", mail: `case5-e-${RUN_ID}@kinsen.gr`, department: null, jobTitle: undefined },
+              // Deliberately ineligible rows — must be excluded, not counted:
+              { userType: "Guest", mail: `case5-guest-${RUN_ID}@kinsen.gr`, department: case5DeptA, jobTitle: case5TitleA }, // Guest, otherwise-matching domain
+              { userType: "Member", mail: `case5-f-${RUN_ID}@othercorp.com`, department: case5DeptA, jobTitle: case5TitleA }, // Member, wrong domain
             ],
           }),
           { status: 200, headers: { "content-type": "application/json" } }
@@ -419,10 +477,22 @@ async function main() {
     check("Case 5: no real network request was made (both calls hit the in-process mock)", case5TokenCalls === 1 && case5UsersCalls === 1);
     if (syncResult.ok) {
       check("Case 5: discovered exactly 1 distinct department (after trim)", syncResult.discoveredDepartments === 1);
-      check("Case 5: discovered exactly 2 distinct job titles (case-sensitive cache storage)", syncResult.discoveredJobTitles === 2);
+      // Job titles now dedup case/whitespace-insensitively (normalizeJobTitleValue,
+      // microsoft-directory-service.ts) — matches the SAME case-insensitive
+      // rule microsoft-mapping-service.ts's findActiveMappingsForClaims
+      // already uses to MATCH a job title mapping at sync/login time, so the
+      // discovered count reflects what will actually match one mapping, not
+      // a raw-string artifact. case5TitleA and its .toUpperCase() variant are
+      // deliberately the same title, seen from two different eligible users —
+      // exactly 1 distinct title, not 2 (department values are intentionally
+      // NOT normalized this way — see MicrosoftDirectoryDepartmentValue,
+      // unchanged).
+      check("Case 5: discovered exactly 1 distinct job title (case/whitespace-insensitive dedup)", syncResult.discoveredJobTitles === 1);
     }
     const cachedDeptA = await prisma.microsoftDirectoryDepartmentValue.findUnique({ where: { value: case5DeptA } });
-    const cachedTitleA = await prisma.microsoftDirectoryJobTitleValue.findUnique({ where: { value: case5TitleA } });
+    // `value` is display-only on this table now, not a unique key (see the
+    // model's schema comment) — findFirst, not findUnique.
+    const cachedTitleA = await prisma.microsoftDirectoryJobTitleValue.findFirst({ where: { value: case5TitleA } });
     check("Case 5: trimmed department value cached", cachedDeptA !== null && cachedDeptA.isActive);
     check("Case 5: job title value cached", cachedTitleA !== null && cachedTitleA.isActive);
 
@@ -556,6 +626,18 @@ async function main() {
     // Each step is independently guarded: one cleanup step failing (e.g.
     // the JobTitleValue table not existing yet, pre-migration) must not
     // mask the original test failure or skip $disconnect for the rest.
+    //
+    // FIND-003: swept by RUN_ID-tagged name rather than the specific
+    // constants tracked in resolvedDeptNames (TEST_MAPPING_VALUE,
+    // unmappedDeptValue) — a broad, robust net that also catches
+    // TEST_LOW_PRIORITY_DEPT_VALUE/TEST_VERBATIM_VALUE (Cases 1-4, Scenario
+    // 9), which ALSO get resolver-created as PRIMARY-placement departments
+    // now that every eligible login resolves one, independent of which
+    // MicrosoftDepartmentMapping scenario each case is actually testing.
+    void resolvedDeptNames; // superseded by the broad sweep below; kept only for the inline resolvedDeptNames.add() call-site comments' context
+    const resolvedDepts = await prisma.department.findMany({ where: { companyId: null, name: { contains: RUN_ID.toString() } }, select: { id: true } });
+    const resolvedDeptIds = resolvedDepts.map((d) => d.id);
+
     const cleanupSteps: Array<[string, () => Promise<unknown>]> = [
       ["departmentMembership", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: testUserIds } } })],
       ["user", () => prisma.user.deleteMany({ where: { id: { in: testUserIds } } })],
@@ -563,7 +645,17 @@ async function main() {
         mappingIds.length > 0
           ? prisma.microsoftDepartmentMapping.deleteMany({ where: { id: { in: mappingIds } } })
           : Promise.resolve()],
-      ["department", () => (department ? prisma.department.delete({ where: { id: department.id } }) : Promise.resolve())],
+      // FIND-003: resolver-created PRIMARY-placement departments (companyId:
+      // null, name-matched) also need their starter TicketPriority/TicketStatus
+      // rows cleared first — same onDelete: RESTRICT FK as any other
+      // createDepartment()-made department.
+      ["resolved-department priorities", () => (resolvedDeptIds.length > 0 ? prisma.ticketPriority.deleteMany({ where: { departmentId: { in: resolvedDeptIds } } }) : Promise.resolve())],
+      ["resolved-department statuses", () => (resolvedDeptIds.length > 0 ? prisma.ticketStatus.deleteMany({ where: { departmentId: { in: resolvedDeptIds } } }) : Promise.resolve())],
+      ["resolved departments", () => (resolvedDeptIds.length > 0 ? prisma.department.deleteMany({ where: { id: { in: resolvedDeptIds } } }) : Promise.resolve())],
+      // deleteMany (not delete): `department`'s own name also contains
+      // RUN_ID, so the broad sweep above may have already removed it —
+      // deleteMany is a safe no-op in that case, unlike delete's P2025 throw.
+      ["department", () => (department ? prisma.department.deleteMany({ where: { id: department.id } }) : Promise.resolve())],
       ["microsoftDirectoryDepartmentValue", () =>
         prisma.microsoftDirectoryDepartmentValue.deleteMany({ where: { value: { contains: RUN_ID.toString() } } })],
       ["microsoftDirectoryJobTitleValue", () =>

@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
-import { Prisma } from "@prisma/client";
+import { Prisma, MembershipSource } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireAuth, hasPermission, canAssignUserToDepartment } from "@/lib/permissions";
 import { updateUserRoleSchema } from "@/lib/validations";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
-import { ensurePrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
+import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 
 const USER_INCLUDE = {
   department: { select: { id: true, name: true } },
@@ -123,7 +123,14 @@ export async function PATCH(
       data: {
         role: data.role,
         isActive: data.isActive,
-        departmentId,
+        // departmentId is written directly here ONLY for the "clearing to
+        // null" case (never touches memberships, unchanged behavior).
+        // Setting it to a real department instead goes entirely through
+        // setPrimaryDepartmentMembership below — the single atomic write
+        // path for User.departmentId + the primary DepartmentMembership
+        // together (see the canonical-membership architecture) — so this
+        // field is simply omitted from this update in that case.
+        ...(departmentClearing ? { departmentId: null } : {}),
         businessUnitId: data.businessUnitId,
         customRoleId: data.customRoleId !== undefined ? data.customRoleId : undefined,
         email: data.email,
@@ -135,7 +142,7 @@ export async function PATCH(
 
     if (departmentSettingToValue) {
       const desiredRole = translateGlobalRoleToDepartmentRole(data.role);
-      await ensurePrimaryDepartmentMembership(id, departmentId!, desiredRole);
+      await setPrimaryDepartmentMembership(id, departmentId!, MembershipSource.MANUAL, { role: desiredRole });
     }
 
     const user = await prisma.user.findUnique({ where: { id }, include: USER_INCLUDE });

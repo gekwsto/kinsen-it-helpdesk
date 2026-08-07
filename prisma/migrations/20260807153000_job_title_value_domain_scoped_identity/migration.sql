@@ -1,0 +1,27 @@
+-- Hand-written (not `prisma migrate dev` auto-generated), following the same
+-- convention as the migration this one corrects
+-- (20260807110000_job_title_directory_domain_scope).
+--
+-- FIX: that prior migration added `domain`/`normalizedValue`/`userCount` and
+-- a NEW compound unique index `(domain, normalizedValue)`, but left the
+-- OLD global `value` unique index in place — a real bug, not a stylistic
+-- leftover: it silently blocked the exact multi-domain scenario the feature
+-- was supposed to support (the same raw job title text, e.g. "IT Manager",
+-- existing once per domain — impossible while `value` alone had to be
+-- globally unique across every domain).
+--
+-- This migration ONLY drops that now-redundant index. It does not touch any
+-- row's data, `id`, or any other column — every one of the pre-existing 55
+-- (as of the prior migration) MicrosoftDirectoryJobTitleValue rows keeps its
+-- exact identity, domain ('kinsen.gr', backfilled by the prior migration),
+-- normalizedValue, userCount, and all other fields untouched. Dropping a
+-- UNIQUE index can never violate anything for existing data (removing a
+-- constraint only relaxes what's allowed going forward) — there is nothing
+-- to backfill or reconcile here.
+--
+-- Canonical identity going forward is `(domain, normalizedValue)` only (the
+-- surviving `MicrosoftDirectoryJobTitleValue_domain_normalizedValue_key`
+-- index, unchanged by this migration) — `value` remains a plain, non-unique,
+-- display-only column.
+
+DROP INDEX "MicrosoftDirectoryJobTitleValue_value_key";

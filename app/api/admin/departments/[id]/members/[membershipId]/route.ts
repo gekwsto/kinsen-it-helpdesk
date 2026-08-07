@@ -17,6 +17,23 @@ export async function DELETE(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
+    // The active primary membership is User.departmentId's mirror source —
+    // revoking it here (a "remove this member" action) would silently leave
+    // User.departmentId pointing at a now-inactive membership, breaking the
+    // canonical-membership invariant. Changing the primary department is a
+    // deliberate action (Edit User's Primary Department field, which goes
+    // through setPrimaryDepartmentMembership), never an implicit side effect
+    // of removing a row from this list.
+    if (membership.isPrimary && membership.isActive) {
+      return NextResponse.json(
+        {
+          error: "This is the user's primary department and can't be removed from here. Change their Primary Department in Edit User first.",
+          code: "cannot_remove_primary_membership",
+        },
+        { status: 409 }
+      );
+    }
+
     await revokeMembership(membershipId);
     return new NextResponse(null, { status: 204 });
   } catch (error: any) {

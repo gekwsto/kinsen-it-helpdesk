@@ -9,19 +9,21 @@
  * never reads a user id from anywhere else, so it works identically for a
  * brand-new user's first login and a returning user's Nth login.
  */
-import { GlobalRoleSource, Prisma, Role } from "@prisma/client";
+import { DepartmentRole, GlobalRoleSource, MembershipSource, Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
   resolveDepartmentMemberships,
   hasActiveProfileDepartmentMapping,
   resolvePrimaryMicrosoftMapping,
 } from "@/lib/services/microsoft-mapping-service";
-import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
+import { syncDepartmentMemberships, setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
 import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
 import { syncMicrosoftProfilePhoto } from "@/lib/services/microsoft-profile-photo-service";
+import { getOrganizationDirectoryEligibility } from "@/lib/services/organization-directory-eligibility-service";
+import { createOrganizationResolutionCache, resolveOrganizationPlacement } from "@/lib/services/organization-company-department-resolver";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -57,6 +59,8 @@ export function buildClaimsFromGraphProfile(
     name: base.name,
     department: profile.department ?? null,
     jobTitle: profile.jobTitle ?? null,
+    companyName: profile.companyName ?? null,
+    userType: profile.userType ?? null,
     groups: base.fallbackGroups,
     roles: base.fallbackRoles,
   };
@@ -108,6 +112,91 @@ export async function syncMicrosoftUserDepartment(
   if (claims.department) await upsertDiscoveredMicrosoftDirectoryValue("department", claims.department);
   if (claims.jobTitle) await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", claims.jobTitle);
 
+  // Organizational placement (PRIMARY department) — FIND-003
+  // (docs/roadmap-handoff-register.md): uses the exact same
+  // organization-directory-eligibility-service.ts rule AND the same
+  // organization-company-department-resolver.ts multi-company
+  // Company/Department resolution the full Directory Sync uses (never a
+  // second, independent department-resolution mechanism) — so a full sync
+  // and a first Microsoft login for the same Graph profile converge on the
+  // identical organizational placement. Gated on eligibility: a non-Kinsen
+  // or Guest account (in practice, close to unreachable here at all — see
+  // lib/auth.ts's own `signIn` callback, which already blocks Microsoft SSO
+  // outside `@<ALLOWED_EMAIL_DOMAIN>` before this code ever runs — this
+  // check exists for its own correctness/defense-in-depth, not because it's
+  // the only gate) is skipped entirely: no company/department resolution,
+  // no primary membership change, existing data left exactly as-is.
+  //
+  // Runs BEFORE the SECONDARY MicrosoftDepartmentMapping resolution below —
+  // deliberately, not incidentally: syncDepartmentMemberships's own tail
+  // fallback ("exactly one active membership and none flagged primary ->
+  // promote it") would otherwise auto-promote a plain secondary-mapping
+  // membership to primary for a brand-new user, which setPrimaryDepartmentMembership
+  // would then immediately have to un-do (treating it as an "obsolete
+  // Microsoft-owned primary" from a different department and deactivating
+  // it) — a real transient-then-corrected bug this ordering avoids
+  // entirely. Same order the full Directory Sync already uses.
+  //
+  // UNCONDITIONAL relative to shouldSyncGlobalRole — department placement
+  // and global role synchronization are deliberately independent decisions
+  // (see the User/Department/Member canonical-membership architecture): a
+  // manually promoted ADMIN, or any user with globalRoleSource MANUAL,
+  // keeps their role exactly as an admin set it (see the global-role block
+  // below, unchanged), but their primary organizational department still
+  // tracks Microsoft's signal correctly. Role protection ≠ department
+  // placement protection. setPrimaryDepartmentMembership is itself the ONLY
+  // function allowed to write User.departmentId (see its own header
+  // comment) and already protects a MANUAL primary from being silently
+  // replaced by an automated sync signal — no separate guard needed here.
+  const eligibility = getOrganizationDirectoryEligibility({
+    userType: claims.userType,
+    // `result.profile.mail` first (this call's own GET /me fetch); falls
+    // back to `claims.email` (the email lib/auth.ts's signIn callback
+    // already gated to `@<ALLOWED_EMAIL_DOMAIN>` for this exact signed-in
+    // user, before this function ever ran) only when Graph's own `mail` is
+    // null — the same "mail can legitimately be null for a real account,
+    // fall back to another trustworthy identity" pattern already used
+    // throughout this codebase (e.g. validateDirectoryUser's own
+    // mail-then-userPrincipalName fallback), not a special case invented
+    // just for this check.
+    mail: result.profile.mail ?? claims.email,
+    userPrincipalName: result.profile.userPrincipalName,
+  });
+  let primaryDepartmentSynced = false;
+  if (eligibility.eligible) {
+    try {
+      const placementCache = createOrganizationResolutionCache();
+      const placement = await resolveOrganizationPlacement(placementCache, claims.companyName, claims.department);
+      await prisma.user.update({
+        where: { id: userId },
+        data: {
+          companyId: placement.companyId,
+          givenName: result.profile.givenName ?? undefined,
+          surname: result.profile.surname ?? undefined,
+          jobTitle: claims.jobTitle ?? undefined,
+          organizationSyncedAt: new Date(),
+        },
+      });
+      await setPrimaryDepartmentMembership(userId, placement.departmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
+        role: DepartmentRole.REQUESTER,
+        deactivateObsoleteMicrosoftPrimary: true,
+      });
+      primaryDepartmentSynced = true;
+    } catch (err) {
+      console.warn("[microsoft-department-sync] Failed to resolve/set organization placement", {
+        userId,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // SECONDARY memberships — the existing, unchanged MicrosoftDepartmentMapping
+  // resolution (group/app-role/job-title/profile-department admin-configured
+  // mappings). setPrimaryDepartmentMembership above never creates a row here
+  // (it uses the resolver-created department, not a MicrosoftDepartmentMapping
+  // lookup), and syncDepartmentMemberships never touches an isPrimary row
+  // (see its own header comment) — the two are fully independent from this
+  // point on.
   let resolved = await resolveDepartmentMemberships(claims);
 
   if (claims.department) {
@@ -120,14 +209,16 @@ export async function syncMicrosoftUserDepartment(
 
   await syncDepartmentMemberships(userId, resolved);
 
-  // Global role sync: the SAME mapping that resolved a department signal
-  // also decides the user's global Role, unless a manual override or
-  // System Admin status protects them (shouldSyncGlobalRole). This is a
-  // separate lookup from resolveDepartmentMemberships above (which is
-  // per-department and unmodified) because the global role must be one
-  // decision, not one per matched department.
-  const globalRoleUpdate: Prisma.UserUpdateInput = { lastMicrosoftSyncAt: new Date() };
+  // Global role sync: a SEPARATE, independent mapping-priority decision
+  // (lib/services/microsoft-mapping-service.ts) — unrelated to the
+  // organization-placement resolution above (which is now driven entirely
+  // by organization-company-department-resolver.ts's companyName/department
+  // signal, not MicrosoftDepartmentMapping) — unless a manual override or
+  // System Admin status protects them (shouldSyncGlobalRole). Completely
+  // independent of the primary department placement above (no `department`
+  // connect here anymore).
   const primaryMapping = await resolvePrimaryMicrosoftMapping(claims);
+  const globalRoleUpdate: Prisma.UserUpdateInput = { lastMicrosoftSyncAt: new Date() };
   let globalRoleSynced = false;
   if (primaryMapping) {
     const dbUser = await prisma.user.findUnique({
@@ -141,7 +232,6 @@ export async function syncMicrosoftUserDepartment(
       // role below in resolveDepartmentMemberships, which still needs the
       // reverse translation since DepartmentMembership.role stays DepartmentRole.
       globalRoleUpdate.role = primaryMapping.role;
-      globalRoleUpdate.department = { connect: { id: primaryMapping.departmentId } };
       globalRoleUpdate.globalRoleSource = "MICROSOFT_DEPARTMENT";
       globalRoleUpdate.globalRoleUpdatedAt = new Date();
       globalRoleUpdate.globalRoleMicrosoftMapping = { connect: { id: primaryMapping.id } };
@@ -155,6 +245,8 @@ export async function syncMicrosoftUserDepartment(
     userId,
     departmentPresent: claims.department !== null,
     resolvedCount: resolved.length,
+    organizationSyncEligible: eligibility.eligible,
+    primaryDepartmentSynced,
     globalRoleSynced,
   });
 }

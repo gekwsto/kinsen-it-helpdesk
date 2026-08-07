@@ -26,17 +26,18 @@
  * parallel mapping logic.
  */
 import { prisma } from "@/lib/prisma";
-import { AuthProvider } from "@prisma/client";
+import { AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { fetchWithGraphRetry } from "@/lib/microsoft-graph-retry";
 import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
-import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
+import { syncDepartmentMemberships, setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { normalizeEmail } from "@/lib/services/email-identity";
 import {
   createOrganizationResolutionCache,
   resolveOrganizationPlacement,
   type OrganizationResolutionCache,
 } from "@/lib/services/organization-company-department-resolver";
+import { getOrganizationDirectoryEligibility } from "@/lib/services/organization-directory-eligibility-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 const GRAPH_USERS_SELECT = [
@@ -170,6 +171,7 @@ export async function fetchAllTenantUsers(): Promise<FetchTenantUsersResult> {
 
 export type DirectoryUserValidationFailureReason =
   | "guest_or_service_account"
+  | "domain_not_eligible"
   | "missing_id"
   | "missing_email_and_upn";
 
@@ -179,23 +181,36 @@ export type DirectoryUserValidationResult =
 
 /**
  * Pure, unit-testable validation — never touches the DB or network. Filters
- * out guest/service accounts (per the brief's explicit "don't display these"
- * requirement) and any record missing the fields this app actually requires
- * (a stable id to upsert by, and something email-shaped to satisfy User's
- * required unique `email` column — `mail` first, `userPrincipalName` as a
- * fallback, since Graph's `mail` is null for some real, non-guest accounts
- * e.g. mailbox-less service identities that still report userType "Member").
+ * out guest/service accounts AND non-Kinsen-domain accounts (see
+ * organization-directory-eligibility-service.ts — the SAME shared rule the
+ * per-login Microsoft sync uses, so a user's eligibility can never diverge
+ * between the two entry points), plus any record missing the fields this
+ * app actually requires (a stable id to upsert by, and something
+ * email-shaped to satisfy User's required unique `email` column).
+ *
+ * FIND-003 (docs/roadmap-handoff-register.md): organization sync now only
+ * processes real `@<ALLOWED_EMAIL_DOMAIN>` identities — an existing local
+ * user who no longer matches (or never did) is simply never touched by this
+ * validation gate, exactly like a guest/service account already was; their
+ * existing organizational data, memberships, and roles are left completely
+ * alone (see upsertOneDirectoryUser — a record that fails validation here
+ * never reaches the upsert at all).
  */
 export function validateDirectoryUser(raw: GraphDirectoryUser): DirectoryUserValidationResult {
   if (!raw.id) return { valid: false, reason: "missing_id" };
-  // Entra's own userType values are "Member" or "Guest" — anything that
-  // isn't "Member" is treated as non-employee and excluded, matching the
-  // brief's "guest/service accounts must not appear" requirement. A missing
-  // userType is NOT rejected here (some tenants don't populate it for every
-  // account) — absence isn't evidence of being a guest.
-  if (raw.userType && raw.userType !== "Member") {
-    return { valid: false, reason: "guest_or_service_account", userId: raw.id };
+
+  const eligibility = getOrganizationDirectoryEligibility({ userType: raw.userType, mail: raw.mail, userPrincipalName: raw.userPrincipalName });
+  if (!eligibility.eligible) {
+    // "not_member" keeps its established, already-tested reason name
+    // ("guest_or_service_account") for backward compatibility with existing
+    // callers/logs; "no_matching_domain" is the new FIND-003 reason.
+    return {
+      valid: false,
+      reason: eligibility.reason === "not_member" ? "guest_or_service_account" : "domain_not_eligible",
+      userId: raw.id,
+    };
   }
+
   const email = raw.mail?.trim() || raw.userPrincipalName?.trim() || "";
   if (!email) return { valid: false, reason: "missing_email_and_upn", userId: raw.id };
   return { valid: true, user: raw, email };
@@ -206,8 +221,8 @@ export interface DirectoryBatchSyncCounts {
   created: number;
   skipped: number;
   errors: number;
-  /** dbUserId + the raw Graph fields needed for department-membership resolution below — captured here (not re-queried afterward) since User has no persisted scalar column for Entra's raw `department` string (only the resolved Department relation). */
-  syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; name: string | null; department: string | null; jobTitle: string | null }>;
+  /** dbUserId + the raw Graph fields needed for department-membership resolution below — captured here (not re-queried afterward) since User has no persisted scalar column for Entra's raw `department` string (only the resolved Department relation). resolvedDepartmentId is the primary-organizational placement (organization-company-department-resolver.ts's result) used for the canonical setPrimaryDepartmentMembership call. */
+  syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; name: string | null; department: string | null; jobTitle: string | null; resolvedDepartmentId: string | null }>;
 }
 
 export type DirectoryUserSyncAction = "created" | "updated" | "linked" | "skipped";
@@ -219,6 +234,8 @@ interface DirectoryUserSyncResult {
   department: string | null;
   jobTitle: string | null;
   companyName: string | null;
+  /** The resolved primary-organizational Department id (placement.departmentId) — null only when the upsert itself failed (skipped). Used by the membership-resolution loop below to set the PRIMARY DepartmentMembership via setPrimaryDepartmentMembership; never written to User.departmentId directly here anymore. */
+  resolvedDepartmentId: string | null;
   skipReason?: string;
 }
 
@@ -303,13 +320,19 @@ async function upsertOneDirectoryUser(
             action: "skipped",
             reason: "email_linked_to_different_microsoft_user",
           });
-          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: placement.companyName, skipReason: "email_linked_to_different_microsoft_user" };
+          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: null, skipReason: "email_linked_to_different_microsoft_user" };
         }
         existing = byEmail;
         action = "linked";
       }
     }
 
+    // departmentId is deliberately NOT written here anymore — it's a mirror
+    // of the active PRIMARY DepartmentMembership, written only by
+    // setPrimaryDepartmentMembership (called from the membership-resolution
+    // loop below, once dbUserId is known) — see the canonical-membership
+    // architecture. companyId has no membership-table equivalent and stays
+    // a direct write, unrelated to this.
     const commonFields = {
       name: user.displayName ?? undefined,
       givenName: user.givenName ?? undefined,
@@ -321,7 +344,6 @@ async function upsertOneDirectoryUser(
       entraUserType: user.userType ?? undefined,
       organizationSyncedAt: new Date(),
       companyId: placement.companyId,
-      departmentId: placement.departmentId,
     };
 
     if (existing) {
@@ -334,7 +356,7 @@ async function upsertOneDirectoryUser(
         select: { id: true, name: true },
       });
       console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action, company: placement.companyName, department: placement.departmentName });
-      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle, companyName: placement.companyName };
+      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId };
     }
 
     const created = await prisma.user.create({
@@ -353,12 +375,11 @@ async function upsertOneDirectoryUser(
         entraUserType: user.userType ?? null,
         organizationSyncedAt: new Date(),
         companyId: placement.companyId,
-        departmentId: placement.departmentId,
       },
       select: { id: true, name: true },
     });
     console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action: "created", company: placement.companyName, department: placement.departmentName });
-    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle, companyName: placement.companyName };
+    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId };
   } catch (err) {
     // Isolated to THIS user only (see the function header) — never runs
     // inside a transaction shared with any other user's writes, so this can
@@ -367,7 +388,7 @@ async function upsertOneDirectoryUser(
     // counted and logged, never silently dropped.
     const reason = err instanceof Error ? err.message : String(err);
     console.warn("[organization-directory-sync] user sync failed", { microsoftUserId: user.id, email, action: "skipped", reason });
-    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: null, skipReason: reason };
+    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: null, resolvedDepartmentId: null, skipReason: reason };
   }
 }
 
@@ -399,6 +420,7 @@ async function upsertDirectoryUserBatch(
         name: result.name,
         department: result.department,
         jobTitle: result.jobTitle,
+        resolvedDepartmentId: result.resolvedDepartmentId,
       });
     }
   }
@@ -424,11 +446,24 @@ export interface DirectoryRawUserRecord {
 export interface DirectorySyncOutcome {
   ok: boolean;
   reason?: DirectorySyncFailureReason;
+  /** Persisted DB contract (OrganizationSyncRun) — never renamed/removed; usersUpdated already includes newly-created users, unchanged since before FIND-003. */
   usersScanned: number;
   usersUpdated: number;
   usersSkipped: number;
   errorCount: number;
   rawUsers: DirectoryRawUserRecord[];
+  /**
+   * Additive, NOT persisted to OrganizationSyncRun (which has no matching
+   * columns — adding them would need a migration this feature doesn't
+   * need) — a more granular in-memory/log breakdown for FIND-003 visibility.
+   * usersSkippedDomain + usersSkippedGuest + (missing_id/missing_email_and_upn,
+   * uncommon) sum to `usersSkipped` above.
+   */
+  usersEligible?: number;
+  usersSkippedDomain?: number;
+  usersSkippedGuest?: number;
+  usersCreatedCount?: number;
+  usersUpdatedCount?: number;
 }
 
 /**
@@ -449,6 +484,8 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
   let usersUpdated = 0;
   let usersCreated = 0;
   let usersSkipped = 0;
+  let usersSkippedDomain = 0;
+  let usersSkippedGuest = 0;
   let errorCount = 0;
   const syncedForMembership: DirectoryBatchSyncCounts["syncedForMembership"] = [];
 
@@ -458,11 +495,14 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
     const result = validateDirectoryUser(raw);
     if (!result.valid) {
       usersSkipped++;
+      if (result.reason === "domain_not_eligible") usersSkippedDomain++;
+      else if (result.reason === "guest_or_service_account") usersSkippedGuest++;
       if (raw.id) excludedMicrosoftUserIds.add(raw.id);
       continue;
     }
     validatedUsers.push({ user: result.user, email: result.email });
   }
+  const usersEligible = validatedUsers.length;
 
   // One resolution cache for the WHOLE run — every user's Company/Department
   // lookup shares it, so scanning a tenant with thousands of users against a
@@ -485,15 +525,54 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
     syncedForMembership.push(...counts.syncedForMembership);
   }
 
-  // Department-membership resolution — reuses the exact same functions the
-  // login path calls (lib/services/microsoft-mapping-service.ts,
-  // lib/services/department-membership-service.ts), one user at a time,
-  // sequentially (not Promise.all) to keep DB load predictable during a
-  // potentially large batch. Uses the raw Graph `department`/`jobTitle`
-  // values captured during the upsert above — User has no persisted scalar
-  // column for the raw Entra department string (only the resolved
-  // Department relation), so there is nothing to re-query here.
+  // Department-membership resolution, one user at a time, sequentially (not
+  // Promise.all) to keep DB load predictable during a potentially large
+  // batch — each user's primary + secondary resolution runs as its own
+  // bounded operation(s), never a single giant shared transaction (see this
+  // file's own header comment on the production incident that rule exists
+  // to prevent).
+  //
+  // Step 1 — PRIMARY: the multi-company Company/Department placement
+  // resolved during the upsert above (organization-company-department-resolver.ts,
+  // `synced.resolvedDepartmentId`) becomes this user's primary organizational
+  // department via setPrimaryDepartmentMembership — the single canonical
+  // write path for User.departmentId + the active primary DepartmentMembership
+  // together (see the User/Department/Member canonical-membership
+  // architecture). This is what used to write User.departmentId directly in
+  // upsertOneDirectoryUser above WITHOUT ever creating a matching
+  // membership — the real bug this closes. DepartmentRole.REQUESTER matches
+  // the existing auto-create default elsewhere in this codebase
+  // (microsoft-department-autocreate-service.ts) — Microsoft sync never
+  // does role mapping (see this file's own role-protection rules below),
+  // this is just the least-privileged starting DepartmentRole for a
+  // membership that exists purely to reflect organizational placement.
+  // deactivateObsoleteMicrosoftPrimary: true — an organizational move
+  // detected by Microsoft sync must not leave a stale Microsoft-granted
+  // primary department access behind (a MANUAL primary is never touched
+  // regardless — setPrimaryDepartmentMembership's own protection).
+  //
+  // Step 2 — SECONDARY: reuses the exact same MicrosoftDepartmentMapping-
+  // based functions the login path calls (lib/services/microsoft-mapping-service.ts,
+  // lib/services/department-membership-service.ts) for any OTHER explicit
+  // admin-configured mapping (group/app-role/job-title) — completely
+  // independent of the primary placement above, and never touches MANUAL
+  // memberships (syncDepartmentMemberships's own existing protection).
   for (const synced of syncedForMembership) {
+    if (synced.resolvedDepartmentId) {
+      try {
+        await setPrimaryDepartmentMembership(synced.dbUserId, synced.resolvedDepartmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
+          role: DepartmentRole.REQUESTER,
+          deactivateObsoleteMicrosoftPrimary: true,
+        });
+      } catch (err) {
+        errorCount++;
+        console.warn("[organization-directory-sync] Failed to set primary department membership", {
+          dbUserId: synced.dbUserId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     try {
       const claims: MicrosoftIdentityClaims = {
         oid: synced.microsoftUserId,
@@ -529,5 +608,10 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
     usersSkipped,
     errorCount,
     rawUsers,
+    usersEligible,
+    usersSkippedDomain,
+    usersSkippedGuest,
+    usersCreatedCount: usersCreated,
+    usersUpdatedCount: usersUpdated,
   };
 }

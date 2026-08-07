@@ -1,29 +1,35 @@
 /**
  * Add/Edit User (app/api/admin/users/route.ts POST, [id]/route.ts PATCH):
- * selecting a Primary Department must also create/reactivate the real
- * DepartmentMembership, not just the legacy User.departmentId pointer.
- * Exercises the exact building blocks those routes call
- * (ensurePrimaryDepartmentMembership, translateGlobalRoleToDepartmentRole,
- * canAssignUserToDepartment) plus the same User.departmentId write, mirroring
+ * selecting a Primary Department must atomically create/reactivate the real
+ * PRIMARY DepartmentMembership AND mirror User.departmentId — never two
+ * separate, potentially-diverging writes. Exercises the exact canonical
+ * function those routes now call (setPrimaryDepartmentMembership), mirroring
  * route behavior end-to-end without spinning up an HTTP server (the
  * established pattern for every test script in this codebase).
  *
  * Tests:
- *  1. Create with a department: User.departmentId set, active membership
- *     created, source MANUAL, role translated from the global role.
+ *  1. Create with a department: User.departmentId set, active PRIMARY
+ *     membership created, source MANUAL, role translated from the global role.
  *  2. Create without a department: User.departmentId null, no membership.
- *  3. Edit department None -> IT: User.departmentId set, membership created.
- *  4. Edit department IT -> Sales: Sales membership created, IT membership untouched.
- *  5. Edit department -> None: User.departmentId cleared, no membership revoked.
- *  6. Inactive membership reactivated: no duplicate row, isActive true after.
+ *  3. Edit department None -> IT: User.departmentId set, primary membership created.
+ *  4. Edit department IT -> Sales: Sales membership becomes primary; IT
+ *     membership is DEMOTED (isPrimary:false) but stays active (a MANUAL
+ *     admin primary-change never revokes the old department's access).
+ *  5. Edit department -> None: User.departmentId cleared (the route's
+ *     separate "clearing" path, untouched by this phase), no membership revoked.
+ *  6. Inactive membership reactivated by a primary switch back: no duplicate
+ *     row, isActive true, isPrimary true after.
  *  7. Existing active MICROSOFT_DEPARTMENT membership, same department, same
- *     translated role: source/role left untouched (not silently downgraded to MANUAL).
+ *     translated role, now targeted by a MANUAL admin primary-set call:
+ *     role/source left untouched (not silently downgraded), but isPrimary
+ *     still gets set/confirmed true and User.departmentId still mirrors it.
  *  7b. Same case, but the translated role actually differs: role updates AND
  *      source becomes MANUAL (mirrors the existing "manual override" rule).
  *  8. canAssignUserToDepartment: denied without department.user.assign or
  *     user.manage; allowed with either.
  *  9. Post-edit DB state reflects the new department without any manual
  *     department-page action (departmentMemberships include shows it).
+ *  10. Never more than one active isPrimary membership after any switch.
  *
  * Usage: npx tsx scripts/test-user-department-membership-sync.ts
  * Requires a reachable DATABASE_URL AND the
@@ -33,7 +39,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { AuthProvider, DepartmentRole, MembershipSource, Role } from "@prisma/client";
-import { ensurePrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
+import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
 import { canAssignUserToDepartment } from "@/lib/permissions";
 
@@ -104,17 +110,19 @@ async function main() {
     // ── Test 1: create with a department ──────────────────────────────
     console.log("\nTesting Add User WITH a department...\n");
     const user1 = await prisma.user.create({
-      data: { email: `test-usersync-1-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.CREDENTIALS, role: Role.USER, departmentId: deptIT.id },
+      data: { email: `test-usersync-1-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.CREDENTIALS, role: Role.USER },
     });
     createdUserIds.push(user1.id);
     const desiredRole1 = translateGlobalRoleToDepartmentRole(Role.USER);
-    const membership1 = await ensurePrimaryDepartmentMembership(user1.id, deptIT.id, desiredRole1);
-    membershipIds.push(membership1.id);
+    const result1 = await setPrimaryDepartmentMembership(user1.id, deptIT.id, MembershipSource.MANUAL, { role: desiredRole1 });
+    membershipIds.push(result1.primaryMembership.id);
 
     check("User.departmentId set", (await prisma.user.findUnique({ where: { id: user1.id } }))?.departmentId === deptIT.id);
-    check("Membership created active", membership1.isActive === true);
-    check("Membership source is MANUAL", membership1.source === MembershipSource.MANUAL);
-    check("Membership role translated from global role (USER -> REQUESTER)", membership1.role === DepartmentRole.REQUESTER);
+    check("Membership created active", result1.primaryMembership.isActive === true);
+    check("Membership isPrimary true", result1.primaryMembership.isPrimary === true);
+    check("Membership source is MANUAL", result1.primaryMembership.source === MembershipSource.MANUAL);
+    check("Membership role translated from global role (USER -> REQUESTER)", result1.primaryMembership.role === DepartmentRole.REQUESTER);
+    check("Outcome is 'switched' (brand-new primary)", result1.outcome === "switched");
 
     // ── Test 2: create without a department ───────────────────────────
     console.log("\nTesting Add User WITHOUT a department...\n");
@@ -128,59 +136,66 @@ async function main() {
 
     // ── Test 3: edit department None -> IT ────────────────────────────
     console.log("\nTesting Edit User department None -> IT...\n");
-    await prisma.user.update({ where: { id: user2.id }, data: { departmentId: deptIT.id } });
-    const membership3 = await ensurePrimaryDepartmentMembership(user2.id, deptIT.id, translateGlobalRoleToDepartmentRole(Role.USER));
-    membershipIds.push(membership3.id);
+    const result3 = await setPrimaryDepartmentMembership(user2.id, deptIT.id, MembershipSource.MANUAL, { role: translateGlobalRoleToDepartmentRole(Role.USER) });
+    membershipIds.push(result3.primaryMembership.id);
     check("User.departmentId set to IT", (await prisma.user.findUnique({ where: { id: user2.id } }))?.departmentId === deptIT.id);
-    check("IT membership created active", membership3.isActive === true);
+    check("IT membership created active + primary", result3.primaryMembership.isActive === true && result3.primaryMembership.isPrimary === true);
 
-    // ── Test 4: edit department IT -> Sales, old membership untouched ─
-    console.log("\nTesting Edit User department IT -> Sales (old membership preserved)...\n");
-    await prisma.user.update({ where: { id: user2.id }, data: { departmentId: deptSales.id } });
-    const membership4 = await ensurePrimaryDepartmentMembership(user2.id, deptSales.id, translateGlobalRoleToDepartmentRole(Role.USER));
-    membershipIds.push(membership4.id);
+    // ── Test 4: edit department IT -> Sales, old membership DEMOTED not removed ─
+    console.log("\nTesting Edit User department IT -> Sales (old membership demoted, not removed)...\n");
+    const result4 = await setPrimaryDepartmentMembership(user2.id, deptSales.id, MembershipSource.MANUAL, { role: translateGlobalRoleToDepartmentRole(Role.USER) });
+    membershipIds.push(result4.primaryMembership.id);
     check("User.departmentId set to Sales", (await prisma.user.findUnique({ where: { id: user2.id } }))?.departmentId === deptSales.id);
-    check("Sales membership created active", membership4.isActive === true);
+    check("Sales membership created active + primary", result4.primaryMembership.isActive === true && result4.primaryMembership.isPrimary === true);
+    check("Outcome is 'switched'", result4.outcome === "switched");
+    check("previousPrimaryDepartmentId reported as IT", result4.previousPrimaryDepartmentId === deptIT.id);
     const itMembershipAfterMove = await prisma.departmentMembership.findUnique({
       where: { userId_departmentId: { userId: user2.id, departmentId: deptIT.id } },
     });
-    check("IT membership still exists and still active (not revoked by the move)", itMembershipAfterMove !== null && itMembershipAfterMove.isActive === true);
+    check("IT membership still exists and still ACTIVE (a MANUAL admin primary-change never revokes old access)", itMembershipAfterMove !== null && itMembershipAfterMove.isActive === true);
+    check("IT membership is no longer primary (demoted to secondary)", itMembershipAfterMove?.isPrimary === false);
 
     // ── Test 5: edit department -> None, memberships not revoked ──────
+    // This is the route's separate "clearing" path (setPrimaryDepartmentMembership
+    // has no null-department concept — clearing never touches memberships,
+    // matching the route's own documented behavior, unchanged by this phase).
     console.log("\nTesting Edit User department -> None (no revoke)...\n");
     await prisma.user.update({ where: { id: user2.id }, data: { departmentId: null } });
     check("User.departmentId cleared", (await prisma.user.findUnique({ where: { id: user2.id } }))?.departmentId === null);
     const activeMembershipsAfterClear = await prisma.departmentMembership.count({ where: { userId: user2.id, isActive: true } });
     check("Existing memberships (IT + Sales) both still active — none revoked", activeMembershipsAfterClear === 2);
 
-    // ── Test 6: inactive membership reactivated, no duplicate ─────────
-    console.log("\nTesting inactive membership reactivation (no duplicate)...\n");
-    await prisma.departmentMembership.update({ where: { id: membership1.id }, data: { isActive: false } });
-    const reactivated = await ensurePrimaryDepartmentMembership(user1.id, deptIT.id, translateGlobalRoleToDepartmentRole(Role.USER));
-    check("Reactivated row is the SAME row (no duplicate)", reactivated.id === membership1.id);
-    check("isActive true after reactivation", reactivated.isActive === true);
+    // ── Test 6: inactive membership reactivated via primary switch back ─────
+    console.log("\nTesting inactive membership reactivation via primary switch (no duplicate)...\n");
+    await prisma.departmentMembership.update({ where: { id: result1.primaryMembership.id }, data: { isActive: false, isPrimary: false } });
+    const result6 = await setPrimaryDepartmentMembership(user1.id, deptIT.id, MembershipSource.MANUAL, { role: translateGlobalRoleToDepartmentRole(Role.USER) });
+    check("Reactivated row is the SAME row (no duplicate)", result6.primaryMembership.id === result1.primaryMembership.id);
+    check("isActive true after reactivation", result6.primaryMembership.isActive === true);
+    check("isPrimary true after reactivation", result6.primaryMembership.isPrimary === true);
     const countForUser1InIT = await prisma.departmentMembership.count({ where: { userId: user1.id, departmentId: deptIT.id } });
     check("Exactly one membership row for user1/deptIT", countForUser1InIT === 1);
 
-    // ── Test 7: Microsoft-sourced membership, same dept, same role -> untouched ──
-    console.log("\nTesting Microsoft-sourced membership preservation...\n");
+    // ── Test 7: Microsoft-sourced membership, same dept, MANUAL primary-set, same role -> role/source untouched ──
+    console.log("\nTesting Microsoft-sourced membership preservation under a MANUAL primary-set call...\n");
     const msUser = await prisma.user.create({
-      data: { email: `test-usersync-ms-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.MICROSOFT, role: Role.IT_AGENT, departmentId: deptIT.id },
+      data: { email: `test-usersync-ms-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.MICROSOFT, role: Role.IT_AGENT },
     });
     createdUserIds.push(msUser.id);
     const msMembership = await prisma.departmentMembership.create({
-      data: { userId: msUser.id, departmentId: deptIT.id, role: DepartmentRole.AGENT_ASSIGNEE, source: MembershipSource.MICROSOFT_DEPARTMENT, isActive: true },
+      data: { userId: msUser.id, departmentId: deptIT.id, role: DepartmentRole.AGENT_ASSIGNEE, source: MembershipSource.MICROSOFT_DEPARTMENT, isActive: true, isPrimary: true },
     });
     membershipIds.push(msMembership.id);
+    await prisma.user.update({ where: { id: msUser.id }, data: { departmentId: deptIT.id } });
 
-    const untouched = await ensurePrimaryDepartmentMembership(msUser.id, deptIT.id, translateGlobalRoleToDepartmentRole(Role.IT_AGENT));
-    check("Same translated role -> source stays MICROSOFT_DEPARTMENT (not silently downgraded)", untouched.source === MembershipSource.MICROSOFT_DEPARTMENT);
-    check("updatedAt unchanged (truly a no-op, not just same source)", untouched.updatedAt.getTime() === msMembership.updatedAt.getTime());
+    const untouched = await setPrimaryDepartmentMembership(msUser.id, deptIT.id, MembershipSource.MANUAL, { role: translateGlobalRoleToDepartmentRole(Role.IT_AGENT) });
+    check("Same translated role -> source stays MICROSOFT_DEPARTMENT (not silently downgraded)", untouched.primaryMembership.source === MembershipSource.MICROSOFT_DEPARTMENT);
+    check("isPrimary confirmed true", untouched.primaryMembership.isPrimary === true);
+    check("Outcome 'unchanged' (already fully consistent)", untouched.outcome === "unchanged");
 
-    console.log("\nTesting Microsoft-sourced membership WITH an actual role change...\n");
-    const roleChanged = await ensurePrimaryDepartmentMembership(msUser.id, deptIT.id, DepartmentRole.DEPARTMENT_MANAGER);
-    check("Role updated to the new desired role", roleChanged.role === DepartmentRole.DEPARTMENT_MANAGER);
-    check("Source becomes MANUAL once the role actually changes", roleChanged.source === MembershipSource.MANUAL);
+    console.log("\nTesting Microsoft-sourced membership WITH an actual role change (MANUAL admin call)...\n");
+    const roleChanged = await setPrimaryDepartmentMembership(msUser.id, deptIT.id, MembershipSource.MANUAL, { role: DepartmentRole.DEPARTMENT_MANAGER });
+    check("Role updated to the new desired role", roleChanged.primaryMembership.role === DepartmentRole.DEPARTMENT_MANAGER);
+    check("Source becomes MANUAL once the role actually changes", roleChanged.primaryMembership.source === MembershipSource.MANUAL);
 
     // ── Test 8: permission gate ────────────────────────────────────────
     console.log("\nTesting canAssignUserToDepartment...\n");
@@ -218,6 +233,13 @@ async function main() {
       "user2's active memberships include Sales without any department-page action",
       finalUser?.departmentMemberships.some((m) => m.departmentId === deptSales!.id) === true
     );
+
+    // ── Test 10: never more than one active isPrimary membership ──────
+    console.log("\nTesting at most one active primary membership across all touched users...\n");
+    for (const uid of [user1.id, msUser.id, managerUser.id]) {
+      const primaries = await prisma.departmentMembership.count({ where: { userId: uid, isActive: true, isPrimary: true } });
+      check(`User ${uid} has at most one active primary membership (found ${primaries})`, primaries <= 1);
+    }
   } finally {
     const cleanupSteps: Array<[string, () => Promise<unknown>]> = [
       ["departmentMemberships", () => prisma.departmentMembership.deleteMany({ where: { id: { in: membershipIds } } })],

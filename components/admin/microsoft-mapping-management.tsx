@@ -29,7 +29,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Loader2, Trash2, Pencil, RefreshCw } from "lucide-react";
+import { Plus, Loader2, Trash2, Pencil, RefreshCw, Users } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import { formatDateTime } from "@/lib/utils";
 import {
   GLOBAL_ROLE_LABELS,
@@ -76,11 +77,33 @@ interface DirectoryCache {
   lastSyncedAt: string | null;
 }
 
+interface JobTitleDiscoveryMapping {
+  id: string;
+  departmentId: string;
+  departmentName: string;
+  role: Role;
+  departmentRole: DepartmentRole;
+  isActive: boolean;
+}
+
+interface JobTitleDiscoveryRow {
+  id: string;
+  value: string;
+  userCount: number;
+  isActive: boolean;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  configured: boolean;
+  mapping: JobTitleDiscoveryMapping | null;
+}
+
 interface MicrosoftMappingManagementProps {
   mappings: Mapping[];
   departments: DepartmentOption[];
   departmentDirectory: DirectoryCache;
   jobTitleDirectory: DirectoryCache;
+  jobTitleDiscoveryDomain: string;
+  jobTitleDiscoveryRows: JobTitleDiscoveryRow[];
 }
 
 // Source types with a real Graph-backed dropdown today — everything else
@@ -96,6 +119,8 @@ export function MicrosoftMappingManagement({
   departments,
   departmentDirectory: initialDepartmentDirectory,
   jobTitleDirectory: initialJobTitleDirectory,
+  jobTitleDiscoveryDomain,
+  jobTitleDiscoveryRows: initialJobTitleDiscoveryRows,
 }: MicrosoftMappingManagementProps) {
   const [mappings, setMappings] = useState(initialMappings);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -103,6 +128,9 @@ export function MicrosoftMappingManagement({
   const [departmentDirectory, setDepartmentDirectory] = useState(initialDepartmentDirectory);
   const [jobTitleDirectory, setJobTitleDirectory] = useState(initialJobTitleDirectory);
   const [syncing, setSyncing] = useState(false);
+
+  const [jobTitleDiscoveryRows, setJobTitleDiscoveryRows] = useState(initialJobTitleDiscoveryRows);
+  const [jobTitleSyncing, setJobTitleSyncing] = useState(false);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingMapping, setEditingMapping] = useState<Mapping | null>(null);
@@ -201,6 +229,52 @@ export function MicrosoftMappingManagement({
     } finally {
       setSyncing(false);
     }
+  };
+
+  const refreshJobTitleDiscovery = async () => {
+    const res = await fetch("/api/admin/microsoft-directory/job-titles");
+    if (res.ok) {
+      const data = await res.json();
+      setJobTitleDiscoveryRows(data.rows ?? []);
+    }
+  };
+
+  const handleJobTitleSync = async () => {
+    setJobTitleSyncing(true);
+    try {
+      const res = await fetch("/api/admin/microsoft-directory/job-titles/sync", { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error ?? "Sync failed");
+      }
+      const summary = await res.json();
+      await refreshJobTitleDiscovery();
+      // Also refresh the mapping-form dropdown cache — the same Graph scan
+      // just refreshed it too.
+      const listRes = await fetch("/api/admin/microsoft-directory/values");
+      if (listRes.ok) {
+        const data = await listRes.json();
+        setDepartmentDirectory(data.departments ?? { values: [], lastSyncedAt: null });
+        setJobTitleDirectory(data.jobTitles ?? { values: [], lastSyncedAt: null });
+      }
+      const extra = summary.otherDomainsObserved?.length
+        ? ` (other domains observed in the tenant, not processed: ${summary.otherDomainsObserved.join(", ")})`
+        : "";
+      toast.success(
+        `Job titles synced for @${summary.domain}: ${summary.discovered} discovered, ${summary.added} new, ${summary.staled} no longer seen${extra}`
+      );
+    } catch (error: any) {
+      toast.error(error.message ?? "Failed to sync Microsoft job titles");
+    } finally {
+      setJobTitleSyncing(false);
+    }
+  };
+
+  const openCreateFromJobTitle = (value: string) => {
+    resetForm();
+    setSourceType(MicrosoftMappingSourceType.PROFILE_JOB_TITLE);
+    setValue(value);
+    setDialogOpen(true);
   };
 
   const handleSave = async () => {
@@ -363,6 +437,82 @@ export function MicrosoftMappingManagement({
             )}
           </TableBody>
         </Table>
+      </div>
+
+      <div className="space-y-3 rounded-lg border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-sm font-semibold">Job Titles — Auto-Discovery</h2>
+            <p className="text-xs text-muted-foreground">
+              Distinct <code className="bg-muted px-1 rounded">jobTitle</code> values seen among real{" "}
+              <code className="bg-muted px-1 rounded">@{jobTitleDiscoveryDomain}</code> users in Microsoft/Entra —
+              other domains/guest accounts are never included. Configure a mapping for any title below to grant it a
+              department and role automatically on login/sync.
+            </p>
+          </div>
+          <Button size="sm" variant="outline" onClick={handleJobTitleSync} disabled={jobTitleSyncing}>
+            {jobTitleSyncing ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
+            Sync Microsoft Job Titles
+          </Button>
+        </div>
+
+        <div className="rounded-md border overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow className="bg-muted/50">
+                <TableHead>Job Title</TableHead>
+                <TableHead className="w-24">Users</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Last Seen</TableHead>
+                <TableHead className="w-32"></TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {jobTitleDiscoveryRows.map((row) => (
+                <TableRow key={row.id} className={!row.isActive ? "opacity-60" : undefined}>
+                  <TableCell>
+                    <code className="text-xs bg-muted px-1.5 py-0.5 rounded">{row.value}</code>
+                    {!row.isActive && <span className="ml-2 text-[11px] text-muted-foreground">not seen in last sync</span>}
+                  </TableCell>
+                  <TableCell>
+                    <span className="inline-flex items-center gap-1 text-sm text-muted-foreground">
+                      <Users className="h-3.5 w-3.5" />
+                      {row.userCount}
+                    </span>
+                  </TableCell>
+                  <TableCell>
+                    {row.configured && row.mapping ? (
+                      <Badge className="border-green-200 bg-green-50 text-green-700" variant="outline">
+                        Configured — {row.mapping.departmentName} ({GLOBAL_ROLE_LABELS[row.mapping.role]})
+                      </Badge>
+                    ) : (
+                      <Badge className="border-amber-200 bg-amber-50 text-amber-700" variant="outline">
+                        Not configured
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{formatDateTime(row.lastSeenAt)}</TableCell>
+                  <TableCell>
+                    {!row.configured && (
+                      <Button size="sm" variant="ghost" onClick={() => openCreateFromJobTitle(row.value)}>
+                        <Plus className="h-3.5 w-3.5 mr-1" />
+                        Map
+                      </Button>
+                    )}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {jobTitleDiscoveryRows.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-8">
+                    No job titles discovered yet — click &quot;Sync Microsoft Job Titles&quot; above, or they&apos;ll
+                    appear automatically as users log in.
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
       </div>
 
       <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>

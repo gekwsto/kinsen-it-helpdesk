@@ -54,6 +54,10 @@ export interface MicrosoftIdentityClaims {
   department?: string | null;
   /** Microsoft Graph `user.jobTitle` — fetched via GET /me during login sync, same as department. */
   jobTitle?: string | null;
+  /** Microsoft Graph `user.companyName` — FIND-003: same multi-company organization-placement signal the full Directory Sync already uses (organization-company-department-resolver.ts), now also carried through the login path. */
+  companyName?: string | null;
+  /** Microsoft Graph `user.userType` ("Member"/"Guest") — FIND-003: organization-sync eligibility (organization-directory-eligibility-service.ts) needs this at login too, not just full sync. */
+  userType?: string | null;
   /** Entra group display names/ids — requires a groups claim/consent, not configured today. */
   groups?: string[];
   /** Entra app role values assigned to the app registration — not configured today. */

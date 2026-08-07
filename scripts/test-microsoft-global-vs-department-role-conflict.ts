@@ -172,11 +172,24 @@ async function main() {
     check("Dept B membership is soft-revoked (isActive: false), not deleted", membershipBAfterDisable?.isActive === false);
     check("Dept A membership is completely untouched by M2 being disabled (still AGENT_ASSIGNEE, still active)", membershipAAfterDisable?.role === DepartmentRole.AGENT_ASSIGNEE && membershipAAfterDisable?.isActive === true);
   } finally {
+    // FIND-003 (docs/roadmap-handoff-register.md): syncMicrosoftUserDepartment
+    // now ALSO resolves a PRIMARY-placement Department via
+    // organization-company-department-resolver.ts for every eligible login,
+    // independent of MicrosoftDepartmentMapping — DEPT_A_VALUE (a raw Graph
+    // `department` string, not a real Department name) gets its own
+    // resolver-created orphan (companyId: null) row this way, distinct from
+    // deptA/deptB above. Swept up by RUN_ID-tagged name, same pattern as
+    // scripts/test-microsoft-first-login-sync.ts.
+    const resolvedDepts = await prisma.department.findMany({ where: { companyId: null, name: { contains: RUN_ID.toString() } }, select: { id: true } });
+    const resolvedDeptIds = resolvedDepts.map((d) => d.id);
+
     const cleanupSteps: Array<[string, () => Promise<unknown>]> = [
       ["departmentMembership", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: testUserIds } } })],
       ["user", () => prisma.user.deleteMany({ where: { id: { in: testUserIds } } })],
       ["microsoftDepartmentMapping", () => (mappingIds.length > 0 ? prisma.microsoftDepartmentMapping.deleteMany({ where: { id: { in: mappingIds } } }) : Promise.resolve())],
-      ["department", () => prisma.department.deleteMany({ where: { id: { in: [deptA?.id, deptB?.id].filter((x): x is string => !!x) } } })],
+      ["resolved-department priorities", () => (resolvedDeptIds.length > 0 ? prisma.ticketPriority.deleteMany({ where: { departmentId: { in: resolvedDeptIds } } }) : Promise.resolve())],
+      ["resolved-department statuses", () => (resolvedDeptIds.length > 0 ? prisma.ticketStatus.deleteMany({ where: { departmentId: { in: resolvedDeptIds } } }) : Promise.resolve())],
+      ["department", () => prisma.department.deleteMany({ where: { id: { in: [deptA?.id, deptB?.id, ...resolvedDeptIds].filter((x): x is string => !!x) } } })],
     ];
     for (const [label, step] of cleanupSteps) {
       try {

@@ -115,8 +115,12 @@ async function main() {
     {
       id: "test-oid-lamprini",
       displayName: "Lamprini Faitaki",
+      givenName: "Lamprini",
+      surname: "Faitaki",
       mail: "lamprini.faitaki@kinsen.gr",
       userPrincipalName: "lamprini.faitaki@kinsen.gr",
+      userType: "Member",
+      companyName: "Kinsen",
       department: "Systems Operations",
       jobTitle: "IT Operations Assistant",
     }
@@ -137,8 +141,12 @@ async function main() {
     {
       id: "test-oid-3",
       displayName: null,
+      givenName: null,
+      surname: null,
       mail: null,
       userPrincipalName: null,
+      userType: null,
+      companyName: null,
       department: null,
       jobTitle: null,
     }

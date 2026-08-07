@@ -948,7 +948,7 @@ export function UserManagement({
                 )}
               </div>
 
-              {/* Primary Department — selecting one also creates/reactivates a real DepartmentMembership (see ensurePrimaryDepartmentMembership) */}
+              {/* Primary Department — selecting one also creates/reactivates the real primary DepartmentMembership (see setPrimaryDepartmentMembership) */}
               <div className="space-y-1.5 pt-3 border-t">
                 <Label className="text-xs">Primary Department</Label>
                 <Select value={editDept} onValueChange={setEditDept}>

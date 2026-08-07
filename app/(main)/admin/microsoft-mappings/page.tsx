@@ -3,17 +3,19 @@ import { redirect } from "next/navigation";
 import { listMappings } from "@/lib/services/microsoft-mapping-service";
 import { listDepartments } from "@/lib/services/department-service";
 import { getCachedDirectoryDepartmentValues, getCachedDirectoryJobTitleValues } from "@/lib/services/microsoft-directory-service";
+import { listJobTitleDirectoryForAdmin } from "@/lib/services/microsoft-job-title-directory-service";
 import { MicrosoftMappingManagement } from "@/components/admin/microsoft-mapping-management";
 
 export default async function MicrosoftMappingsAdminPage() {
   const session = await auth();
   if (!session?.user || session.user.role !== "ADMIN") redirect("/dashboard");
 
-  const [mappings, departments, departmentDirectory, jobTitleDirectory] = await Promise.all([
+  const [mappings, departments, departmentDirectory, jobTitleDirectory, jobTitleDirectoryDiscovery] = await Promise.all([
     listMappings(),
     listDepartments(),
     getCachedDirectoryDepartmentValues(),
     getCachedDirectoryJobTitleValues(),
+    listJobTitleDirectoryForAdmin(),
   ]);
 
   return (
@@ -36,6 +38,12 @@ export default async function MicrosoftMappingsAdminPage() {
           values: jobTitleDirectory.values,
           lastSyncedAt: jobTitleDirectory.lastSyncedAt ? jobTitleDirectory.lastSyncedAt.toISOString() : null,
         }}
+        jobTitleDiscoveryDomain={jobTitleDirectoryDiscovery.domain}
+        jobTitleDiscoveryRows={jobTitleDirectoryDiscovery.rows.map((r) => ({
+          ...r,
+          firstSeenAt: r.firstSeenAt.toISOString(),
+          lastSeenAt: r.lastSeenAt.toISOString(),
+        }))}
       />
     </div>
   );

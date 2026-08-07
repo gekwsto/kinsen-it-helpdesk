@@ -1,12 +1,17 @@
 /**
  * lib/services/organization-tree-service.ts's getDepartmentTree — real DB,
  * multi-level Company -> BusinessUnit -> Department -> SubDepartment
- * fixtures. Proves: correct active/total user counts (dual-source rule,
- * matching admin/users' own department query), inactive-department-with-
- * active-subdepartment stays visible (never orphans an active descendant),
- * departments with zero users are pruned under activeOnly, duplicate
- * department names don't collide, and DEPARTMENT_MANAGER membership drives
- * the `manager` field.
+ * fixtures. Proves: correct active/total user counts (PRIMARY-ONLY rule —
+ * User.departmentId, the canonical primary-membership mirror; a user who
+ * only has a SECONDARY active DepartmentMembership in a department is
+ * deliberately NOT counted here, since the Organization tree is an
+ * organizational-placement chart, not an access/membership view — see
+ * organization-tree-service.ts's own header comment), inactive-department-
+ * with-active-subdepartment stays visible (never orphans an active
+ * descendant), departments with zero users are pruned under activeOnly,
+ * duplicate department names don't collide, and DEPARTMENT_MANAGER
+ * membership (primary or secondary — a manager designation is a role fact,
+ * independent of primary/secondary) drives the `manager` field.
  *
  * Usage: npx tsx scripts/test-organization-tree-assembly.ts
  * Requires a reachable DATABASE_URL — skips (not fails) if unreachable.
@@ -71,21 +76,28 @@ async function main() {
 
     subActive = await prisma.subDepartment.create({ data: { name: `OrgTest Sub Active ${RUN_ID}`, departmentId: deptInactiveWithActiveChild.id, isActive: true } });
 
-    // Users: 2 active + 1 inactive in deptActive (via legacy departmentId);
-    // 1 active via DepartmentMembership only (multi-membership case).
+    // Users: 2 active + 1 inactive in deptActive via User.departmentId (the
+    // canonical primary mirror); 1 more active user with ONLY a SECONDARY
+    // active DepartmentMembership in deptActive (no User.departmentId) —
+    // deliberately NOT counted in the tree (organizational placement, not
+    // access/membership — see this file's header comment).
     const u1 = await prisma.user.create({ data: { email: `orgtest-u1-${RUN_ID}@kinsen.gr`, name: "Org Test U1", authProvider: AuthProvider.CREDENTIALS, role: Role.USER, isActive: true, departmentId: deptActive.id } });
     const u2 = await prisma.user.create({ data: { email: `orgtest-u2-${RUN_ID}@kinsen.gr`, name: "Org Test U2", authProvider: AuthProvider.CREDENTIALS, role: Role.USER, isActive: true, departmentId: deptActive.id } });
     const u3Inactive = await prisma.user.create({ data: { email: `orgtest-u3-${RUN_ID}@kinsen.gr`, name: "Org Test U3 Inactive", authProvider: AuthProvider.CREDENTIALS, role: Role.USER, isActive: false, departmentId: deptActive.id } });
     const u4ViaMembership = await prisma.user.create({ data: { email: `orgtest-u4-${RUN_ID}@kinsen.gr`, name: "Org Test U4", authProvider: AuthProvider.CREDENTIALS, role: Role.USER, isActive: true } });
     userIds.push(u1.id, u2.id, u3Inactive.id, u4ViaMembership.id);
 
-    const m4 = await prisma.departmentMembership.create({ data: { userId: u4ViaMembership.id, departmentId: deptActive.id, role: DepartmentRole.REQUESTER, source: MembershipSource.MANUAL, isActive: true } });
+    const m4 = await prisma.departmentMembership.create({ data: { userId: u4ViaMembership.id, departmentId: deptActive.id, role: DepartmentRole.REQUESTER, source: MembershipSource.MANUAL, isActive: true, isPrimary: false } });
     membershipIds.push(m4.id);
 
-    // Manager membership for deptActive.
+    // Manager: also placed via a SECONDARY membership only (no
+    // User.departmentId) — the `manager` field must still resolve (a
+    // DEPARTMENT_MANAGER designation is a role fact, independent of
+    // primary/secondary), even though this person doesn't count toward
+    // deptActive's own primary-only user counts.
     const managerUser = await prisma.user.create({ data: { email: `orgtest-mgr-${RUN_ID}@kinsen.gr`, name: "Org Test Manager", jobTitle: "Head of Ops", authProvider: AuthProvider.CREDENTIALS, role: Role.USER, isActive: true } });
     userIds.push(managerUser.id);
-    const mgrMembership = await prisma.departmentMembership.create({ data: { userId: managerUser.id, departmentId: deptActive.id, role: DepartmentRole.DEPARTMENT_MANAGER, source: MembershipSource.MANUAL, isActive: true } });
+    const mgrMembership = await prisma.departmentMembership.create({ data: { userId: managerUser.id, departmentId: deptActive.id, role: DepartmentRole.DEPARTMENT_MANAGER, source: MembershipSource.MANUAL, isActive: true, isPrimary: false } });
     membershipIds.push(mgrMembership.id);
 
     // Active user in the SubDepartment under the inactive parent Department.
@@ -95,17 +107,18 @@ async function main() {
     invalidateOrganizationTreeCache();
     const fullTree = await getDepartmentTree({ activeOnly: false });
 
-    console.log("\nCounts (dual-source: legacy departmentId OR active DepartmentMembership)...\n");
+    console.log("\nCounts (PRIMARY-ONLY: User.departmentId, never secondary-only membership)...\n");
     const activeDeptNode = findNode(fullTree, deptActive.id);
     check("deptActive found in tree", activeDeptNode !== null);
-    // u1,u2 via legacy departmentId; u3 via legacy departmentId but inactive;
-    // u4 via active DepartmentMembership; managerUser also via active
-    // DepartmentMembership (the DEPARTMENT_MANAGER row) — 5 distinct
-    // associated users total, 4 of them active (all but u3).
-    check("deptActive activeUserCount = 4 (u1, u2, u4, manager; u3 inactive excluded)", activeDeptNode?.activeUserCount === 4);
-    check("deptActive totalUserCount = 5 (u1,u2,u3,u4,manager)", activeDeptNode?.totalUserCount === 5);
-    check("deptActive manager resolved from DEPARTMENT_MANAGER membership", activeDeptNode?.manager?.id === managerUser.id);
+    // u1,u2 via User.departmentId (primary); u3 via User.departmentId but
+    // inactive. u4 and managerUser have ONLY a secondary active
+    // DepartmentMembership (no User.departmentId) — deliberately excluded
+    // from these counts.
+    check("deptActive activeUserCount = 2 (u1, u2 only — primary-placed and active)", activeDeptNode?.activeUserCount === 2);
+    check("deptActive totalUserCount = 3 (u1, u2, u3 — primary-placed, regardless of active/inactive)", activeDeptNode?.totalUserCount === 3);
+    check("deptActive manager STILL resolved from a SECONDARY DEPARTMENT_MANAGER membership (role fact, independent of primary/secondary)", activeDeptNode?.manager?.id === managerUser.id);
     check("deptActive manager jobTitle carried through", activeDeptNode?.manager?.jobTitle === "Head of Ops");
+    check("u4 (secondary-only membership, no primary placement) does NOT inflate the organizational headcount", activeDeptNode?.totalUserCount === 3);
 
     console.log("\nInactive department with an active subdepartment stays visible...\n");
     const inactiveParentNode = findNode(fullTree, deptInactiveWithActiveChild.id);
@@ -141,7 +154,7 @@ async function main() {
     check("company node exists at the root", !!companyNode);
     const buNode = companyNode?.children.find((c) => c.id === businessUnit!.id);
     check("business unit is a child of the company", !!buNode);
-    check("business unit rolls up child departments' active user counts", (buNode?.activeUserCount ?? 0) >= 4);
+    check("business unit rolls up child departments' active user counts", (buNode?.activeUserCount ?? 0) >= 2);
   } finally {
     const steps: Array<[string, () => Promise<unknown>]> = [
       ["departmentMembership", () => prisma.departmentMembership.deleteMany({ where: { id: { in: membershipIds } } })],

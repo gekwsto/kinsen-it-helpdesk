@@ -95,22 +95,35 @@ export async function getMembership(userId: string, departmentId: string): Promi
 }
 
 /**
- * Reconciles a user's DepartmentMembership rows with a freshly-resolved set
- * of memberships (from Microsoft claims, see microsoft-mapping-service).
+ * Reconciles a user's SECONDARY DepartmentMembership rows with a freshly-
+ * resolved set (from Microsoft claims, see microsoft-mapping-service) —
+ * i.e. explicit MicrosoftDepartmentMapping matches (group/app-role/job-title/
+ * profile-department), independent of the multi-company organizational
+ * PRIMARY placement, which is setPrimaryDepartmentMembership's exclusive job
+ * (see its own header comment). This function never creates, updates, or
+ * revokes an `isPrimary: true` row — primary designation is out of scope
+ * here entirely, so it can never fight with setPrimaryDepartmentMembership's
+ * own decisions about the same user (both are commonly called back-to-back
+ * for the same sync run, e.g. organization-directory-sync-service.ts,
+ * microsoft-department-sync-service.ts).
  *
  * Rules (see the login-sync edge cases in the architecture plan):
  * - A MANUAL row (admin override) is never modified or removed here — it
  *   survives regardless of what the resolved set says.
+ * - A row currently flagged isPrimary is never modified or removed here
+ *   either, regardless of source — it survives untouched, full stop.
  * - Resolved tuples are upserted by [userId, departmentId]; an existing
- *   non-MANUAL row gets its role/source updated (a "promotion" is an
- *   update, not a new row).
- * - An existing non-MANUAL, currently-active membership whose department is
- *   no longer in the resolved set is soft-revoked (isActive: false), never
- *   deleted — preserves history and anything referencing the user.
+ *   non-MANUAL, non-primary row gets its role/source updated (a
+ *   "promotion" is an update, not a new row).
+ * - An existing non-MANUAL, non-primary, currently-active membership whose
+ *   department is no longer in the resolved set is soft-revoked
+ *   (isActive: false), never deleted — preserves history and anything
+ *   referencing the user.
  * - If exactly one active membership exists afterward and none is flagged
- *   primary, it's promoted to primary. Zero or multiple active memberships
- *   are left for the workspace selector (Phase 2 UI) to resolve at request
- *   time — this function never guesses.
+ *   primary, it's promoted to primary — a fallback for callers with no
+ *   separate primary-placement signal of their own; harmless for callers
+ *   that also call setPrimaryDepartmentMembership, since that function
+ *   corrects the final primary regardless of what this fallback did.
  */
 export async function syncDepartmentMemberships(
   userId: string,
@@ -124,6 +137,7 @@ export async function syncDepartmentMemberships(
     for (const r of resolved) {
       const current = existingByDept.get(r.departmentId);
       if (current?.source === MembershipSource.MANUAL) continue; // never overwrite a manual override
+      if (current?.isPrimary) continue; // primary rows are setPrimaryDepartmentMembership's exclusive concern
 
       if (current) {
         await tx.departmentMembership.update({
@@ -137,9 +151,10 @@ export async function syncDepartmentMemberships(
       }
     }
 
-    // Soft-revoke non-MANUAL memberships whose source claim disappeared.
+    // Soft-revoke non-MANUAL, non-primary memberships whose source claim disappeared.
     for (const current of existing) {
       if (current.source === MembershipSource.MANUAL) continue;
+      if (current.isPrimary) continue; // never revoked from here — see header comment
       if (!resolvedDeptIds.has(current.departmentId) && current.isActive) {
         await tx.departmentMembership.update({
           where: { id: current.id },
@@ -190,16 +205,15 @@ export async function revokeMembership(id: string): Promise<DepartmentMembership
 }
 
 /**
- * Ensures an active DepartmentMembership exists for (userId, departmentId),
- * called when an admin sets a user's Primary/Default Department from the
- * Add/Edit User dialog (a passive side effect of an account-level edit) —
- * unlike grantManualMembership above (an explicit, deliberate membership
- * action from the department members / user-memberships UI), this must
- * NEVER clobber an already-active row's source/role unless something
- * actually needs to change, so a Microsoft-synced membership isn't silently
- * downgraded to MANUAL just by re-saving the same primary department:
- *  - no row yet -> create it, source MANUAL, role translated from the
- *    user's global role (see translateGlobalRoleToDepartmentRole).
+ * Ensures an active DepartmentMembership exists for (userId, departmentId).
+ * Pure row-level upsert — does NOT touch `isPrimary` or `User.departmentId`;
+ * see setPrimaryDepartmentMembership below for the atomic operation that
+ * manages those too. Kept as its own composable building block (accepts an
+ * optional `db` so a caller can fold it into a larger transaction) because
+ * its "never clobber an already-active row's source/role unless something
+ * actually needs to change" behavior is reused as-is by
+ * setPrimaryDepartmentMembership:
+ *  - no row yet -> create it, source MANUAL, role = desiredRole.
  *  - inactive row -> reactivate (isActive:true, source MANUAL) — reactivating
  *    is itself a deliberate decision, matching the existing "Reactivate"
  *    semantics elsewhere in this admin surface.
@@ -214,20 +228,21 @@ export async function revokeMembership(id: string): Promise<DepartmentMembership
 export async function ensurePrimaryDepartmentMembership(
   userId: string,
   departmentId: string,
-  desiredRole: DepartmentRole
+  desiredRole: DepartmentRole,
+  db: Db = prisma
 ): Promise<DepartmentMembership> {
-  const existing = await prisma.departmentMembership.findUnique({
+  const existing = await db.departmentMembership.findUnique({
     where: { userId_departmentId: { userId, departmentId } },
   });
 
   if (!existing) {
-    return prisma.departmentMembership.create({
+    return db.departmentMembership.create({
       data: { userId, departmentId, role: desiredRole, customRoleId: null, source: MembershipSource.MANUAL, isActive: true },
     });
   }
 
   if (!existing.isActive) {
-    return prisma.departmentMembership.update({
+    return db.departmentMembership.update({
       where: { id: existing.id },
       data: { isActive: true, source: MembershipSource.MANUAL, role: desiredRole, customRoleId: null },
     });
@@ -236,8 +251,164 @@ export async function ensurePrimaryDepartmentMembership(
   if (existing.customRoleId) return existing;
   if (existing.role === desiredRole) return existing;
 
-  return prisma.departmentMembership.update({
+  return db.departmentMembership.update({
     where: { id: existing.id },
     data: { role: desiredRole, source: MembershipSource.MANUAL },
+  });
+}
+
+export type SetPrimaryDepartmentMembershipOutcome = "unchanged" | "aligned" | "switched" | "blocked_manual_primary_protected";
+
+export interface SetPrimaryDepartmentMembershipOptions {
+  /** Role to apply to the target row — ignored (existing value preserved) for an existing MANUAL-source or custom-role row, same protection as ensurePrimaryDepartmentMembership. */
+  role: DepartmentRole;
+  /**
+   * Microsoft-sourced calls ONLY (organization-directory-sync-service.ts,
+   * microsoft-department-sync-service.ts): when the CURRENT primary is being
+   * replaced and its source is itself Microsoft-derived (not MANUAL), fully
+   * deactivate it (isActive:false) instead of just demoting it to a
+   * secondary membership — "Microsoft organizational placement δεν πρέπει
+   * να αφήνει πίσω παλιό Microsoft-granted department access χωρίς λόγο."
+   * Admin-driven (source: MANUAL) calls must never pass this — an explicit
+   * admin primary change should never silently revoke the old department's
+   * access; the old primary is always just demoted to isPrimary:false,
+   * isActive unchanged, for a MANUAL call. Defaults to false.
+   */
+  deactivateObsoleteMicrosoftPrimary?: boolean;
+}
+
+export interface SetPrimaryDepartmentMembershipResult {
+  outcome: SetPrimaryDepartmentMembershipOutcome;
+  /** The membership that IS (or remains) primary after this call — for "blocked_manual_primary_protected", this is the untouched, MANUAL-protected existing primary. */
+  primaryMembership: DepartmentMembership;
+  previousPrimaryDepartmentId: string | null;
+}
+
+/**
+ * THE single, atomic, canonical write path for "this user's primary/home
+ * department is now X" — the ONLY function that is allowed to write
+ * `User.departmentId` going forward (it stays on the schema as a mirror/
+ * cache of the active primary DepartmentMembership, never a second
+ * independently-writable source of truth — see the User/Department/Member
+ * architecture audit this implements).
+ *
+ * Runs as one bounded transaction per user (never a shared transaction
+ * across a batch — see organization-directory-sync-service.ts's own header
+ * comment on the real production incident that rule exists to prevent).
+ * Guarantees, on successful commit:
+ *   - at most one active `isPrimary: true` DepartmentMembership for this user,
+ *   - `User.departmentId` equals that membership's `departmentId` (or stays
+ *     whatever it already was if this call is blocked/protected — see below),
+ *   - a MANUAL secondary membership is NEVER touched by this function at all
+ *     (only the current/target primary rows are ever written here).
+ *
+ * MANUAL-primary protection: if the user's CURRENT active primary is itself
+ * source: MANUAL (an admin explicitly chose it) and this call's `source` is
+ * anything else (a Microsoft sync signal), the primary is left completely
+ * untouched and `outcome: "blocked_manual_primary_protected"` is returned —
+ * mirrors syncDepartmentMemberships's existing "MANUAL rows are never
+ * modified by sync" rule, applied to the primary designation too. A MANUAL
+ * call (an admin explicitly re-choosing) always wins over any previous
+ * MANUAL primary, same as it always did.
+ */
+export async function setPrimaryDepartmentMembership(
+  userId: string,
+  departmentId: string,
+  source: MembershipSource,
+  options: SetPrimaryDepartmentMembershipOptions
+): Promise<SetPrimaryDepartmentMembershipResult> {
+  const { role, deactivateObsoleteMicrosoftPrimary = false } = options;
+
+  return prisma.$transaction(async (tx) => {
+    const allMemberships = await tx.departmentMembership.findMany({ where: { userId } });
+    const currentPrimary = allMemberships.find((m) => m.isPrimary && m.isActive) ?? null;
+    const previousPrimaryDepartmentId = currentPrimary?.departmentId ?? null;
+
+    if (
+      currentPrimary &&
+      currentPrimary.source === MembershipSource.MANUAL &&
+      source !== MembershipSource.MANUAL &&
+      currentPrimary.departmentId !== departmentId
+    ) {
+      return {
+        outcome: "blocked_manual_primary_protected" as const,
+        primaryMembership: currentPrimary,
+        previousPrimaryDepartmentId,
+      };
+    }
+
+    const targetExisting = allMemberships.find((m) => m.departmentId === departmentId) ?? null;
+    const wasAlreadyConsistent =
+      !!targetExisting && targetExisting.isActive && targetExisting.isPrimary && previousPrimaryDepartmentId === departmentId;
+
+    // Deliberately NOT delegated to ensurePrimaryDepartmentMembership — that
+    // function hardcodes source: MANUAL on create/reactivate (correct for
+    // its own direct callers, an admin action), but this function must
+    // apply the CALLER's real `source` (MANUAL for admin routes,
+    // MICROSOFT_DEPARTMENT for sync). Same protection rules, generalized to
+    // any source:
+    //  - no row yet -> create with the caller's role/source.
+    //  - existing row already source:MANUAL, but THIS call's source isn't
+    //    MANUAL -> a Microsoft signal must never downgrade/touch an admin's
+    //    manual choice — role/source preserved, only isActive/isPrimary set.
+    //  - existing row has a custom department role (customRoleId) -> never
+    //    downgraded to a plain enum role, same as ensurePrimaryDepartmentMembership.
+    //  - existing ACTIVE row whose role already matches the desired role ->
+    //    left untouched (no silent source downgrade for a true no-op).
+    //  - otherwise (inactive row being reactivated, or an active row whose
+    //    role genuinely differs) -> role/source updated to the caller's values.
+    let targetRow: DepartmentMembership;
+    if (!targetExisting) {
+      targetRow = await tx.departmentMembership.create({
+        data: { userId, departmentId, role, source, customRoleId: null, isActive: true, isPrimary: true },
+      });
+    } else {
+      const protectManualFromNonManual = targetExisting.source === MembershipSource.MANUAL && source !== MembershipSource.MANUAL;
+      const protectCustomRole = !!targetExisting.customRoleId;
+      const roleAlreadyMatches = targetExisting.isActive && targetExisting.role === role;
+
+      if (protectManualFromNonManual || protectCustomRole || roleAlreadyMatches) {
+        targetRow =
+          targetExisting.isActive && targetExisting.isPrimary
+            ? targetExisting
+            : await tx.departmentMembership.update({ where: { id: targetExisting.id }, data: { isActive: true, isPrimary: true } });
+      } else {
+        targetRow = await tx.departmentMembership.update({
+          where: { id: targetExisting.id },
+          data: { isActive: true, isPrimary: true, role, source, customRoleId: null },
+        });
+      }
+    }
+
+    if (currentPrimary && currentPrimary.id !== targetRow.id) {
+      const oldIsManual = currentPrimary.source === MembershipSource.MANUAL;
+      const shouldDeactivate = !oldIsManual && deactivateObsoleteMicrosoftPrimary;
+      await tx.departmentMembership.update({
+        where: { id: currentPrimary.id },
+        data: shouldDeactivate ? { isPrimary: false, isActive: false } : { isPrimary: false },
+      });
+    }
+
+    // Defensive cleanup: demote any OTHER stray active isPrimary rows left
+    // over from pre-existing data drift (see the reconciliation script) so
+    // this call always leaves AT MOST one active primary, never more,
+    // regardless of what state the row set was in before this call.
+    for (const m of allMemberships) {
+      if (m.id === targetRow.id) continue;
+      if (currentPrimary && m.id === currentPrimary.id) continue; // already handled above
+      if (m.isPrimary) {
+        await tx.departmentMembership.update({ where: { id: m.id }, data: { isPrimary: false } });
+      }
+    }
+
+    await tx.user.update({ where: { id: userId }, data: { departmentId } });
+
+    const outcome: SetPrimaryDepartmentMembershipOutcome = wasAlreadyConsistent
+      ? "unchanged"
+      : previousPrimaryDepartmentId === departmentId
+        ? "aligned"
+        : "switched";
+
+    return { outcome, primaryMembership: targetRow, previousPrimaryDepartmentId };
   });
 }

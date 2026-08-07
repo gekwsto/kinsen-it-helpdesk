@@ -19,13 +19,24 @@
  *        different trigger.
  *
  *   Operation B — admin-triggered company directory discovery (this file):
- *      - Endpoint: GET /users?$select=id,department,jobTitle&$top=999, paged
+ *      - Endpoint: GET /users?$select=id,department,jobTitle,userType,mail,
+ *        userPrincipalName&$top=999, paged
  *      - Token: application (client-credentials), via getAppOnlyGraphAccessToken()
  *      - Permission: Directory.Read.All (Application, admin consent required)
- *      - Reads every user in the tenant to collect distinct department AND
- *        jobTitle values in one pass, purely to populate the admin mapping
- *        dropdowns. Never called from the login path, never called on page
- *        render or modal open — only from the admin-triggered
+ *      - Reads every user in the tenant, but only COLLECTS department/
+ *        jobTitle values from users who pass the same shared
+ *        organization-sync eligibility rule as the rest of the app (see
+ *        organization-directory-eligibility-service.ts, FIND-003 in
+ *        docs/roadmap-handoff-register.md) — a guest, service account, or
+ *        non-`@<ALLOWED_EMAIL_DOMAIN>` identity's department/job title never
+ *        pollutes the admin mapping dropdowns. This is a real fix, not
+ *        cosmetic: before this, ANY tenant user's raw text (including
+ *        another company's job titles, if this tenant is ever multi-domain)
+ *        could show up as a mapping option. Purely to populate the admin
+ *        mapping dropdowns (department/job title) and, for job titles only,
+ *        the domain-scoped MicrosoftDirectoryJobTitleValue.userCount used by
+ *        the Job Titles admin panel. Never called from the login path, never
+ *        called on page render or modal open — only from the admin-triggered
  *        POST .../values/sync route.
  *
  * Directory.Read.All must be added and admin-consented on the SAME app
@@ -40,9 +51,10 @@
  */
 import { prisma } from "@/lib/prisma";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
+import { getOrganizationDirectoryEligibility, ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
 
 const GRAPH_USERS_PAGE_URL =
-  "https://graph.microsoft.com/v1.0/users?$select=id,department,jobTitle&$top=999";
+  "https://graph.microsoft.com/v1.0/users?$select=id,department,jobTitle,userType,mail,userPrincipalName&$top=999";
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_PAGES = 200; // guards against a runaway @odata.nextLink loop; ~200k users at $top=999
 
@@ -60,9 +72,27 @@ export type DirectoryFetchFailureReason =
   // fixing configuration for this reason, not "check your connection".
   | "configuration_error";
 
+/** One distinct, eligible-domain job title value plus how many eligible users currently have it — the basis of MicrosoftDirectoryJobTitleValue.userCount. */
+export interface JobTitleCount {
+  /** First-seen raw casing/spacing (trimmed only) — used as the stored display value. */
+  value: string;
+  /** trim + collapse-internal-whitespace + lowercase — the dedup/match key. */
+  normalizedValue: string;
+  count: number;
+}
+
 export interface DirectoryFetchValues {
   departments: string[];
   jobTitles: string[];
+  jobTitleCounts: JobTitleCount[];
+  /**
+   * Distinct email domains seen on Member-type users that did NOT match
+   * `ORGANIZATION_SYNC_ALLOWED_DOMAIN` — pure visibility for an admin
+   * ("we also saw these domains in the tenant but only kinsen.gr is
+   * processed"), never used to gate or process anything. Empty when every
+   * Member account in the tenant is on the configured domain.
+   */
+  otherDomainsObserved: string[];
 }
 
 export type DirectoryFetchResult =
@@ -70,7 +100,13 @@ export type DirectoryFetchResult =
   | { ok: false; reason: DirectoryFetchFailureReason; status?: number };
 
 interface GraphUsersPage {
-  value: Array<{ department?: string | null; jobTitle?: string | null }>;
+  value: Array<{
+    department?: string | null;
+    jobTitle?: string | null;
+    userType?: string | null;
+    mail?: string | null;
+    userPrincipalName?: string | null;
+  }>;
   "@odata.nextLink"?: string;
 }
 
@@ -79,9 +115,31 @@ function isGraphUsersPage(data: unknown): data is GraphUsersPage {
 }
 
 /**
+ * trim + collapse-internal-whitespace + lowercase — the ONE normalization
+ * used everywhere a Job Title value needs a stable dedup/match key (this
+ * file's discovery/sync, microsoft-job-title-directory-service.ts's admin
+ * listing, and matched consistently against MicrosoftDepartmentMapping's
+ * existing case-insensitive PROFILE_JOB_TITLE comparison in
+ * microsoft-mapping-service.ts's findActiveMappingsForClaims). Exported so
+ * nothing re-implements a slightly different normalization.
+ */
+export function normalizeJobTitleValue(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/** Domain portion of an email-shaped string, lowercased — null if not email-shaped. */
+function extractDomain(emailLike: string): string | null {
+  const at = emailLike.lastIndexOf("@");
+  if (at < 0 || at === emailLike.length - 1) return null;
+  return emailLike.slice(at + 1).toLowerCase();
+}
+
+/**
  * Pages through the tenant's users in ONE combined scan, collecting
- * distinct, trimmed, non-empty `department` AND `jobTitle` values. Never
- * throws — every failure is a typed result.
+ * distinct, trimmed, non-empty `department` AND `jobTitle` values —
+ * FROM ELIGIBLE (`@<ALLOWED_EMAIL_DOMAIN>`, userType=Member) USERS ONLY, per
+ * this file's header comment. Never throws — every failure is a typed
+ * result.
  */
 export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetchResult> {
   let token: string;
@@ -94,6 +152,9 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
 
   const departments = new Set<string>();
   const jobTitles = new Set<string>();
+  // normalizedValue -> {value: first-seen raw casing, count}
+  const jobTitleCounts = new Map<string, JobTitleCount>();
+  const otherDomainsObserved = new Set<string>();
   let url: string | undefined = GRAPH_USERS_PAGE_URL;
   let pages = 0;
 
@@ -125,13 +186,38 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
     if (!isGraphUsersPage(data)) return { ok: false, reason: "malformed_response" };
 
     for (const user of data.value) {
+      const eligibility = getOrganizationDirectoryEligibility({
+        userType: user.userType,
+        mail: user.mail,
+        userPrincipalName: user.userPrincipalName,
+      });
+
+      if (!eligibility.eligible) {
+        // Only report OTHER domains for a real Member account that simply
+        // isn't on the configured domain — a Guest/service account (reason
+        // "not_member") tells us nothing useful about tenant domains.
+        if (eligibility.reason === "no_matching_domain") {
+          const candidate = user.mail?.trim() || user.userPrincipalName?.trim() || "";
+          const domain = candidate ? extractDomain(candidate.toLowerCase()) : null;
+          if (domain) otherDomainsObserved.add(domain);
+        }
+        continue;
+      }
+
       // .trim() only strips leading/trailing whitespace — never alters
       // internal characters/casing, so stored values still match what
       // Graph will send at login time.
       const dept = typeof user.department === "string" ? user.department.trim() : "";
       if (dept) departments.add(dept);
+
       const title = typeof user.jobTitle === "string" ? user.jobTitle.trim() : "";
-      if (title) jobTitles.add(title);
+      if (title) {
+        jobTitles.add(title);
+        const normalized = normalizeJobTitleValue(title);
+        const existing = jobTitleCounts.get(normalized);
+        if (existing) existing.count += 1;
+        else jobTitleCounts.set(normalized, { value: title, normalizedValue: normalized, count: 1 });
+      }
     }
 
     url = data["@odata.nextLink"];
@@ -142,14 +228,17 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
     values: {
       departments: Array.from(departments).sort((a, b) => a.localeCompare(b)),
       jobTitles: Array.from(jobTitles).sort((a, b) => a.localeCompare(b)),
+      jobTitleCounts: Array.from(jobTitleCounts.values()).sort((a, b) => a.value.localeCompare(b.value)),
+      otherDomainsObserved: Array.from(otherDomainsObserved).sort((a, b) => a.localeCompare(b)),
     },
   };
 }
 
-// Minimal structural shape shared by the two directory-value cache tables
-// (MicrosoftDirectoryDepartmentValue / MicrosoftDirectoryJobTitleValue —
-// byte-for-byte identical schema) so the sync logic below is written once,
-// not duplicated per table. Both Prisma delegates satisfy this shape.
+// Structural shape for the simple, `value`-only-unique directory-value
+// cache tables. Only MicrosoftDirectoryDepartmentValue uses this generic
+// path now — MicrosoftDirectoryJobTitleValue outgrew it (domain/
+// normalizedValue/userCount, see the model's schema comment) and has its
+// own dedicated syncJobTitleDirectoryTable below.
 interface DirectoryValueDelegate {
   findMany(args: { select: { value: true; isActive: true } }): Promise<Array<{ value: string; isActive: boolean }>>;
   upsert(args: {
@@ -202,6 +291,50 @@ async function syncDirectoryValueTable(delegate: DirectoryValueDelegate, seen: S
   return { added, updated, staled: staleValues.length };
 }
 
+/**
+ * Job-title-table-specific counterpart to syncDirectoryValueTable above —
+ * diverges from the shared generic helper because this table alone carries
+ * `domain`/`normalizedValue`/`userCount` (see the model's own schema
+ * comment). Upserts by the (domain, normalizedValue) compound key — NEVER
+ * by `value` — so two different casings of the same title never create two
+ * rows, and a legacy Operation-A-created row with a different casing never
+ * collides with the compound unique index. `value` (display casing) is only
+ * ever set on CREATE — an update never rewrites it, so the cache's display
+ * casing stays stable across syncs even if a later scan sees a different
+ * casing from a different user.
+ */
+async function syncJobTitleDirectoryTable(domain: string, seen: JobTitleCount[]): Promise<TableSyncSummary> {
+  const existing = await prisma.microsoftDirectoryJobTitleValue.findMany({
+    where: { domain },
+    select: { normalizedValue: true, isActive: true },
+  });
+  const existingByNormalized = new Map(existing.map((row) => [row.normalizedValue, row.isActive]));
+
+  let added = 0;
+  let updated = 0;
+  for (const { value, normalizedValue, count } of seen) {
+    const priorIsActive = existingByNormalized.get(normalizedValue);
+    await prisma.microsoftDirectoryJobTitleValue.upsert({
+      where: { domain_normalizedValue: { domain, normalizedValue } },
+      create: { value, domain, normalizedValue, userCount: count, firstSeenAt: new Date(), lastSeenAt: new Date(), isActive: true },
+      update: { userCount: count, lastSeenAt: new Date(), isActive: true },
+    });
+    if (priorIsActive === undefined) added++;
+    else if (!priorIsActive) updated++;
+  }
+
+  const seenNormalized = new Set(seen.map((s) => s.normalizedValue));
+  const staleNormalized = existing.filter((row) => row.isActive && !seenNormalized.has(row.normalizedValue)).map((row) => row.normalizedValue);
+  if (staleNormalized.length > 0) {
+    await prisma.microsoftDirectoryJobTitleValue.updateMany({
+      where: { domain, normalizedValue: { in: staleNormalized } },
+      data: { isActive: false, userCount: 0 },
+    });
+  }
+
+  return { added, updated, staled: staleNormalized.length };
+}
+
 export interface DirectorySyncSummary {
   discoveredDepartments: number;
   addedDepartments: number;
@@ -211,6 +344,8 @@ export interface DirectorySyncSummary {
   addedJobTitles: number;
   updatedJobTitles: number;
   staledJobTitles: number;
+  /** Non-configured-domain Member accounts observed this run — visibility only, see DirectoryFetchValues.otherDomainsObserved. */
+  otherDomainsObserved: string[];
 }
 
 export type DirectorySyncResult =
@@ -219,7 +354,8 @@ export type DirectorySyncResult =
 
 /**
  * Admin-triggered only. Fetches the current distinct department + jobTitle
- * values from Graph in one combined scan and upserts both cache tables.
+ * values from Graph in one combined scan (eligible `@<ALLOWED_EMAIL_DOMAIN>`
+ * Member users only, see this file's header) and upserts both cache tables.
  */
 export async function syncMicrosoftDirectoryValues(): Promise<DirectorySyncResult> {
   const result = await fetchAllGraphUserDirectoryValues();
@@ -229,16 +365,16 @@ export async function syncMicrosoftDirectoryValues(): Promise<DirectorySyncResul
   }
 
   const seenDepartments = new Set(result.values.departments);
-  const seenJobTitles = new Set(result.values.jobTitles);
 
   const deptSummary = await syncDirectoryValueTable(prisma.microsoftDirectoryDepartmentValue, seenDepartments);
-  const titleSummary = await syncDirectoryValueTable(prisma.microsoftDirectoryJobTitleValue, seenJobTitles);
+  const titleSummary = await syncJobTitleDirectoryTable(ORGANIZATION_SYNC_ALLOWED_DOMAIN, result.values.jobTitleCounts);
 
   console.log("[microsoft-directory] Directory sync completed", {
     discoveredDepartments: seenDepartments.size,
     ...deptSummary,
-    discoveredJobTitles: seenJobTitles.size,
+    discoveredJobTitles: result.values.jobTitleCounts.length,
     ...titleSummary,
+    otherDomainsObserved: result.values.otherDomainsObserved,
   });
 
   return {
@@ -247,10 +383,11 @@ export async function syncMicrosoftDirectoryValues(): Promise<DirectorySyncResul
     addedDepartments: deptSummary.added,
     updatedDepartments: deptSummary.updated,
     staledDepartments: deptSummary.staled,
-    discoveredJobTitles: seenJobTitles.size,
+    discoveredJobTitles: result.values.jobTitleCounts.length,
     addedJobTitles: titleSummary.added,
     updatedJobTitles: titleSummary.updated,
     staledJobTitles: titleSummary.staled,
+    otherDomainsObserved: result.values.otherDomainsObserved,
   };
 }
 
@@ -286,7 +423,9 @@ export async function getCachedDirectoryJobTitleValues(): Promise<{
  * zero extra Graph calls, zero extra permissions (uses data already fetched
  * via delegated User.Read). This is how the dropdown cache can fill in over
  * time even on a tenant that never grants Directory.Read.All. Never writes
- * an empty value; trims before storing/comparing.
+ * an empty value; trims before storing/comparing. Never throws — a cache
+ * fill must never break a real Microsoft sign-in (see the try/catch in the
+ * jobTitle branch below, added specifically for this reason).
  */
 export async function upsertDiscoveredMicrosoftDirectoryValue(
   kind: "department" | "jobTitle",
@@ -295,12 +434,44 @@ export async function upsertDiscoveredMicrosoftDirectoryValue(
   const trimmed = value.trim();
   if (!trimmed) return;
 
-  const delegate: DirectoryValueDelegate =
-    kind === "department" ? prisma.microsoftDirectoryDepartmentValue : prisma.microsoftDirectoryJobTitleValue;
+  if (kind === "department") {
+    await prisma.microsoftDirectoryDepartmentValue.upsert({
+      where: { value: trimmed },
+      create: { value: trimmed, firstSeenAt: new Date(), lastSeenAt: new Date(), isActive: true },
+      update: { lastSeenAt: new Date(), isActive: true },
+    });
+    return;
+  }
 
-  await delegate.upsert({
-    where: { value: trimmed },
-    create: { value: trimmed, firstSeenAt: new Date(), lastSeenAt: new Date(), isActive: true },
-    update: { lastSeenAt: new Date(), isActive: true },
-  });
+  // Job title: upsert by the (domain, normalizedValue) compound key, never
+  // by `value` — this function only ever runs for an already-authenticated
+  // Microsoft sign-in, which lib/auth.ts already domain-gated, so the
+  // configured ORGANIZATION_SYNC_ALLOWED_DOMAIN is always the correct
+  // domain here (see the model's schema comment). userCount is
+  // deliberately left untouched (this call only ever observes ONE user, so
+  // it cannot know the real tenant-wide count) — only the admin-triggered
+  // syncJobTitleDirectoryTable (a full, eligibility-filtered tenant scan)
+  // is authoritative for userCount.
+  try {
+    const domain = ORGANIZATION_SYNC_ALLOWED_DOMAIN;
+    const normalizedValue = normalizeJobTitleValue(trimmed);
+    const existing = await prisma.microsoftDirectoryJobTitleValue.findUnique({
+      where: { domain_normalizedValue: { domain, normalizedValue } },
+      select: { id: true },
+    });
+    if (existing) {
+      await prisma.microsoftDirectoryJobTitleValue.update({
+        where: { id: existing.id },
+        data: { lastSeenAt: new Date(), isActive: true },
+      });
+    } else {
+      await prisma.microsoftDirectoryJobTitleValue.create({
+        data: { value: trimmed, domain, normalizedValue, firstSeenAt: new Date(), lastSeenAt: new Date(), isActive: true },
+      });
+    }
+  } catch (err) {
+    console.warn("[microsoft-directory] Opportunistic job title cache fill skipped", {
+      reason: err instanceof Error ? err.message : String(err),
+    });
+  }
 }

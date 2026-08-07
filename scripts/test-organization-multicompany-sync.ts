@@ -80,47 +80,47 @@ async function main() {
   try {
     // ── Fixture: a pre-existing manually-created user with a manually-elevated role ──
     const manualAdminOid = `mc-manual-admin-${RUN_ID}`;
-    const manualAdminEmail = `mc-manual-admin-${RUN_ID}@x.com`;
+    const manualAdminEmail = `mc-manual-admin-${RUN_ID}@kinsen.gr`;
     const manualAdmin = await prisma.user.create({
       data: { email: manualAdminEmail, microsoftUserId: manualAdminOid, role: Role.ADMIN, globalRoleSource: GlobalRoleSource.MANUAL, name: "Manually Promoted Admin" },
     });
     userIds.push(manualAdmin.id);
 
     // ── Fixture: existing user, same email, NO microsoftUserId yet ──
-    const linkTargetEmail = `mc-link-target-${RUN_ID}@x.com`;
+    const linkTargetEmail = `mc-link-target-${RUN_ID}@kinsen.gr`;
     const linkTargetOid = `mc-link-oid-${RUN_ID}`;
     const linkTarget = await prisma.user.create({ data: { email: linkTargetEmail, authProvider: AuthProvider.CREDENTIALS, name: "Pre-existing Local Account" } });
     userIds.push(linkTarget.id);
 
     // ── Fixture: existing user whose local email is lowercase; Graph will report it mixed-case ──
-    const caseTestEmailLower = `mc-case-${RUN_ID}@x.com`;
+    const caseTestEmailLower = `mc-case-${RUN_ID}@kinsen.gr`;
     const caseTestOid = `mc-case-oid-${RUN_ID}`;
     const caseTestUser = await prisma.user.create({ data: { email: caseTestEmailLower, name: "Case Sensitivity Fixture" } });
     userIds.push(caseTestUser.id);
 
     // ── Fixture: existing user who will MOVE department (same company) ──
     const moveDeptOid = `mc-movedept-${RUN_ID}`;
-    const moveDeptEmail = `mc-movedept-${RUN_ID}@x.com`;
+    const moveDeptEmail = `mc-movedept-${RUN_ID}@kinsen.gr`;
     const moveDeptUser = await prisma.user.create({ data: { email: moveDeptEmail, microsoftUserId: moveDeptOid, name: "Move Dept User" } });
     userIds.push(moveDeptUser.id);
 
     // ── Fixture: existing user who will MOVE company entirely ──
     const moveCompanyOid = `mc-movecompany-${RUN_ID}`;
-    const moveCompanyEmail = `mc-movecompany-${RUN_ID}@x.com`;
+    const moveCompanyEmail = `mc-movecompany-${RUN_ID}@kinsen.gr`;
     const moveCompanyUser = await prisma.user.create({ data: { email: moveCompanyEmail, microsoftUserId: moveCompanyOid, name: "Move Company User" } });
     userIds.push(moveCompanyUser.id);
 
     const graphUsers: GraphDirectoryUser[] = [
       // Brand-new users across 3 distinct companies.
-      { id: `mc-new-kinsen-${RUN_ID}`, userType: "Member", mail: `mc-new-kinsen-${RUN_ID}@x.com`, displayName: "New Kinsen User", givenName: "New", surname: "KinsenUser", companyName: companyKinsen, department: "IT", jobTitle: "Engineer", accountEnabled: true },
-      { id: `mc-new-austria-${RUN_ID}`, userType: "Member", mail: `mc-new-austria-${RUN_ID}@x.com`, displayName: "New Austria User", companyName: companyKinsenAustria, department: "IT", jobTitle: "Support", accountEnabled: true },
-      { id: `mc-new-saracakis-${RUN_ID}`, userType: "Member", mail: `mc-new-saracakis-${RUN_ID}@x.com`, displayName: "New Saracakis User", companyName: companySaracakis, department: "Sales", jobTitle: "Account Manager", accountEnabled: true },
+      { id: `mc-new-kinsen-${RUN_ID}`, userType: "Member", mail: `mc-new-kinsen-${RUN_ID}@kinsen.gr`, displayName: "New Kinsen User", givenName: "New", surname: "KinsenUser", companyName: companyKinsen, department: "IT", jobTitle: "Engineer", accountEnabled: true },
+      { id: `mc-new-austria-${RUN_ID}`, userType: "Member", mail: `mc-new-austria-${RUN_ID}@kinsen.gr`, displayName: "New Austria User", companyName: companyKinsenAustria, department: "IT", jobTitle: "Support", accountEnabled: true },
+      { id: `mc-new-saracakis-${RUN_ID}`, userType: "Member", mail: `mc-new-saracakis-${RUN_ID}@kinsen.gr`, displayName: "New Saracakis User", companyName: companySaracakis, department: "Sales", jobTitle: "Account Manager", accountEnabled: true },
       // Duplicate/whitespace/case variant of Kinsen's own name+department — must resolve to the SAME company/department as the first Kinsen user above, never a new one.
-      { id: `mc-dup-kinsen-${RUN_ID}`, userType: "Member", mail: `mc-dup-kinsen-${RUN_ID}@x.com`, displayName: "Dup Kinsen User", companyName: `  ${companyKinsen.toUpperCase()}  `, department: "  IT  ", jobTitle: "Engineer II", accountEnabled: true },
+      { id: `mc-dup-kinsen-${RUN_ID}`, userType: "Member", mail: `mc-dup-kinsen-${RUN_ID}@kinsen.gr`, displayName: "Dup Kinsen User", companyName: `  ${companyKinsen.toUpperCase()}  `, department: "  IT  ", jobTitle: "Engineer II", accountEnabled: true },
       // Null companyName AND null department -> global Unassigned/Unassigned.
-      { id: `mc-null-both-${RUN_ID}`, userType: "Member", mail: `mc-null-both-${RUN_ID}@x.com`, displayName: "Null Both User", companyName: null, department: null, accountEnabled: true },
+      { id: `mc-null-both-${RUN_ID}`, userType: "Member", mail: `mc-null-both-${RUN_ID}@kinsen.gr`, displayName: "Null Both User", companyName: null, department: null, accountEnabled: true },
       // Known company, null department -> that company's own Unassigned.
-      { id: `mc-null-dept-${RUN_ID}`, userType: "Member", mail: `mc-null-dept-${RUN_ID}@x.com`, displayName: "Null Dept User", companyName: companyKinsen, department: null, accountEnabled: true },
+      { id: `mc-null-dept-${RUN_ID}`, userType: "Member", mail: `mc-null-dept-${RUN_ID}@kinsen.gr`, displayName: "Null Dept User", companyName: companyKinsen, department: null, accountEnabled: true },
       // Links to the pre-existing no-microsoftUserId local account.
       { id: linkTargetOid, userType: "Member", mail: linkTargetEmail, displayName: "Linked Account", companyName: companyKinsen, department: "IT", jobTitle: "Linked Role", accountEnabled: true },
       // Case-different email — must match the existing lowercase-stored user, not create a duplicate.
@@ -251,7 +251,7 @@ async function main() {
     // again here specifically alongside company/department placement data,
     // proving the counters stay honest in the multi-company path too.
     const conflictOwnerOid = `mc-conflict-owner-${RUN_ID}`;
-    const conflictEmail = `mc-conflict-${RUN_ID}@x.com`;
+    const conflictEmail = `mc-conflict-${RUN_ID}@kinsen.gr`;
     const conflictOwner = await prisma.user.create({ data: { email: conflictEmail, microsoftUserId: conflictOwnerOid, name: "Conflict Owner" } });
     userIds.push(conflictOwner.id);
     const conflictAttemptOid = `mc-conflict-attempt-${RUN_ID}`;
@@ -260,7 +260,7 @@ async function main() {
       jsonResponse(200, {
         value: [
           { id: conflictAttemptOid, userType: "Member", mail: conflictEmail, displayName: "Conflict Attempt", companyName: companyKinsen, department: "IT", accountEnabled: true },
-          { id: afterConflictOid, userType: "Member", mail: `mc-after-conflict-${RUN_ID}@x.com`, displayName: "After Conflict", companyName: companyKinsen, department: "IT", accountEnabled: true },
+          { id: afterConflictOid, userType: "Member", mail: `mc-after-conflict-${RUN_ID}@kinsen.gr`, displayName: "After Conflict", companyName: companyKinsen, department: "IT", accountEnabled: true },
         ],
       })
     );
