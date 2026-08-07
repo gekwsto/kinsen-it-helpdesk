@@ -16,6 +16,7 @@ import { mock } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Role, RoleScope, DepartmentRole, MembershipSource, MicrosoftMappingSourceType } from "@prisma/client";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 import { createDepartment } from "@/lib/services/department-service";
 
 let passed = 0;
@@ -94,9 +95,9 @@ async function main() {
   }
 
   try {
-    const companyA = await prisma.company.create({ data: { name: `BU Move Company A ${RUN_ID}`, domain: `bu-move-a-${RUN_ID}.example.com` } });
+    const companyA = await prisma.company.create({ data: { name: `BU Move Company A ${RUN_ID}`, domain: `bu-move-a-${RUN_ID}.example.com`, normalizedName: normalizeCompanyName(`BU Move Company A ${RUN_ID}`) } });
     companyIds.push(companyA.id);
-    const companyB = await prisma.company.create({ data: { name: `BU Move Company B ${RUN_ID}`, domain: `bu-move-b-${RUN_ID}.example.com` } });
+    const companyB = await prisma.company.create({ data: { name: `BU Move Company B ${RUN_ID}`, domain: `bu-move-b-${RUN_ID}.example.com`, normalizedName: normalizeCompanyName(`BU Move Company B ${RUN_ID}`) } });
     companyIds.push(companyB.id);
 
     const buA1 = await prisma.businessUnit.create({ data: { name: `BU Move A1 ${RUN_ID}`, companyId: companyA.id } });

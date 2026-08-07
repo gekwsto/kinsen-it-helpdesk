@@ -13,6 +13,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { AuthProvider, DepartmentRole, MembershipSource, Role } from "@prisma/client";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 import { getDepartmentTree, invalidateOrganizationTreeCache, type DepartmentTreeNode } from "@/lib/services/organization-tree-service";
 
 let passed = 0;
@@ -59,7 +60,7 @@ async function main() {
   let subActive: Awaited<ReturnType<typeof prisma.subDepartment.create>> | undefined;
 
   try {
-    company = await prisma.company.create({ data: { name: `OrgTest Co ${RUN_ID}`, domain: `orgtest-${RUN_ID}.example` } });
+    company = await prisma.company.create({ data: { name: `OrgTest Co ${RUN_ID}`, domain: `orgtest-${RUN_ID}.example`, normalizedName: normalizeCompanyName(`OrgTest Co ${RUN_ID}`) } });
     businessUnit = await prisma.businessUnit.create({ data: { name: `OrgTest BU ${RUN_ID}`, companyId: company.id } });
 
     deptActive = await prisma.department.create({ data: { name: `OrgTest Dept Active ${RUN_ID}`, slug: `orgtest-dept-active-${RUN_ID}`, isActive: true, businessUnitId: businessUnit.id } });

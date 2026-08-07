@@ -174,6 +174,11 @@ async function main() {
       ["project", () => (project ? prisma.project.deleteMany({ where: { id: project.id } }) : Promise.resolve())],
       ["user", () => (owner ? prisma.user.deleteMany({ where: { id: owner.id } }) : Promise.resolve())],
       ["priorities", () => (priorityIds.length > 0 ? prisma.ticketPriority.deleteMany({ where: { id: { in: priorityIds } } }) : Promise.resolve())],
+      // Every department here was made via createDepartment(), which also
+      // creates starter TicketStatus rows (onDelete: RESTRICT on
+      // Department) — must be cleared first or the deletion below silently
+      // fails, leaking every department in this batch.
+      ["statuses", () => (allDeptIds.length > 0 ? prisma.ticketStatus.deleteMany({ where: { departmentId: { in: allDeptIds } } }) : Promise.resolve())],
       ["departments", () => prisma.department.deleteMany({ where: { id: { in: allDeptIds } } })],
     ];
     for (const [label, step] of cleanupSteps) {

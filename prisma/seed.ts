@@ -16,6 +16,7 @@ import {
   ensureStatusAndPriorityConfigForDepartment,
 } from "@/lib/services/config-starter-data";
 import { checkAllDepartmentsConfigHealth } from "@/lib/services/config-health";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 
 const prisma = new PrismaClient();
 
@@ -320,7 +321,7 @@ async function main() {
   const company = await prisma.company.upsert({
     where: { domain: "kinsen.gr" },
     update: {},
-    create: { name: "Kinsen", domain: "kinsen.gr" },
+    create: { name: "Kinsen", domain: "kinsen.gr", normalizedName: normalizeCompanyName("Kinsen") },
   });
   console.log("✓ Company seeded");
 

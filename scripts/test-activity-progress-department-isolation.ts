@@ -180,6 +180,12 @@ async function main() {
       ["activityProgressConfig", () => (configIds.length > 0 ? prisma.activityProgressConfig.deleteMany({ where: { id: { in: configIds } } }) : Promise.resolve())],
       ["user", () => (owner ? prisma.user.deleteMany({ where: { id: owner.id } }) : Promise.resolve())],
       ["newDept priorities", () => (newDeptPriorityIds.length > 0 ? prisma.ticketPriority.deleteMany({ where: { id: { in: newDeptPriorityIds } } }) : Promise.resolve())],
+      // newDept was made via createDepartment(), which also creates starter
+      // TicketStatus rows (onDelete: RESTRICT on Department) — must be
+      // cleared before the department itself or the deletion below silently
+      // fails, leaking the department (and itDept/financeDept alongside it,
+      // since they're deleted in the same batched call).
+      ["newDept statuses", () => (newDept ? prisma.ticketStatus.deleteMany({ where: { departmentId: newDept.id } }) : Promise.resolve())],
       ["departments", () => prisma.department.deleteMany({ where: { id: { in: [itDept?.id, financeDept?.id, newDept?.id].filter((x): x is string => !!x) } } })],
     ];
     for (const [label, step] of cleanupSteps) {

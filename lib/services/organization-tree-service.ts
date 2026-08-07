@@ -149,7 +149,7 @@ export async function getDepartmentTree(options: DepartmentTreeOptions = {}): Pr
   const [companies, businessUnits, departments, subDepartments, associations, managers] = await Promise.all([
     prisma.company.findMany({ select: { id: true, name: true } }),
     prisma.businessUnit.findMany({ select: { id: true, name: true, companyId: true } }),
-    prisma.department.findMany({ select: { id: true, name: true, isActive: true, businessUnitId: true } }),
+    prisma.department.findMany({ select: { id: true, name: true, isActive: true, businessUnitId: true, companyId: true } }),
     prisma.subDepartment.findMany({ select: { id: true, name: true, isActive: true, departmentId: true } }),
     loadDepartmentUserAssociations(),
     loadDepartmentManagers(),
@@ -198,20 +198,31 @@ export async function getDepartmentTree(options: DepartmentTreeOptions = {}): Pr
     };
   });
   const departmentsByBusinessUnit = new Map<string, DepartmentTreeNode[]>();
+  // Departments placed DIRECTLY under a Company (Department.companyId,
+  // Microsoft Directory Sync's own placement path — see
+  // lib/services/organization-company-department-resolver.ts), scoped
+  // per-company (a fix for a real bug: this used to be one shared array
+  // attached to EVERY company node, which would have shown e.g. Kinsen
+  // Austria's "IT" department under every other company too once more than
+  // one company existed).
+  const departmentsByCompany = new Map<string, DepartmentTreeNode[]>();
+  // Genuinely orphaned legacy departments (neither businessUnitId nor
+  // companyId set — predates both organizational-placement paths) are never
+  // duplicated across companies either; collected separately and rendered
+  // under their own dedicated top-level grouping below.
+  const orphanDepartments: DepartmentTreeNode[] = [];
   for (let i = 0; i < departments.length; i++) {
-    const parentId = departments[i].businessUnitId;
-    if (!parentId) continue;
-    if (!departmentsByBusinessUnit.has(parentId)) departmentsByBusinessUnit.set(parentId, []);
-    departmentsByBusinessUnit.get(parentId)!.push(departmentNodes[i]);
+    const d = departments[i];
+    if (d.businessUnitId) {
+      if (!departmentsByBusinessUnit.has(d.businessUnitId)) departmentsByBusinessUnit.set(d.businessUnitId, []);
+      departmentsByBusinessUnit.get(d.businessUnitId)!.push(departmentNodes[i]);
+    } else if (d.companyId) {
+      if (!departmentsByCompany.has(d.companyId)) departmentsByCompany.set(d.companyId, []);
+      departmentsByCompany.get(d.companyId)!.push(departmentNodes[i]);
+    } else {
+      orphanDepartments.push(departmentNodes[i]);
+    }
   }
-  // Departments with no BusinessUnit (legacy/optional FK) are attached
-  // directly under their Company as a synthetic top-level grouping isn't
-  // warranted — they're appended to every company's root list instead, so
-  // they're never silently dropped from the tree.
-  const departmentsWithoutBusinessUnit = departments
-    .map((d, i) => ({ d, node: departmentNodes[i] }))
-    .filter(({ d }) => !d.businessUnitId)
-    .map(({ node }) => node);
 
   const businessUnitNodes = businessUnits.map((bu): DepartmentTreeNode => {
     const children = departmentsByBusinessUnit.get(bu.id) ?? [];
@@ -240,7 +251,8 @@ export async function getDepartmentTree(options: DepartmentTreeOptions = {}): Pr
 
   const companyNodes = companies.map((c): DepartmentTreeNode => {
     const businessUnitChildren = businessUnitsByCompany.get(c.id) ?? [];
-    const children = [...businessUnitChildren, ...departmentsWithoutBusinessUnit];
+    const directDepartmentChildren = departmentsByCompany.get(c.id) ?? [];
+    const children = [...businessUnitChildren, ...directDepartmentChildren];
     const activeUserCount = children.reduce((sum, ch) => sum + ch.activeUserCount, 0);
     const totalUserCount = children.reduce((sum, ch) => sum + ch.totalUserCount, 0);
     return {
@@ -255,9 +267,29 @@ export async function getDepartmentTree(options: DepartmentTreeOptions = {}): Pr
     };
   });
 
+  // A presentation-only grouping for genuinely orphaned legacy departments
+  // (see above) — never persisted as a fake Company row, only synthesized
+  // here at read time, and only included at all when at least one such
+  // department actually exists.
+  const orphanGroupNode: DepartmentTreeNode | null =
+    orphanDepartments.length > 0
+      ? {
+          id: "__unassigned_departments__",
+          name: "Unassigned",
+          type: "company",
+          isActive: true,
+          manager: null,
+          activeUserCount: orphanDepartments.reduce((sum, d) => sum + d.activeUserCount, 0),
+          totalUserCount: orphanDepartments.reduce((sum, d) => sum + d.totalUserCount, 0),
+          children: orphanDepartments,
+        }
+      : null;
+
+  const allRootNodes = orphanGroupNode ? [...companyNodes, orphanGroupNode] : companyNodes;
+
   const result = activeOnly
-    ? companyNodes.map(pruneInactive).filter((n): n is DepartmentTreeNode => n !== null)
-    : companyNodes;
+    ? allRootNodes.map(pruneInactive).filter((n): n is DepartmentTreeNode => n !== null)
+    : allRootNodes;
 
   setCached(cacheKey, result);
   return result;

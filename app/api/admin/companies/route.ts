@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import { createCompanySchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 
 // GET /api/admin/companies — Administrator (or a custom role granted
 // company.create/update/delete) only; the top level of the organization
@@ -44,7 +45,18 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(apiError("domain_taken", "A company with this domain already exists.", { field: "domain" }), { status: 409 });
     }
 
-    const company = await prisma.company.create({ data: parsed.data });
+    // normalizedName is the real duplicate-prevention backstop (also relied
+    // on by Microsoft Directory Sync to match/create Company rows from
+    // Entra's companyName — see lib/services/organization-normalization.ts)
+    // — checked here too so a manually-created company with the same name
+    // (modulo case/whitespace) gets a clear 409, not a raw constraint error.
+    const normalizedName = normalizeCompanyName(parsed.data.name);
+    const nameConflict = await prisma.company.findUnique({ where: { normalizedName }, select: { id: true } });
+    if (nameConflict) {
+      return NextResponse.json(apiError("name_taken", "A company with this name already exists.", { field: "name" }), { status: 409 });
+    }
+
+    const company = await prisma.company.create({ data: { ...parsed.data, normalizedName } });
     const withCounts = await prisma.company.findUnique({
       where: { id: company.id },
       include: { _count: { select: { businessUnits: true, users: true } } },

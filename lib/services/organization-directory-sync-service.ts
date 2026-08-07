@@ -32,11 +32,18 @@ import { fetchWithGraphRetry } from "@/lib/microsoft-graph-retry";
 import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
 import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { normalizeEmail } from "@/lib/services/email-identity";
+import {
+  createOrganizationResolutionCache,
+  resolveOrganizationPlacement,
+  type OrganizationResolutionCache,
+} from "@/lib/services/organization-company-department-resolver";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 const GRAPH_USERS_SELECT = [
   "id",
   "displayName",
+  "givenName",
+  "surname",
   "userPrincipalName",
   "mail",
   "accountEnabled",
@@ -47,6 +54,12 @@ const GRAPH_USERS_SELECT = [
   "officeLocation",
   "employeeId",
   "employeeType",
+  // Deliberately NOT "manager" here — that's a navigation property, not a
+  // plain field; Graph's application-permission `/users` list endpoint
+  // can't bulk-expand it (the documented reason
+  // lib/services/organization-manager-sync-service.ts exists at all — see
+  // its header comment). Manager/reporting-line resolution stays that
+  // service's job, via the directReports inversion, never duplicated here.
 ].join(",");
 
 const GRAPH_USERS_PAGE_URL = `https://graph.microsoft.com/v1.0/users?$select=${GRAPH_USERS_SELECT}&$top=999`;
@@ -65,6 +78,8 @@ const BATCH_SIZE = 200;
 export interface GraphDirectoryUser {
   id: string;
   displayName?: string | null;
+  givenName?: string | null;
+  surname?: string | null;
   userPrincipalName?: string | null;
   mail?: string | null;
   accountEnabled?: boolean | null;
@@ -203,6 +218,7 @@ interface DirectoryUserSyncResult {
   name: string | null;
   department: string | null;
   jobTitle: string | null;
+  companyName: string | null;
   skipReason?: string;
 }
 
@@ -247,13 +263,33 @@ interface DirectoryUserSyncResult {
  * EXISTING row's `isActive` (a TicketApp-local decision) is never touched by
  * sync, mirroring how `avatarSource`/`globalRoleSource` already protect
  * their own fields from being silently overwritten.
+ *
+ * Company/Department placement (`companyId`/`departmentId`) is resolved via
+ * lib/services/organization-company-department-resolver.ts — one Company
+ * root per normalized Entra `companyName`, a Department attached directly to
+ * that Company (never a fabricated BusinessUnit) per normalized
+ * `department`. This is ALWAYS re-resolved and overwritten on every sync,
+ * for both a brand-new and an already-existing user, exactly like
+ * `jobTitle`/`employeeId` above already are — Microsoft is the source of
+ * truth for a Microsoft-linked user's organizational placement, so a user
+ * who moved department/company in Entra is correctly moved to the new node
+ * here too. This never touches DepartmentMembership/MicrosoftDepartmentMapping
+ * (the permission-bearing tables — see lib/services/microsoft-mapping-service.ts) or
+ * `role`/`globalRoleSource` (untouched, see the module header) — purely the
+ * plain organizational-placement FKs, same category as jobTitle.
  */
-async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string): Promise<DirectoryUserSyncResult> {
+async function upsertOneDirectoryUser(
+  user: GraphDirectoryUser,
+  rawEmail: string,
+  placementCache: OrganizationResolutionCache
+): Promise<DirectoryUserSyncResult> {
   const email = normalizeEmail(rawEmail);
   const department = user.department ?? null;
   const jobTitle = user.jobTitle ?? null;
 
   try {
+    const placement = await resolveOrganizationPlacement(placementCache, user.companyName, user.department);
+
     let existing = await prisma.user.findUnique({ where: { microsoftUserId: user.id }, select: { id: true, name: true, microsoftUserId: true } });
     let action: DirectoryUserSyncAction = "updated";
 
@@ -267,7 +303,7 @@ async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string
             action: "skipped",
             reason: "email_linked_to_different_microsoft_user",
           });
-          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, skipReason: "email_linked_to_different_microsoft_user" };
+          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: placement.companyName, skipReason: "email_linked_to_different_microsoft_user" };
         }
         existing = byEmail;
         action = "linked";
@@ -276,12 +312,16 @@ async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string
 
     const commonFields = {
       name: user.displayName ?? undefined,
+      givenName: user.givenName ?? undefined,
+      surname: user.surname ?? undefined,
       jobTitle: user.jobTitle ?? undefined,
       employeeId: user.employeeId ?? undefined,
       employeeType: user.employeeType ?? undefined,
       entraAccountEnabled: user.accountEnabled ?? undefined,
       entraUserType: user.userType ?? undefined,
       organizationSyncedAt: new Date(),
+      companyId: placement.companyId,
+      departmentId: placement.departmentId,
     };
 
     if (existing) {
@@ -293,14 +333,16 @@ async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string
         data: { ...commonFields, microsoftUserId: user.id },
         select: { id: true, name: true },
       });
-      console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action });
-      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle };
+      console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action, company: placement.companyName, department: placement.departmentName });
+      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle, companyName: placement.companyName };
     }
 
     const created = await prisma.user.create({
       data: {
         email,
         name: user.displayName ?? null,
+        givenName: user.givenName ?? null,
+        surname: user.surname ?? null,
         microsoftUserId: user.id,
         authProvider: AuthProvider.MICROSOFT,
         isActive: user.accountEnabled ?? true,
@@ -310,11 +352,13 @@ async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string
         entraAccountEnabled: user.accountEnabled ?? null,
         entraUserType: user.userType ?? null,
         organizationSyncedAt: new Date(),
+        companyId: placement.companyId,
+        departmentId: placement.departmentId,
       },
       select: { id: true, name: true },
     });
-    console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action: "created" });
-    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle };
+    console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action: "created", company: placement.companyName, department: placement.departmentName });
+    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle, companyName: placement.companyName };
   } catch (err) {
     // Isolated to THIS user only (see the function header) — never runs
     // inside a transaction shared with any other user's writes, so this can
@@ -323,7 +367,7 @@ async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string
     // counted and logged, never silently dropped.
     const reason = err instanceof Error ? err.message : String(err);
     console.warn("[organization-directory-sync] user sync failed", { microsoftUserId: user.id, email, action: "skipped", reason });
-    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, skipReason: reason };
+    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: null, skipReason: reason };
   }
 }
 
@@ -336,12 +380,13 @@ async function upsertOneDirectoryUser(user: GraphDirectoryUser, rawEmail: string
  * shared transaction.
  */
 async function upsertDirectoryUserBatch(
-  validated: Array<{ user: GraphDirectoryUser; email: string }>
+  validated: Array<{ user: GraphDirectoryUser; email: string }>,
+  placementCache: OrganizationResolutionCache
 ): Promise<DirectoryBatchSyncCounts> {
   const counts: DirectoryBatchSyncCounts = { updated: 0, created: 0, skipped: 0, errors: 0, syncedForMembership: [] };
 
   for (const { user, email } of validated) {
-    const result = await upsertOneDirectoryUser(user, email);
+    const result = await upsertOneDirectoryUser(user, email, placementCache);
     if (result.action === "created") counts.created++;
     else if (result.action === "updated" || result.action === "linked") counts.updated++;
     else counts.errors++; // identity-resolution/write failure — a real problem to investigate, distinct from the pre-batch validation `skipped` counter (guest/service accounts, missing email)
@@ -419,6 +464,13 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
     validatedUsers.push({ user: result.user, email: result.email });
   }
 
+  // One resolution cache for the WHOLE run — every user's Company/Department
+  // lookup shares it, so scanning a tenant with thousands of users against a
+  // handful of real companies/departments costs O(distinct companies +
+  // distinct departments) find-or-create round trips, not O(users). See
+  // lib/services/organization-company-department-resolver.ts.
+  const placementCache = createOrganizationResolutionCache();
+
   // No shared transaction across a batch (see BATCH_SIZE's comment and
   // upsertOneDirectoryUser's header for the production incident this fixed)
   // — upsertDirectoryUserBatch/upsertOneDirectoryUser never throw, every
@@ -426,7 +478,7 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
   // so no try/catch is needed here.
   for (let i = 0; i < validatedUsers.length; i += BATCH_SIZE) {
     const batch = validatedUsers.slice(i, i + BATCH_SIZE);
-    const counts = await upsertDirectoryUserBatch(batch);
+    const counts = await upsertDirectoryUserBatch(batch, placementCache);
     usersUpdated += counts.updated;
     usersCreated += counts.created;
     errorCount += counts.errors;

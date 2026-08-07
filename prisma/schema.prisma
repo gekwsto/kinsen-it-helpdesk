@@ -181,8 +181,29 @@ enum GoalStatus {
 model Company {
   id            String         @id @default(cuid())
   name          String
-  domain        String         @unique
+  // Trim + collapse-whitespace + lowercase of `name` (see
+  // lib/services/organization-normalization.ts's normalizeCompanyName) — the
+  // real duplicate-prevention backstop for "one Company root per
+  // normalized Microsoft companyName" (Microsoft Directory Sync,
+  // lib/services/organization-directory-sync-service.ts), the same
+  // database-level-constraint-as-hard-backstop pattern already used for
+  // User.email (see the add_user_email_case_insensitive_unique migration) —
+  // application-level normalization alone is a convention, not a guarantee.
+  normalizedName String        @unique
+  // Optional: a Microsoft-sourced company (matched/created purely from
+  // Entra's free-text companyName) has no inherent domain — only a manually
+  // admin-created company (via /admin/companies) is expected to always set
+  // one. Still unique when present.
+  domain        String?        @unique
   businessUnits BusinessUnit[]
+  // Departments attached directly to this Company (no BusinessUnit) — the
+  // path Microsoft Directory Sync always uses, since Entra has no "business
+  // unit" concept of its own. A manually admin-organized department instead
+  // goes through `businessUnit` above, unchanged. See
+  // lib/services/organization-directory-sync-service.ts and
+  // lib/services/organization-tree-service.ts (which renders both paths
+  // under the same Company node).
+  directDepartments Department[] @relation("DepartmentDirectCompany")
   users         User[]
   createdAt     DateTime       @default(now())
   updatedAt     DateTime       @updatedAt
@@ -204,6 +225,15 @@ model BusinessUnit {
 model Department {
   id                      String                       @id @default(cuid())
   name                    String
+  // Trim + collapse-whitespace + lowercase of `name` (see
+  // lib/services/organization-normalization.ts's normalizeDepartmentName) —
+  // paired with `companyId` below in a uniqueness backstop so Microsoft
+  // Directory Sync can never create two "IT" departments under the same
+  // Company. Nullable for backward compatibility with departments that
+  // predate this column (backfilled for existing rows in the migration that
+  // introduced it) — always populated going forward (createDepartment/
+  // updateDepartment keep it in sync with `name`).
+  normalizedName          String?
   slug                    String                       @unique
   description             String?
   isActive                Boolean                      @default(true)
@@ -215,6 +245,14 @@ model Department {
   inboundEmail            String?                      @unique
   businessUnit            BusinessUnit?                @relation(fields: [businessUnitId], references: [id])
   businessUnitId          String?
+  // Direct Company placement — used ONLY when there's no meaningful
+  // BusinessUnit to nest under (always true for a Microsoft-sourced
+  // department, since Entra has no "business unit" concept). Mutually
+  // exclusive with `businessUnitId` in practice (never both set), though the
+  // schema doesn't hard-enforce that — see organization-tree-service.ts for
+  // how the two paths are rendered under the same Company node either way.
+  company                 Company?                     @relation("DepartmentDirectCompany", fields: [companyId], references: [id])
+  companyId               String?
   subDepartments          SubDepartment[]
   users                   User[]
   memberships             DepartmentMembership[]
@@ -234,6 +272,13 @@ model Department {
   externalIntegrations    ExternalIntegration[]        @relation("IntegrationDepartment")
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt
+
+  // Guards the direct-Company placement path only (companyId set,
+  // businessUnitId null — always true for Microsoft Directory Sync). A
+  // NULL companyId never collides with another NULL (standard SQL unique-index
+  // semantics), so this has zero effect on departments organized via
+  // businessUnitId instead.
+  @@unique([companyId, normalizedName])
 }
 
 // Per-user, per-department standing. Decoupled from User.departmentId (which
@@ -420,6 +465,12 @@ model User {
   email                        String                      @unique
   emailVerified                DateTime?
   name                         String?
+  // Entra `givenName`/`surname` — distinct from `name` (the combined display
+  // name, Entra's `displayName`). Optional: only ever populated from
+  // Microsoft directory sync (lib/services/organization-directory-sync-service.ts);
+  // never required for a credentials-created account.
+  givenName                    String?
+  surname                      String?
   image                        String?
   // Provenance of `image` — see AvatarSource. Protects a manually-uploaded
   // avatar from ever being silently overwritten by Microsoft sync.

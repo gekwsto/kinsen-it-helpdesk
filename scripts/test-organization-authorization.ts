@@ -14,6 +14,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { AuthProvider, Role } from "@prisma/client";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 import { canViewFullOrganizationTree, canTriggerOrganizationSync, getOwnDepartmentTreeSlice, getOwnPeopleTreeSlice } from "@/lib/services/organization-scope-service";
 import { hasPermission } from "@/lib/permissions";
 
@@ -66,7 +67,7 @@ async function main() {
   let department: Awaited<ReturnType<typeof prisma.department.create>> | undefined;
 
   try {
-    company = await prisma.company.create({ data: { name: `AuthTest Co ${RUN_ID}`, domain: `authtest-${RUN_ID}.example` } });
+    company = await prisma.company.create({ data: { name: `AuthTest Co ${RUN_ID}`, domain: `authtest-${RUN_ID}.example`, normalizedName: normalizeCompanyName(`AuthTest Co ${RUN_ID}`) } });
     businessUnit = await prisma.businessUnit.create({ data: { name: `AuthTest BU ${RUN_ID}`, companyId: company.id } });
     department = await prisma.department.create({ data: { name: `AuthTest Dept ${RUN_ID}`, slug: `authtest-dept-${RUN_ID}`, isActive: true, businessUnitId: businessUnit.id } });
 

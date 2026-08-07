@@ -27,7 +27,12 @@ import { Search, Plus, Loader2, Pencil, Trash2, Building } from "lucide-react";
 interface CompanyRow {
   id: string;
   name: string;
-  domain: string;
+  // Null for a company matched/created purely from Microsoft Directory Sync
+  // (Entra's companyName has no domain) — see
+  // lib/services/organization-directory-sync-service.ts. A company created
+  // through this admin form always has one (still required by the create
+  // form below), so null only ever appears for a sync-originated row.
+  domain: string | null;
   _count: { businessUnits: number; users: number };
 }
 
@@ -54,7 +59,7 @@ export function CompanyManagement({ companies: initialCompanies }: CompanyManage
   const [deleting, setDeleting] = useState(false);
 
   const filtered = companies.filter(
-    (c) => c.name.toLowerCase().includes(search.toLowerCase()) || c.domain.toLowerCase().includes(search.toLowerCase())
+    (c) => c.name.toLowerCase().includes(search.toLowerCase()) || (c.domain ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   const resetCreate = () => {
@@ -91,7 +96,7 @@ export function CompanyManagement({ companies: initialCompanies }: CompanyManage
   const openEdit = (company: CompanyRow) => {
     setEditTarget(company);
     setEditName(company.name);
-    setEditDomain(company.domain);
+    setEditDomain(company.domain ?? "");
   };
 
   const handleSaveEdit = async () => {
@@ -183,7 +188,7 @@ export function CompanyManagement({ companies: initialCompanies }: CompanyManage
                   </div>
                 </TableCell>
                 <TableCell>
-                  <span className="text-sm text-muted-foreground">{company.domain}</span>
+                  <span className="text-sm text-muted-foreground">{company.domain ?? "—"}</span>
                 </TableCell>
                 <TableCell>
                   <span className="text-sm text-muted-foreground">{company._count.businessUnits}</span>

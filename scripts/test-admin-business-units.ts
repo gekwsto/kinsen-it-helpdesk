@@ -15,6 +15,7 @@ import { mock } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Role, RoleScope } from "@prisma/client";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 
 let passed = 0;
 let failed = 0;
@@ -81,9 +82,9 @@ async function main() {
     const grantedUser = await prisma.user.create({ data: { email: `bu-granted-${RUN_ID}@example.com`, role: Role.USER, customRoleId: grantedRole.id } });
     userIds.push(grantedUser.id);
 
-    const companyA = await prisma.company.create({ data: { name: `BU Test Company A ${RUN_ID}`, domain: `bu-test-a-${RUN_ID}.example.com` } });
+    const companyA = await prisma.company.create({ data: { name: `BU Test Company A ${RUN_ID}`, domain: `bu-test-a-${RUN_ID}.example.com`, normalizedName: normalizeCompanyName(`BU Test Company A ${RUN_ID}`) } });
     companyIds.push(companyA.id);
-    const companyB = await prisma.company.create({ data: { name: `BU Test Company B ${RUN_ID}`, domain: `bu-test-b-${RUN_ID}.example.com` } });
+    const companyB = await prisma.company.create({ data: { name: `BU Test Company B ${RUN_ID}`, domain: `bu-test-b-${RUN_ID}.example.com`, normalizedName: normalizeCompanyName(`BU Test Company B ${RUN_ID}`) } });
     companyIds.push(companyB.id);
 
     const seedBu = await prisma.businessUnit.create({ data: { name: `BU Seed ${RUN_ID}`, companyId: companyA.id } });

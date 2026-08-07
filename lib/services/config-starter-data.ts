@@ -86,6 +86,27 @@ export async function ensureStarterPrioritiesForDepartment(db: Db, departmentId:
   }
 }
 
+/**
+ * Loops STARTER_STATUSES for a single department — the TicketStatus
+ * counterpart of ensureStarterPrioritiesForDepartment above. Every caller
+ * that needed a working TicketStatus for a freshly-created department
+ * (seed.ts, several test-*.ts scripts) previously had to call
+ * ensureStatusForDepartment for each starter status itself, one at a time,
+ * because createDepartment() never did this despite its own header comment
+ * promising a complete starter set — a real gap (Open/Closed/etc. never
+ * existed for any department created purely through createDepartment(),
+ * including every admin-created department and, since Microsoft Directory
+ * Sync started calling createDepartment() too, every Microsoft-sourced
+ * department) that left those departments unable to have a ticket created
+ * for them at all (no default TicketStatus to assign). Fixed once here, at
+ * the shared root, rather than in any one caller.
+ */
+export async function ensureStarterStatusesForDepartment(db: Db, departmentId: string) {
+  for (const status of STARTER_STATUSES) {
+    await ensureStatusForDepartment(db, departmentId, status);
+  }
+}
+
 export async function ensureStatusForDepartment(
   db: Db,
   departmentId: string,

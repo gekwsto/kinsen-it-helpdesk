@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import sql from "mssql";
 import { PrismaClient, AuthProvider, MessageDirection, Role, TicketHistoryType, TicketSource } from "@prisma/client";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 import "dotenv/config";
 
 const prisma = new PrismaClient();
@@ -262,8 +263,8 @@ async function ensureDefaultOrg() {
 
   const company = await prisma.company.upsert({
     where: { domain: companyDomain },
-    update: { name: companyName },
-    create: { name: companyName, domain: companyDomain },
+    update: { name: companyName, normalizedName: normalizeCompanyName(companyName) },
+    create: { name: companyName, domain: companyDomain, normalizedName: normalizeCompanyName(companyName) },
   });
 
   const existingBusinessUnit = await prisma.businessUnit.findFirst({

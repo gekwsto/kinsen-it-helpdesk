@@ -270,6 +270,15 @@ export async function runOrganizationManagerSync(candidateManagers: DirectoryRaw
   // ── Resolve edges to LOCAL dbUserIds — never a raw Entra id written. ──
   const dbUserIdByMicrosoftUserId = new Map(orderedCandidates.filter((u) => u.dbUserId).map((u) => [u.microsoftUserId, u.dbUserId as string]));
 
+  // Bulk-loaded once (not per-edge) — the companyId each candidate was
+  // placed under by Microsoft Directory Sync (lib/services/
+  // organization-directory-sync-service.ts), used only to reject a
+  // cross-company manager edge below; never touches organizational
+  // placement itself.
+  const allDbUserIds = orderedCandidates.map((u) => u.dbUserId).filter((id): id is string => !!id);
+  const companyRows = allDbUserIds.length > 0 ? await prisma.user.findMany({ where: { id: { in: allDbUserIds } }, select: { id: true, companyId: true } }) : [];
+  const companyIdByDbUserId = new Map(companyRows.map((u) => [u.id, u.companyId]));
+
   interface Resolution {
     managerId: string | null;
     managerExcludedFromSync: boolean;
@@ -277,6 +286,7 @@ export async function runOrganizationManagerSync(candidateManagers: DirectoryRaw
   const resolutionByDbUserId = new Map<string, Resolution>();
   let managerNotSyncedCount = 0;
   let managerNotInSyncSetCount = 0;
+  let crossCompanyRejections = 0;
 
   for (const user of orderedCandidates) {
     if (!user.dbUserId) continue; // excluded user — no local row to update
@@ -303,6 +313,24 @@ export async function runOrganizationManagerSync(candidateManagers: DirectoryRaw
       // the directory-sync stage. Same downstream treatment as "not synced".
       resolutionByDbUserId.set(user.dbUserId, { managerId: null, managerExcludedFromSync: true });
       managerNotInSyncSetCount++;
+      continue;
+    }
+    // Cross-company guard: a manager relationship spanning two different
+    // Companies (e.g. a misconfigured tenant, or a company-merger transition
+    // period in Entra) is rejected outright — never silently accepted just
+    // because the target id resolves. Only rejects when BOTH sides have a
+    // known, DIFFERENT companyId; a null companyId on either side (not yet
+    // synced this run, or a pre-migration legacy row) is not treated as a
+    // mismatch — there's nothing concrete to reject against.
+    const reportCompanyId = companyIdByDbUserId.get(user.dbUserId);
+    const managerCompanyId = companyIdByDbUserId.get(localManagerId);
+    if (reportCompanyId && managerCompanyId && reportCompanyId !== managerCompanyId) {
+      crossCompanyRejections++;
+      console.warn("[organization-manager-sync] Rejected cross-company manager edge, publishing null instead", {
+        reportMicrosoftUserId: user.microsoftUserId,
+        managerMicrosoftUserId: edge.managerMicrosoftUserId,
+      });
+      resolutionByDbUserId.set(user.dbUserId, { managerId: null, managerExcludedFromSync: false });
       continue;
     }
     resolutionByDbUserId.set(user.dbUserId, { managerId: localManagerId, managerExcludedFromSync: false });
@@ -354,7 +382,7 @@ export async function runOrganizationManagerSync(candidateManagers: DirectoryRaw
     usersScanned: candidateManagers.length,
     usersUpdated: resolutionByDbUserId.size,
     usersSkipped: candidateManagers.length - orderedCandidates.filter((u) => u.dbUserId).length,
-    errorCount: duplicateEdgeConflicts + selfManagerRejections + cycleRejections + managerNotInSyncSetCount,
+    errorCount: duplicateEdgeConflicts + selfManagerRejections + cycleRejections + managerNotInSyncSetCount + crossCompanyRejections,
     managerNotSyncedCount,
   };
 }

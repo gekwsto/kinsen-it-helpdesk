@@ -2,8 +2,9 @@ import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import type { Department } from "@prisma/client";
 import type { DepartmentSummary, DepartmentWithCounts } from "@/types/department";
-import { ensureStatusAndPriorityConfigForDepartment, ensureActivityProgressConfigForDepartment, ensureStarterPrioritiesForDepartment } from "@/lib/services/config-starter-data";
+import { ensureStatusAndPriorityConfigForDepartment, ensureActivityProgressConfigForDepartment, ensureStarterPrioritiesForDepartment, ensureStarterStatusesForDepartment } from "@/lib/services/config-starter-data";
 import { logDepartmentConfigHealth } from "@/lib/services/config-health";
+import { normalizeDepartmentName } from "@/lib/services/organization-normalization";
 
 // Slug of the department legacy (pre-Phase-1) rows fall back to for scoping
 // purposes — never a raw literal id, so it stays correct if the bootstrap
@@ -70,6 +71,14 @@ export interface CreateDepartmentInput {
   name: string;
   description?: string | null;
   businessUnitId?: string | null;
+  /**
+   * Direct Company placement — used ONLY when there's no meaningful
+   * BusinessUnit to nest under (always true for Microsoft Directory Sync,
+   * see lib/services/organization-directory-sync-service.ts; never set
+   * alongside businessUnitId in practice, though the schema doesn't hard-
+   * enforce mutual exclusivity).
+   */
+  companyId?: string | null;
   /** Explicit slug override; auto-generated from `name` (collision-checked) if omitted. */
   slug?: string;
 }
@@ -87,14 +96,17 @@ export async function createDepartment(input: CreateDepartmentInput): Promise<De
     const department = await tx.department.create({
       data: {
         name: input.name,
+        normalizedName: normalizeDepartmentName(input.name),
         slug,
         description: input.description ?? null,
         businessUnitId: input.businessUnitId ?? null,
+        companyId: input.companyId ?? null,
       },
     });
     await ensureStatusAndPriorityConfigForDepartment(tx, department.id);
     await ensureActivityProgressConfigForDepartment(tx, department.id);
     await ensureStarterPrioritiesForDepartment(tx, department.id);
+    await ensureStarterStatusesForDepartment(tx, department.id);
     // Verifies the ensure-functions above actually left this brand-new
     // department fully configured before the transaction commits — logs
     // loudly (never silently) if not, so a regression here is caught
@@ -109,12 +121,26 @@ export interface UpdateDepartmentInput {
   name?: string;
   description?: string | null;
   businessUnitId?: string | null;
+  companyId?: string | null;
 }
 
 export async function updateDepartment(id: string, patch: UpdateDepartmentInput): Promise<Department> {
   return prisma.department.update({
     where: { id },
-    data: patch,
+    data: {
+      ...patch,
+      // normalizedName is kept in lockstep with name on every rename — the
+      // same rule Microsoft Directory Sync's own matching relies on (see
+      // lib/services/organization-normalization.ts) — so a manual admin
+      // rename can never leave it stale.
+      ...(patch.name !== undefined ? { normalizedName: normalizeDepartmentName(patch.name) } : {}),
+      // A department manually re-parented under a real BusinessUnit (the
+      // existing admin "move to a different Business Unit" flow) is no
+      // longer a direct-Company Microsoft-sync placement — clear companyId
+      // so the two placement paths never both point somewhere at once (see
+      // Department.companyId's schema comment).
+      ...(patch.businessUnitId !== undefined && patch.businessUnitId !== null && patch.companyId === undefined ? { companyId: null } : {}),
+    },
   });
 }
 

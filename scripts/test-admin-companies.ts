@@ -15,6 +15,7 @@ import { mock } from "node:test";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Role, RoleScope } from "@prisma/client";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 
 let passed = 0;
 let failed = 0;
@@ -80,7 +81,7 @@ async function main() {
     const grantedUser = await prisma.user.create({ data: { email: `companies-granted-${RUN_ID}@example.com`, role: Role.USER, customRoleId: grantedRole.id } });
     userIds.push(grantedUser.id);
 
-    const seedCompany = await prisma.company.create({ data: { name: `Companies Seed ${RUN_ID}`, domain: `companies-seed-${RUN_ID}.example.com` } });
+    const seedCompany = await prisma.company.create({ data: { name: `Companies Seed ${RUN_ID}`, domain: `companies-seed-${RUN_ID}.example.com`, normalizedName: normalizeCompanyName(`Companies Seed ${RUN_ID}`) } });
     companyIds.push(seedCompany.id);
 
     const { GET: listGET, POST: createPOST } = await import("@/app/api/admin/companies/route");

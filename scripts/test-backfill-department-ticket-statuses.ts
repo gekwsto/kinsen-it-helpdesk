@@ -1,0 +1,208 @@
+/**
+ * Regression test for prisma/migrations/20260806173000_backfill_missing_department_ticket_statuses.
+ *
+ * Sets up three fixture departments that must each behave differently under
+ * the backfill migration, in the SAME dev database the migration runs
+ * against (no separate throwaway migration DB is configured in this repo —
+ * matches how every other scripts/test-*.ts here already exercises real
+ * migrated schema against the real dev DB).
+ *
+ *  A. "No Statuses" department — zero TicketStatus rows before the
+ *     backfill. After: must have exactly the 6 STARTER_STATUSES rows,
+ *     matching config-starter-data.ts exactly.
+ *  B. "Custom Status Only" department — one manually-created, non-starter-
+ *     named status before the backfill. Must remain EXACTLY that one row,
+ *     untouched, after (the backfill must never touch a department that
+ *     already has any status).
+ *  C. "Already Full Starter Set" department — the full 6 STARTER_STATUSES
+ *     rows already present (simulating a department created by the
+ *     already-fixed createDepartment()) before the backfill. Must remain
+ *     exactly 6 rows after — no duplicates.
+ *
+ * Also proves: idempotency (re-running the backfill SQL a second time
+ * changes nothing), and that a ticket can actually be created in the
+ * previously-affected department A once it has a default status.
+ *
+ * Default (no args) — matches every other scripts/test-*.ts's convention
+ * (self-contained, no manual steps, safe for the generic test runner):
+ *   npx tsx scripts/test-backfill-department-ticket-statuses.ts
+ * runs setup -> applies the migration's exact SQL directly (since the real
+ * migration only ever runs once per database, at deploy time — fixture
+ * departments created by this script AFTER that already happened need the
+ * same statement re-applied to be tested at all; the statement's own
+ * WHERE-NOT-EXISTS idempotency is exactly what step 4 below verifies) ->
+ * verify -> cleanup, all in one process, exiting non-zero on any failure.
+ *
+ * Manual step-by-step mode (for testing against a REAL `npx prisma migrate
+ * deploy` run specifically, e.g. on a fresh migration test database):
+ *   npx tsx scripts/test-backfill-department-ticket-statuses.ts --setup   (BEFORE `npx prisma migrate deploy`)
+ *   npx prisma migrate deploy
+ *   npx tsx scripts/test-backfill-department-ticket-statuses.ts --verify  (AFTER)
+ *   npx tsx scripts/test-backfill-department-ticket-statuses.ts --cleanup (always last)
+ */
+import { prisma } from "@/lib/prisma";
+import { STARTER_STATUSES } from "@/lib/services/config-starter-data";
+import { AuthProvider, Role } from "@prisma/client";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+let passed = 0, failed = 0;
+function check(label: string, condition: boolean) {
+  if (condition) { console.log(`  ✓ ${label}`); passed++; }
+  else { console.error(`  ✗ ${label}`); failed++; }
+}
+
+const RUN_ID = Date.now();
+const NAME_A = `Backfill No Statuses ${RUN_ID}`;
+const NAME_B = `Backfill Custom Status Only ${RUN_ID}`;
+const NAME_C = `Backfill Already Full ${RUN_ID}`;
+const SLUG_A = `backfill-no-statuses-${RUN_ID}`;
+const SLUG_B = `backfill-custom-status-${RUN_ID}`;
+const SLUG_C = `backfill-already-full-${RUN_ID}`;
+
+const MIGRATION_SQL_PATH = join(
+  process.cwd(),
+  "prisma/migrations/20260806173000_backfill_missing_department_ticket_statuses/migration.sql"
+);
+
+async function setup() {
+  console.log("\n=== SETUP: creating pre-migration fixture departments ===\n");
+  // Raw prisma.department.create (bypassing createDepartment()) so these
+  // start with ZERO TicketStatus rows — exactly the pre-fix historical
+  // state this migration targets. The real historical bug only ever
+  // affected TicketStatus (createDepartment() always created starter
+  // TicketPriority rows correctly) — department A gets a starter priority
+  // here too, so it matches that real historical shape, not an
+  // artificially-more-broken one.
+  const deptA = await prisma.department.upsert({ where: { slug: SLUG_A }, create: { name: NAME_A, slug: SLUG_A }, update: {} });
+  const deptB = await prisma.department.upsert({ where: { slug: SLUG_B }, create: { name: NAME_B, slug: SLUG_B }, update: {} });
+  const deptC = await prisma.department.upsert({ where: { slug: SLUG_C }, create: { name: NAME_C, slug: SLUG_C }, update: {} });
+
+  await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: [deptA.id, deptB.id, deptC.id] } } });
+  await prisma.ticketPriority.deleteMany({ where: { departmentId: deptA.id } });
+  await prisma.ticketPriority.create({ data: { departmentId: deptA.id, name: "High", level: 3, color: "#f97316" } });
+
+  // B: one manually-configured, non-starter-named status.
+  await prisma.ticketStatus.create({ data: { departmentId: deptB.id, name: "Awaiting Vendor", color: "#111111", isDefault: true, isClosed: false, order: 1 } });
+
+  // C: the full starter set already present (id generated by Prisma here — fine, this is a normal app-layer insert, not the migration itself).
+  for (const s of STARTER_STATUSES) {
+    await prisma.ticketStatus.create({ data: { departmentId: deptC.id, name: s.name, color: s.color, isDefault: s.isDefault, isClosed: s.isClosed, order: s.order } });
+  }
+
+  const countA = await prisma.ticketStatus.count({ where: { departmentId: deptA.id } });
+  const countB = await prisma.ticketStatus.count({ where: { departmentId: deptB.id } });
+  const countC = await prisma.ticketStatus.count({ where: { departmentId: deptC.id } });
+  console.log(`Department A (${deptA.id}): ${countA} statuses (expect 0)`);
+  console.log(`Department B (${deptB.id}): ${countB} statuses (expect 1)`);
+  console.log(`Department C (${deptC.id}): ${countC} statuses (expect 6)`);
+  if (countA !== 0 || countB !== 1 || countC !== 6) {
+    throw new Error("Setup did not produce the expected pre-migration state.");
+  }
+}
+
+/** Applies the migration's own SQL directly — see the file header on why this is needed for fixtures created after the migration already ran once for real. Idempotent by construction (WHERE NOT EXISTS), so calling it is always safe. */
+async function applyBackfillSql() {
+  const sql = readFileSync(MIGRATION_SQL_PATH, "utf-8");
+  await prisma.$executeRawUnsafe(sql);
+}
+
+async function verify() {
+  console.log("\n=== VERIFY: post-backfill state ===\n");
+  const deptA = await prisma.department.findUniqueOrThrow({ where: { slug: SLUG_A } });
+  const deptB = await prisma.department.findUniqueOrThrow({ where: { slug: SLUG_B } });
+  const deptC = await prisma.department.findUniqueOrThrow({ where: { slug: SLUG_C } });
+
+  // ── 1. Department with zero statuses gets the full correct starter set ──
+  const statusesA = await prisma.ticketStatus.findMany({ where: { departmentId: deptA.id }, orderBy: { order: "asc" } });
+  check("1. Department A (was empty) now has exactly 6 statuses", statusesA.length === 6);
+  check("   Names/colors/isDefault/isClosed/order match STARTER_STATUSES exactly, in order", statusesA.every((row, i) => row.name === STARTER_STATUSES[i].name && row.color === STARTER_STATUSES[i].color && row.isDefault === STARTER_STATUSES[i].isDefault && row.isClosed === STARTER_STATUSES[i].isClosed && row.order === STARTER_STATUSES[i].order));
+  check("   isActive is true for every backfilled row", statusesA.every((row) => row.isActive === true));
+  check("   Exactly one isDefault=true row (Open)", statusesA.filter((r) => r.isDefault).length === 1 && statusesA.find((r) => r.isDefault)?.name === "Open");
+
+  // ── 2. Department with an existing custom status is completely untouched ──
+  const statusesB = await prisma.ticketStatus.findMany({ where: { departmentId: deptB.id } });
+  check("2. Department B (had 1 custom status) still has EXACTLY 1 status (untouched)", statusesB.length === 1);
+  check("   That status is still the original custom one, unmodified", statusesB[0]?.name === "Awaiting Vendor" && statusesB[0]?.color === "#111111");
+
+  // ── 3. Department with the full starter set already gets no duplicates ──
+  const statusesC = await prisma.ticketStatus.findMany({ where: { departmentId: deptC.id } });
+  check("3. Department C (already had full starter set) still has exactly 6 (no duplicates)", statusesC.length === 6);
+  check("   No duplicate names within department C", new Set(statusesC.map((s) => s.name)).size === statusesC.length);
+
+  // ── 4. Idempotency: re-applying the backfill SQL changes nothing ──
+  const countsBefore = { a: statusesA.length, b: statusesB.length, c: statusesC.length };
+  await applyBackfillSql();
+  const countAAfter = await prisma.ticketStatus.count({ where: { departmentId: deptA.id } });
+  const countBAfter = await prisma.ticketStatus.count({ where: { departmentId: deptB.id } });
+  const countCAfter = await prisma.ticketStatus.count({ where: { departmentId: deptC.id } });
+  check("4. Re-running the exact same backfill statement is idempotent — A unchanged", countAAfter === countsBefore.a);
+  check("   B still unchanged", countBAfter === countsBefore.b);
+  check("   C still unchanged", countCAfter === countsBefore.c);
+
+  // ── 5. Ticket creation is now possible in the previously-affected department ──
+  const requester = await prisma.user.create({ data: { email: `backfill-requester-${RUN_ID}@example.com`, authProvider: AuthProvider.CREDENTIALS, role: Role.USER, departmentId: deptA.id } });
+  const defaultStatus = statusesA.find((s) => s.isDefault);
+  const priority = await prisma.ticketPriority.findFirst({ where: { departmentId: deptA.id } });
+  let ticketCreationOk = false;
+  let createdTicketId: string | null = null;
+  try {
+    if (defaultStatus && priority) {
+      const ticket = await prisma.ticket.create({
+        data: { title: "Backfill verification ticket", description: "Proves ticket creation now works", departmentId: deptA.id, statusId: defaultStatus.id, priorityId: priority.id, requesterId: requester.id, source: "WEB" },
+      });
+      createdTicketId = ticket.id;
+      ticketCreationOk = true;
+    }
+  } catch (err) {
+    console.warn("Ticket creation failed:", err instanceof Error ? err.message : err);
+  }
+  check("5. A ticket CAN now be created in the previously-affected department", ticketCreationOk);
+  if (createdTicketId) await prisma.ticket.deleteMany({ where: { id: createdTicketId } });
+  await prisma.user.deleteMany({ where: { id: requester.id } });
+}
+
+async function cleanup() {
+  console.log("\n=== CLEANUP ===\n");
+  const depts = await prisma.department.findMany({ where: { slug: { in: [SLUG_A, SLUG_B, SLUG_C] } }, select: { id: true } });
+  const ids = depts.map((d) => d.id);
+  await prisma.ticket.deleteMany({ where: { departmentId: { in: ids } } });
+  await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: ids } } });
+  await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: ids } } });
+  await prisma.department.deleteMany({ where: { id: { in: ids } } });
+  console.log(`Cleaned up ${ids.length} fixture department(s).`);
+}
+
+async function main() {
+  const mode = process.argv[2];
+  try {
+    if (mode === "--setup") {
+      await setup();
+      console.log("\nSetup complete. Now run: npx prisma migrate deploy\n");
+    } else if (mode === "--verify") {
+      await verify();
+      console.log(`\n${passed} passed, ${failed} failed`);
+      if (failed > 0) process.exit(1);
+    } else if (mode === "--cleanup") {
+      await cleanup();
+    } else if (mode) {
+      console.error("Usage: (no args, full self-contained run) | --setup | --verify | --cleanup");
+      process.exit(1);
+    } else {
+      // Default: full self-contained cycle, matching every other test-*.ts script's convention.
+      try {
+        await setup();
+        await applyBackfillSql();
+        await verify();
+      } finally {
+        await cleanup();
+      }
+      console.log(`\n${passed} passed, ${failed} failed`);
+      if (failed > 0) process.exit(1);
+    }
+  } finally {
+    await prisma.$disconnect();
+  }
+}
+
+main();

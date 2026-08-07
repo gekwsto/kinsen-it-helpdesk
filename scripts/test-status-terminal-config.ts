@@ -157,11 +157,13 @@ async function main() {
       ["activity status configs", () => (deptIds.length ? prisma.activityStatusConfig.deleteMany({ where: { departmentId: { in: deptIds } } }) : Promise.resolve())],
       ["activity priority configs", () => (deptIds.length ? prisma.activityPriorityConfig.deleteMany({ where: { departmentId: { in: deptIds } } }) : Promise.resolve())],
       // createDepartment() (used for freshDept) also creates starter
-      // TicketPriority rows (ensureStarterPrioritiesForDepartment) — these
-      // have an onDelete: RESTRICT relation to Department, so they must be
-      // removed before the department itself or the deletion below silently
-      // fails, leaking the department across every run of this script.
+      // TicketPriority AND TicketStatus rows (ensureStarterPrioritiesForDepartment,
+      // ensureStarterStatusesForDepartment) — both have an onDelete: RESTRICT
+      // relation to Department, so they must be removed before the
+      // department itself or the deletion below silently fails, leaking the
+      // department across every run of this script.
       ["priorities", () => (deptIds.length ? prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } }) : Promise.resolve())],
+      ["statuses", () => (deptIds.length ? prisma.ticketStatus.deleteMany({ where: { departmentId: { in: deptIds } } }) : Promise.resolve())],
       ["departments", () => (deptIds.length ? prisma.department.deleteMany({ where: { id: { in: deptIds } } }) : Promise.resolve())],
     ];
     for (const [label, step] of cleanupSteps) {

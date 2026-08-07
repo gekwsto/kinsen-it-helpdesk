@@ -96,6 +96,13 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `Dash Ticket Cards Dept ${RUN_ID}`, slug: `dash-ticket-cards-dept-${RUN_ID}` });
     departmentIds.push(dept.id);
+    // createDepartment() now also creates its own starter TicketStatus set
+    // (STARTER_STATUSES: Open/In Progress/Pending User/Resolved/Closed/
+    // Cancelled) — cleared here so this test's own three custom-semantics
+    // statuses below (in particular "Resolved" deliberately marked
+    // isClosed:true, unlike the starter one) can be created under the same
+    // names without colliding with @@unique([departmentId, name]).
+    await prisma.ticketStatus.deleteMany({ where: { departmentId: dept.id } });
 
     const openStatus = await prisma.ticketStatus.create({ data: { name: "Open", color: "#3b82f6", departmentId: dept.id, isClosed: false, isDefault: true, order: 1 } });
     statusIds.push(openStatus.id);

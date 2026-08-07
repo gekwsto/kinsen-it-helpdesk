@@ -148,6 +148,12 @@ async function main() {
       ["project", () => (project ? prisma.project.deleteMany({ where: { id: project.id } }) : Promise.resolve())],
       ["priorities", () => (priorityIds.length > 0 ? prisma.ticketPriority.deleteMany({ where: { id: { in: priorityIds } } }) : Promise.resolve())],
       ["user", () => (owner ? prisma.user.deleteMany({ where: { id: owner.id } }) : Promise.resolve())],
+      // newDept/secondHealthyDept were made via createDepartment(), which
+      // also creates starter TicketStatus rows (onDelete: RESTRICT on
+      // Department) — must be cleared first or the deletion below silently
+      // fails, leaking every department in this batch (dirtyDept included,
+      // since it's deleted in the same call).
+      ["statuses", () => (allDeptIds.length > 0 ? prisma.ticketStatus.deleteMany({ where: { departmentId: { in: allDeptIds } } }) : Promise.resolve())],
       ["departments", () => prisma.department.deleteMany({ where: { id: { in: [newDept?.id, dirtyDept?.id, secondHealthyDept?.id].filter((x): x is string => !!x) } } })],
     ];
     for (const [label, step] of cleanupSteps) {

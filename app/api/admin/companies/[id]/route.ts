@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import { updateCompanySchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -22,9 +23,22 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       }
     }
 
+    // Keep normalizedName in lockstep with name — same rationale as the
+    // POST route above (this is what both the admin UI's own uniqueness and
+    // Microsoft Directory Sync's matching rely on).
+    const data: typeof parsed.data & { normalizedName?: string } = { ...parsed.data };
+    if (parsed.data.name) {
+      const normalizedName = normalizeCompanyName(parsed.data.name);
+      const nameConflict = await prisma.company.findFirst({ where: { normalizedName, NOT: { id } }, select: { id: true } });
+      if (nameConflict) {
+        return NextResponse.json(apiError("name_taken", "A company with this name already exists.", { field: "name" }), { status: 409 });
+      }
+      data.normalizedName = normalizedName;
+    }
+
     const company = await prisma.company.update({
       where: { id },
-      data: parsed.data,
+      data,
       include: { _count: { select: { businessUnits: true, users: true } } },
     });
     return NextResponse.json(company);
