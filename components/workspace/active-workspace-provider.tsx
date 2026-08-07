@@ -4,11 +4,11 @@ import { createContext, useCallback, useContext, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ALL_WORKSPACES_VALUE } from "@/types/department";
-import type { DepartmentSummary } from "@/types/department";
+import type { WorkspaceOption } from "@/types/department";
 
 interface ActiveWorkspaceContextValue {
   departmentId: string | null;
-  departments: DepartmentSummary[];
+  departments: WorkspaceOption[];
   isSystemAdmin: boolean;
   /** True for Role.ADMIN or Role.DIRECTOR — offers the "All Workspaces" choice. */
   canViewAllDepartments: boolean;
@@ -23,7 +23,7 @@ const ActiveWorkspaceContext = createContext<ActiveWorkspaceContextValue | null>
 
 interface ActiveWorkspaceProviderProps {
   initialDepartmentId: string | null;
-  departments: DepartmentSummary[];
+  departments: WorkspaceOption[];
   isSystemAdmin: boolean;
   canViewAllDepartments: boolean;
   initialIsAllSelected: boolean;

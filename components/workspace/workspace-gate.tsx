@@ -2,7 +2,7 @@
 
 import { Building2, ShieldOff } from "lucide-react";
 import { useActiveWorkspace } from "@/components/workspace/active-workspace-provider";
-import type { DepartmentSummary } from "@/types/department";
+import type { WorkspaceOption } from "@/types/department";
 
 /** Zero accessible departments — pending setup, not a crash. */
 export function NoWorkspaceState() {
@@ -24,7 +24,7 @@ export function NoWorkspaceState() {
  * silently guess. Reuses the same setActiveDepartment the topbar selector
  * uses, so the two pick-a-workspace paths stay identical.
  */
-export function ChooseWorkspaceState({ departments }: { departments: DepartmentSummary[] }) {
+export function ChooseWorkspaceState({ departments }: { departments: WorkspaceOption[] }) {
   const { switching, setActiveDepartment } = useActiveWorkspace();
 
   return (

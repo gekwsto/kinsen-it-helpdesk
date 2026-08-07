@@ -86,6 +86,18 @@ export const ALL_WORKSPACES_VALUE = "ALL";
 // zero memberships — pending-setup state — or more than one with none
 // selected/primary — selector state); the caller decides which by checking
 // `departments.length`.
+/**
+ * Lightweight {id, name} projection for the workspace switcher — deliberately
+ * NOT the full DepartmentSummary (slug/description/isActive/businessUnitId
+ * aren't needed to render a dropdown row) so the switcher's initial/search
+ * queries (lib/services/workspace-service.ts's listAccessibleWorkspaces)
+ * select only what's actually rendered.
+ */
+export interface WorkspaceOption {
+  id: string;
+  name: string;
+}
+
 export interface ActiveWorkspaceContext {
   departmentId: string | null;
   /** True for global Role.ADMIN — bypasses membership checks, sees every active department. */
@@ -99,7 +111,14 @@ export interface ActiveWorkspaceContext {
    * "deliberately unrestricted," not "nothing resolved yet."
    */
   isAllSelected: boolean;
-  departments: DepartmentSummary[];
+  /**
+   * The switcher's INITIAL (take-bounded, see WORKSPACE_LIST_TAKE) list —
+   * never the full accessible set for a canViewAllDepartments role. Always
+   * includes the currently-active department even if it wouldn't otherwise
+   * be among the first N. The rest are reachable via the switcher's search
+   * box (GET /api/workspace/search), never preloaded here.
+   */
+  departments: WorkspaceOption[];
 }
 
 // ─── Permissions ───────────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ import {
 import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { useHelpGuide } from "@/components/help/help-guide-provider";
+import { resolveActiveHref } from "@/lib/sidebar-active-route";
 
 // `visible`, when defined, wins outright over `roles` — lets specific items
 // be gated by a server-computed permission flag (e.g. subdepartment.view)
@@ -279,6 +280,11 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
           if (hasChildren) {
             const visibleChildren = item.children!.filter((c) => canAccess(c));
             if (visibleChildren.length === 0) return null;
+            // Computed once per section, from ALL visible siblings at once —
+            // never per-child in isolation — so exactly one child (the most
+            // specific href match, or none) is active. See resolveActiveHref's
+            // own doc comment above.
+            const activeChildHref = resolveActiveHref(pathname, visibleChildren.map((c) => c.href));
 
             return (
               <div key={item.label}>
@@ -313,7 +319,7 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
                         className={cn(
                           "flex items-center gap-2 px-3 rounded-lg text-sm transition-colors",
                           NAV_CHILD_SIZE,
-                          isActive(child.href)
+                          child.href === activeChildHref
                             ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium"
                             : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                         )}

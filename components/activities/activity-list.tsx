@@ -57,7 +57,31 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
   const searchParams = useSearchParams();
   const view = (searchParams.get("view") as ViewMode | null) ?? "grid";
   const [activities, setActivities] = useState(initialActivities);
+  // Tracks the last `initialActivities` reference `activities` was synced
+  // from — NOT itself rendered, purely a comparison key.
+  const [syncedFrom, setSyncedFrom] = useState(initialActivities);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+
+  // `activities` is intentionally local (not just the prop directly) so
+  // handleToggle below can optimistically flip completion state without
+  // waiting on a round-trip — but `useState(initialActivities)` only seeds
+  // that state on the component's FIRST render. Without this, changing an
+  // Activities filter (app/(main)/activities/page.tsx re-runs its query and
+  // passes a genuinely new `activities` array down) updated the URL and the
+  // page's own server data correctly, but this already-mounted client
+  // component kept showing its stale local copy — exactly the "filters
+  // change, results don't update until refresh" bug (a full reload remounts
+  // this component, re-seeding useState from the now-correct prop, which is
+  // why refreshing "fixed" it). Comparing reference identity DURING render
+  // (not in a useEffect) re-syncs immediately, before paint, so there's no
+  // stale-frame flash — see React's documented "adjusting state when a prop
+  // changes" pattern. Never fires for an unrelated re-render (e.g. the
+  // optimistic toggle below), since `initialActivities` only changes when
+  // the Server Component actually re-ran with new searchParams.
+  if (initialActivities !== syncedFrom) {
+    setSyncedFrom(initialActivities);
+    setActivities(initialActivities);
+  }
 
   const handleToggle = async (activity: SerializedActivity) => {
     const previous = activity.isCompleted;
