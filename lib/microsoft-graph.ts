@@ -310,47 +310,72 @@ async function graphRequest<T>(
   return readJsonResponse<T>(response, requestUrl);
 }
 
-const MAILBOX = process.env.GRAPH_USER_EMAIL || "kinsenitsupport@kinsen.gr";
+// The central/support mailbox — used for OUTBOUND sending (sendMail/
+// sendTicketReply) unconditionally, and as the default INBOUND mailbox for
+// callers that don't have a more specific one (e.g. testConnection's
+// backward-compatible central-only check). A FUNCTION, not a top-level
+// const — deliberately, matching readAndValidateGraphCredentials' own
+// lazy-read convention above: process.env.GRAPH_USER_EMAIL must be read at
+// CALL time, not at module-import time, since ES module imports are
+// hoisted before any of a caller's own top-level `process.env.X = ...`
+// lines run (this bit a test script directly: setting GRAPH_USER_EMAIL
+// before its `import` statements textually had no effect on a top-level
+// const, since the import already ran first). Exported so other modules
+// that need to know "which mailbox is the central one"
+// (inbound-mailbox-service.ts, the admin diagnostics UI) read the exact
+// same value instead of re-deriving it from process.env themselves.
+export function getCentralMailbox(): string {
+  return process.env.GRAPH_USER_EMAIL || "kinsenitsupport@kinsen.gr";
+}
 
 export const microsoftGraph = {
   /**
-   * Fetch unread messages from the support inbox.
+   * Fetch unread messages from a specific mailbox's Inbox. `mailbox` is
+   * always an explicit, caller-supplied address now — never an implicit
+   * global (see docs/roadmap-handoff-register.md's inbound-email multi-
+   * mailbox fix): the central support mailbox and every configured
+   * Department.inboundEmail are all genuinely pollable mailboxes, not just
+   * the one hardcoded address this used to be limited to.
    */
-  async getUnreadMessages(top = 25): Promise<GraphMailMessage[]> {
+  async getUnreadMessages(mailbox: string, top = 25): Promise<GraphMailMessage[]> {
     const select = [
       "id", "subject", "bodyPreview", "body", "from", "toRecipients",
       "internetMessageId", "conversationId", "receivedDateTime",
       "hasAttachments", "isRead", "internetMessageHeaders",
     ].join(",");
     const data = await graphRequest<{ value: GraphMailMessage[] }>(
-      `/users/${MAILBOX}/mailFolders/Inbox/messages?$filter=isRead eq false&$top=${top}&$orderby=receivedDateTime asc&$select=${select}&$expand=attachments`
+      `/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages?$filter=isRead eq false&$top=${top}&$orderby=receivedDateTime asc&$select=${select}&$expand=attachments`
     );
     return data.value;
   },
 
   /**
-   * Mark a message as read.
+   * Mark a message as read — in the EXACT mailbox it was fetched from
+   * (Graph message IDs are scoped to their owning mailbox, so this must
+   * match the `mailbox` passed to the getUnreadMessages call that returned
+   * this message).
    */
-  async markAsRead(messageId: string): Promise<void> {
-    await graphRequest(`/users/${MAILBOX}/messages/${messageId}`, {
+  async markAsRead(mailbox: string, messageId: string): Promise<void> {
+    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${messageId}`, {
       method: "PATCH",
       body: JSON.stringify({ isRead: true }),
     });
   },
 
   /**
-   * Move a message to a specific folder (e.g., Processed).
+   * Move a message to a specific folder (e.g., Processed) — in the same
+   * mailbox it was fetched from, same reasoning as markAsRead above.
    */
-  async moveMessage(messageId: string, destinationFolderName: string): Promise<void> {
+  async moveMessage(mailbox: string, messageId: string, destinationFolderName: string): Promise<void> {
     const folders = await graphRequest<{ value: Array<{ id: string; displayName: string }> }>(
-      `/users/${MAILBOX}/mailFolders?$filter=displayName eq '${destinationFolderName}'`
+      `/users/${encodeURIComponent(mailbox)}/mailFolders?$filter=displayName eq '${destinationFolderName}'`
     );
 
     let folderId: string;
 
     if (folders.value.length === 0) {
       const newFolder = await graphRequest<{ id: string }>(
-        `/users/${MAILBOX}/mailFolders`,
+        `/users/${encodeURIComponent(mailbox)}/mailFolders`,
         {
           method: "POST",
           body: JSON.stringify({ displayName: destinationFolderName }),
@@ -361,29 +386,35 @@ export const microsoftGraph = {
       folderId = folders.value[0].id;
     }
 
-    await graphRequest(`/users/${MAILBOX}/messages/${messageId}/move`, {
+    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${messageId}/move`, {
       method: "POST",
       body: JSON.stringify({ destinationId: folderId }),
     });
   },
 
   /**
-   * Send an email from the support mailbox.
+   * Send an email from the central support mailbox. Deliberately NOT
+   * mailbox-parameterized — outbound replies/notifications always come from
+   * getCentralMailbox() regardless of which mailbox a thread's inbound messages
+   * were polled from, so a reply never appears to come from a department's
+   * or an individual's personal mailbox.
    */
   async sendMail(payload: SendMailPayload): Promise<void> {
-    await graphRequest(`/users/${MAILBOX}/sendMail`, {
+    await graphRequest(`/users/${encodeURIComponent(getCentralMailbox())}/sendMail`, {
       method: "POST",
       body: JSON.stringify({ ...payload, saveToSentItems: true }),
     });
   },
 
   /**
-   * Validate Microsoft Graph credentials and mailbox access.
-   * Returns structured result for the admin diagnostics panel.
+   * Validate Microsoft Graph credentials and access to ONE mailbox — the
+   * shared implementation behind both testConnection (central mailbox,
+   * backward-compatible response shape) and the admin diagnostics route's
+   * per-department-mailbox checks (app/api/admin/email/test-connection/route.ts).
+   * Never throws — every failure is a typed result.
    */
-  async testConnection(): Promise<{
-    tokenOk: boolean;
-    mailboxOk: boolean;
+  async testMailboxAccess(mailbox: string): Promise<{
+    ok: boolean;
     mailboxEmail?: string;
     unreadCount?: number;
     error?: string;
@@ -394,8 +425,7 @@ export const microsoftGraph = {
       token = await getAccessToken();
     } catch (err) {
       return {
-        tokenOk: false,
-        mailboxOk: false,
+        ok: false,
         error: "Failed to acquire access token — check GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET",
         details: err instanceof Error ? err.message : String(err),
       };
@@ -404,10 +434,11 @@ export const microsoftGraph = {
     try {
       const base = "https://graph.microsoft.com/v1.0";
       const hdrs = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+      const encoded = encodeURIComponent(mailbox);
       const [profileRes, inboxRes] = await Promise.all([
-        fetch(`${base}/users/${MAILBOX}?$select=mail,userPrincipalName`, { headers: hdrs }),
+        fetch(`${base}/users/${encoded}?$select=mail,userPrincipalName`, { headers: hdrs }),
         fetch(
-          `${base}/users/${MAILBOX}/mailFolders/Inbox/messages?$filter=isRead eq false&$top=1&$select=id`,
+          `${base}/users/${encoded}/mailFolders/Inbox/messages?$filter=isRead eq false&$top=1&$select=id`,
           { headers: hdrs }
         ),
       ]);
@@ -419,9 +450,8 @@ export const microsoftGraph = {
           ? errText
           : `non-JSON response (content-type="${errContentType}", finalUrl=${profileRes.url}, redirected=${profileRes.redirected}): ${errText.replace(/\s+/g, " ").trim().slice(0, 200)}`;
         return {
-          tokenOk: true,
-          mailboxOk: false,
-          error: `Mailbox access failed (HTTP ${profileRes.status}) — verify GRAPH_USER_EMAIL and Mail.Read permission`,
+          ok: false,
+          error: `Mailbox access failed (HTTP ${profileRes.status}) — Graph can't reach this mailbox (wrong address, not a real mailbox — e.g. a distribution-only address, or missing Mail.Read permission)`,
           details,
         };
       }
@@ -432,19 +462,51 @@ export const microsoftGraph = {
         : { value: [] };
 
       return {
-        tokenOk: true,
-        mailboxOk: true,
-        mailboxEmail: profile.mail ?? profile.userPrincipalName ?? MAILBOX,
+        ok: true,
+        mailboxEmail: profile.mail ?? profile.userPrincipalName ?? mailbox,
         unreadCount: inbox.value.length,
       };
     } catch (err) {
       return {
-        tokenOk: true,
-        mailboxOk: false,
+        ok: false,
         error: "Mailbox connectivity error",
         details: err instanceof Error ? err.message : String(err),
       };
     }
+  },
+
+  /**
+   * Validate Microsoft Graph credentials and CENTRAL mailbox access.
+   * Returns structured result for the admin diagnostics panel — response
+   * shape kept exactly as before (tokenOk/mailboxOk/mailboxEmail/
+   * unreadCount/error/details) for backward compatibility; per-department-
+   * mailbox diagnostics are a separate, additive concern (see
+   * app/api/admin/email/test-connection/route.ts, which calls
+   * testMailboxAccess above once per configured department mailbox too).
+   */
+  async testConnection(): Promise<{
+    tokenOk: boolean;
+    mailboxOk: boolean;
+    mailboxEmail?: string;
+    unreadCount?: number;
+    error?: string;
+    details?: string;
+  }> {
+    const result = await microsoftGraph.testMailboxAccess(getCentralMailbox());
+    // tokenOk was historically distinguishable from mailboxOk (a bad token
+    // fails before any mailbox call) — testMailboxAccess's `error` message
+    // for that case already starts with "Failed to acquire access token",
+    // so token-vs-mailbox failure is still distinguishable by an admin
+    // reading the error text, without needing two separate booleans here.
+    const tokenFailed = !result.ok && result.error?.startsWith("Failed to acquire access token");
+    return {
+      tokenOk: !tokenFailed,
+      mailboxOk: result.ok,
+      mailboxEmail: result.mailboxEmail,
+      unreadCount: result.unreadCount,
+      error: result.error,
+      details: result.details,
+    };
   },
 
   /**

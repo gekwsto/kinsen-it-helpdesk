@@ -7,9 +7,26 @@ import { Badge } from "@/components/ui/badge";
 import { EmailPollButton } from "@/components/admin/email-poll-button";
 import { EmailAdminActions } from "@/components/admin/email-admin-actions";
 import { formatDateTime, formatRelative } from "@/lib/utils";
-import { Mail, CheckCircle2, XCircle, Clock, SkipForward, AlertCircle, ShieldCheck, ShieldOff } from "lucide-react";
+import { getCentralMailbox } from "@/lib/microsoft-graph";
+import { listConfiguredDepartmentMailboxes } from "@/lib/services/inbound-mailbox-service";
+import { Mail, CheckCircle2, XCircle, Clock, SkipForward, AlertCircle, ShieldCheck, ShieldOff, Building2 } from "lucide-react";
 
-const MAILBOX = process.env.GRAPH_USER_EMAIL || process.env.SUPPORT_EMAIL || "kinsenitsupport@kinsen.gr";
+const MAILBOX = getCentralMailbox();
+
+/** One entry of EmailPollRun.mailboxResults — see that column's schema comment in prisma/schema.prisma. */
+interface MailboxResult {
+  mailbox: string;
+  kind: "central" | "department";
+  departmentId: string | null;
+  departmentName: string | null;
+  ok: boolean;
+  error: string | null;
+  fetched: number;
+  created: number;
+  appended: number;
+  skipped: number;
+  errors: number;
+}
 
 const ACTION_LABELS: Record<string, { label: string; variant: "default" | "secondary" | "destructive" | "outline" }> = {
   CREATED_TICKET:    { label: "New ticket",    variant: "default" },
@@ -29,7 +46,7 @@ export default async function EmailAdminPage() {
     redirect("/dashboard");
   }
 
-  const [recentRuns, recentLogs, totalStats] = await Promise.all([
+  const [recentRuns, recentLogs, totalStats, departmentMailboxes] = await Promise.all([
     prisma.emailPollRun.findMany({
       orderBy: { startedAt: "desc" },
       take: 15,
@@ -41,11 +58,20 @@ export default async function EmailAdminPage() {
     prisma.emailPollRun.aggregate({
       _sum: { created: true, appended: true, skipped: true, errors: true },
     }),
+    listConfiguredDepartmentMailboxes(),
   ]);
 
   const lastRun = recentRuns[0] ?? null;
   const lastSuccess = recentRuns.find((r) => r.succeeded) ?? null;
   const lastError = recentRuns.find((r) => !r.succeeded && r.lastError)?.lastError ?? null;
+
+  // Most recent per-mailbox breakdown, from the newest run that actually has
+  // one (older rows predate the mailboxResults column and are simply
+  // skipped, never guessed at) — pure DB read, no Graph calls, so this is
+  // safe to render unconditionally on every page load.
+  const mailboxResultsRun = recentRuns.find((r) => r.mailboxResults != null) ?? null;
+  const lastMailboxResults = (mailboxResultsRun?.mailboxResults as unknown as MailboxResult[] | null) ?? [];
+  const lastResultByMailbox = new Map(lastMailboxResults.map((m) => [m.mailbox, m]));
 
   const cronSecret = process.env.CRON_SECRET ? "configured" : "not set";
   const webhookSecret = process.env.EMAIL_WEBHOOK_SECRET ? "configured" : "not set";
@@ -79,16 +105,19 @@ export default async function EmailAdminPage() {
 
       {/* Status cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Mailbox */}
+        {/* Central mailbox */}
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-              Monitored Mailbox
+              Central Mailbox
             </CardTitle>
           </CardHeader>
           <CardContent>
             <p className="font-medium text-sm break-all">{MAILBOX}</p>
-            <p className="text-xs text-muted-foreground mt-1">Polling every 2 min (Vercel Cron)</p>
+            <p className="text-xs text-muted-foreground mt-1">
+              + {departmentMailboxes.filter((d) => d.isActive).length} department mailbox
+              {departmentMailboxes.filter((d) => d.isActive).length !== 1 ? "es" : ""} polled every ~2 min
+            </p>
           </CardContent>
         </Card>
 
@@ -173,6 +202,70 @@ export default async function EmailAdminPage() {
         </Card>
       </div>
 
+      {/* Department mailboxes */}
+      <div className="rounded-lg border p-4 space-y-3">
+        <div className="flex items-center gap-2">
+          <Building2 className="h-4 w-4 text-muted-foreground" />
+          <p className="text-sm font-medium">Department Mailboxes</p>
+        </div>
+        {departmentMailboxes.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No department has an inbound email configured yet — every department's own mailbox address (set on the
+            department's page) is polled here automatically once configured. Until then, all inbound email is
+            routed by recipient address through the central mailbox above.
+          </p>
+        ) : (
+          <div className="rounded-md border overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/50">
+                <tr>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Department</th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Mailbox</th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Status</th>
+                  <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">Last Poll</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {departmentMailboxes.map((d) => {
+                  const lastResult = lastResultByMailbox.get(d.email);
+                  return (
+                    <tr key={d.departmentId}>
+                      <td className="px-3 py-2 text-xs">{d.departmentName}</td>
+                      <td className="px-3 py-2 text-xs font-mono break-all">{d.email}</td>
+                      <td className="px-3 py-2 text-xs">
+                        {!d.isActive ? (
+                          <Badge variant="outline" className="text-[10px]">Inactive — not polled</Badge>
+                        ) : (
+                          <Badge variant="secondary" className="text-[10px]">Polled every ~2 min</Badge>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-xs">
+                        {!d.isActive ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : lastResult ? (
+                          <span className={`flex items-center gap-1 ${lastResult.ok ? "text-emerald-600" : "text-destructive"}`}>
+                            {lastResult.ok ? <CheckCircle2 className="h-3 w-3" /> : <XCircle className="h-3 w-3" />}
+                            {lastResult.ok
+                              ? `OK · ${lastResult.fetched} fetched`
+                              : (lastResult.error ?? "Failed")}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground">Not polled yet</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="text-xs text-muted-foreground">
+          Use <span className="font-medium">Test Microsoft Connection</span> below to live-check Graph access to
+          every configured mailbox, including inactive ones.
+        </p>
+      </div>
+
       {/* Last error */}
       {lastError && (
         <div className="flex items-start gap-3 rounded-lg border border-destructive/40 bg-destructive/5 p-4">
@@ -208,7 +301,12 @@ export default async function EmailAdminPage() {
           ))}
         </div>
         <p className="text-muted-foreground text-xs">
-          Docker / server cron — add to crontab:
+          The Docker Compose stack (<code className="bg-background px-1 rounded">docker-compose.yml</code>) already
+          includes an <code className="bg-background px-1 rounded">email-poller</code> service that calls this
+          endpoint every ~2 minutes automatically — no manual cron needed. It requires{" "}
+          <code className="bg-background px-1 rounded">EMAIL_WEBHOOK_SECRET</code> to be set (see Configuration
+          above); without it, this endpoint refuses unauthenticated requests in production. For a non-Docker-Compose
+          self-hosted deployment, an equivalent server/host cron works too:
         </p>
         <pre className="bg-background rounded border px-3 py-2 text-xs font-mono overflow-x-auto">
           {"*/2 * * * * curl -s -X POST https://your-domain/api/email/inbound \\\n  -H \"Authorization: Bearer $EMAIL_WEBHOOK_SECRET\""}
@@ -295,6 +393,11 @@ export default async function EmailAdminPage() {
                           <p className="text-xs truncate">{log.fromEmail ?? "—"}</p>
                           {log.subject && (
                             <p className="text-[11px] text-muted-foreground truncate">{log.subject}</p>
+                          )}
+                          {log.mailbox && (
+                            <p className="text-[10px] text-muted-foreground/70 truncate" title={`Fetched from ${log.mailbox}`}>
+                              via {log.mailbox}
+                            </p>
                           )}
                         </td>
                         <td className="px-3 py-2">

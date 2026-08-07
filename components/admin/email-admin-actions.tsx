@@ -6,6 +6,16 @@ import { Button } from "@/components/ui/button";
 import { CheckCircle2, XCircle, Loader2, Plug, TestTube2, ExternalLink } from "lucide-react";
 import Link from "next/link";
 
+interface DepartmentMailboxResult {
+  departmentId: string;
+  departmentName: string;
+  email: string;
+  isActive: boolean;
+  ok: boolean;
+  unreadCount?: number;
+  error?: string;
+}
+
 interface ConnectionResult {
   tokenOk: boolean;
   mailboxOk: boolean;
@@ -13,6 +23,7 @@ interface ConnectionResult {
   unreadCount?: number;
   error?: string;
   details?: string;
+  departmentMailboxes?: DepartmentMailboxResult[];
 }
 
 interface TestTicketResult {
@@ -107,6 +118,31 @@ export function EmailAdminActions() {
                 <p className="text-muted-foreground pl-5 font-mono break-all text-[10px]">
                   {connResult.details}
                 </p>
+              )}
+
+              {connResult.departmentMailboxes && connResult.departmentMailboxes.length > 0 && (
+                <div className="border-t pt-2 mt-2 space-y-1.5">
+                  <p className="text-muted-foreground font-medium">Department mailboxes</p>
+                  {connResult.departmentMailboxes.map((d) => (
+                    <div key={d.departmentId} className="flex items-start gap-1.5">
+                      {d.ok ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <XCircle className="h-3.5 w-3.5 text-destructive flex-shrink-0 mt-0.5" />
+                      )}
+                      <div className="min-w-0">
+                        <p className={d.ok ? "text-emerald-700" : "text-destructive font-medium"}>
+                          {d.departmentName}{!d.isActive && <span className="text-muted-foreground font-normal"> (inactive)</span>}
+                        </p>
+                        <p className="text-muted-foreground break-all">{d.email}</p>
+                        {d.ok && d.unreadCount !== undefined && (
+                          <p className="text-muted-foreground">{d.unreadCount} unread</p>
+                        )}
+                        {d.error && <p className="text-destructive break-words">{d.error}</p>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}

@@ -31,6 +31,43 @@ services:
     networks:
       - kinsen-helpdesk-net
 
+  # Vercel's cron (vercel.json) only fires when the app is actually deployed
+  # on Vercel — it does nothing for this Docker Compose deployment, which
+  # otherwise has no scheduler at all. This single, always-on sidecar is
+  # what triggers /api/email/inbound roughly every 2 minutes here instead —
+  # exactly one instance, so there's no risk of two schedulers racing to
+  # poll the same mailbox. Talks to the app over the internal Docker network
+  # only (kinsen-helpdesk:3000, never a public/production hostname). Reads
+  # EMAIL_WEBHOOK_SECRET from the same .env file the app container uses —
+  # required for the app to accept the request at all in production (see
+  # isAuthorized in app/api/email/inbound/route.ts, which fails closed with
+  # no secret configured and NODE_ENV=production). Never logs the secret
+  # value itself, only the HTTP status code of each poll attempt.
+  kinsen-helpdesk-email-poller:
+    image: curlimages/curl:8.11.0
+    container_name: kinsen-helpdesk-email-poller
+    restart: unless-stopped
+    depends_on:
+      - kinsen-helpdesk
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          if [ -z "$$EMAIL_WEBHOOK_SECRET" ]; then
+            echo "[email-poller] EMAIL_WEBHOOK_SECRET is not set in .env — skipping this poll (the endpoint rejects unauthenticated requests in production). Set EMAIL_WEBHOOK_SECRET and restart this service to enable polling."
+          else
+            curl -fsS -m 30 -X POST "http://kinsen-helpdesk:3000/api/email/inbound" \
+              -H "Authorization: Bearer $$EMAIL_WEBHOOK_SECRET" \
+              -o /dev/null -w "[email-poller] poll finished, HTTP %{http_code}\n" \
+              || echo "[email-poller] poll request failed (network error or non-2xx response)"
+          fi
+          sleep 120
+        done
+    networks:
+      - kinsen-helpdesk-net
+
 volumes:
   kinsen_helpdesk_db_data:
 

@@ -1086,7 +1086,16 @@ model TicketMessage {
   direction  MessageDirection @default(OUTBOUND)
   isInternal Boolean          @default(false)
 
-  emailMessageId String?
+  // Real DB-unique dedup key (Postgres allows any number of NULL rows under
+  // a unique index — only ever set for an email-originated reply, so
+  // in-app-composed messages, which leave this null, are unaffected) — see
+  // the concurrent-processing note in processInboundEmails
+  // (lib/ticket-email-service.ts): two overlapping poll runs (e.g. a manual
+  // "Poll Now" click racing a scheduled poll) both attempting to append the
+  // same reply now fail one of them at the DB with P2002, caught and treated
+  // as a safe duplicate-skip, not a broken run. Confirmed zero pre-existing
+  // duplicate/non-null values before adding this constraint.
+  emailMessageId String? @unique
   fromEmail      String?
   fromName       String?
 
@@ -1096,7 +1105,6 @@ model TicketMessage {
   updatedAt DateTime @updatedAt
 
   @@index([ticketId])
-  @@index([emailMessageId])
 }
 
 model TicketAttachment {
@@ -1476,10 +1484,19 @@ model EmailProcessingLog {
   ticketId  String?
   error     String?        @db.Text
   createdAt DateTime       @default(now())
+  // Multi-mailbox inbound polling: which mailbox this message was actually
+  // fetched from (normalized lowercase) — e.g. the central support mailbox
+  // or a department's own Department.inboundEmail. Null only for pre-
+  // migration rows and the small number of paths that don't fetch from a
+  // specific Graph mailbox (never backfilled/guessed). See
+  // lib/services/inbound-mailbox-service.ts / processInboundEmails in
+  // lib/ticket-email-service.ts.
+  mailbox   String?
 
   @@index([runId])
   @@index([createdAt])
   @@index([action])
+  @@index([mailbox])
 }
 
 model EmailPollRun {
@@ -1492,6 +1509,17 @@ model EmailPollRun {
   errors     Int       @default(0)
   lastError  String?   @db.Text
   succeeded  Boolean   @default(false)
+  // Per-mailbox breakdown for THIS run — one entry per mailbox actually
+  // polled (central support mailbox + every active department's
+  // inboundEmail), each shaped like MailboxPollResult in
+  // lib/ticket-email-service.ts: { mailbox, kind, departmentId,
+  // departmentName, ok, error, fetched, created, appended, skipped, errors }.
+  // Null for runs before this column existed. Deliberately JSON, not a
+  // separate relational table — this is a point-in-time diagnostic snapshot
+  // for the admin Email Integration screen, never queried/joined against by
+  // application logic (PendingTicket/Department routing reads Department.
+  // inboundEmail directly, never this column).
+  mailboxResults Json?
 
   @@index([startedAt])
 }

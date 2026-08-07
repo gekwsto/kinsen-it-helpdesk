@@ -7,8 +7,9 @@ import {
 } from "@/lib/email-ticket-parser";
 import { formatTicketNumber } from "@/lib/utils";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
-import { EmailLogAction } from "@prisma/client";
+import { EmailLogAction, Prisma } from "@prisma/client";
 import { matchDepartmentForRecipients, createPendingTicketFromEmail } from "@/lib/services/pending-ticket-service";
+import { getMailboxesToPoll, type MailboxToPoll } from "@/lib/services/inbound-mailbox-service";
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import path from "path";
 import fs from "fs/promises";
@@ -68,6 +69,37 @@ function isLoopEmail(parsed: ParsedEmail): boolean {
 
 // ── Main processing loop ──────────────────────────────────────────────────────
 
+/** Per-mailbox breakdown persisted on EmailPollRun.mailboxResults — see that column's schema comment. */
+interface MailboxPollResult {
+  mailbox: string;
+  kind: MailboxToPoll["kind"];
+  departmentId: string | null;
+  departmentName: string | null;
+  ok: boolean;
+  error: string | null;
+  fetched: number;
+  created: number;
+  appended: number;
+  skipped: number;
+  errors: number;
+}
+
+/** True for a Prisma unique-constraint violation (P2002) — used to treat a race between two overlapping poll runs as a safe duplicate-skip instead of a hard error. */
+function isUniqueConstraintViolation(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002";
+}
+
+/**
+ * Polls EVERY mailbox returned by getMailboxesToPoll() — the central
+ * support mailbox plus every active department's own inboundEmail — each
+ * fully independently: a Graph failure fetching one mailbox (wrong address,
+ * missing permission, a distribution-only address that isn't a real
+ * mailbox, etc.) is caught, recorded against THAT mailbox only, and never
+ * prevents any other mailbox (including the central one) from being
+ * processed in the same run. See lib/services/inbound-mailbox-service.ts
+ * for the mailbox-discovery/dedup rules and MailboxToPoll's `kind`, which
+ * drives routing below.
+ */
 export async function processInboundEmails(): Promise<{
   created: number;
   appended: number;
@@ -83,110 +115,197 @@ export async function processInboundEmails(): Promise<{
   let skipped = 0;
   let errors = 0;
   let lastError: string | null = null;
+  const mailboxResults: MailboxPollResult[] = [];
 
-  let messages: Awaited<ReturnType<typeof microsoftGraph.getUnreadMessages>> = [];
-
+  let mailboxes: MailboxToPoll[];
   try {
-    messages = await microsoftGraph.getUnreadMessages(50);
+    mailboxes = await getMailboxesToPoll();
   } catch (err) {
+    // Only a genuinely infrastructural failure (e.g. the database itself is
+    // unreachable) reaches here — a single mailbox's Graph failure never
+    // does, see the per-mailbox loop below. Preserves the pre-existing
+    // "close the run record, then propagate" behavior for this class of
+    // failure.
     const msg = err instanceof Error ? err.message : String(err);
-    lastError = msg;
-    errors++;
     await prisma.emailPollRun.update({
       where: { id: run.id },
-      data: { finishedAt: new Date(), errors, lastError, succeeded: false },
+      data: { finishedAt: new Date(), errors: 1, lastError: msg, succeeded: false },
     });
     throw err;
   }
 
-  for (const message of messages) {
-    let parsed: ParsedEmail | null = null;
+  for (const mailbox of mailboxes) {
+    const mailboxResult: MailboxPollResult = {
+      mailbox: mailbox.email,
+      kind: mailbox.kind,
+      departmentId: mailbox.departmentId,
+      departmentName: mailbox.departmentName,
+      ok: true,
+      error: null,
+      fetched: 0,
+      created: 0,
+      appended: 0,
+      skipped: 0,
+      errors: 0,
+    };
 
+    let messages: Awaited<ReturnType<typeof microsoftGraph.getUnreadMessages>> = [];
     try {
-      parsed = parseIncomingEmail(message);
-
-      // ── Loop / auto-reply protection ──────────────────────────────────────
-      if (isLoopEmail(parsed)) {
-        await logEmail(run.id, parsed, "SKIPPED_LOOP");
-        await microsoftGraph.markAsRead(message.id);
-        skipped++;
-        continue;
-      }
-
-      // ── Message-ID deduplication ────────────────────────────────────────────
-      // Checks both tables a message could already exist under: a reply
-      // already appended to a real Ticket (TicketMessage), or a still-pending
-      // (or already resolved) PendingTicket from an earlier poll run.
-      const [duplicateMessage, duplicatePending] = await Promise.all([
-        prisma.ticketMessage.findFirst({ where: { emailMessageId: parsed.messageId }, select: { id: true } }),
-        prisma.pendingTicket.findFirst({ where: { emailMessageId: parsed.messageId }, select: { id: true } }),
-      ]);
-      if (duplicateMessage || duplicatePending) {
-        await logEmail(run.id, parsed, "SKIPPED_DUPLICATE");
-        await microsoftGraph.markAsRead(message.id);
-        skipped++;
-        continue;
-      }
-
-      // ── Route: append to an already-accepted ticket, or create a pending ticket ──
-      // Replies to a real, already-accepted Ticket (subject carries its
-      // number) still append directly — no pending step for those. Every
-      // other new thread now creates a PendingTicket, never a Ticket
-      // directly; a human must Accept it via /tickets/pending.
-      let ticketId: string | null = null;
-
-      if (parsed.existingTicketNumber !== null) {
-        const ticket = await prisma.ticket.findUnique({
-          where: { ticketNumber: parsed.existingTicketNumber },
-          select: { id: true, ticketNumber: true, title: true },
-        });
-
-        if (ticket) {
-          const user = await findOrCreateRequesterForReply(parsed);
-          await appendEmailReply(parsed, ticket, user.id);
-          ticketId = ticket.id;
-          await logEmail(run.id, parsed, "APPENDED_REPLY", ticketId);
-          appended++;
-        } else {
-          // Ticket ref in subject but ticket not found — create a pending ticket
-          const department = await matchDepartmentForRecipients(parsed.toEmails);
-          const pendingTicket = await createPendingTicketFromEmail(parsed, department);
-          await logEmail(run.id, parsed, "CREATED_TICKET", pendingTicket.id);
-          created++;
-        }
-      } else {
-        const department = await matchDepartmentForRecipients(parsed.toEmails);
-        const pendingTicket = await createPendingTicketFromEmail(parsed, department);
-        await logEmail(run.id, parsed, "CREATED_TICKET", pendingTicket.id);
-        created++;
-      }
-
-      // ── Move processed email ──────────────────────────────────────────────
-      await microsoftGraph.markAsRead(message.id);
-      await microsoftGraph.moveMessage(message.id, "Processed");
+      messages = await microsoftGraph.getUnreadMessages(mailbox.email, 50);
+      mailboxResult.fetched = messages.length;
     } catch (err) {
-      // One email failure must not abort the whole batch.
-      // Leave the email UNREAD so it is retried on the next poll.
-      const errMsg = err instanceof Error ? err.message : String(err);
-      lastError = errMsg;
+      // This mailbox is inaccessible/misconfigured — record it and move on
+      // to the NEXT mailbox. Never aborts polling of any other mailbox.
+      const msg = err instanceof Error ? err.message : String(err);
+      mailboxResult.ok = false;
+      mailboxResult.error = msg;
+      mailboxResult.errors = 1;
+      lastError = msg;
       errors++;
-
-      // Best-effort log — swallow any secondary DB error
-      await prisma.emailProcessingLog
-        .create({
-          data: {
-            runId: run.id,
-            messageId: parsed?.messageId ?? null,
-            fromEmail: parsed?.fromEmail ?? null,
-            subject: parsed?.subject ?? null,
-            action: "FAILED",
-            error: errMsg,
-          },
-        })
-        .catch(() => {});
-
-      console.error(`[email] Failed to process message ${message.id}:`, err);
+      console.error(`[email] Failed to fetch messages from mailbox ${mailbox.email}:`, err);
+      mailboxResults.push(mailboxResult);
+      continue;
     }
+
+    for (const message of messages) {
+      let parsed: ParsedEmail | null = null;
+
+      try {
+        parsed = parseIncomingEmail(message);
+
+        // ── Loop / auto-reply protection ──────────────────────────────────
+        if (isLoopEmail(parsed)) {
+          await logEmail(run.id, mailbox.email, parsed, "SKIPPED_LOOP");
+          await microsoftGraph.markAsRead(mailbox.email, message.id);
+          skipped++;
+          mailboxResult.skipped++;
+          continue;
+        }
+
+        // ── Message-ID deduplication ─────────────────────────────────────
+        // Checks both tables a message could already exist under: a reply
+        // already appended to a real Ticket (TicketMessage), or a still-
+        // pending (or already resolved) PendingTicket from an earlier poll
+        // run — or from a DIFFERENT mailbox in THIS SAME run, since the
+        // same internetMessageId could in principle be visible through more
+        // than one configured delivery path (e.g. a message both delivered
+        // directly to a department mailbox AND forwarded/cc'd into the
+        // central one).
+        const [duplicateMessage, duplicatePending] = await Promise.all([
+          prisma.ticketMessage.findFirst({ where: { emailMessageId: parsed.messageId }, select: { id: true } }),
+          prisma.pendingTicket.findFirst({ where: { emailMessageId: parsed.messageId }, select: { id: true } }),
+        ]);
+        if (duplicateMessage || duplicatePending) {
+          await logEmail(run.id, mailbox.email, parsed, "SKIPPED_DUPLICATE");
+          await microsoftGraph.markAsRead(mailbox.email, message.id);
+          skipped++;
+          mailboxResult.skipped++;
+          continue;
+        }
+
+        // ── Route: append to an already-accepted ticket, or create a pending ticket ──
+        // Replies to a real, already-accepted Ticket (subject carries its
+        // number) still append directly — no pending step for those. Every
+        // other new thread now creates a PendingTicket, never a Ticket
+        // directly; a human must Accept it via /tickets/pending.
+        //
+        // Department resolution is deterministic per mailbox.kind:
+        //   - "department": this message was fetched directly from a
+        //     specific department's own configured mailbox — route straight
+        //     to it, never re-derived from (and never overridden by) Graph
+        //     `toRecipients`, which Exchange rules/aliases/forwarding can
+        //     rewrite.
+        //   - "central": unchanged, existing recipient-based matching — this
+        //     is what keeps aliases/forwarding that ultimately deliver into
+        //     the central mailbox working exactly as before.
+        let ticketId: string | null = null;
+        let duplicateRace = false;
+
+        if (parsed.existingTicketNumber !== null) {
+          const ticket = await prisma.ticket.findUnique({
+            where: { ticketNumber: parsed.existingTicketNumber },
+            select: { id: true, ticketNumber: true, title: true },
+          });
+
+          if (ticket) {
+            const user = await findOrCreateRequesterForReply(parsed);
+            try {
+              await appendEmailReply(parsed, ticket, user.id);
+            } catch (err) {
+              if (!isUniqueConstraintViolation(err)) throw err;
+              duplicateRace = true;
+            }
+            if (duplicateRace) {
+              await logEmail(run.id, mailbox.email, parsed, "SKIPPED_DUPLICATE");
+              skipped++;
+              mailboxResult.skipped++;
+            } else {
+              ticketId = ticket.id;
+              await logEmail(run.id, mailbox.email, parsed, "APPENDED_REPLY", ticketId);
+              appended++;
+              mailboxResult.appended++;
+            }
+          } else {
+            // Ticket ref in subject but ticket not found — create a pending ticket
+            const department = mailbox.kind === "department" ? { id: mailbox.departmentId! } : await matchDepartmentForRecipients(parsed.toEmails);
+            try {
+              const pendingTicket = await createPendingTicketFromEmail(parsed, department);
+              await logEmail(run.id, mailbox.email, parsed, "CREATED_TICKET", pendingTicket.id);
+              created++;
+              mailboxResult.created++;
+            } catch (err) {
+              if (!isUniqueConstraintViolation(err)) throw err;
+              await logEmail(run.id, mailbox.email, parsed, "SKIPPED_DUPLICATE");
+              skipped++;
+              mailboxResult.skipped++;
+            }
+          }
+        } else {
+          const department = mailbox.kind === "department" ? { id: mailbox.departmentId! } : await matchDepartmentForRecipients(parsed.toEmails);
+          try {
+            const pendingTicket = await createPendingTicketFromEmail(parsed, department);
+            await logEmail(run.id, mailbox.email, parsed, "CREATED_TICKET", pendingTicket.id);
+            created++;
+            mailboxResult.created++;
+          } catch (err) {
+            if (!isUniqueConstraintViolation(err)) throw err;
+            await logEmail(run.id, mailbox.email, parsed, "SKIPPED_DUPLICATE");
+            skipped++;
+            mailboxResult.skipped++;
+          }
+        }
+
+        // ── Move processed email — in the EXACT mailbox it was fetched from ──
+        await microsoftGraph.markAsRead(mailbox.email, message.id);
+        await microsoftGraph.moveMessage(mailbox.email, message.id, "Processed");
+      } catch (err) {
+        // One email failure must not abort the whole mailbox (or the whole
+        // batch). Leave the email UNREAD so it is retried on the next poll.
+        const errMsg = err instanceof Error ? err.message : String(err);
+        lastError = errMsg;
+        errors++;
+        mailboxResult.errors++;
+
+        // Best-effort log — swallow any secondary DB error
+        await prisma.emailProcessingLog
+          .create({
+            data: {
+              runId: run.id,
+              mailbox: mailbox.email,
+              messageId: parsed?.messageId ?? null,
+              fromEmail: parsed?.fromEmail ?? null,
+              subject: parsed?.subject ?? null,
+              action: "FAILED",
+              error: errMsg,
+            },
+          })
+          .catch(() => {});
+
+        console.error(`[email] Failed to process message ${message.id} from mailbox ${mailbox.email}:`, err);
+      }
+    }
+
+    mailboxResults.push(mailboxResult);
   }
 
   // Close the run record
@@ -200,6 +319,7 @@ export async function processInboundEmails(): Promise<{
       errors,
       lastError,
       succeeded: errors === 0,
+      mailboxResults: mailboxResults as unknown as Prisma.InputJsonValue,
     },
   });
 
@@ -210,6 +330,7 @@ export async function processInboundEmails(): Promise<{
 
 async function logEmail(
   runId: string,
+  mailbox: string,
   parsed: ParsedEmail,
   action: EmailLogAction,
   ticketId?: string | null
@@ -217,6 +338,7 @@ async function logEmail(
   await prisma.emailProcessingLog.create({
     data: {
       runId,
+      mailbox,
       messageId: parsed.messageId,
       fromEmail: parsed.fromEmail,
       subject: parsed.subject,
