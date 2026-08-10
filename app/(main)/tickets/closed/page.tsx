@@ -9,6 +9,29 @@ import { TicketFilters } from "@/components/tickets/ticket-filters";
 import { redirect } from "next/navigation";
 import { ArchiveX } from "lucide-react";
 import { Role } from "@prisma/client";
+import {
+  getTicketFilterOptions,
+  splitFilterParam,
+  reconcileTicketFilterParam,
+} from "@/lib/services/ticket-filter-options-service";
+
+/** Same purpose as app/(main)/tickets/page.tsx's own helper — see there for the full rationale. */
+function buildClosedTicketsUrlWithCorrections(
+  params: SearchParams,
+  corrections: Partial<Record<"statusId" | "priorityId" | "categoryId", string | null>>
+): string {
+  const merged = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "page") continue;
+    if (typeof value === "string" && value) merged.set(key, value);
+  }
+  for (const [key, value] of Object.entries(corrections)) {
+    if (value) merged.set(key, value);
+    else merged.delete(key);
+  }
+  merged.set("page", "1");
+  return `/tickets/closed?${merged.toString()}`;
+}
 
 interface SearchParams {
   page?: string;
@@ -66,6 +89,25 @@ export default async function ClosedTicketsPage({
   const scope = await buildTicketListWhere(session.user.id, session.user.role, effectiveDepartmentId);
   if ("denied" in scope) redirect("/dashboard");
 
+  // Same workspace-scoped options + reconciliation pattern as
+  // app/(main)/tickets/page.tsx — this list's Status options are further
+  // narrowed to isClosed:true statuses only, matching what this page shows.
+  const filterOptions = await getTicketFilterOptions(effectiveDepartmentId, session.user.id, session.user.role, {
+    statusWhere: { isClosed: true },
+  });
+  const [reconciledStatusId, reconciledPriorityId, reconciledCategoryId] = await Promise.all([
+    reconcileTicketFilterParam("status", params.statusId, filterOptions.statuses),
+    reconcileTicketFilterParam("priority", params.priorityId, filterOptions.priorities),
+    reconcileTicketFilterParam("category", params.categoryId, filterOptions.categories),
+  ]);
+  const corrections: Partial<Record<"statusId" | "priorityId" | "categoryId", string | null>> = {};
+  if (reconciledStatusId !== (params.statusId ?? null)) corrections.statusId = reconciledStatusId;
+  if (reconciledPriorityId !== (params.priorityId ?? null)) corrections.priorityId = reconciledPriorityId;
+  if (reconciledCategoryId !== (params.categoryId ?? null)) corrections.categoryId = reconciledCategoryId;
+  if (Object.keys(corrections).length > 0) {
+    redirect(buildClosedTicketsUrlWithCorrections(params, corrections));
+  }
+
   // Base filter: all tickets with a closed status OR with a cancel reason
   const andConditions: any[] = [
     scope,
@@ -85,57 +127,41 @@ export default async function ClosedTicketsPage({
     });
   }
   if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
-  if (params.statusId) andConditions.push({ statusId: params.statusId });
-  if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
-  if (params.categoryId) andConditions.push({ categoryId: params.categoryId });
+  if (params.statusId) andConditions.push({ statusId: { in: splitFilterParam(params.statusId) } });
+  if (params.priorityId) andConditions.push({ priorityId: { in: splitFilterParam(params.priorityId) } });
+  if (params.categoryId) andConditions.push({ categoryId: { in: splitFilterParam(params.categoryId) } });
   if (params.assignedAgentId) andConditions.push({ assignedAgentId: params.assignedAgentId });
 
   const where: any = { AND: andConditions };
 
-  const [tickets, total, statuses, priorities, categories, departments, agents] =
-    await Promise.all([
-      prisma.ticket.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy,
-        include: {
-          requester: { select: { id: true, name: true, email: true, image: true } },
-          assignedAgent: { select: { id: true, name: true, email: true, image: true } },
-          status: { select: { id: true, name: true, color: true } },
-          priority: { select: { id: true, name: true, color: true, level: true } },
-          category: { select: { id: true, name: true, color: true } },
-          department: { select: { id: true, name: true } },
-          project: { select: { id: true, title: true } },
-          _count: { select: { messages: true, attachments: true } },
-        },
-      }),
-      prisma.ticket.count({ where }),
-      prisma.ticketStatus.findMany({
-        where: { isActive: true, isClosed: true },
-        orderBy: { order: "asc" },
-        select: { id: true, name: true, color: true },
-      }),
-      prisma.ticketPriority.findMany({
-        where: { isActive: true },
-        orderBy: { level: "desc" },
-        select: { id: true, name: true, color: true, level: true },
-      }),
-      prisma.ticketCategory.findMany({
-        where: { isActive: true },
-        orderBy: { name: "asc" },
-        select: { id: true, name: true },
-      }),
-      prisma.department.findMany({
-        orderBy: { name: "asc" },
-        select: { id: true, name: true },
-      }),
-      prisma.user.findMany({
-        where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
-        select: { id: true, name: true, email: true, image: true },
-        orderBy: { name: "asc" },
-      }),
-    ]);
+  const [tickets, total, departments, agents] = await Promise.all([
+    prisma.ticket.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy,
+      include: {
+        requester: { select: { id: true, name: true, email: true, image: true } },
+        assignedAgent: { select: { id: true, name: true, email: true, image: true } },
+        status: { select: { id: true, name: true, color: true } },
+        priority: { select: { id: true, name: true, color: true, level: true } },
+        category: { select: { id: true, name: true, color: true } },
+        department: { select: { id: true, name: true } },
+        project: { select: { id: true, title: true } },
+        _count: { select: { messages: true, attachments: true } },
+      },
+    }),
+    prisma.ticket.count({ where }),
+    prisma.department.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+    prisma.user.findMany({
+      where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
+      select: { id: true, name: true, email: true, image: true },
+      orderBy: { name: "asc" },
+    }),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -152,7 +178,7 @@ export default async function ClosedTicketsPage({
       </div>
 
       <TicketFilters
-        options={{ statuses, priorities, categories, departments, agents }}
+        options={{ ...filterOptions, departments, agents }}
       />
 
       <TicketTable

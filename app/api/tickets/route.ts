@@ -9,6 +9,7 @@ import {
   departmentDenialStatus,
   resolveDefaultStatusId,
   validateTicketProjectActivityLink,
+  validateTicketConfigOwnership,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -224,6 +225,23 @@ export async function POST(req: NextRequest) {
         { error: "No default status configured" },
         { status: 500 }
       );
+    }
+
+    // categoryId/priorityId ARE accepted directly from the client (statusId
+    // above never is — it's always server-resolved) — never trust that a
+    // submitted id actually belongs to this department without checking:
+    // TicketCategory/TicketPriority are department-owned config tables, and
+    // accepting a foreign department's row here is exactly how a real
+    // cross-department data-integrity bug was previously introduced (see
+    // scripts/repair-ticket-config-department-mismatch.ts).
+    if (data.categoryId || data.priorityId) {
+      const ownership = await validateTicketConfigOwnership(deptResolution.departmentId, {
+        categoryId: data.categoryId,
+        priorityId: data.priorityId,
+      });
+      if (!ownership.ok) {
+        return NextResponse.json({ error: ownership.message, code: `${ownership.field}_department_mismatch` }, { status: 400 });
+      }
     }
 
     const ticket = await createTicketAtomic(

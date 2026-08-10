@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
+import { getTicketFilterOptions, splitFilterParam } from "@/lib/services/ticket-filter-options-service";
 
 interface SearchParams {
   page?: string;
@@ -89,9 +90,9 @@ export default async function AssignedToMeTicketsPage({
     });
   }
   if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
-  if (params.statusId) andConditions.push({ statusId: params.statusId });
-  if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
-  if (params.categoryId) andConditions.push({ categoryId: params.categoryId });
+  if (params.statusId) andConditions.push({ statusId: { in: splitFilterParam(params.statusId) } });
+  if (params.priorityId) andConditions.push({ priorityId: { in: splitFilterParam(params.priorityId) } });
+  if (params.categoryId) andConditions.push({ categoryId: { in: splitFilterParam(params.categoryId) } });
   if (params.source) andConditions.push({ source: params.source });
   if (params.createdAfter || params.createdBefore) {
     andConditions.push({
@@ -104,7 +105,11 @@ export default async function AssignedToMeTicketsPage({
 
   const where: any = { AND: andConditions };
 
-  const [tickets, total, statuses, priorities, categories, departments] = await Promise.all([
+  // No active-workspace concept on this page (an explicit ?departmentId=
+  // just narrows an already-personal result set — see buildAssignedToMeWhere
+  // above) — filter options are scoped the same way: that one department if
+  // given, else the full set the caller may view tickets in.
+  const [tickets, total, filterOptions, departments] = await Promise.all([
     prisma.ticket.findMany({
       where,
       skip,
@@ -122,9 +127,7 @@ export default async function AssignedToMeTicketsPage({
       },
     }),
     prisma.ticket.count({ where }),
-    prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" }, select: { id: true, name: true, color: true } }),
-    prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" }, select: { id: true, name: true, color: true, level: true } }),
-    prisma.ticketCategory.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    getTicketFilterOptions(params.departmentId, session.user.id, role),
     getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
   ]);
 
@@ -145,7 +148,7 @@ export default async function AssignedToMeTicketsPage({
         )}
       </div>
 
-      <TicketFilters options={{ statuses, priorities, categories, departments, agents: [] }} />
+      <TicketFilters options={{ ...filterOptions, departments, agents: [] }} />
 
       <TicketTable
         tickets={tickets as any}

@@ -750,6 +750,40 @@ async function main() {
     return;
   }
 
+  // Department-scoped Status/Priority/Category lookups, memoized —
+  // TicketStatus/TicketPriority/TicketCategory are owned by exactly one
+  // department each (`@@unique([departmentId, name])`), so a ticket seeded
+  // into Finance/HR/Sales/Operations below must resolve ITS OWN department's
+  // "Open"/"High"/"Hardware"/etc. row, never reuse openStatus/highPri/
+  // hardwareCat/etc. above (those are deliberately dept-it-scoped, correct
+  // only for the IT tickets that already use them). Reusing them for a
+  // ticket assigned to a different department previously produced exactly
+  // the cross-department config FK corruption
+  // scripts/repair-ticket-config-department-mismatch.ts was written to
+  // detect and fix — this comment prevents it from recurring at the source.
+  const deptConfigCache = new Map<string, { id: string } | null>();
+  async function deptStatus(departmentId: string, name: string): Promise<{ id: string } | null> {
+    const key = `status:${departmentId}:${name}`;
+    if (!deptConfigCache.has(key)) {
+      deptConfigCache.set(key, await prisma.ticketStatus.findFirst({ where: { departmentId, name }, select: { id: true } }));
+    }
+    return deptConfigCache.get(key) ?? null;
+  }
+  async function deptPriority(departmentId: string, name: string): Promise<{ id: string } | null> {
+    const key = `priority:${departmentId}:${name}`;
+    if (!deptConfigCache.has(key)) {
+      deptConfigCache.set(key, await prisma.ticketPriority.findFirst({ where: { departmentId, name }, select: { id: true } }));
+    }
+    return deptConfigCache.get(key) ?? null;
+  }
+  async function deptCategory(departmentId: string, name: string): Promise<{ id: string } | null> {
+    const key = `category:${departmentId}:${name}`;
+    if (!deptConfigCache.has(key)) {
+      deptConfigCache.set(key, await prisma.ticketCategory.findFirst({ where: { departmentId, name }, select: { id: true } }));
+    }
+    return deptConfigCache.get(key) ?? null;
+  }
+
   // Projects
   const proj1 = await prisma.project.upsert({
     where: { id: "mock-proj-001" },
@@ -1041,13 +1075,16 @@ async function main() {
     return ticket;
   }
 
+  const financeOpen1 = await deptStatus("dept-finance", "Open");
+  const financeHigh1 = await deptPriority("dept-finance", "High");
+  const financeHardware1 = await deptCategory("dept-finance", "Hardware");
   await upsertTicket("mock-tkt-001", {
     title: "Laptop won't start after Windows update",
     description: "My laptop stopped booting after the latest Windows update was applied. Stuck on a black screen with spinning dots. This is my primary work machine.",
-    statusId: openStatus.id,
+    statusId: financeOpen1!.id,
     requesterId: demoUser.id,
-    categoryId: hardwareCat?.id,
-    priorityId: highPri.id,
+    categoryId: financeHardware1?.id,
+    priorityId: financeHigh1!.id,
     departmentId: "dept-finance",
     messages: [
       { body: "I've tried holding the power button for 10 seconds. Still no display. Power LED is on.", authorId: demoUser.id },
@@ -1055,13 +1092,16 @@ async function main() {
     ],
   });
 
+  const financeInProgress2 = await deptStatus("dept-finance", "In Progress");
+  const financeHigh2 = await deptPriority("dept-finance", "High");
+  const financeAccess2 = await deptCategory("dept-finance", "Access & Permissions");
   await upsertTicket("mock-tkt-002", {
     title: "Cannot access shared Finance drive",
     description: "Since this morning I've lost access to the \\\\fileserver\\Finance shared drive. My permissions haven't changed as far as I know. Getting 'Access Denied' error.",
-    statusId: inProgressStatus.id,
+    statusId: financeInProgress2!.id,
     requesterId: managerUser.id,
-    categoryId: accessCat?.id,
-    priorityId: highPri.id,
+    categoryId: financeAccess2?.id,
+    priorityId: financeHigh2!.id,
     assignedAgentId: agentUser.id,
     departmentId: "dept-finance",
     messages: [
@@ -1070,13 +1110,16 @@ async function main() {
     ],
   });
 
+  const hrPending3 = await deptStatus("dept-hr", "Pending User");
+  const hrMedium3 = await deptPriority("dept-hr", "Medium");
+  const hrEmail3 = await deptCategory("dept-hr", "Email");
   await upsertTicket("mock-tkt-003", {
     title: "Outlook keeps crashing on send",
     description: "Outlook crashes every time I try to send an email with an attachment over 5MB. Happened 4 times today. Running Office 2021 on Windows 11.",
-    statusId: pendingStatus.id,
+    statusId: hrPending3!.id,
     requesterId: demoUser.id,
-    categoryId: emailCat?.id,
-    priorityId: mediumPri.id,
+    categoryId: hrEmail3?.id,
+    priorityId: hrMedium3!.id,
     assignedAgentId: agentUser.id,
     departmentId: "dept-hr",
     messages: [
@@ -1164,13 +1207,16 @@ async function main() {
     ],
   });
 
+  const financeOpen10 = await deptStatus("dept-finance", "Open");
+  const financeLow10 = await deptPriority("dept-finance", "Low");
+  const financePrinting10 = await deptCategory("dept-finance", "Printing");
   await upsertTicket("mock-tkt-010", {
     title: "HP printer on Finance floor not printing",
     description: "The HP LaserJet on the 2nd floor Finance area is showing 'Paper Jam' but the paper tray is clear. Colleagues can't print urgent documents.",
-    statusId: openStatus.id,
+    statusId: financeOpen10!.id,
     requesterId: demoUser.id,
-    categoryId: printingCat?.id,
-    priorityId: lowPri.id,
+    categoryId: financePrinting10?.id,
+    priorityId: financeLow10!.id,
     departmentId: "dept-finance",
   });
 
@@ -1188,13 +1234,16 @@ async function main() {
     ],
   });
 
+  const hrClosed12 = await deptStatus("dept-hr", "Closed");
+  const hrLow12 = await deptPriority("dept-hr", "Low");
+  const hrSoftware12 = await deptCategory("dept-hr", "Software");
   await upsertTicket("mock-tkt-012", {
     title: "Request: Adobe Acrobat Pro installation",
     description: "I need Adobe Acrobat Pro installed on my workstation (WIN-HR-042) for processing contract PDFs. I have manager approval.",
-    statusId: closedStatus.id,
+    statusId: hrClosed12!.id,
     requesterId: demoUser.id,
-    categoryId: softwareCat?.id,
-    priorityId: lowPri.id,
+    categoryId: hrSoftware12?.id,
+    priorityId: hrLow12!.id,
     assignedAgentId: agentUser.id,
     departmentId: "dept-hr",
     messages: [
@@ -1232,23 +1281,29 @@ async function main() {
     ],
   });
 
+  const salesOpen15 = await deptStatus("dept-sales", "Open");
+  const salesMedium15 = await deptPriority("dept-sales", "Medium");
+  const salesHardware15 = await deptCategory("dept-sales", "Hardware");
   await upsertTicket("mock-tkt-015", {
     title: "USB mouse and keyboard not recognised",
     description: "After logging in this morning, neither my USB mouse nor keyboard respond. Tried different USB ports. Works fine on another PC.",
-    statusId: openStatus.id,
+    statusId: salesOpen15!.id,
     requesterId: demoUser.id,
-    categoryId: hardwareCat?.id,
-    priorityId: mediumPri.id,
+    categoryId: salesHardware15?.id,
+    priorityId: salesMedium15!.id,
     departmentId: "dept-sales",
   });
 
+  const hrPending16 = await deptStatus("dept-hr", "Pending User");
+  const hrLow16 = await deptPriority("dept-hr", "Low");
+  const hrEmail16 = await deptCategory("dept-hr", "Email");
   await upsertTicket("mock-tkt-016", {
     title: "Outlook calendar not syncing with Teams",
     description: "My Outlook calendar events don't appear in Microsoft Teams. Started after the Office update last Thursday. Meetings are appearing in Outlook but not Teams calendar.",
-    statusId: pendingStatus.id,
+    statusId: hrPending16!.id,
     requesterId: managerUser.id,
-    categoryId: emailCat?.id,
-    priorityId: lowPri.id,
+    categoryId: hrEmail16?.id,
+    priorityId: hrLow16!.id,
     assignedAgentId: agentUser.id,
     departmentId: "dept-hr",
     messages: [
@@ -1256,13 +1311,16 @@ async function main() {
     ],
   });
 
+  const opsOpen17 = await deptStatus("dept-operations", "Open");
+  const opsLow17 = await deptPriority("dept-operations", "Low");
+  const opsAccess17 = await deptCategory("dept-operations", "Access & Permissions");
   await upsertTicket("mock-tkt-017", {
     title: "MFA setup assistance needed",
     description: "I tried to set up the Microsoft Authenticator for MFA but the QR code scan keeps failing. Need help setting it up before the MFA enforcement deadline.",
-    statusId: openStatus.id,
+    statusId: opsOpen17!.id,
     requesterId: demoUser.id,
-    categoryId: accessCat?.id,
-    priorityId: lowPri.id,
+    categoryId: opsAccess17?.id,
+    priorityId: opsLow17!.id,
     departmentId: "dept-operations",
   });
 
@@ -1280,13 +1338,16 @@ async function main() {
     ],
   });
 
+  const financeInProgress19 = await deptStatus("dept-finance", "In Progress");
+  const financeHigh19 = await deptPriority("dept-finance", "High");
+  const financeSecurity19 = await deptCategory("dept-finance", "Security");
   await upsertTicket("mock-tkt-019", {
     title: "Phishing email targeting Finance team",
     description: "Several Finance team members received a convincing phishing email appearing to come from our CEO requesting urgent wire transfer approval. 2 staff clicked the link.",
-    statusId: inProgressStatus.id,
+    statusId: financeInProgress19!.id,
     requesterId: managerUser.id,
-    categoryId: securityCat?.id,
-    priorityId: highPri.id,
+    categoryId: financeSecurity19?.id,
+    priorityId: financeHigh19!.id,
     assignedAgentId: adminUser.id,
     departmentId: "dept-finance",
     projectId: proj3.id,

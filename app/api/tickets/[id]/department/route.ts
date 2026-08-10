@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, canViewAllDepartments, hasDepartmentPermission } from "@/lib/permissions";
-import { canActOnEntity, resolveDefaultStatusId } from "@/lib/services/department-scope-service";
+import { canActOnEntity, resolveDefaultStatusId, findEquivalentDepartmentConfig } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { changeTicketDepartmentSchema } from "@/lib/validations";
@@ -94,10 +94,17 @@ export async function PATCH(
     // Department changed -> re-validate the ticket's category/priority/
     // status/cancel reason still belong to the target department (or are
     // global) — never silently keep a config value scoped to the OLD
-    // department. Category/priority/cancel reason are nullable, so an
-    // invalid one just clears; status is required, so it falls back to the
-    // target department's own default (or the global default) via the same
-    // resolveDefaultStatusId used at ticket creation.
+    // department. A stale category/priority/status is first remapped to the
+    // TARGET department's own same-named equivalent (findEquivalentDepartmentConfig
+    // — every department shares the same starter name set, so this resolves
+    // deterministically for the common case); only when no equivalent exists
+    // there does it fall back to clearing (category/priority, both
+    // nullable) or the target department's own default status (status is a
+    // required field, so it can never simply clear). This is the actual
+    // "remap, don't just null" behavior required to avoid silently losing a
+    // ticket's real status/priority/category identity on a department move
+    // — see scripts/repair-ticket-config-department-mismatch.ts for the
+    // same remap logic applied retroactively to pre-existing data.
     let resolvedCategoryId = ticket.categoryId;
     let resolvedPriorityId = ticket.priorityId;
     let resolvedStatusId = ticket.statusId;
@@ -107,9 +114,9 @@ export async function PATCH(
 
     if (departmentChanging) {
       const [category, priority, status, cancelReason, project, activity] = await Promise.all([
-        ticket.categoryId ? prisma.ticketCategory.findUnique({ where: { id: ticket.categoryId }, select: { departmentId: true } }) : Promise.resolve(null),
-        ticket.priorityId ? prisma.ticketPriority.findUnique({ where: { id: ticket.priorityId }, select: { departmentId: true } }) : Promise.resolve(null),
-        prisma.ticketStatus.findUnique({ where: { id: ticket.statusId }, select: { departmentId: true } }),
+        ticket.categoryId ? prisma.ticketCategory.findUnique({ where: { id: ticket.categoryId }, select: { departmentId: true, name: true } }) : Promise.resolve(null),
+        ticket.priorityId ? prisma.ticketPriority.findUnique({ where: { id: ticket.priorityId }, select: { departmentId: true, name: true } }) : Promise.resolve(null),
+        prisma.ticketStatus.findUnique({ where: { id: ticket.statusId }, select: { departmentId: true, name: true } }),
         ticket.cancelReasonId ? prisma.ticketCancelReason.findUnique({ where: { id: ticket.cancelReasonId }, select: { departmentId: true } }) : Promise.resolve(null),
         ticket.projectId ? prisma.project.findUnique({ where: { id: ticket.projectId }, select: { departmentId: true } }) : Promise.resolve(null),
         ticket.activityId ? prisma.projectActivity.findUnique({ where: { id: ticket.activityId }, select: { departmentId: true, projectId: true } }) : Promise.resolve(null),
@@ -118,12 +125,18 @@ export async function PATCH(
       const stillValid = (rowDepartmentId: string | null | undefined) =>
         rowDepartmentId == null || rowDepartmentId === data.departmentId;
 
-      if (ticket.categoryId && !stillValid(category?.departmentId)) resolvedCategoryId = null;
-      if (ticket.priorityId && !stillValid(priority?.departmentId)) resolvedPriorityId = null;
+      if (ticket.categoryId && category && !stillValid(category.departmentId)) {
+        const equivalent = await findEquivalentDepartmentConfig("ticketCategory", data.departmentId, category.name);
+        resolvedCategoryId = equivalent?.id ?? null;
+      }
+      if (ticket.priorityId && priority && !stillValid(priority.departmentId)) {
+        const equivalent = await findEquivalentDepartmentConfig("ticketPriority", data.departmentId, priority.name);
+        resolvedPriorityId = equivalent?.id ?? null;
+      }
       if (ticket.cancelReasonId && !stillValid(cancelReason?.departmentId)) resolvedCancelReasonId = null;
-      if (!stillValid(status?.departmentId)) {
-        const fallbackStatusId = await resolveDefaultStatusId(data.departmentId);
-        if (fallbackStatusId) resolvedStatusId = fallbackStatusId;
+      if (status && !stillValid(status.departmentId)) {
+        const equivalent = await findEquivalentDepartmentConfig("ticketStatus", data.departmentId, status.name);
+        resolvedStatusId = equivalent?.id ?? (await resolveDefaultStatusId(data.departmentId)) ?? resolvedStatusId;
       }
       // Project/Activity — same leniency, plus the activity must still
       // belong to whichever project survives (if it belonged to one at all).

@@ -188,6 +188,34 @@ export async function resolveDefaultStatusId(departmentId: string): Promise<stri
 }
 
 /**
+ * Deterministic, name-based lookup of a department's own equivalent of a
+ * TicketStatus/TicketPriority/TicketCategory row — used ONLY for the
+ * department-transfer remap (PATCH /api/tickets/[id]/department) and the
+ * one-time repair script for pre-existing corrupted data (scripts/repair-
+ * ticket-config-department-mismatch.ts). Never used for ticket FILTERING
+ * itself (see validateTicketConfigOwnership below, and buildTicketListWhere
+ * — both stay strictly canonical-ID based).
+ *
+ * Every department in this app is seeded with the same starter Status/
+ * Priority/Category name set (see config-starter-data.ts), so an exact,
+ * case-sensitive name match against an ACTIVE row in the target department
+ * is expected to resolve cleanly; a department with no same-named row
+ * returns null (never a guessed/fallback substitution — callers decide
+ * what "no equivalent" means for their own field, e.g. clearing vs. a
+ * required-field default).
+ */
+export async function findEquivalentDepartmentConfig(
+  model: "ticketStatus" | "ticketPriority" | "ticketCategory",
+  departmentId: string,
+  name: string
+): Promise<{ id: string } | null> {
+  return (prisma[model] as any).findFirst({
+    where: { departmentId, name, isActive: true },
+    select: { id: true },
+  });
+}
+
+/**
  * True if `id` is currently the only active default status in its own
  * department — removing/un-defaulting/deactivating/deleting it would leave
  * ticket creation and the pending-ticket accept flow with no default status
@@ -619,6 +647,65 @@ export async function validateTicketProjectActivityLink(
     if (activity.projectId && activity.projectId !== projectId) {
       return { ok: false, code: "invalid_project_activity_pair", message: "The selected activity does not belong to the selected project." };
     }
+  }
+
+  return { ok: true };
+}
+
+export type TicketConfigOwnershipField = "status" | "priority" | "category";
+
+export type TicketConfigOwnershipValidation =
+  | { ok: true }
+  | { ok: false; field: TicketConfigOwnershipField; message: string };
+
+/**
+ * Enforces the department-scoped-configuration-ownership invariant every
+ * ticket must satisfy: Ticket.status.departmentId === Ticket.departmentId
+ * (same for priority/category) — TicketStatus/TicketPriority/TicketCategory
+ * are each owned by exactly one department (`@@unique([departmentId,
+ * name])`), so a ticket can never legitimately reference a config row
+ * belonging to a DIFFERENT department than the ticket itself. A real
+ * corruption of this invariant was found and repaired (see
+ * scripts/repair-ticket-config-department-mismatch.ts) — this function is
+ * the single, shared guard that stops it from being written again through
+ * any client-facing route (ticket creation, the generic PATCH route, and
+ * the dedicated status-change route all call this before accepting a
+ * caller-submitted statusId/priorityId/categoryId).
+ *
+ * Deliberately REJECTS rather than silently clears/nulls an invalid id —
+ * unlike the department-TRANSFER route (PATCH /api/tickets/[id]/department),
+ * which legitimately degrades a ticket's PRE-EXISTING config values to
+ * null/a new department default when the department itself changes out
+ * from under them. This function instead guards a caller's freshly
+ * SUBMITTED id against the ticket's CURRENT (unchanged) department — a
+ * request that tries to attach a foreign department's config row must
+ * fail outright, never be quietly corrected.
+ *
+ * Only the fields actually present in `fields` are checked — a caller
+ * updating just `priorityId` should not be forced to also pass
+ * `statusId`/`categoryId`. `null`/`undefined` on an individual field is
+ * always valid (means "not being set" for priority/category, which are
+ * nullable; status is required by the schema, so callers must always pass
+ * a real value for it in a context where statusId is being written).
+ */
+export async function validateTicketConfigOwnership(
+  departmentId: string,
+  fields: { statusId?: string | null; priorityId?: string | null; categoryId?: string | null }
+): Promise<TicketConfigOwnershipValidation> {
+  const [status, priority, category] = await Promise.all([
+    fields.statusId ? prisma.ticketStatus.findUnique({ where: { id: fields.statusId }, select: { departmentId: true } }) : Promise.resolve(undefined),
+    fields.priorityId ? prisma.ticketPriority.findUnique({ where: { id: fields.priorityId }, select: { departmentId: true } }) : Promise.resolve(undefined),
+    fields.categoryId ? prisma.ticketCategory.findUnique({ where: { id: fields.categoryId }, select: { departmentId: true } }) : Promise.resolve(undefined),
+  ]);
+
+  if (fields.statusId && (!status || status.departmentId !== departmentId)) {
+    return { ok: false, field: "status", message: "The selected status does not belong to this department." };
+  }
+  if (fields.priorityId && (!priority || priority.departmentId !== departmentId)) {
+    return { ok: false, field: "priority", message: "The selected priority does not belong to this department." };
+  }
+  if (fields.categoryId && (!category || category.departmentId !== departmentId)) {
+    return { ok: false, field: "category", message: "The selected category does not belong to this department." };
   }
 
   return { ok: true };

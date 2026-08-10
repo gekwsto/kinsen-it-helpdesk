@@ -16,11 +16,14 @@ interface KpiCardsProps {
   emailCreated: number;
 }
 
-// Each href's `status`/`source` value is the exact query contract the All
-// Tickets list (app/(main)/tickets/page.tsx) and the shared
-// lib/services/ticket-status-groups.ts helper both consume — the same
-// function that produced this card's own count also resolves what the
-// destination list shows, so the two can never disagree.
+// Each href's `status`/`source` value is a legacy/deep-link-only contract
+// app/(main)/tickets/page.tsx still recognizes (see its SearchParams doc
+// comment) — only "all" (lifts the default non-closed scope) and "closed"
+// (redirects to the dedicated /tickets/closed page below) still change
+// behavior there; this card's own COUNT still comes from the same
+// lib/services/ticket-status-groups.ts helper the Dashboard always used,
+// unaffected by the All Tickets list no longer offering a matching manual
+// dropdown for every group.
 const CARDS = [
   {
     key: "total" as const,
@@ -59,7 +62,7 @@ const CARDS = [
     iconClass: "text-emerald-600",
     bgClass: "bg-emerald-50",
     sub: "Resolved & closed",
-    href: "/tickets?status=closed",
+    href: "/tickets/closed",
     ariaLabel: "View closed tickets",
   },
   {

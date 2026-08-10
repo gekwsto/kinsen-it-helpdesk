@@ -25,14 +25,26 @@ import {
   ChevronUp,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { TICKET_STATUS_GROUP_LABEL, type TicketStatusGroup } from "@/lib/services/ticket-status-groups";
 
-const STATUS_GROUP_OPTIONS: TicketStatusGroup[] = ["open", "in_progress", "closed", "all"];
+/**
+ * `value` is the real, authoritative identifier a Select item resolves to
+ * (and what flows into the `statusId`/`priorityId`/`categoryId` URL param)
+ * — a single TicketStatus/TicketPriority/TicketCategory id in the common
+ * case, or several comma-joined ids when the same name is configured in
+ * more than one department (an "All Workspaces" selection). See
+ * lib/services/ticket-filter-options-service.ts.
+ */
+interface TicketFilterOption {
+  value: string;
+  name: string;
+  color: string;
+  level?: number;
+}
 
 export interface FilterOptions {
-  statuses: { id: string; name: string; color: string }[];
-  priorities: { id: string; name: string; color: string; level: number }[];
-  categories: { id: string; name: string }[];
+  statuses: TicketFilterOption[];
+  priorities: TicketFilterOption[];
+  categories: TicketFilterOption[];
   departments: { id: string; name: string }[];
   agents: { id: string; name: string | null }[];
   showAssignedToMe?: boolean;
@@ -102,14 +114,6 @@ export function TicketFilters({
     push({ [key]: value === "all" ? null : value });
   };
 
-  // Deliberately NOT handleSelect: this list's baseline default is "open"
-  // (not "all" — see app/(main)/tickets/page.tsx), so "all" must be written
-  // into the URL explicitly (status=all) rather than stripped as a no-op,
-  // or picking "All statuses" would silently fall back to open-only again.
-  const handleStatusGroupSelect = (value: string) => {
-    push({ status: value === "open" ? null : value });
-  };
-
   const handleDepartmentSelect = (value: string) => {
     // The old sub-department (if any) belongs to the previous department —
     // never valid for a new one, so it's cleared in the same navigation.
@@ -148,7 +152,6 @@ export function TicketFilters({
 
   // Count active filters (excluding sort/search)
   const activeFilterCount = [
-    isAllTickets ? get("status") : "",
     get("statusId"),
     get("priorityId"),
     get("categoryId"),
@@ -232,31 +235,17 @@ export function TicketFilters({
 
       {/* Row 2: Quick filters */}
       <div className="flex flex-wrap items-center gap-2">
-        {/* Status group (all/open/in progress/closed) — All Tickets only; the
-            underlying dashboard KPI cards deep-link here via the same
-            `?status=` values (see lib/services/ticket-status-groups.ts), and
-            this select lets a user pick the same views manually. Distinct
-            from the department-owned "Status" select below (statusId), which
-            picks one specific status row rather than a group. */}
-        {isAllTickets && (
-          <Select
-            value={get("status") || "open"}
-            onValueChange={handleStatusGroupSelect}
-          >
-            <SelectTrigger className="h-8 w-[140px] text-xs">
-              <SelectValue placeholder="Status view" />
-            </SelectTrigger>
-            <SelectContent>
-              {STATUS_GROUP_OPTIONS.map((g) => (
-                <SelectItem key={g} value={g}>
-                  {TICKET_STATUS_GROUP_LABEL[g]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
-
-        {/* Status (one specific department-owned status row) */}
+        {/* Status (one specific department-owned status row). This is the
+            only Status control now — the old coarse "status group"
+            selector (Open/In Progress/Closed/All) was removed: it
+            independently ANDed a heuristic isClosed/name condition
+            alongside whatever specific status a user picked here, and the
+            two could silently disagree (e.g. group stuck on a prior
+            selection while this picks a status that doesn't match it),
+            returning zero rows even for a ticket that visibly matched.
+            Status/Closed scoping is now implicit page behavior — see
+            app/(main)/tickets/page.tsx — and Closed Tickets has its own
+            dedicated page. */}
         <Select
           value={get("statusId") || "all"}
           onValueChange={(v) => handleSelect("statusId", v)}
@@ -267,7 +256,7 @@ export function TicketFilters({
           <SelectContent>
             <SelectItem value="all">All statuses</SelectItem>
             {options.statuses.map((s) => (
-              <SelectItem key={s.id} value={s.id}>
+              <SelectItem key={s.value} value={s.value}>
                 <span className="flex items-center gap-1.5">
                   <span
                     className="inline-block h-2 w-2 rounded-full flex-shrink-0"
@@ -291,7 +280,7 @@ export function TicketFilters({
           <SelectContent>
             <SelectItem value="all">All priorities</SelectItem>
             {options.priorities.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
+              <SelectItem key={p.value} value={p.value}>
                 {p.name}
               </SelectItem>
             ))}
@@ -338,7 +327,7 @@ export function TicketFilters({
                 <SelectContent>
                   <SelectItem value="all">Any category</SelectItem>
                   {options.categories.map((c) => (
-                    <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>
+                    <SelectItem key={c.value} value={c.value}>{c.name}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>

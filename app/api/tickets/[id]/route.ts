@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
-import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink } from "@/lib/services/department-scope-service";
+import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink, validateTicketConfigOwnership } from "@/lib/services/department-scope-service";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
@@ -110,13 +110,19 @@ export async function PATCH(
       );
     }
 
+    // Legacy tickets with no department fall back to the same default
+    // legacy department used elsewhere for this exact case (see
+    // canActOnEntity in department-scope-service.ts) — computed once,
+    // reused below both for the project/activity link check and for the
+    // status/priority/category ownership check (this route never changes
+    // a ticket's OWN department — that's PATCH /api/tickets/[id]/department
+    // — so every config id submitted here must belong to this SAME
+    // department, never silently accepted from a different one).
+    const effectiveTicketDepartmentId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
+
     if (projectChanging || activityChanging) {
       const effectiveProjectId = data.projectId !== undefined ? data.projectId : ticket.projectId;
       const effectiveActivityId = data.activityId !== undefined ? data.activityId : ticket.activityId;
-      // Legacy tickets with no department fall back to the same default
-      // legacy department used elsewhere for this exact case (see
-      // canActOnEntity in department-scope-service.ts).
-      const effectiveTicketDepartmentId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
       if (!effectiveTicketDepartmentId) {
         return NextResponse.json({ error: "This ticket has no department to validate the link against.", code: "invalid_project_scope" }, { status: 400 });
       }
@@ -126,6 +132,20 @@ export async function PATCH(
           { error: linkValidation.message, code: linkValidation.code },
           { status: linkValidation.code === "project_not_found" || linkValidation.code === "activity_not_found" ? 404 : 400 }
         );
+      }
+    }
+
+    if (data.statusId || data.priorityId || data.categoryId) {
+      if (!effectiveTicketDepartmentId) {
+        return NextResponse.json({ error: "This ticket has no department to validate the selection against.", code: "invalid_department_scope" }, { status: 400 });
+      }
+      const ownership = await validateTicketConfigOwnership(effectiveTicketDepartmentId, {
+        statusId: data.statusId,
+        priorityId: data.priorityId,
+        categoryId: data.categoryId,
+      });
+      if (!ownership.ok) {
+        return NextResponse.json({ error: ownership.message, code: `${ownership.field}_department_mismatch` }, { status: 400 });
       }
     }
 

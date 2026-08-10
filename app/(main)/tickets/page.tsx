@@ -14,13 +14,72 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
+import { parseTicketStatusGroup } from "@/lib/services/ticket-status-groups";
+import {
+  getTicketFilterOptions,
+  splitFilterParam,
+  reconcileTicketFilterParam,
+} from "@/lib/services/ticket-filter-options-service";
 import { Role } from "@prisma/client";
-import { parseTicketStatusGroup, buildTicketStatusGroupCondition } from "@/lib/services/ticket-status-groups";
+
+/**
+ * Rebuilds the current URL with one or more statusId/priorityId/categoryId
+ * values corrected (or removed, for `null`) — used only when a previously
+ * selected filter no longer applies after the active workspace changed (see
+ * reconcileTicketFilterParam). Preserves every other param (search, sort,
+ * other compatible filters) and always resets to page 1, since the filtered
+ * result set has genuinely changed.
+ */
+function buildTicketsUrlWithCorrections(
+  params: SearchParams,
+  corrections: Partial<Record<"statusId" | "priorityId" | "categoryId", string | null>>
+): string {
+  const merged = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "page") continue;
+    if (typeof value === "string" && value) merged.set(key, value);
+  }
+  for (const [key, value] of Object.entries(corrections)) {
+    if (value) merged.set(key, value);
+    else merged.delete(key);
+  }
+  merged.set("page", "1");
+  return `/tickets?${merged.toString()}`;
+}
+
+/**
+ * Preserves every param except `status` (dropped — its destination, /tickets/closed,
+ * has its own scope and doesn't need it) and `page` (reset — a different page's
+ * result set). Used only for the ?status=closed -> /tickets/closed redirect below.
+ */
+function buildClosedRedirectUrl(params: SearchParams): string {
+  const merged = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "page" || key === "status") continue;
+    if (typeof value === "string" && value) merged.set(key, value);
+  }
+  const qs = merged.toString();
+  return qs ? `/tickets/closed?${qs}` : "/tickets/closed";
+}
 
 interface SearchParams {
   page?: string;
   search?: string;
-  /** Status GROUP (all/open/in_progress/closed) — see lib/services/ticket-status-groups.ts. Distinct from statusId below, which picks one specific department-owned TicketStatus row. Defaults to "open", preserving this page's original always-open-only behavior when absent. */
+  /**
+   * Legacy/deep-link-only status GROUP — no longer user-selectable in the UI
+   * (the old left-most "Open" dropdown was removed; see
+   * components/tickets/ticket-filters.tsx). Only two values still change
+   * behavior here: "all" (the Dashboard's "Total Tickets" KPI card — lifts
+   * the default non-closed scope so closed/cancelled-status tickets are
+   * included too) and "closed" (the Dashboard's "Closed Tickets" KPI card —
+   * redirects to the dedicated /tickets/closed page, the actual canonical
+   * home for closed tickets). Any other value (including the former
+   * "in_progress" name-heuristic group, which used to silently AND-conflict
+   * with an explicitly selected statusId — see the redesign notes on the
+   * base scope below) is treated the same as absent: the implicit
+   * non-closed default. statusId below is the real, precise, per-department
+   * filter and is unaffected by this legacy param either way.
+   */
   status?: string;
   statusId?: string;
   priorityId?: string;
@@ -113,15 +172,71 @@ export default async function AllTicketsPage({
     );
   }
 
-  // Base filter: status GROUP (defaults to "open", matching this page's
-  // original always-open-only behavior when ?status= is absent/invalid) plus
-  // never-cancelled. buildTicketStatusGroupCondition is the exact same
-  // function the Tickets Dashboard's KPI counts use, so a card's count and
-  // this list's result count for the same group can never disagree.
-  const statusGroup = parseTicketStatusGroup(params.status) ?? "open";
+  // The legacy status-GROUP deep-link (see the SearchParams doc comment
+  // above) — "closed" now belongs exclusively to the dedicated Closed
+  // Tickets page. Redirecting here (rather than silently re-showing an
+  // empty/wrong scope) is what actually eliminates the class of bug this
+  // page had: two INDEPENDENTLY computed "which statuses are in scope"
+  // answers (a coarse isClosed/name heuristic AND a precise statusId) that
+  // could silently disagree and AND together into zero rows. There is now
+  // exactly one scope decision on this page (isAllStatusesMode below), and
+  // both the Status dropdown's own option list and the base Prisma
+  // condition are derived from that SAME single value — never two
+  // independently-drifting conditions that can contradict each other.
+  if (parseTicketStatusGroup(params.status) === "closed") {
+    redirect(buildClosedRedirectUrl(params));
+  }
+  // "all" (the Dashboard's "Total Tickets" KPI card) lifts the normal
+  // non-closed default so closed/cancelled-status tickets are included too
+  // — every other value (absent, "open", or the retired "in_progress"
+  // name-heuristic) means the normal implicit default scope.
+  const isAllStatusesMode = parseTicketStatusGroup(params.status) === "all";
+
+  // Status/Priority/Category options for THIS workspace scope (or the
+  // authorized union for "All Workspaces") — fetched once, reused both to
+  // reconcile a possibly-now-invalid selected filter (below) and to render
+  // the filter dropdowns further down, so switching workspaces never
+  // requires a second round-trip to pick up the new option set. The Status
+  // options are themselves scoped to isClosed:false (unless isAllStatusesMode
+  // lifts that) — so whatever the user picks from the dropdown can NEVER
+  // contradict the base scope condition below; the two are constructed from
+  // the same source, not verified to agree after the fact.
+  const filterOptions = await getTicketFilterOptions(
+    effectiveDepartmentId,
+    session.user.id,
+    role,
+    isAllStatusesMode ? {} : { statusWhere: { isClosed: false } }
+  );
+
+  // If the active workspace changed since statusId/priorityId/categoryId
+  // were selected, a previously valid choice may no longer exist in this
+  // scope. reconcileTicketFilterParam carries the selection over (by name)
+  // if an equivalent option still exists, or reports null if it doesn't —
+  // never leaving a stale/invalid id silently active. A one-time redirect
+  // (not a client-side patch) keeps the URL itself the source of truth, so
+  // Back/Forward and bookmarks stay correct.
+  const [reconciledStatusId, reconciledPriorityId, reconciledCategoryId] = await Promise.all([
+    reconcileTicketFilterParam("status", params.statusId, filterOptions.statuses),
+    reconcileTicketFilterParam("priority", params.priorityId, filterOptions.priorities),
+    reconcileTicketFilterParam("category", params.categoryId, filterOptions.categories),
+  ]);
+  const corrections: Partial<Record<"statusId" | "priorityId" | "categoryId", string | null>> = {};
+  if (reconciledStatusId !== (params.statusId ?? null)) corrections.statusId = reconciledStatusId;
+  if (reconciledPriorityId !== (params.priorityId ?? null)) corrections.priorityId = reconciledPriorityId;
+  if (reconciledCategoryId !== (params.categoryId ?? null)) corrections.categoryId = reconciledCategoryId;
+  if (Object.keys(corrections).length > 0) {
+    redirect(buildTicketsUrlWithCorrections(params, corrections));
+  }
+
+  // Base filter: never-cancelled (unconditional, matching this page's
+  // original behavior), plus the same non-closed default the Status
+  // dropdown's own options are scoped to above — unless isAllStatusesMode
+  // lifted it. Because both this condition and the dropdown's option list
+  // are derived from the identical `isAllStatusesMode` value, a statusId the
+  // user actually selected can never be outside this scope: it's always
+  // implied compatible by construction, not just implied likely.
   const andConditions: any[] = [scope, { cancelReasonId: null }];
-  const statusGroupCondition = buildTicketStatusGroupCondition(statusGroup);
-  if (statusGroupCondition) andConditions.push(statusGroupCondition);
+  if (!isAllStatusesMode) andConditions.push({ status: { isClosed: false } });
 
   if (params.myOnly === "true") {
     andConditions.push({ requesterId: session.user.id });
@@ -140,9 +255,13 @@ export default async function AllTicketsPage({
     });
   }
   if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
-  if (params.statusId) andConditions.push({ statusId: params.statusId });
-  if (params.priorityId) andConditions.push({ priorityId: params.priorityId });
-  if (params.categoryId) andConditions.push({ categoryId: params.categoryId });
+  // statusId/priorityId/categoryId may carry several comma-joined real ids
+  // when the selected option came from a grouped "All Workspaces" choice
+  // (the same name configured in more than one authorized department) —
+  // always a set of real FK ids, never a name-based match.
+  if (params.statusId) andConditions.push({ statusId: { in: splitFilterParam(params.statusId) } });
+  if (params.priorityId) andConditions.push({ priorityId: { in: splitFilterParam(params.priorityId) } });
+  if (params.categoryId) andConditions.push({ categoryId: { in: splitFilterParam(params.categoryId) } });
   if (params.source) andConditions.push({ source: params.source });
   if (params.unassigned === "true") {
     andConditions.push({ assignedAgentId: null });
@@ -160,34 +279,30 @@ export default async function AllTicketsPage({
 
   const where: any = { AND: andConditions };
 
-  const [tickets, total, statuses, priorities, categories, departments, agents] =
-    await Promise.all([
-      prisma.ticket.findMany({
-        where,
-        skip,
-        take: limit,
-        orderBy,
-        include: {
-          requester: { select: { id: true, name: true, email: true, image: true } },
-          assignedAgent: { select: { id: true, name: true, email: true, image: true } },
-          status: { select: { id: true, name: true, color: true } },
-          priority: { select: { id: true, name: true, color: true, level: true } },
-          category: { select: { id: true, name: true, color: true } },
-          department: { select: { id: true, name: true } },
-          project: { select: { id: true, title: true } },
-          departmentChangedBy: { select: { id: true, name: true, email: true } },
-          _count: { select: { messages: true, attachments: true } },
-        },
-      }),
-      prisma.ticket.count({ where }),
-      prisma.ticketStatus.findMany({ where: { isActive: true }, orderBy: { order: "asc" }, select: { id: true, name: true, color: true } }),
-      prisma.ticketPriority.findMany({ where: { isActive: true }, orderBy: { level: "desc" }, select: { id: true, name: true, color: true, level: true } }),
-      prisma.ticketCategory.findMany({ where: { isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
-      // Only departments the caller can actually filter to — never one that
-      // would just 403 if picked.
-      getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
-      prisma.user.findMany({ where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
-    ]);
+  const [tickets, total, departments, agents] = await Promise.all([
+    prisma.ticket.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy,
+      include: {
+        requester: { select: { id: true, name: true, email: true, image: true } },
+        assignedAgent: { select: { id: true, name: true, email: true, image: true } },
+        status: { select: { id: true, name: true, color: true } },
+        priority: { select: { id: true, name: true, color: true, level: true } },
+        category: { select: { id: true, name: true, color: true } },
+        department: { select: { id: true, name: true } },
+        project: { select: { id: true, title: true } },
+        departmentChangedBy: { select: { id: true, name: true, email: true } },
+        _count: { select: { messages: true, attachments: true } },
+      },
+    }),
+    prisma.ticket.count({ where }),
+    // Only departments the caller can actually filter to — never one that
+    // would just 403 if picked.
+    getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
+    prisma.user.findMany({ where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+  ]);
 
   return (
     <div className="space-y-6">
@@ -207,7 +322,7 @@ export default async function AllTicketsPage({
       </div>
 
       <TicketFilters
-        options={{ statuses, priorities, categories, departments, agents }}
+        options={{ ...filterOptions, departments, agents }}
         isAllTickets
         currentUserId={session.user.id}
       />

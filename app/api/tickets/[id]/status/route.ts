@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { canActOnEntity, validateTicketConfigOwnership } from "@/lib/services/department-scope-service";
+import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { changeStatusSchema } from "@/lib/validations";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
@@ -32,6 +33,21 @@ export async function PATCH(
 
     const body = await req.json();
     const { statusId, cancelReasonId } = changeStatusSchema.parse(body);
+
+    // A submitted statusId must belong to THIS ticket's own department —
+    // never silently accepted from a different one (see
+    // validateTicketConfigOwnership's own doc comment for the full
+    // rationale/incident this guards against). Legacy (departmentId: null)
+    // tickets fall back to the same default legacy department used
+    // elsewhere for this exact case.
+    const effectiveTicketDepartmentId = ticket.departmentId ?? (await getDefaultLegacyDepartmentId());
+    if (!effectiveTicketDepartmentId) {
+      return NextResponse.json({ error: "This ticket has no department to validate the status against.", code: "invalid_department_scope" }, { status: 400 });
+    }
+    const ownership = await validateTicketConfigOwnership(effectiveTicketDepartmentId, { statusId });
+    if (!ownership.ok) {
+      return NextResponse.json({ error: ownership.message, code: `${ownership.field}_department_mismatch` }, { status: 400 });
+    }
 
     const [oldStatus, newStatus] = await Promise.all([
       prisma.ticketStatus.findUnique({ where: { id: ticket.statusId } }),
