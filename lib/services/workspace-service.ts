@@ -1,4 +1,5 @@
 import { cookies } from "next/headers";
+import { cache } from "react";
 import { Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
@@ -178,8 +179,18 @@ export async function resolveActiveWorkspace(
  * (components/workspace/active-workspace-provider.tsx), hydrated from a
  * single server-side call to this function in app/(main)/layout.tsx.
  */
-export async function getActiveWorkspace(userId: string, role: Role): Promise<ActiveWorkspaceContext> {
+// Wrapped in React's `cache()` for request-level deduplication: every
+// listing page under app/(main)/ (dashboard, tickets, projects, activities,
+// pending, closed) independently calls this again with the SAME (userId,
+// role) the layout already resolved, since each Server Component only ever
+// sees its own props, never the layout's local variables — without this,
+// every navigation paid for the department/membership query twice (once in
+// the layout, once in the page) in the exact same render pass. `cache()`
+// only memoizes for the lifetime of one request/render — never across
+// requests or users — so this is a pure duplicate-work removal, not a
+// persistence mechanism.
+export const getActiveWorkspace = cache(async (userId: string, role: Role): Promise<ActiveWorkspaceContext> => {
   const cookieStore = await cookies();
   const cookieValue = cookieStore.get(ACTIVE_WORKSPACE_COOKIE)?.value ?? null;
   return resolveActiveWorkspace(userId, role, cookieValue);
-}
+});

@@ -1176,6 +1176,10 @@ model Project {
   @@index([status])
   @@index([departmentId])
   @@index([subDepartmentId])
+  // Matches Ticket's own @@index([createdAt]) — app/(main)/projects/page.tsx
+  // (and the Projects Dashboard) always order by createdAt desc, id asc, the
+  // same pagination-ordering pattern Ticket already has this index for.
+  @@index([createdAt])
 }
 
 model ProjectActivity {
@@ -1217,6 +1221,10 @@ model ProjectActivity {
   @@index([status])
   @@index([departmentId])
   @@index([subDepartmentId])
+  // Matches Ticket's own @@index([createdAt]) — app/(main)/activities/page.tsx
+  // orders by createdAt desc, id asc, the same pattern Ticket already has
+  // this index for.
+  @@index([createdAt])
 }
 
 // Per-department, editable status->progress% mapping — Activity progress is

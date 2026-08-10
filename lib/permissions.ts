@@ -6,6 +6,13 @@ import { headers } from "next/headers";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { readRawSessionExpiryState } from "@/lib/session-expiry";
 import type { DepartmentAccessResult } from "@/types/department";
+// hasRole/isAdmin/canManageProjects/canViewAllDepartments are the pure,
+// dependency-free subset also needed client-side (Sidebar, the route
+// prefetcher) — defined once in lib/nav-access.ts (no prisma/next-headers
+// imports, safe for a client bundle) and re-exported here unchanged so
+// every existing `@/lib/permissions` import keeps working.
+export { hasRole, isAdmin, canManageProjects, canViewAllDepartments } from "@/lib/nav-access";
+import { hasRole, isAdmin } from "@/lib/nav-access";
 
 export const ROLES = {
   ADMIN: "ADMIN" as Role,
@@ -13,14 +20,6 @@ export const ROLES = {
   DEPARTMENT_MANAGER: "DEPARTMENT_MANAGER" as Role,
   USER: "USER" as Role,
 };
-
-export function hasRole(userRole: Role, ...allowedRoles: Role[]): boolean {
-  return allowedRoles.includes(userRole);
-}
-
-export function isAdmin(role: Role): boolean {
-  return role === Role.ADMIN;
-}
 
 export function isITAgent(role: Role): boolean {
   return role === Role.IT_AGENT || role === Role.ADMIN;
@@ -70,27 +69,15 @@ export function canChangeTicketStatus(role: Role): boolean {
   return hasRole(role, Role.ADMIN, Role.IT_AGENT);
 }
 
-export function canManageProjects(role: Role): boolean {
-  return hasRole(role, Role.ADMIN, Role.IT_AGENT, Role.DEPARTMENT_MANAGER, Role.DIRECTOR);
-}
-
-/**
- * Cross-department oversight: Admin (full system access) and Director
- * (view-all + create-anywhere, no admin.access / user.manage / role.manage /
- * department.manage* power) both see/act across every department, rather
- * than being scoped to their own DepartmentMembership rows. Every central
- * scope function in lib/services/department-scope-service.ts and
- * lib/services/workspace-service.ts that used to special-case
- * `role === Role.ADMIN` now uses this instead — Director rides the exact
- * same bypass Admin already had, not a parallel system.
- *
- * Deliberately NOT used by requireDepartmentAccess/requireDepartmentPermission
- * below — those gate department.manageSettings/department.manageMembers
- * (real department administration), which stays Administrator-only.
- */
-export function canViewAllDepartments(role: Role): boolean {
-  return role === Role.ADMIN || role === Role.DIRECTOR;
-}
+// canManageProjects/canViewAllDepartments now live in lib/nav-access.ts (see
+// the re-export at the top of this file) — Director rides the exact same
+// cross-department bypass Admin already had, not a parallel system; every
+// central scope function in department-scope-service.ts/workspace-service.ts
+// that used to special-case `role === Role.ADMIN` uses canViewAllDepartments
+// instead. Deliberately NOT used by requireDepartmentAccess/
+// requireDepartmentPermission below — those gate department.manageSettings/
+// department.manageMembers (real department administration), which stays
+// Administrator-only.
 
 // ─── Dynamic Permission System ────────────────────────────────────────────────
 

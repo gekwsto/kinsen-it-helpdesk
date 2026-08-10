@@ -1,4 +1,5 @@
 import { DepartmentRole, Role } from "@prisma/client";
+import { cache } from "react";
 import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships, getMembership } from "@/lib/services/department-membership-service";
 import { getDefaultLegacyDepartmentId, listDepartments, toDepartmentSummary } from "@/lib/services/department-service";
@@ -94,11 +95,17 @@ async function getDepartmentIdsWithPermission(userId: string, permissionKey: str
  * page that needs to show a "which department" choice without ever
  * rendering one the backend would reject anyway (Phase 2B §6/§7).
  */
-export async function getAccessibleDepartmentSummaries(
+// cache()-wrapped: called with the SAME (userId, role, permissionKey) more
+// than once in a single render in several places — e.g. app/(main)/tickets/page.tsx
+// calls this directly for the Department filter dropdown, and (in "All
+// Workspaces" mode) getTicketFilterOptions internally calls it again with
+// the identical "ticket.view" key. Pure read, no side effects — safe to
+// memoize for the request's lifetime only.
+export const getAccessibleDepartmentSummaries = cache(async (
   userId: string,
   role: Role,
   permissionKey: string
-): Promise<DepartmentSummary[]> {
+): Promise<DepartmentSummary[]> => {
   if (canViewAllDepartments(role)) {
     return (await listDepartments()).map(toDepartmentSummary);
   }
@@ -108,7 +115,7 @@ export async function getAccessibleDepartmentSummaries(
     if (await hasDepartmentPermission(m.role, permissionKey, m.customRoleId)) result.push(m.department);
   }
   return result;
-}
+});
 
 /**
  * SubDepartment ids where `userId` has an active SubDepartmentMembership AND
@@ -410,11 +417,16 @@ export interface NavVisibilityFlags {
   canViewOrganizationChart: boolean;
 }
 
-export async function getNavVisibilityFlags(
+// cache()-wrapped: app/(main)/layout.tsx computes this once for Sidebar,
+// and app/(main)/tickets/pending/page.tsx (and any other page gated by a
+// navFlags.* check) independently calls it again with the identical
+// (userId, role, customRoleId) in the very same render — request-scoped
+// memoization only, removes the duplicate membership/permission queries.
+export const getNavVisibilityFlags = cache(async (
   userId: string,
   role: Role,
   customRoleId?: string | null
-): Promise<NavVisibilityFlags> {
+): Promise<NavVisibilityFlags> => {
   if (canViewAllDepartments(role)) {
     return {
       canViewAdminSubDepartments: true,
@@ -444,7 +456,7 @@ export async function getNavVisibilityFlags(
     canViewPendingTickets: pendingTicketDepartmentIds.length > 0 || globalPendingView,
     canViewOrganizationChart: canViewOrgChart,
   };
-}
+});
 
 /** Shared shape for Project/Activity list scoping — accessible department + permission key, no own/all split. */
 async function buildEntityListWhere(

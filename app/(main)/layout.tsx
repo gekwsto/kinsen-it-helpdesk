@@ -5,6 +5,7 @@ import { hasPermission } from "@/lib/permissions";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { ActiveWorkspaceProvider } from "@/components/workspace/active-workspace-provider";
+import { AppRoutePrefetcher } from "@/components/navigation/app-route-prefetcher";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { HelpGuideProvider } from "@/components/help/help-guide-provider";
@@ -55,6 +56,11 @@ export default async function MainLayout({
       {/* Central, single mount point for absolute-8h session enforcement —
           never one per page. See components/auth/session-expiry-controller.tsx. */}
       <SessionExpiryController />
+      {/* Central, single mount point for background route warming — never a
+          per-page useEffect fetch. Must live inside ActiveWorkspaceProvider
+          (it reads useActiveWorkspace() to re-warm on workspace switches).
+          See components/navigation/app-route-prefetcher.tsx. */}
+      <AppRoutePrefetcher userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
     </ActiveWorkspaceProvider>
   );
 }

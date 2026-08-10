@@ -26,6 +26,7 @@ import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { useHelpGuide } from "@/components/help/help-guide-provider";
 import { resolveActiveHref } from "@/lib/sidebar-active-route";
+import { canManageProjects, isAdmin } from "@/lib/nav-access";
 
 // `visible`, when defined, wins outright over `roles` — lets specific items
 // be gated by a server-computed permission flag (e.g. subdepartment.view)
@@ -84,14 +85,14 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
   };
 
   const ticketChildren = [
-    ...(["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"].includes(userRole)
+    ...(canManageProjects(userRole)
       ? [{ label: "All Tickets", href: "/tickets" }]
       : []),
     { label: "Assigned to Me", href: "/tickets/assigned-to-me" },
     { label: "Created by Me", href: "/tickets/created-by-me" },
     ...(canCreateTicket ? [{ label: "Create Ticket", href: "/tickets/new" }] : []),
     { label: "Pending Tickets", href: "/tickets/pending", visible: navFlags.canViewPendingTickets },
-    ...(userRole === "ADMIN"
+    ...(isAdmin(userRole)
       ? [{ label: "Closed Tickets", href: "/tickets/closed", roles: ["ADMIN"] as Role[] }]
       : []),
   ];
@@ -112,20 +113,20 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       label: "Projects",
       href: "/projects",
       icon: FolderKanban,
-      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
+      visible: canManageProjects(userRole),
       children: [
-        { label: "All Projects", href: "/projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
-        { label: "My Projects", href: "/my-projects", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
-        { label: "New Project", href: "/projects/new", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
-        { label: "Project Gantt", href: "/projects/gantt", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
-        { label: "Resource Planning", href: "/projects/resource-planning", roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[] },
+        { label: "All Projects", href: "/projects" },
+        { label: "My Projects", href: "/my-projects" },
+        { label: "New Project", href: "/projects/new" },
+        { label: "Project Gantt", href: "/projects/gantt" },
+        { label: "Resource Planning", href: "/projects/resource-planning" },
       ],
     },
     {
       label: "Activities",
       href: "/activities",
       icon: CheckSquare,
-      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
+      visible: canManageProjects(userRole),
       children: [
         { label: "All Activities", href: "/activities" },
         { label: "My Activities", href: "/my-activities" },
@@ -137,7 +138,7 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       label: "Goals",
       href: "/goals",
       icon: Target,
-      roles: ["ADMIN", "IT_AGENT", "DEPARTMENT_MANAGER", "DIRECTOR"] as Role[],
+      visible: canManageProjects(userRole),
     },
     {
       // Full company tree + reporting-lines chart (department tree / people
