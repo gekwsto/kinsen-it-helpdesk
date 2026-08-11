@@ -68,7 +68,11 @@ export interface JobTitleDirectoryMappingSummary {
   departmentId: string;
   departmentName: string;
   role: Role;
+  /** Set when this mapping grants a custom GLOBAL/BOTH-scope role instead of the built-in `role` above — see MicrosoftDepartmentMapping.globalCustomRoleId. */
+  globalCustomRoleName: string | null;
   departmentRole: DepartmentRole;
+  /** Same idea, department-scoped — see MicrosoftDepartmentMapping.departmentCustomRoleId. */
+  departmentCustomRoleName: string | null;
   isActive: boolean;
 }
 
@@ -104,7 +108,11 @@ export async function listJobTitleDirectoryForAdmin(): Promise<{ domain: string;
     // versa. Matches this table's own `where: {domain}` above exactly.
     prisma.microsoftDepartmentMapping.findMany({
       where: { sourceType: "PROFILE_JOB_TITLE", domain },
-      include: { department: { select: { id: true, name: true } } },
+      include: {
+        department: { select: { id: true, name: true } },
+        globalCustomRole: { select: { name: true } },
+        departmentCustomRole: { select: { name: true } },
+      },
     }),
   ]);
 
@@ -131,7 +139,9 @@ export async function listJobTitleDirectoryForAdmin(): Promise<{ domain: string;
             departmentId: mapping.departmentId,
             departmentName: mapping.department.name,
             role: mapping.role,
+            globalCustomRoleName: mapping.globalCustomRole?.name ?? null,
             departmentRole: mapping.departmentRole,
+            departmentCustomRoleName: mapping.departmentCustomRole?.name ?? null,
             isActive: mapping.isActive,
           }
         : null,

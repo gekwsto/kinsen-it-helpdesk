@@ -170,12 +170,62 @@ async function main() {
     const rejectedAsTicket = await prisma.ticket.findFirst({ where: { emailMessageId: pendingToReject.emailMessageId } });
     check("Rejected pending ticket never produced a Ticket", rejectedAsTicket === null);
 
-    console.log("\nTesting re-rejecting and accepting-after-reject...\n");
+    console.log("\nTesting re-rejecting, and the Rejected Tickets \"Create Ticket\" recovery transition (REJECTED -> ACCEPTED)...\n");
     const reReject = await rejectPendingTicket(pendingToReject.id, acceptingUser.id);
     check("Re-rejecting returns already_rejected", !reReject.ok && reReject.error === "already_rejected");
 
+    // Intentional behavior (see /tickets/rejected's "Create Ticket" action,
+    // lib/services/pending-ticket-service.ts's own doc comment on
+    // acceptPendingTicket): a REJECTED record can be recovered into a real
+    // Ticket exactly like a PENDING one — this is the ONE deliberately
+    // supported non-PENDING starting state, not a general bypass.
     const acceptAfterReject = await acceptPendingTicket(pendingToReject.id, acceptingUser.id);
-    check("Accepting an already-rejected ticket returns already_rejected (not silently accepted)", !acceptAfterReject.ok && acceptAfterReject.error === "already_rejected");
+    check("Accepting an already-rejected ticket now SUCCEEDS (Rejected -> Create Ticket recovery)", acceptAfterReject.ok === true);
+    if (acceptAfterReject.ok) {
+      ticketIds.push(acceptAfterReject.ticket.id);
+      const recoveredTicket = await prisma.ticket.findUnique({ where: { id: acceptAfterReject.ticket.id } });
+      check("The recovered Ticket carries the ORIGINAL subject as its title", recoveredTicket?.title === "Reject Me");
+      check("The recovered Ticket carries the ORIGINAL emailMessageId", recoveredTicket?.emailMessageId === pendingToReject.emailMessageId);
+
+      const afterRecovery = await prisma.pendingTicket.findUnique({ where: { id: pendingToReject.id } });
+      check("The source PendingTicket is now ACCEPTED (not left REJECTED)", afterRecovery?.status === "ACCEPTED");
+      check("acceptedTicketId points at the recovered Ticket", afterRecovery?.acceptedTicketId === acceptAfterReject.ticket.id);
+      // The rejection history is NOT erased by later recovery — both are
+      // real, independently meaningful audit facts about this one record.
+      check("rejectedAt/rejectedById are PRESERVED after later recovery (rejection history is not erased)", afterRecovery?.rejectedById === acceptingUser.id && afterRecovery?.rejectedAt !== null);
+
+      console.log("\nTesting idempotency: accepting the now-ACCEPTED (recovered) record again is rejected, never creates a second Ticket...\n");
+      const reAcceptAfterRecovery = await acceptPendingTicket(pendingToReject.id, acceptingUser.id);
+      check("Re-accepting the recovered record returns already_accepted", !reAcceptAfterRecovery.ok && reAcceptAfterRecovery.error === "already_accepted");
+      const ticketCountForRecovered = await prisma.ticket.count({ where: { emailMessageId: pendingToReject.emailMessageId } });
+      check("Exactly ONE Ticket exists for the recovered emailMessageId, even after a repeat accept attempt", ticketCountForRecovered === 1);
+
+      console.log("\nTesting concurrent recovery attempts produce exactly ONE Ticket...\n");
+      const concurrentPending = await prisma.pendingTicket.create({
+        data: {
+          emailMessageId: `ar-concurrent-${RUN_ID}@test.local`,
+          fromEmail: senderEmail,
+          subject: "Concurrent Recovery",
+          body: "<p>Body</p>",
+          receivedAt: new Date(),
+          departmentId: dept.id,
+          status: "REJECTED",
+          rejectedById: acceptingUser.id,
+          rejectedAt: new Date(),
+        },
+      });
+      pendingTicketIds.push(concurrentPending.id);
+      const [concurrentA, concurrentB] = await Promise.all([
+        acceptPendingTicket(concurrentPending.id, acceptingUser.id),
+        acceptPendingTicket(concurrentPending.id, acceptingUser.id),
+      ]);
+      const concurrentOkCount = [concurrentA, concurrentB].filter((r) => r.ok).length;
+      check("Exactly one of the two concurrent recovery attempts succeeds", concurrentOkCount === 1);
+      if (concurrentA.ok) ticketIds.push(concurrentA.ticket.id);
+      if (concurrentB.ok) ticketIds.push(concurrentB.ticket.id);
+      const concurrentTicketCount = await prisma.ticket.count({ where: { emailMessageId: concurrentPending.emailMessageId } });
+      check("Exactly ONE real Ticket was created despite two simultaneous requests", concurrentTicketCount === 1);
+    }
 
     console.log("\nTesting Accept with an explicit department override for an unmatched pending ticket...\n");
     const unmatchedPending = await prisma.pendingTicket.create({

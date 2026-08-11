@@ -428,34 +428,68 @@ export const grantMembershipSchema = z
 
 // ─── Microsoft Mapping Schemas (Phase 3) ─────────────────────────────────────────
 
-export const createMicrosoftMappingSchema = z.object({
-  sourceType: z.nativeEnum(MicrosoftMappingSourceType),
-  microsoftValue: z.string().trim().min(1, "Value is required"),
-  departmentId: z.string().min(1, "Department is required"),
-  // Global Role (matches /admin/roles), not DepartmentRole — a stale client
-  // sending an old DepartmentRole string (e.g. "AGENT_ASSIGNEE") is rejected
-  // here automatically, since it isn't a member of Role.
-  role: z.nativeEnum(Role).default(Role.USER),
-  // DepartmentRole granted on the resulting DepartmentMembership —
-  // independent of `role` above (see department-role-translation.ts).
-  // Required: an admin must make an explicit choice, no silent default.
-  departmentRole: z.nativeEnum(DepartmentRole),
-  // FIND-006: required (and server-validated against the allowed-domain
-  // set) only when sourceType is domain-scoped (today: PROFILE_JOB_TITLE) —
-  // ignored for every other sourceType. See
-  // lib/services/microsoft-mapping-service.ts's isDomainScopedMicrosoftMappingSourceType.
-  domain: z.string().trim().min(1).optional(),
-});
+// Global Role is either a built-in Role enum value or a custom GLOBAL/BOTH-
+// scope role (globalCustomRoleId, see
+// lib/services/microsoft-mapping-role-options-service.ts) — never both;
+// omitting both keeps the pre-existing "defaults to USER" behavior (applied
+// in lib/services/microsoft-mapping-service.ts, not here, same reasoning as
+// grantMembershipSchema above not using z.default() alongside a mutual-
+// exclusion refine). Department Role is REQUIRED (an admin must make an
+// explicit choice, no silent default) but, same idea, either the built-in
+// enum or a custom DEPARTMENT/BOTH-scope role — never both.
+export const createMicrosoftMappingSchema = z
+  .object({
+    sourceType: z.nativeEnum(MicrosoftMappingSourceType),
+    microsoftValue: z.string().trim().min(1, "Value is required"),
+    departmentId: z.string().min(1, "Department is required"),
+    // Global Role (matches /admin/roles), not DepartmentRole — a stale client
+    // sending an old DepartmentRole string (e.g. "AGENT_ASSIGNEE") is rejected
+    // here automatically, since it isn't a member of Role.
+    role: z.nativeEnum(Role).optional(),
+    globalCustomRoleId: z.string().min(1).nullable().optional(),
+    // DepartmentRole granted on the resulting DepartmentMembership —
+    // independent of `role` above (see department-role-translation.ts).
+    departmentRole: z.nativeEnum(DepartmentRole).optional(),
+    departmentCustomRoleId: z.string().min(1).nullable().optional(),
+    // FIND-006: required (and server-validated against the allowed-domain
+    // set) only when sourceType is domain-scoped (today: PROFILE_JOB_TITLE) —
+    // ignored for every other sourceType. See
+    // lib/services/microsoft-mapping-service.ts's isDomainScopedMicrosoftMappingSourceType.
+    domain: z.string().trim().min(1).optional(),
+  })
+  .refine((data) => !(data.role && data.globalCustomRoleId), {
+    message: "Provide at most one of role or globalCustomRoleId",
+    path: ["globalCustomRoleId"],
+  })
+  .refine((data) => !(data.departmentRole && data.departmentCustomRoleId), {
+    message: "Provide at most one of departmentRole or departmentCustomRoleId",
+    path: ["departmentCustomRoleId"],
+  })
+  .refine((data) => !!data.departmentRole || !!data.departmentCustomRoleId, {
+    message: "Provide either departmentRole or departmentCustomRoleId",
+    path: ["departmentRole"],
+  });
 
-export const updateMicrosoftMappingSchema = z.object({
-  sourceType: z.nativeEnum(MicrosoftMappingSourceType).optional(),
-  microsoftValue: z.string().trim().min(1, "Value is required").optional(),
-  departmentId: z.string().min(1).optional(),
-  role: z.nativeEnum(Role).optional(),
-  departmentRole: z.nativeEnum(DepartmentRole).optional(),
-  isActive: z.boolean().optional(),
-  domain: z.string().trim().min(1).optional(),
-});
+export const updateMicrosoftMappingSchema = z
+  .object({
+    sourceType: z.nativeEnum(MicrosoftMappingSourceType).optional(),
+    microsoftValue: z.string().trim().min(1, "Value is required").optional(),
+    departmentId: z.string().min(1).optional(),
+    role: z.nativeEnum(Role).optional(),
+    globalCustomRoleId: z.string().min(1).nullable().optional(),
+    departmentRole: z.nativeEnum(DepartmentRole).optional(),
+    departmentCustomRoleId: z.string().min(1).nullable().optional(),
+    isActive: z.boolean().optional(),
+    domain: z.string().trim().min(1).optional(),
+  })
+  .refine((data) => !(data.role && data.globalCustomRoleId), {
+    message: "Provide at most one of role or globalCustomRoleId",
+    path: ["globalCustomRoleId"],
+  })
+  .refine((data) => !(data.departmentRole && data.departmentCustomRoleId), {
+    message: "Provide at most one of departmentRole or departmentCustomRoleId",
+    path: ["departmentCustomRoleId"],
+  });
 
 export const createPrioritySchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),

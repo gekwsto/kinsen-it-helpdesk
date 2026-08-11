@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import type { MicrosoftDepartmentMapping } from "@prisma/client";
-import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Role } from "@prisma/client";
+import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Role, RoleScope } from "@prisma/client";
 import {
   isDepartmentRoleAllowedForMicrosoftMapping,
   isGlobalRoleAllowedForMicrosoftMapping,
@@ -192,6 +192,13 @@ export async function resolveDepartmentMemberships(
   return Array.from(bestByDepartment.values()).map((m) => ({
     departmentId: m.departmentId,
     role: m.departmentRole,
+    // Custom DEPARTMENT/BOTH-scope role this mapping grants, or null for a
+    // plain built-in DepartmentRole — see MicrosoftDepartmentMapping's
+    // departmentCustomRoleId schema comment. Read straight off the mapping
+    // row, same as `role` above; syncDepartmentMemberships
+    // (department-membership-service.ts) is the only writer of
+    // DepartmentMembership.customRoleId from this value.
+    customRoleId: m.departmentCustomRoleId ?? null,
     source: SOURCE_TYPE_TO_MEMBERSHIP_SOURCE[m.sourceType],
   }));
 }
@@ -244,9 +251,13 @@ export async function hasActiveProfileDepartmentMapping(value: string): Promise<
 
 // ─── Admin CRUD (wired to app/api/admin/microsoft-mappings/**) ──
 
-function toView(
-  m: MicrosoftDepartmentMapping & { department: { id: string; name: string; slug: string } }
-): MicrosoftMappingView {
+type MappingRowWithRelations = MicrosoftDepartmentMapping & {
+  department: { id: string; name: string; slug: string };
+  globalCustomRole: { id: string; name: string; isActive: boolean } | null;
+  departmentCustomRole: { id: string; name: string; isActive: boolean } | null;
+};
+
+function toView(m: MappingRowWithRelations): MicrosoftMappingView {
   return {
     id: m.id,
     sourceType: m.sourceType,
@@ -254,15 +265,25 @@ function toView(
     domain: m.domain,
     departmentId: m.departmentId,
     role: m.role,
+    globalCustomRoleId: m.globalCustomRoleId,
+    globalCustomRole: m.globalCustomRole,
     departmentRole: m.departmentRole,
+    departmentCustomRoleId: m.departmentCustomRoleId,
+    departmentCustomRole: m.departmentCustomRole,
     isActive: m.isActive,
     department: m.department,
   };
 }
 
+const mappingRelationsInclude = {
+  department: { select: { id: true, name: true, slug: true } },
+  globalCustomRole: { select: { id: true, name: true, isActive: true } },
+  departmentCustomRole: { select: { id: true, name: true, isActive: true } },
+} as const;
+
 export async function listMappings(): Promise<MicrosoftMappingView[]> {
   const rows = await prisma.microsoftDepartmentMapping.findMany({
-    include: { department: { select: { id: true, name: true, slug: true } } },
+    include: mappingRelationsInclude,
     orderBy: [{ sourceType: "asc" }, { microsoftValue: "asc" }],
   });
   return rows.map(toView);
@@ -286,6 +307,23 @@ export class MicrosoftMappingValidationError extends Error {
       // enabled" enforced at the mapping layer too, not just at sync/login
       // eligibility.
       | "DOMAIN_NOT_ALLOWED"
+      // globalCustomRoleId/departmentCustomRoleId type-safety — enforced here
+      // (not just hidden by dropdown filtering client-side), so a direct API
+      // call can never smuggle in a wrong-scope or built-in role id:
+      | "GLOBAL_CUSTOM_ROLE_NOT_FOUND"
+      // Wrong scope (DEPARTMENT-only) OR a built-in role's id sent through
+      // this field — built-ins are always represented via the plain `role`
+      // enum, never via globalCustomRoleId, so there is exactly one way to
+      // represent each built-in role, never two.
+      | "GLOBAL_CUSTOM_ROLE_INVALID"
+      // Only enforced when this id is a NEW assignment (create, or an update
+      // that actually changes the id) — see assertGlobalCustomRoleEligible's
+      // own comment for why an already-referenced-but-now-inactive role is
+      // NOT rejected merely by being left unchanged.
+      | "GLOBAL_CUSTOM_ROLE_INACTIVE"
+      | "DEPARTMENT_CUSTOM_ROLE_NOT_FOUND"
+      | "DEPARTMENT_CUSTOM_ROLE_INVALID"
+      | "DEPARTMENT_CUSTOM_ROLE_INACTIVE"
   ) {
     super(code);
     this.name = "MicrosoftMappingValidationError";
@@ -295,6 +333,49 @@ export class MicrosoftMappingValidationError extends Error {
 async function assertDepartmentExists(departmentId: string): Promise<void> {
   const department = await prisma.department.findUnique({ where: { id: departmentId }, select: { id: true } });
   if (!department) throw new MicrosoftMappingValidationError("DEPARTMENT_NOT_FOUND");
+}
+
+/**
+ * Validates a `globalCustomRoleId` the client wants this mapping to grant.
+ * Enforced server-side (never just hidden by dropdown filtering) per the
+ * same "backend is authoritative" rule createMapping/updateMapping already
+ * apply to `role`/`departmentRole` above:
+ *  - must exist,
+ *  - must be scope GLOBAL or BOTH (never a DEPARTMENT-only role — this is
+ *    the type-safety guard against a client sending a department role id in
+ *    the global-role slot),
+ *  - must NOT be isBuiltIn (built-in roles are always represented via the
+ *    plain `role` enum column, so there is exactly one way to reference
+ *    each of them, never a redundant second path that could disagree with
+ *    the ADMIN-exclusion check below),
+ *  - must be active — but ONLY when this id is a genuinely NEW assignment
+ *    (`currentId !== customRoleId`). Re-saving a mapping without touching
+ *    its already-stored (now possibly deactivated) custom role must never
+ *    fail — see the "current selection that becomes ineligible" requirement
+ *    (an admin editing unrelated fields on an old mapping isn't required to
+ *    also resolve a stale role reference in the same save).
+ */
+async function assertGlobalCustomRoleEligible(customRoleId: string, currentId: string | null): Promise<void> {
+  const role = await prisma.customRole.findUnique({ where: { id: customRoleId } });
+  if (!role) throw new MicrosoftMappingValidationError("GLOBAL_CUSTOM_ROLE_NOT_FOUND");
+  if (role.isBuiltIn || role.scope === RoleScope.DEPARTMENT) {
+    throw new MicrosoftMappingValidationError("GLOBAL_CUSTOM_ROLE_INVALID");
+  }
+  if (customRoleId !== currentId && !role.isActive) {
+    throw new MicrosoftMappingValidationError("GLOBAL_CUSTOM_ROLE_INACTIVE");
+  }
+}
+
+/** Department-scoped mirror of assertGlobalCustomRoleEligible above — see its doc comment for the full reasoning, identical shape. */
+async function assertDepartmentCustomRoleEligible(customRoleId: string, currentId: string | null): Promise<void> {
+  const role = await prisma.customRole.findUnique({ where: { id: customRoleId } });
+  if (!role) throw new MicrosoftMappingValidationError("DEPARTMENT_CUSTOM_ROLE_NOT_FOUND");
+  if (role.isBuiltIn || role.scope === RoleScope.GLOBAL) {
+    throw new MicrosoftMappingValidationError("DEPARTMENT_CUSTOM_ROLE_INVALID");
+  }
+  if (customRoleId !== currentId && !role.isActive) {
+    throw new MicrosoftMappingValidationError("DEPARTMENT_CUSTOM_ROLE_INACTIVE");
+  }
 }
 
 /**
@@ -326,22 +407,64 @@ export interface CreateMappingInput {
   sourceType: MicrosoftMappingSourceType;
   microsoftValue: string;
   departmentId: string;
-  /** Global Role (matches /admin/roles) — never DepartmentRole. See department-role-translation.ts. */
+  /** Global Role (matches /admin/roles) — never DepartmentRole. See department-role-translation.ts. Ignored (forced to the placeholder USER) when globalCustomRoleId is set. */
   role?: Role;
-  /** DepartmentRole granted on the resulting DepartmentMembership — independent of `role` above. */
-  departmentRole: DepartmentRole;
+  /** Custom GLOBAL/BOTH-scope role (CustomRole, isBuiltIn: false) this mapping grants instead of a built-in `role` — see MicrosoftDepartmentMapping's schema comment. At most one of role/globalCustomRoleId is meaningful; if both are sent, globalCustomRoleId wins and `role` is ignored. */
+  globalCustomRoleId?: string | null;
+  /** DepartmentRole granted on the resulting DepartmentMembership — independent of `role` above. Ignored (forced to the placeholder VIEWER) when departmentCustomRoleId is set. */
+  departmentRole?: DepartmentRole;
+  /** Custom DEPARTMENT/BOTH-scope role this mapping grants instead of a built-in `departmentRole` — same relationship as globalCustomRoleId above. */
+  departmentCustomRoleId?: string | null;
   /** Required (and validated against the allowed-domain set) when sourceType is domain-scoped (today: PROFILE_JOB_TITLE only) — ignored entirely for every other sourceType. See isDomainScopedMicrosoftMappingSourceType. */
   domain?: string;
 }
 
-export async function createMapping(input: CreateMappingInput): Promise<MicrosoftDepartmentMapping> {
-  const role = input.role ?? Role.USER;
-  if (!isGlobalRoleAllowedForMicrosoftMapping(role)) {
+/**
+ * Resolves the GLOBAL role half of a create/update: either a custom role id
+ * (validated via assertGlobalCustomRoleEligible) or the built-in `role` enum
+ * (validated via the existing ADMIN-exclusion rule) — never both stored at
+ * once. Mirrors grantManualMembership's exact placeholder convention
+ * (lib/services/department-membership-service.ts): when a custom role is
+ * granted, the enum column becomes a required-but-unused placeholder, never
+ * whatever raw value the caller happened to send alongside it.
+ */
+async function resolveGlobalRoleAssignment(
+  role: Role | undefined,
+  globalCustomRoleId: string | null | undefined,
+  currentGlobalCustomRoleId: string | null
+): Promise<{ role: Role; globalCustomRoleId: string | null }> {
+  if (globalCustomRoleId) {
+    await assertGlobalCustomRoleEligible(globalCustomRoleId, currentGlobalCustomRoleId);
+    return { role: Role.USER, globalCustomRoleId };
+  }
+  const resolvedRole = role ?? Role.USER;
+  if (!isGlobalRoleAllowedForMicrosoftMapping(resolvedRole)) {
     throw new MicrosoftMappingValidationError("ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
   }
-  if (!isDepartmentRoleAllowedForMicrosoftMapping(input.departmentRole)) {
+  return { role: resolvedRole, globalCustomRoleId: null };
+}
+
+/** Department-scoped mirror of resolveGlobalRoleAssignment above — see its doc comment. `departmentRole` has no implicit default (an explicit choice is required — enforced by createMicrosoftMappingSchema's refine, not repeated here). */
+async function resolveDepartmentRoleAssignment(
+  departmentRole: DepartmentRole | undefined,
+  departmentCustomRoleId: string | null | undefined,
+  currentDepartmentCustomRoleId: string | null
+): Promise<{ departmentRole: DepartmentRole; departmentCustomRoleId: string | null }> {
+  if (departmentCustomRoleId) {
+    await assertDepartmentCustomRoleEligible(departmentCustomRoleId, currentDepartmentCustomRoleId);
+    return { departmentRole: DepartmentRole.VIEWER, departmentCustomRoleId };
+  }
+  const resolvedRole = departmentRole ?? DepartmentRole.VIEWER;
+  if (!isDepartmentRoleAllowedForMicrosoftMapping(resolvedRole)) {
     throw new MicrosoftMappingValidationError("DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
   }
+  return { departmentRole: resolvedRole, departmentCustomRoleId: null };
+}
+
+export async function createMapping(input: CreateMappingInput): Promise<MicrosoftDepartmentMapping> {
+  const globalAssignment = await resolveGlobalRoleAssignment(input.role, input.globalCustomRoleId, null);
+  const departmentAssignment = await resolveDepartmentRoleAssignment(input.departmentRole, input.departmentCustomRoleId, null);
+
   await assertDepartmentExists(input.departmentId);
   const { domain, normalizedMicrosoftValue } = resolveMappingIdentity(input.sourceType, input.microsoftValue, input.domain);
   return prisma.microsoftDepartmentMapping.create({
@@ -351,8 +474,10 @@ export async function createMapping(input: CreateMappingInput): Promise<Microsof
       domain,
       normalizedMicrosoftValue,
       departmentId: input.departmentId,
-      role,
-      departmentRole: input.departmentRole,
+      role: globalAssignment.role,
+      globalCustomRoleId: globalAssignment.globalCustomRoleId,
+      departmentRole: departmentAssignment.departmentRole,
+      departmentCustomRoleId: departmentAssignment.departmentCustomRoleId,
     },
   });
 }
@@ -363,25 +488,54 @@ export interface UpdateMappingInput {
   departmentId?: string;
   /** Global Role (matches /admin/roles) — never DepartmentRole. See department-role-translation.ts. */
   role?: Role;
+  /** See CreateMappingInput's doc comment — same relationship to `role`. `undefined` leaves the mapping's current global-role assignment untouched; `null` explicitly clears a custom role back to the built-in `role` enum; a string switches to that custom role. */
+  globalCustomRoleId?: string | null;
   /** DepartmentRole granted on the resulting DepartmentMembership — independent of `role` above. */
   departmentRole?: DepartmentRole;
+  /** Same undefined/null/string semantics as globalCustomRoleId above, department-scoped. */
+  departmentCustomRoleId?: string | null;
   isActive?: boolean;
   /** Only meaningful (and only re-validated) when sourceType is part of THIS patch and is domain-scoped, or when explicitly provided — see updateMapping's own comment. Omitting it never clears an existing mapping's domain. */
   domain?: string;
 }
 
 export async function updateMapping(id: string, patch: UpdateMappingInput): Promise<MicrosoftDepartmentMapping> {
-  if (patch.role !== undefined && !isGlobalRoleAllowedForMicrosoftMapping(patch.role)) {
-    throw new MicrosoftMappingValidationError("ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
+  // Fetched once, up front, for two independent purposes below: (a) the
+  // identity-recompute branch (domain/normalizedMicrosoftValue), (b) knowing
+  // this mapping's CURRENT custom-role ids so resolveGlobalRoleAssignment/
+  // resolveDepartmentRoleAssignment can tell "already-referenced, left
+  // unchanged" apart from "newly assigned" (see assertGlobalCustomRoleEligible's
+  // doc comment on why that distinction matters for the isActive check).
+  // Missing here just means the row doesn't exist — every branch below
+  // degrades gracefully and the final update() call surfaces the real P2025.
+  const existing = await prisma.microsoftDepartmentMapping.findUnique({
+    where: { id },
+    select: { sourceType: true, microsoftValue: true, domain: true, globalCustomRoleId: true, departmentCustomRoleId: true },
+  });
+
+  const data: Record<string, unknown> = { ...patch };
+
+  const globalRoleTouched = patch.role !== undefined || patch.globalCustomRoleId !== undefined;
+  if (globalRoleTouched) {
+    const assignment = await resolveGlobalRoleAssignment(patch.role, patch.globalCustomRoleId, existing?.globalCustomRoleId ?? null);
+    data.role = assignment.role;
+    data.globalCustomRoleId = assignment.globalCustomRoleId;
   }
-  if (patch.departmentRole !== undefined && !isDepartmentRoleAllowedForMicrosoftMapping(patch.departmentRole)) {
-    throw new MicrosoftMappingValidationError("DEPARTMENT_ROLE_NOT_ALLOWED_FOR_MICROSOFT_MAPPING");
+
+  const departmentRoleTouched = patch.departmentRole !== undefined || patch.departmentCustomRoleId !== undefined;
+  if (departmentRoleTouched) {
+    const assignment = await resolveDepartmentRoleAssignment(
+      patch.departmentRole,
+      patch.departmentCustomRoleId,
+      existing?.departmentCustomRoleId ?? null
+    );
+    data.departmentRole = assignment.departmentRole;
+    data.departmentCustomRoleId = assignment.departmentCustomRoleId;
   }
+
   if (patch.departmentId !== undefined) {
     await assertDepartmentExists(patch.departmentId);
   }
-
-  const data: Record<string, unknown> = { ...patch };
 
   // FIND-006: `domain`/`normalizedMicrosoftValue` are only ever recomputed
   // when something that could change the mapping's IDENTITY is actually
@@ -392,10 +546,6 @@ export async function updateMapping(id: string, patch: UpdateMappingInput): Prom
   // DOES need recomputing, the row's CURRENT sourceType/microsoftValue/domain
   // fill in whatever this patch didn't explicitly change.
   if (patch.sourceType !== undefined || patch.microsoftValue !== undefined || patch.domain !== undefined) {
-    const existing = await prisma.microsoftDepartmentMapping.findUnique({
-      where: { id },
-      select: { sourceType: true, microsoftValue: true, domain: true },
-    });
     if (!existing) {
       // Let the update below hit its own P2025 — never invent a row here.
     } else {

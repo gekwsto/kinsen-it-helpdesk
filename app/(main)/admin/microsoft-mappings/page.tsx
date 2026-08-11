@@ -4,19 +4,26 @@ import { listMappings } from "@/lib/services/microsoft-mapping-service";
 import { listDepartments } from "@/lib/services/department-service";
 import { getCachedDirectoryDepartmentValues, getCachedDirectoryJobTitleValues } from "@/lib/services/microsoft-directory-service";
 import { listJobTitleDirectoryForAdmin } from "@/lib/services/microsoft-job-title-directory-service";
+import {
+  getMicrosoftMappingGlobalRoleOptions,
+  getMicrosoftMappingDepartmentRoleOptions,
+} from "@/lib/services/microsoft-mapping-role-options-service";
 import { MicrosoftMappingManagement } from "@/components/admin/microsoft-mapping-management";
 
 export default async function MicrosoftMappingsAdminPage() {
   const session = await auth();
   if (!session?.user || session.user.role !== "ADMIN") redirect("/dashboard");
 
-  const [mappings, departments, departmentDirectory, jobTitleDirectory, jobTitleDirectoryDiscovery] = await Promise.all([
-    listMappings(),
-    listDepartments(),
-    getCachedDirectoryDepartmentValues(),
-    getCachedDirectoryJobTitleValues(),
-    listJobTitleDirectoryForAdmin(),
-  ]);
+  const [mappings, departments, departmentDirectory, jobTitleDirectory, jobTitleDirectoryDiscovery, globalRoleOptions, departmentRoleOptions] =
+    await Promise.all([
+      listMappings(),
+      listDepartments(),
+      getCachedDirectoryDepartmentValues(),
+      getCachedDirectoryJobTitleValues(),
+      listJobTitleDirectoryForAdmin(),
+      getMicrosoftMappingGlobalRoleOptions(),
+      getMicrosoftMappingDepartmentRoleOptions(),
+    ]);
 
   return (
     <div className="space-y-6">
@@ -44,6 +51,8 @@ export default async function MicrosoftMappingsAdminPage() {
           firstSeenAt: r.firstSeenAt.toISOString(),
           lastSeenAt: r.lastSeenAt.toISOString(),
         }))}
+        initialGlobalRoleOptions={globalRoleOptions}
+        initialDepartmentRoleOptions={departmentRoleOptions}
       />
     </div>
   );

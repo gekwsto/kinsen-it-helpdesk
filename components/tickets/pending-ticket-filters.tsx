@@ -16,9 +16,19 @@ import { Search, X } from "lucide-react";
 
 interface PendingTicketFiltersProps {
   departments: { id: string; name: string }[];
+  /**
+   * The dedicated /tickets/rejected page is intrinsically `status = REJECTED`
+   * — a Status selector there would let a user "filter" to a status the
+   * page can never actually contain, which is meaningless UI. Defaults to
+   * true so the existing /tickets/pending usage (where Status genuinely
+   * lets a reviewer browse Accepted/Rejected history without leaving the
+   * page — a real, currently-used capability, preserved unchanged) is
+   * completely unaffected.
+   */
+  showStatusFilter?: boolean;
 }
 
-export function PendingTicketFilters({ departments }: PendingTicketFiltersProps) {
+export function PendingTicketFilters({ departments, showStatusFilter = true }: PendingTicketFiltersProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -43,7 +53,7 @@ export function PendingTicketFilters({ departments }: PendingTicketFiltersProps)
     [pathname, router, searchParams]
   );
 
-  const hasAnyFilter = !!(get("fromEmail") || get("subject") || get("departmentId") || get("status") || get("receivedAfter") || get("receivedBefore"));
+  const hasAnyFilter = !!(get("fromEmail") || get("subject") || get("departmentId") || (showStatusFilter && get("status")) || get("receivedAfter") || get("receivedBefore"));
 
   const resetAll = () => {
     setFromEmail("");
@@ -96,19 +106,21 @@ export function PendingTicketFilters({ departments }: PendingTicketFiltersProps)
           </div>
         )}
 
-        <div className="space-y-1">
-          <Label className="text-xs text-muted-foreground">Status</Label>
-          <Select value={get("status") || "PENDING"} onValueChange={(v) => push({ status: v })}>
-            <SelectTrigger className="h-8 text-xs">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="PENDING">Pending</SelectItem>
-              <SelectItem value="ACCEPTED">Accepted</SelectItem>
-              <SelectItem value="REJECTED">Rejected</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
+        {showStatusFilter && (
+          <div className="space-y-1">
+            <Label className="text-xs text-muted-foreground">Status</Label>
+            <Select value={get("status") || "PENDING"} onValueChange={(v) => push({ status: v })}>
+              <SelectTrigger className="h-8 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="PENDING">Pending</SelectItem>
+                <SelectItem value="ACCEPTED">Accepted</SelectItem>
+                <SelectItem value="REJECTED">Rejected</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-wrap items-end gap-3">

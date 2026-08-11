@@ -241,6 +241,18 @@ export async function syncMicrosoftUserDepartment(
       // role below in resolveDepartmentMemberships, which still needs the
       // reverse translation since DepartmentMembership.role stays DepartmentRole.
       globalRoleUpdate.role = primaryMapping.role;
+      // Custom GLOBAL/BOTH-scope role this mapping grants instead of the
+      // built-in `role` above, or null for a plain built-in mapping — see
+      // MicrosoftDepartmentMapping.globalCustomRoleId's schema comment.
+      // Always written (never left stale): this sync fully owns
+      // User.customRoleId once shouldSyncGlobalRole() allows it, exactly as
+      // it already fully owns User.role — a user's PREVIOUS Microsoft-synced
+      // custom role must be cleared if the winning mapping is now a
+      // built-in-only one, same as `role` itself is always overwritten
+      // rather than left stale.
+      globalRoleUpdate.customRole = primaryMapping.globalCustomRoleId
+        ? { connect: { id: primaryMapping.globalCustomRoleId } }
+        : { disconnect: true };
       globalRoleUpdate.globalRoleSource = "MICROSOFT_DEPARTMENT";
       globalRoleUpdate.globalRoleUpdatedAt = new Date();
       globalRoleUpdate.globalRoleMicrosoftMapping = { connect: { id: primaryMapping.id } };

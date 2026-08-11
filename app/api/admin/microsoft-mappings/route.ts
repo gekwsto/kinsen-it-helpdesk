@@ -56,6 +56,27 @@ export async function POST(req: NextRequest) {
           { status: 400 }
         );
       }
+      if (error.code === "GLOBAL_CUSTOM_ROLE_NOT_FOUND" || error.code === "DEPARTMENT_CUSTOM_ROLE_NOT_FOUND") {
+        return NextResponse.json({ error: "The selected role no longer exists.", code: "custom_role_not_found" }, { status: 404 });
+      }
+      if (error.code === "GLOBAL_CUSTOM_ROLE_INVALID") {
+        return NextResponse.json(
+          { error: "That role can't be used as a Global Role — it's either a built-in role or scoped to a department only.", code: "custom_role_invalid_scope" },
+          { status: 400 }
+        );
+      }
+      if (error.code === "DEPARTMENT_CUSTOM_ROLE_INVALID") {
+        return NextResponse.json(
+          { error: "That role can't be used as a Department Role — it's either a built-in role or scoped globally only.", code: "custom_role_invalid_scope" },
+          { status: 400 }
+        );
+      }
+      if (error.code === "GLOBAL_CUSTOM_ROLE_INACTIVE" || error.code === "DEPARTMENT_CUSTOM_ROLE_INACTIVE") {
+        return NextResponse.json(
+          { error: "That role is disabled and can't be newly assigned — enable it first or choose another role.", code: "custom_role_inactive" },
+          { status: 400 }
+        );
+      }
     }
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return NextResponse.json({ error: "A mapping for this value already exists.", code: "duplicate_mapping" }, { status: 409 });

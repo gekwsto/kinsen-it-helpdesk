@@ -88,15 +88,23 @@ export async function DELETE(
       );
     }
 
-    const [usersWithRole, membershipsWithRole] = await Promise.all([
+    const [usersWithRole, membershipsWithRole, globalMappingsWithRole, departmentMappingsWithRole] = await Promise.all([
       prisma.user.count({ where: { customRoleId: id } }),
       prisma.departmentMembership.count({ where: { customRoleId: id } }),
+      prisma.microsoftDepartmentMapping.count({ where: { globalCustomRoleId: id } }),
+      prisma.microsoftDepartmentMapping.count({ where: { departmentCustomRoleId: id } }),
     ]);
-    const totalInUse = usersWithRole + membershipsWithRole;
+    const mappingsWithRole = globalMappingsWithRole + departmentMappingsWithRole;
+    const totalInUse = usersWithRole + membershipsWithRole + mappingsWithRole;
     if (totalInUse > 0) {
       const parts: string[] = [];
       if (usersWithRole > 0) parts.push(`${usersWithRole} user${usersWithRole > 1 ? "s" : ""}`);
       if (membershipsWithRole > 0) parts.push(`${membershipsWithRole} department membership${membershipsWithRole > 1 ? "s" : ""}`);
+      // Never silently orphan a Microsoft mapping's role target — same
+      // "prevent deletion while referenced" rule as users/memberships above,
+      // extended to the newer globalCustomRoleId/departmentCustomRoleId
+      // relations (see MicrosoftDepartmentMapping's schema comment).
+      if (mappingsWithRole > 0) parts.push(`${mappingsWithRole} Microsoft mapping${mappingsWithRole > 1 ? "s" : ""}`);
       return NextResponse.json(
         { error: `This role is assigned to ${parts.join(" and ")} and cannot be deleted. Reassign them first.`, code: "role_in_use" },
         { status: 409 }

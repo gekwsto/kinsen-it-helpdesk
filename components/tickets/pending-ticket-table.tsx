@@ -53,6 +53,15 @@ interface PendingTicketTableProps {
   /** True when no single department is in scope (Admin/Director "All Workspaces") — an unmatched pending ticket needs an explicit department chosen at accept time. */
   showDepartmentPicker: boolean;
   allDepartments: { id: string; name: string }[];
+  /**
+   * "pending" (default) — the /tickets/pending operational queue: Accept/
+   * Reject on PENDING rows. "rejected" — the /tickets/rejected recovery
+   * archive: rows are always REJECTED, and the only action is "Create
+   * Ticket" (recovering the SAME row into a real Ticket via the SAME
+   * accept endpoint/dialog — never a duplicated implementation). No Reject
+   * button ever renders in this mode (the row is already rejected).
+   */
+  mode?: "pending" | "rejected";
 }
 
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
@@ -68,7 +77,9 @@ export function PendingTicketTable({
   canReject,
   showDepartmentPicker,
   allDepartments,
+  mode = "pending",
 }: PendingTicketTableProps) {
+  const isRejectedMode = mode === "rejected";
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -117,11 +128,23 @@ export function PendingTicketTable({
         const err = await res.json();
         throw new Error(err.error ?? "Failed to accept ticket");
       }
-      toast.success("Ticket accepted — now visible in All Tickets");
+      const created: { id: string; ticketNumber: number; title: string } = await res.json();
+      if (isRejectedMode) {
+        // Recovered from Rejected — the source row switches to ACCEPTED
+        // and, per the query filter, disappears from this page's list on
+        // the next render (router.refresh() below). Offer a direct way to
+        // reach the ticket that was just created, since the user can no
+        // longer find it via this same page.
+        toast.success("Ticket created successfully", {
+          action: { label: "View Ticket", onClick: () => router.push(`/tickets/${created.id}`) },
+        });
+      } else {
+        toast.success("Ticket accepted — now visible in All Tickets");
+      }
       setAcceptTarget(null);
       router.refresh();
     } catch (e: any) {
-      toast.error(e.message ?? "Failed to accept ticket");
+      toast.error(e.message ?? (isRejectedMode ? "Failed to create ticket" : "Failed to accept ticket"));
     } finally {
       setProcessing(false);
     }
@@ -166,7 +189,9 @@ export function PendingTicketTable({
                 <TableCell colSpan={6}>
                   <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-muted-foreground">
                     <Inbox className="h-8 w-8" />
-                    <p className="text-sm">No pending tickets match your filters.</p>
+                    <p className="text-sm">
+                      {isRejectedMode ? "No rejected tickets match your filters." : "No pending tickets match your filters."}
+                    </p>
                   </div>
                 </TableCell>
               </TableRow>
@@ -210,16 +235,25 @@ export function PendingTicketTable({
                         <Button size="sm" variant="ghost" onClick={() => setPreviewTarget(pt)} title="Preview full email">
                           <Eye className="h-3.5 w-3.5" />
                         </Button>
-                        {pt.status === "PENDING" && canAccept && (
+                        {!isRejectedMode && pt.status === "PENDING" && canAccept && (
                           <Button size="sm" variant="outline" onClick={() => openAccept(pt)}>
                             <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600" />
                             Accept
                           </Button>
                         )}
-                        {pt.status === "PENDING" && canReject && (
+                        {!isRejectedMode && pt.status === "PENDING" && canReject && (
                           <Button size="sm" variant="outline" onClick={() => setRejectTarget(pt)}>
                             <XCircle className="h-3.5 w-3.5 mr-1.5 text-destructive" />
                             Reject
+                          </Button>
+                        )}
+                        {/* Rejected Tickets: no Reject button (already rejected) — the
+                            SAME accept dialog/endpoint is reused as the "Create Ticket"
+                            recovery action, never a second implementation. */}
+                        {isRejectedMode && pt.status === "REJECTED" && canAccept && (
+                          <Button size="sm" variant="outline" onClick={() => openAccept(pt)}>
+                            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600" />
+                            Create Ticket
                           </Button>
                         )}
                       </div>
@@ -236,16 +270,23 @@ export function PendingTicketTable({
         pagination={pagination}
         onPageChange={(page) => updateParams({ page: page === 1 ? null : String(page) })}
         onPageSizeChange={(pageSize) => updateParams({ pageSize: pageSize === 20 ? null : String(pageSize) }, { resetPage: true })}
-        itemLabel="pending tickets"
+        itemLabel={isRejectedMode ? "rejected tickets" : "pending tickets"}
       />
 
-      {/* Accept confirm dialog */}
+      {/* Accept confirm dialog — reused verbatim as the Rejected Tickets
+          "Create Ticket" recovery dialog (same department-resolution UI
+          for an unmatched request), only the copy differs by mode. */}
       <Dialog open={!!acceptTarget} onOpenChange={(o) => !o && setAcceptTarget(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Accept Pending Ticket</DialogTitle>
+            <DialogTitle>{isRejectedMode ? "Create Ticket from Rejected Request" : "Accept Pending Ticket"}</DialogTitle>
           </DialogHeader>
           <div className="py-2 space-y-3">
+            {isRejectedMode && (
+              <p className="text-sm text-muted-foreground">
+                This request was previously rejected. Creating it will create a real ticket using the original email/request data.
+              </p>
+            )}
             <p className="text-sm text-muted-foreground">
               This creates a real ticket from <strong className="text-foreground">{acceptTarget?.subject}</strong>.
               It will then appear in All Tickets{acceptTarget?.department ? ` for ${acceptTarget.department.name}` : ""}.
@@ -270,7 +311,7 @@ export function PendingTicketTable({
             <Button variant="outline" onClick={() => setAcceptTarget(null)} disabled={processing}>Cancel</Button>
             <Button onClick={handleAccept} disabled={processing}>
               {processing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Accept
+              {isRejectedMode ? "Create Ticket" : "Accept"}
             </Button>
           </DialogFooter>
         </DialogContent>

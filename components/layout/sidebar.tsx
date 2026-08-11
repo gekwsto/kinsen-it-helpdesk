@@ -92,6 +92,11 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
     { label: "Created by Me", href: "/tickets/created-by-me" },
     ...(canCreateTicket ? [{ label: "Create Ticket", href: "/tickets/new" }] : []),
     { label: "Pending Tickets", href: "/tickets/pending", visible: navFlags.canViewPendingTickets },
+    // Same review capability as Pending Tickets — a rejected email request
+    // is still an inbound-review record, just further along the same
+    // PendingTicket lifecycle (PENDING -> REJECTED, recoverable into
+    // ACCEPTED), not a separate permission concept.
+    { label: "Rejected Tickets", href: "/tickets/rejected", visible: navFlags.canViewPendingTickets },
     ...(isAdmin(userRole)
       ? [{ label: "Closed Tickets", href: "/tickets/closed", roles: ["ADMIN"] as Role[] }]
       : []),

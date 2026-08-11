@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { DepartmentRole, MicrosoftMappingSourceType, Role } from "@prisma/client";
 import {
@@ -39,22 +39,27 @@ import {
   MAPPING_SOURCE_TYPE_OPTIONS,
 } from "@/components/admin/department-role-info";
 import {
-  getMicrosoftMappingRoleOptions,
-  getMicrosoftMappingDepartmentRoleOptions,
   translateGlobalRoleToDepartmentRole,
   DEPARTMENT_ROLE_LABELS,
 } from "@/lib/services/department-role-translation";
 
-// The actual, centrally-validated set of GLOBAL roles a Microsoft mapping
-// can grant — the same roles shown on /admin/roles, minus Administrator.
-// See lib/services/department-role-translation.ts. Computed once; pure
-// function, no props/state dependency. Administrator is simply absent from
-// this list, not shown disabled — see the persistent note near the field.
-const ROLE_OPTIONS = getMicrosoftMappingRoleOptions();
-
-// Same idea for the Department Role dropdown — every built-in DepartmentRole
-// except Department Admin (the department-scoped analog of Administrator).
-const DEPARTMENT_ROLE_SELECT_OPTIONS = getMicrosoftMappingDepartmentRoleOptions();
+// Live, database-backed role choices — built-in roles plus any active custom
+// role of the matching scope — fetched from GET
+// /api/admin/microsoft-mappings/role-options (see
+// lib/services/microsoft-mapping-role-options-service.ts), never a
+// build-time constant. `initialGlobalRoleOptions`/`initialDepartmentRoleOptions`
+// (server-rendered, always fresh at page load) seed state for instant first
+// paint; the dialog re-fetches every time it opens (openCreate/openEdit) so
+// a role created moments ago without a page reload still shows up — see
+// fetchRoleOptions below.
+interface RoleOptionDto {
+  /** Built-in: the Role/DepartmentRole enum value itself. Custom: `custom:<CustomRole.id>`. */
+  value: string;
+  label: string;
+  description?: string;
+  isCustom: boolean;
+  customRoleId?: string;
+}
 
 interface Mapping {
   id: string;
@@ -64,9 +69,64 @@ interface Mapping {
   domain: string;
   departmentId: string;
   role: Role;
+  globalCustomRoleId: string | null;
+  globalCustomRole: { id: string; name: string; isActive: boolean } | null;
   departmentRole: DepartmentRole;
+  departmentCustomRoleId: string | null;
+  departmentCustomRole: { id: string; name: string; isActive: boolean } | null;
   isActive: boolean;
   department: { id: string; name: string; slug: string };
+}
+
+/** Display label for a mapping row's Global Role — the joined custom role name when set, else the built-in enum label. */
+function mappingGlobalRoleLabel(m: Pick<Mapping, "role" | "globalCustomRole">): string {
+  return m.globalCustomRole?.name ?? GLOBAL_ROLE_LABELS[m.role];
+}
+
+/** Same idea, department-scoped. */
+function mappingDepartmentRoleLabel(m: Pick<Mapping, "departmentRole" | "departmentCustomRole">): string {
+  return m.departmentCustomRole?.name ?? DEPARTMENT_ROLE_LABELS[m.departmentRole];
+}
+
+/**
+ * The <Select> value for a mapping's current role — `custom:<id>` when a
+ * custom role is set, else the built-in enum value. Used both to seed
+ * dialog state on openEdit and to keep the two derived-label helpers above
+ * (which read the raw mapping fields, not this encoded string) in sync.
+ */
+function roleSelectValue(customRoleId: string | null, enumValue: string): string {
+  return customRoleId ? `custom:${customRoleId}` : enumValue;
+}
+
+/**
+ * If the mapping's currently-stored custom role id isn't present in the
+ * freshly-fetched options (deactivated, or simply not "assignable" for a
+ * NEW pick anymore), inject it as a clearly-labeled synthetic option so the
+ * dialog shows the real historical selection instead of silently falling
+ * back to a default — "current selection that becomes ineligible" must
+ * never be silently downgraded. The admin must explicitly pick something
+ * else to change it; leaving it selected and saving keeps it as-is (a valid
+ * choice, not just a display quirk), since updateMapping only re-validates
+ * activeness for a genuinely NEW assignment (see
+ * assertGlobalCustomRoleEligible in lib/services/microsoft-mapping-service.ts).
+ */
+function withPreservedSelection(
+  options: RoleOptionDto[],
+  currentCustomRoleId: string | null | undefined,
+  currentCustomRoleName: string | null | undefined
+): RoleOptionDto[] {
+  if (!currentCustomRoleId) return options;
+  const value = `custom:${currentCustomRoleId}`;
+  if (options.some((o) => o.value === value)) return options;
+  return [
+    {
+      value,
+      label: `${currentCustomRoleName ?? "Unknown role"} (no longer eligible — pick a different role to change)`,
+      isCustom: true,
+      customRoleId: currentCustomRoleId,
+    },
+    ...options,
+  ];
 }
 
 interface DepartmentOption {
@@ -84,7 +144,9 @@ interface JobTitleDiscoveryMapping {
   departmentId: string;
   departmentName: string;
   role: Role;
+  globalCustomRoleName: string | null;
   departmentRole: DepartmentRole;
+  departmentCustomRoleName: string | null;
   isActive: boolean;
 }
 
@@ -106,6 +168,9 @@ interface MicrosoftMappingManagementProps {
   jobTitleDirectory: DirectoryCache;
   jobTitleDiscoveryDomain: string;
   jobTitleDiscoveryRows: JobTitleDiscoveryRow[];
+  /** Server-rendered, always-fresh-at-page-load role options — see the RoleOptionDto comment above. */
+  initialGlobalRoleOptions: RoleOptionDto[];
+  initialDepartmentRoleOptions: RoleOptionDto[];
 }
 
 // Source types with a real Graph-backed dropdown today — everything else
@@ -123,6 +188,8 @@ export function MicrosoftMappingManagement({
   jobTitleDirectory: initialJobTitleDirectory,
   jobTitleDiscoveryDomain,
   jobTitleDiscoveryRows: initialJobTitleDiscoveryRows,
+  initialGlobalRoleOptions,
+  initialDepartmentRoleOptions,
 }: MicrosoftMappingManagementProps) {
   const [mappings, setMappings] = useState(initialMappings);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -148,30 +215,78 @@ export function MicrosoftMappingManagement({
   // verbatim from the mapping being edited.
   const [domain, setDomain] = useState("");
   const [departmentId, setDepartmentId] = useState(departments[0]?.id ?? "");
-  const [role, setRole] = useState<Role>(Role.USER);
-  const [departmentRole, setDepartmentRole] = useState<DepartmentRole>(translateGlobalRoleToDepartmentRole(Role.USER));
+  // Encoded Select value — a built-in Role/DepartmentRole enum member, or
+  // `custom:<CustomRole.id>` — resolved back into the real
+  // {role,globalCustomRoleId}/{departmentRole,departmentCustomRoleId} API
+  // shape in handleSave, mirroring the exact pattern already used by
+  // user-management.tsx / department-members-management.tsx.
+  const [role, setRole] = useState<string>(Role.USER);
+  const [departmentRole, setDepartmentRole] = useState<string>(translateGlobalRoleToDepartmentRole(Role.USER));
   // Once the admin edits Department Role directly, stop auto-suggesting a
   // new default when Global Role changes — never silently overwrite an
   // explicit choice. Starts true in edit mode (see openEdit below), so
   // opening an existing mapping never re-suggests over its stored value.
   const [departmentRoleTouched, setDepartmentRoleTouched] = useState(false);
 
+  // Live role options — seeded from the server-rendered initial props,
+  // refreshed every time the dialog opens (fetchRoleOptions, called from
+  // openCreate/openEdit) so a role created moments ago in Roles &
+  // Permissions, without a page reload, still appears (never a stale
+  // build-time/page-load-time-only list).
+  const [globalRoleOptions, setGlobalRoleOptions] = useState<RoleOptionDto[]>(initialGlobalRoleOptions);
+  const [departmentRoleOptionsState, setDepartmentRoleOptionsState] = useState<RoleOptionDto[]>(initialDepartmentRoleOptions);
+  const [roleOptionsLoading, setRoleOptionsLoading] = useState(false);
+  // Stale-response guard for the role-options fetch — the dialog can be
+  // closed/reopened faster than a fetch resolves; only the LATEST request's
+  // response is ever applied to state.
+  const roleOptionsRequestRef = useRef(0);
+
+  const fetchRoleOptions = async (forMapping?: Mapping) => {
+    const requestId = ++roleOptionsRequestRef.current;
+    setRoleOptionsLoading(true);
+    try {
+      const res = await fetch("/api/admin/microsoft-mappings/role-options");
+      if (roleOptionsRequestRef.current !== requestId) return; // a newer request already landed
+      if (!res.ok) return; // keep whatever options we already had — non-fatal
+      const data = await res.json();
+      const global = withPreservedSelection(
+        Array.isArray(data.globalRoles) ? data.globalRoles : [],
+        forMapping?.globalCustomRoleId,
+        forMapping?.globalCustomRole?.name
+      );
+      const dept = withPreservedSelection(
+        Array.isArray(data.departmentRoles) ? data.departmentRoles : [],
+        forMapping?.departmentCustomRoleId,
+        forMapping?.departmentCustomRole?.name
+      );
+      setGlobalRoleOptions(global);
+      setDepartmentRoleOptionsState(dept);
+    } catch {
+      // keep whatever options we already had — non-fatal, dialog stays usable
+    } finally {
+      if (roleOptionsRequestRef.current === requestId) setRoleOptionsLoading(false);
+    }
+  };
+
   const isDirectoryBacked = DIRECTORY_BACKED_SOURCE_TYPES.includes(sourceType);
   const isProfileDepartment = sourceType === MicrosoftMappingSourceType.PROFILE_DEPARTMENT;
   const isProfileJobTitle = sourceType === MicrosoftMappingSourceType.PROFILE_JOB_TITLE;
   const activeDirectory = isProfileDepartment ? departmentDirectory : isProfileJobTitle ? jobTitleDirectory : null;
   const showDropdown = isDirectoryBacked && !manualEntry;
-  const selectedRoleOption = ROLE_OPTIONS.find((opt) => opt.value === role);
-  const selectedDepartmentRoleOption = DEPARTMENT_ROLE_SELECT_OPTIONS.find((opt) => opt.value === departmentRole);
+  const selectedRoleOption = globalRoleOptions.find((opt) => opt.value === role);
+  const selectedDepartmentRoleOption = departmentRoleOptionsState.find((opt) => opt.value === departmentRole);
 
-  const handleRoleChange = (v: Role) => {
+  const handleRoleChange = (v: string) => {
     setRole(v);
-    if (!departmentRoleTouched) {
-      setDepartmentRole(translateGlobalRoleToDepartmentRole(v));
+    // Auto-suggestion only makes sense going FROM a real built-in Role — a
+    // custom global role has no meaningful DepartmentRole translation, so
+    // picking one simply leaves whatever Department Role is already set.
+    if (!departmentRoleTouched && (Object.values(Role) as string[]).includes(v)) {
+      setDepartmentRole(translateGlobalRoleToDepartmentRole(v as Role));
     }
   };
 
-  const handleDepartmentRoleChange = (v: DepartmentRole) => {
+  const handleDepartmentRoleChange = (v: string) => {
     setDepartmentRole(v);
     setDepartmentRoleTouched(true);
   };
@@ -191,6 +306,11 @@ export function MicrosoftMappingManagement({
   const openCreate = () => {
     resetForm();
     setDialogOpen(true);
+    // Refresh options every time the dialog opens (not just once at page
+    // load) — a role created moments ago in Roles & Permissions, without a
+    // page reload, must still appear here (see fetchRoleOptions's own
+    // comment).
+    fetchRoleOptions();
   };
 
   const openEdit = (mapping: Mapping) => {
@@ -201,11 +321,12 @@ export function MicrosoftMappingManagement({
     // mapping preserves domain" (FIND-006).
     setDomain(mapping.domain);
     setDepartmentId(mapping.departmentId);
-    setRole(mapping.role);
-    setDepartmentRole(mapping.departmentRole);
+    setRole(roleSelectValue(mapping.globalCustomRoleId, mapping.role));
+    setDepartmentRole(roleSelectValue(mapping.departmentCustomRoleId, mapping.departmentRole));
     // Seed as "touched" so tweaking Global Role while editing never silently
     // overwrites this mapping's already-stored Department Role.
     setDepartmentRoleTouched(true);
+    fetchRoleOptions(mapping);
     // If the mapping's current value isn't in the relevant cached directory
     // list, default to manual entry so the admin sees the real stored value
     // instead of an empty/mismatched dropdown.
@@ -293,22 +414,31 @@ export function MicrosoftMappingManagement({
     // scoped to one domain at a time).
     setDomain(jobTitleDiscoveryDomain);
     setDialogOpen(true);
+    fetchRoleOptions();
   };
 
   const handleSave = async () => {
     if (!value.trim() || !departmentId) return;
     setSaving(true);
     try {
-      // domain is only meaningful for PROFILE_JOB_TITLE — omitted (not sent
-      // as "") for every other source type, so the server's own
-      // isDomainScopedMicrosoftMappingSourceType logic is the single source
-      // of truth for whether a domain applies, never a client assumption.
+      // Resolve the encoded Select value back into the real API shape —
+      // exactly the pattern already used by user-management.tsx
+      // (roleOptions.find + enumRole/customRoleId) and
+      // department-members-management.tsx (roleBody). A custom pick sends
+      // its customRoleId and omits the enum value entirely (the service
+      // forces the placeholder itself); a built-in pick sends the enum
+      // value and explicit `null` so an edit can clear a previously-set
+      // custom role back to a built-in one.
       const payload = {
         sourceType,
         microsoftValue: value.trim(),
         departmentId,
-        role,
-        departmentRole,
+        ...(selectedRoleOption?.isCustom
+          ? { globalCustomRoleId: selectedRoleOption.customRoleId }
+          : { role: role as Role, globalCustomRoleId: null }),
+        ...(selectedDepartmentRoleOption?.isCustom
+          ? { departmentCustomRoleId: selectedDepartmentRoleOption.customRoleId }
+          : { departmentRole: departmentRole as DepartmentRole, departmentCustomRoleId: null }),
         ...(isProfileJobTitle ? { domain } : {}),
       };
       const res = await fetch(
@@ -325,7 +455,22 @@ export function MicrosoftMappingManagement({
       }
       const saved = await res.json();
       const dept = departments.find((d) => d.id === departmentId);
-      const view: Mapping = { ...saved, department: { id: departmentId, name: dept?.name ?? "", slug: "" } };
+      // The create/update API returns the raw row only (no joined
+      // globalCustomRole/departmentCustomRole names) — built here from the
+      // already-fetched, already-validated selectedRoleOption/
+      // selectedDepartmentRoleOption instead of a second round-trip.
+      const view: Mapping = {
+        ...saved,
+        department: { id: departmentId, name: dept?.name ?? "", slug: "" },
+        globalCustomRole:
+          selectedRoleOption?.isCustom && selectedRoleOption.customRoleId
+            ? { id: selectedRoleOption.customRoleId, name: selectedRoleOption.label, isActive: true }
+            : null,
+        departmentCustomRole:
+          selectedDepartmentRoleOption?.isCustom && selectedDepartmentRoleOption.customRoleId
+            ? { id: selectedDepartmentRoleOption.customRoleId, name: selectedDepartmentRoleOption.label, isActive: true }
+            : null,
+      };
 
       if (editingMapping) {
         setMappings((prev) => prev.map((m) => (m.id === editingMapping.id ? { ...m, ...view } : m)));
@@ -435,7 +580,10 @@ export function MicrosoftMappingManagement({
                   <span className="text-sm">
                     {m.department.name}{" "}
                     <span className="text-muted-foreground">
-                      — {GLOBAL_ROLE_LABELS[m.role]} / {DEPARTMENT_ROLE_LABELS[m.departmentRole]}
+                      — {mappingGlobalRoleLabel(m)}
+                      {m.globalCustomRole && <span className="text-[10px]"> (Custom)</span>} /{" "}
+                      {mappingDepartmentRoleLabel(m)}
+                      {m.departmentCustomRole && <span className="text-[10px]"> (Custom)</span>}
                     </span>
                   </span>
                 </TableCell>
@@ -522,7 +670,7 @@ export function MicrosoftMappingManagement({
                   <TableCell>
                     {row.configured && row.mapping ? (
                       <Badge className="border-green-200 bg-green-50 text-green-700" variant="outline">
-                        Configured — {row.mapping.departmentName} ({GLOBAL_ROLE_LABELS[row.mapping.role]})
+                        Configured — {row.mapping.departmentName} ({row.mapping.globalCustomRoleName ?? GLOBAL_ROLE_LABELS[row.mapping.role]})
                       </Badge>
                     ) : (
                       <Badge className="border-amber-200 bg-amber-50 text-amber-700" variant="outline">
@@ -694,18 +842,26 @@ export function MicrosoftMappingManagement({
             </div>
 
             <div className="space-y-2">
-              <Label>Global Role</Label>
-              <Select value={role} onValueChange={(v) => handleRoleChange(v as Role)}>
+              <div className="flex items-center justify-between">
+                <Label>Global Role</Label>
+                {roleOptionsLoading && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+              </div>
+              <Select value={role} onValueChange={handleRoleChange}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {ROLE_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  {globalRoleOptions.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                      {opt.isCustom && !opt.label.includes("no longer eligible") ? " (Custom)" : ""}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
               {selectedRoleOption && (
                 <>
-                  <p className="text-xs text-muted-foreground">{selectedRoleOption.description}</p>
+                  {selectedRoleOption.description && (
+                    <p className="text-xs text-muted-foreground">{selectedRoleOption.description}</p>
+                  )}
                   {(role === "DEPARTMENT_MANAGER" || role === "DIRECTOR") && (
                     <p className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-xs text-amber-700">
                       {role === "DIRECTOR"
@@ -716,28 +872,36 @@ export function MicrosoftMappingManagement({
                 </>
               )}
               <p className="text-[11px] text-muted-foreground">
-                Global Role controls the user&apos;s app-wide role. Administrator cannot be granted automatically by
-                Microsoft mappings — assign it manually from Roles &amp; Permissions or User Management.
+                Global Role controls the user&apos;s app-wide role — built-in roles plus any active custom Global
+                Role from Roles &amp; Permissions. Administrator cannot be granted automatically by Microsoft
+                mappings — assign it manually from Roles &amp; Permissions or User Management.
               </p>
             </div>
 
             <div className="space-y-2">
-              <Label>Department Role</Label>
-              <Select value={departmentRole} onValueChange={(v) => handleDepartmentRoleChange(v as DepartmentRole)}>
+              <div className="flex items-center justify-between">
+                <Label>Department Role</Label>
+                {roleOptionsLoading && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+              </div>
+              <Select value={departmentRole} onValueChange={handleDepartmentRoleChange}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {DEPARTMENT_ROLE_SELECT_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                  {departmentRoleOptionsState.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                      {opt.isCustom && !opt.label.includes("no longer eligible") ? " (Custom)" : ""}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
-              {selectedDepartmentRoleOption && (
+              {selectedDepartmentRoleOption?.description && (
                 <p className="text-xs text-muted-foreground">{selectedDepartmentRoleOption.description}</p>
               )}
               <p className="text-[11px] text-muted-foreground">
-                Department Role controls the user&apos;s membership role in the selected department — chosen
-                independently of Global Role above (pre-filled with a sensible default until you change it).
-                Department Admin cannot be granted automatically by Microsoft mappings.
+                Department Role controls the user&apos;s membership role in the selected department — built-in
+                roles plus any active custom Department Role, chosen independently of Global Role above (pre-filled
+                with a sensible default until you change it). Department Admin cannot be granted automatically by
+                Microsoft mappings.
               </p>
             </div>
 

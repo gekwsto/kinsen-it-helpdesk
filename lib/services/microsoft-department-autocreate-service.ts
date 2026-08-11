@@ -84,6 +84,8 @@ export async function maybeAutoCreateDepartmentForGraphValue(
   return {
     departmentId: department.id,
     role: DepartmentRole.REQUESTER,
+    // Auto-created mapping is always the built-in REQUESTER default above — never a custom role.
+    customRoleId: null,
     source: MembershipSource.MICROSOFT_DEPARTMENT,
   };
 }

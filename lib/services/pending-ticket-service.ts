@@ -10,7 +10,7 @@ const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
 
 export type AcceptPendingTicketResult =
   | { ok: true; ticket: { id: string; ticketNumber: number; title: string } }
-  | { ok: false; error: "ticket_not_found" | "already_accepted" | "already_rejected" | "invalid_department" | "department_inactive" };
+  | { ok: false; error: "ticket_not_found" | "already_accepted" | "invalid_department" | "department_inactive" };
 
 export type RejectPendingTicketResult =
   | { ok: true }
@@ -121,6 +121,18 @@ async function savePendingAttachments(
  * Admin/Director pick a department for an unmatched (departmentId: null)
  * pending ticket at accept time; ignored if the pending ticket already has
  * one (that department already "won" at receipt time).
+ *
+ * Callable from BOTH lifecycle starting points:
+ *   PENDING  -> ACCEPTED (+ Ticket)   — the original Pending-review flow.
+ *   REJECTED -> ACCEPTED (+ Ticket)   — the "Create Ticket" recovery flow
+ *     from /tickets/rejected: a reviewer changes their mind about a
+ *     previously-rejected request. This is a single, direct, intentional
+ *     transition — never REJECTED -> PENDING -> ACCEPTED through two
+ *     separate calls, which could leave an inconsistent intermediate state
+ *     visible to a concurrent reader.
+ * Only ACCEPTED is a genuine terminal state here: an already-ACCEPTED
+ * record (whichever path it arrived from) can never produce a second
+ * Ticket — see the idempotency notes below.
  */
 export async function acceptPendingTicket(
   pendingTicketId: string,
@@ -130,7 +142,6 @@ export async function acceptPendingTicket(
   const pendingTicket = await prisma.pendingTicket.findUnique({ where: { id: pendingTicketId } });
   if (!pendingTicket) return { ok: false, error: "ticket_not_found" };
   if (pendingTicket.status === PendingTicketStatus.ACCEPTED) return { ok: false, error: "already_accepted" };
-  if (pendingTicket.status === PendingTicketStatus.REJECTED) return { ok: false, error: "already_rejected" };
 
   const departmentId = pendingTicket.departmentId ?? overrideDepartmentId ?? null;
   if (!pendingTicket.departmentId && overrideDepartmentId) {
@@ -164,35 +175,106 @@ export async function acceptPendingTicket(
 
   const requesterId = pendingTicket.requesterId ?? (await findOrCreateRequester(pendingTicket.fromEmail, pendingTicket.fromName ?? "")).id;
 
-  const ticket = await prisma.ticket.create({
-    data: {
-      title: pendingTicket.subject || "Email Support Request",
-      description: pendingTicket.body,
-      source: "EMAIL",
-      requesterId,
-      departmentId,
-      statusId: defaultStatusId,
-      priorityId: defaultPriorityId,
-      emailMessageId: pendingTicket.emailMessageId,
-      emailThreadId: pendingTicket.emailThreadId,
-    },
-    select: { id: true, ticketNumber: true, title: true },
-  });
+  // Ticket + its initial message + history + the PendingTicket's own
+  // ACCEPTED transition all commit together or not at all — closes the gap
+  // where a process crash/DB error between separate sequential writes could
+  // leave a real Ticket that the PendingTicket never got marked as
+  // producing (or vice versa). The actual anti-duplication guarantee is
+  // Ticket.emailMessageId's DB-level `@unique` constraint (see
+  // prisma/schema.prisma) — this transaction makes the SUCCESS path atomic;
+  // that constraint makes the CONCURRENCY path safe (caught below).
+  let ticket: { id: string; ticketNumber: number; title: string };
+  try {
+    const created = await prisma.$transaction(async (tx) => {
+      const newTicket = await tx.ticket.create({
+        data: {
+          title: pendingTicket.subject || "Email Support Request",
+          description: pendingTicket.body,
+          source: "EMAIL",
+          requesterId,
+          departmentId,
+          statusId: defaultStatusId,
+          priorityId: defaultPriorityId,
+          emailMessageId: pendingTicket.emailMessageId,
+          emailThreadId: pendingTicket.emailThreadId,
+        },
+        select: { id: true, ticketNumber: true, title: true },
+      });
 
-  const msg = await prisma.ticketMessage.create({
-    data: {
-      ticketId: ticket.id,
-      authorId: requesterId,
-      body: pendingTicket.body,
-      direction: "INBOUND",
-      emailMessageId: pendingTicket.emailMessageId,
-      fromEmail: pendingTicket.fromEmail,
-      fromName: pendingTicket.fromName,
-    },
-    select: { id: true },
-  });
+      const msg = await tx.ticketMessage.create({
+        data: {
+          ticketId: newTicket.id,
+          authorId: requesterId,
+          body: pendingTicket.body,
+          direction: "INBOUND",
+          emailMessageId: pendingTicket.emailMessageId,
+          fromEmail: pendingTicket.fromEmail,
+          fromName: pendingTicket.fromName,
+        },
+        select: { id: true },
+      });
 
+      await tx.ticketHistory.create({
+        data: {
+          ticketId: newTicket.id,
+          changedById: acceptingUserId,
+          type: "CREATED",
+          description: `Ticket created by accepting a pending email ticket from ${pendingTicket.fromEmail}`,
+          newValue: "EMAIL",
+        },
+      });
+
+      // Re-checked INSIDE the transaction (not just at function entry
+      // above) so two concurrent callers that both read PENDING/REJECTED
+      // before either wrote anything cannot both reach this update: the
+      // loser's WHERE clause (status still PENDING/REJECTED, never
+      // ACCEPTED) will already have been flipped by the winner by the time
+      // its own transaction's write is attempted, causing Prisma to report
+      // 0 rows updated — checked explicitly below via `updateMany`'s count,
+      // since `update` would instead throw P2025 on a WHERE miss, which is
+      // a valid alternative but count-based logic reads more directly here.
+      const updateResult = await tx.pendingTicket.updateMany({
+        where: { id: pendingTicket.id, status: pendingTicket.status },
+        data: {
+          status: PendingTicketStatus.ACCEPTED,
+          acceptedById: acceptingUserId,
+          acceptedAt: new Date(),
+          acceptedTicketId: newTicket.id,
+        },
+      });
+      if (updateResult.count === 0) {
+        // Someone else already transitioned this PendingTicket between our
+        // initial read and this write — abort the whole transaction (the
+        // Ticket we just created inside it is rolled back with everything
+        // else) rather than leaving an orphaned duplicate.
+        throw new AlreadyProcessedError();
+      }
+
+      return newTicket;
+    });
+    ticket = created;
+  } catch (err) {
+    if (err instanceof AlreadyProcessedError) {
+      return { ok: false, error: "already_accepted" };
+    }
+    // A concurrent request's transaction committed first and already holds
+    // the unique emailMessageId — this request's own ticket.create lost the
+    // race at the DB level (belt-and-suspenders alongside the in-transaction
+    // updateMany guard above, which normally catches this first since it
+    // reads the SAME row both requests started from).
+    if (err && typeof err === "object" && "code" in err && (err as { code?: string }).code === "P2002") {
+      return { ok: false, error: "already_accepted" };
+    }
+    throw err;
+  }
+
+  // Attachment file copying is best-effort and stays OUTSIDE the
+  // transaction (filesystem writes aren't part of a Prisma transaction,
+  // and a copy failure here was already non-fatal to Ticket creation
+  // before this change — each attachment is independently try/caught and
+  // logged, never rolls back the Ticket that was just durably committed).
   const attachments = await prisma.pendingTicketAttachment.findMany({ where: { pendingTicketId: pendingTicket.id } });
+  const msg = await prisma.ticketMessage.findFirst({ where: { ticketId: ticket.id }, select: { id: true }, orderBy: { createdAt: "asc" } });
   for (const att of attachments) {
     try {
       const sourcePath = path.join(UPLOAD_DIR, "pending", pendingTicket.id, att.filename);
@@ -204,7 +286,7 @@ export async function acceptPendingTicket(
       await prisma.ticketAttachment.create({
         data: {
           ticketId: ticket.id,
-          messageId: msg.id,
+          messageId: msg?.id,
           uploadedById: requesterId,
           filename: att.filename,
           originalName: att.originalName,
@@ -218,26 +300,6 @@ export async function acceptPendingTicket(
     }
   }
 
-  await prisma.ticketHistory.create({
-    data: {
-      ticketId: ticket.id,
-      changedById: acceptingUserId,
-      type: "CREATED",
-      description: `Ticket created by accepting a pending email ticket from ${pendingTicket.fromEmail}`,
-      newValue: "EMAIL",
-    },
-  });
-
-  await prisma.pendingTicket.update({
-    where: { id: pendingTicket.id },
-    data: {
-      status: PendingTicketStatus.ACCEPTED,
-      acceptedById: acceptingUserId,
-      acceptedAt: new Date(),
-      acceptedTicketId: ticket.id,
-    },
-  });
-
   // Notifying the requester is the caller's job (app/api/tickets/pending/
   // [id]/accept/route.ts schedules it via next/server's after()) — this
   // function stays framework-context-agnostic on purpose: it's also called
@@ -245,6 +307,9 @@ export async function acceptPendingTicket(
   // Next.js request scope, where after() would throw.
   return { ok: true, ticket };
 }
+
+/** Internal sentinel — thrown (never exported) to abort the accept transaction when a concurrent request already won the race; caught immediately in acceptPendingTicket and translated to `{ ok: false, error: "already_accepted" }`. */
+class AlreadyProcessedError extends Error {}
 
 /**
  * Rejects a PendingTicket — soft, kept for audit, never produces a Ticket.

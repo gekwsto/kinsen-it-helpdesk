@@ -142,11 +142,11 @@ export async function syncDepartmentMemberships(
       if (current) {
         await tx.departmentMembership.update({
           where: { id: current.id },
-          data: { role: r.role, source: r.source, isActive: true },
+          data: { role: r.role, customRoleId: r.customRoleId, source: r.source, isActive: true },
         });
       } else {
         await tx.departmentMembership.create({
-          data: { userId, departmentId: r.departmentId, role: r.role, source: r.source },
+          data: { userId, departmentId: r.departmentId, role: r.role, customRoleId: r.customRoleId, source: r.source },
         });
       }
     }

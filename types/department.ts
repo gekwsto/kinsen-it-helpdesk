@@ -34,6 +34,8 @@ export type DepartmentMembershipView = Pick<
 export type ResolvedMembership = {
   departmentId: string;
   role: DepartmentRole;
+  /** Custom DEPARTMENT/BOTH-scope role (CustomRole.id) this membership should carry instead of the placeholder `role` above, or null for a plain built-in role — see MicrosoftDepartmentMapping.departmentCustomRoleId. */
+  customRoleId: string | null;
   source: MembershipSource;
 };
 
@@ -66,9 +68,21 @@ export interface MicrosoftIdentityClaims {
 
 export type MicrosoftMappingView = Pick<
   MicrosoftDepartmentMapping,
-  "id" | "sourceType" | "microsoftValue" | "domain" | "departmentId" | "role" | "departmentRole" | "isActive"
+  | "id"
+  | "sourceType"
+  | "microsoftValue"
+  | "domain"
+  | "departmentId"
+  | "role"
+  | "globalCustomRoleId"
+  | "departmentRole"
+  | "departmentCustomRoleId"
+  | "isActive"
 > & {
   department: Pick<Department, "id" | "name" | "slug">;
+  /** Joined for display — includes isActive so the UI can render "(no longer eligible)" for a stale/deactivated selection without a second lookup. Null when globalCustomRoleId is null. */
+  globalCustomRole: { id: string; name: string; isActive: boolean } | null;
+  departmentCustomRole: { id: string; name: string; isActive: boolean } | null;
 };
 
 // ─── Workspace ─────────────────────────────────────────────────────────────────

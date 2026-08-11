@@ -387,15 +387,38 @@ model MicrosoftDepartmentMapping {
   department     Department                 @relation(fields: [departmentId], references: [id])
   departmentId   String
   // The GLOBAL role (matches /admin/roles / User.role) — so this dropdown
-  // shows exactly the same roles as Roles & Permissions.
+  // shows exactly the same roles as Roles & Permissions. Required, DB-level
+  // placeholder when `globalCustomRole` below is set (mirrors User.role's
+  // relationship to User.customRoleId) — see globalCustomRoleId's comment.
   role           Role                       @default(USER)
+  // Custom GLOBAL role (CustomRole.scope GLOBAL/BOTH, isBuiltIn: false) —
+  // when set, this is the authoritative Global Role this mapping grants and
+  // `role` above just holds the required placeholder USER, exactly
+  // mirroring User.customRoleId's relationship to User.role (see that
+  // field's schema comment). Nullable/additive: every pre-existing mapping
+  // row has this NULL and keeps working unchanged via `role` alone — no
+  // backfill needed. onDelete SetNull is a DB-level backstop only; the
+  // actual product rule (never silently orphan a mapping) is enforced by
+  // blocking CustomRole deletion while referenced — see the DELETE guard in
+  // app/api/admin/roles/[id]/route.ts, extended to check this relation too.
+  globalCustomRole   CustomRole?            @relation("MicrosoftMappingGlobalCustomRole", fields: [globalCustomRoleId], references: [id], onDelete: SetNull)
+  globalCustomRoleId String?
   // The DepartmentRole granted in `department` above. Explicitly chosen by
   // the admin (no longer derived from `role` at sync time) — see
   // resolveDepartmentMemberships in lib/services/microsoft-mapping-service.ts.
   // DEPARTMENT_ADMIN is deliberately never allowed here (department-scoped
   // analog of Role.ADMIN) — see isDepartmentRoleAllowedForMicrosoftMapping in
-  // lib/services/department-role-translation.ts.
+  // lib/services/department-role-translation.ts. Required, DB-level
+  // placeholder when `departmentCustomRole` below is set.
   departmentRole DepartmentRole
+  // Custom DEPARTMENT role (CustomRole.scope DEPARTMENT/BOTH, isBuiltIn:
+  // false) — when set, authoritative for the resulting DepartmentMembership
+  // and `departmentRole` above just holds the required placeholder VIEWER,
+  // exactly mirroring DepartmentMembership.customRoleId's relationship to
+  // DepartmentMembership.role. Same nullable/additive/backward-compatible
+  // reasoning as globalCustomRoleId above.
+  departmentCustomRole   CustomRole?        @relation("MicrosoftMappingDepartmentCustomRole", fields: [departmentCustomRoleId], references: [id], onDelete: SetNull)
+  departmentCustomRoleId String?
   isActive       Boolean                    @default(true)
   createdAt      DateTime                   @default(now())
   updatedAt      DateTime                   @updatedAt
@@ -405,6 +428,8 @@ model MicrosoftDepartmentMapping {
   @@unique([sourceType, domain, normalizedMicrosoftValue])
   @@index([departmentId])
   @@index([domain])
+  @@index([globalCustomRoleId])
+  @@index([departmentCustomRoleId])
 }
 
 // Local cache of distinct `department` profile values seen across the
@@ -1442,6 +1467,12 @@ model CustomRole {
   scope                 RoleScope              @default(GLOBAL)
   users                 User[]                 @relation("UserCustomRole")
   departmentMemberships DepartmentMembership[] @relation("DepartmentMembershipCustomRole")
+  // Microsoft mappings that grant this role — see MicrosoftDepartmentMapping's
+  // globalCustomRoleId/departmentCustomRoleId comments. Referenced by the
+  // role-deletion guard (app/api/admin/roles/[id]/route.ts) so a role in use
+  // by a mapping can never be silently orphaned by a hard delete.
+  microsoftMappingsAsGlobalRole     MicrosoftDepartmentMapping[] @relation("MicrosoftMappingGlobalCustomRole")
+  microsoftMappingsAsDepartmentRole MicrosoftDepartmentMapping[] @relation("MicrosoftMappingDepartmentCustomRole")
   createdAt             DateTime               @default(now())
   updatedAt             DateTime               @updatedAt
 }
