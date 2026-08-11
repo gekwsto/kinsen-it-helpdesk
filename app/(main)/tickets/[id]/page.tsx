@@ -114,19 +114,23 @@ export default async function TicketDetailPage({
 
   // Same hard rule as Create Ticket and the generic PATCH route (see
   // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) — only System
-  // Admin may link a ticket to a Project/Activity.
+  // Admin may link a ticket to a Project/Activity. Project/Activity OPTIONS
+  // themselves are no longer loaded here — TicketActions fetches them
+  // client-side, scoped to `effectiveDeptId` via the same GET /api/projects
+  // / GET /api/activities the standalone list pages use, never an unbounded
+  // "every project/activity in the system" query (see ticket-actions.tsx).
+  // Only the two booleans below (can the user ALSO create a Project/Activity
+  // in this specific department — reusing canActOnEntity, the same
+  // department-permission primitive used throughout this file) are resolved
+  // here.
   const canLinkProjectActivity = isAdminUser;
-  const [allProjects, allActivities] = await Promise.all([
-    canLinkProjectActivity
-      ? prisma.project.findMany({ orderBy: { title: "asc" }, select: { id: true, title: true } })
-      : Promise.resolve([]),
-    canLinkProjectActivity
-      ? prisma.projectActivity.findMany({
-          where: { isCompleted: false },
-          orderBy: { title: "asc" },
-          select: { id: true, title: true, projectId: true },
-        })
-      : Promise.resolve([]),
+  const [canCreateProjectInDept, canCreateActivityInDept] = await Promise.all([
+    canLinkProjectActivity && effectiveDeptId
+      ? canActOnEntity(session.user.id, role, effectiveDeptId, "project.create")
+      : Promise.resolve(false),
+    canLinkProjectActivity && effectiveDeptId
+      ? canActOnEntity(session.user.id, role, effectiveDeptId, "activity.create")
+      : Promise.resolve(false),
   ]);
 
   // Requesters can always reply to their own ticket (even without ticket.reply perm)
@@ -215,8 +219,9 @@ export default async function TicketDetailPage({
       ? { id: ticket.activity.id, title: ticket.activity.title }
       : null,
     canLinkProjectActivity,
-    allProjects: allProjects.map((p) => ({ id: p.id, title: p.title })),
-    allActivities: allActivities.map((a) => ({ id: a.id, title: a.title, projectId: a.projectId })),
+    effectiveDepartmentId: effectiveDeptId ?? null,
+    canCreateProjectInDept,
+    canCreateActivityInDept,
     initialStatus: {
       id: ticket.status.id,
       name: ticket.status.name,

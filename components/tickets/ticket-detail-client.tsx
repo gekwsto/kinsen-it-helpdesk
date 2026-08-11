@@ -112,8 +112,10 @@ export interface TicketDetailClientProps {
   project: { id: string; title: string } | null;
   activity: { id: string; title: string } | null;
   canLinkProjectActivity: boolean;
-  allProjects: Array<{ id: string; title: string }>;
-  allActivities: Array<{ id: string; title: string; projectId: string | null }>;
+  /** Effective department (legacy-fallback-resolved, same as elsewhere on this page) — what TicketActions scopes its own Project/Activity option fetch to. */
+  effectiveDepartmentId: string | null;
+  canCreateProjectInDept: boolean;
+  canCreateActivityInDept: boolean;
   initialStatus: TicketStatus;
   initialPriority: TicketPriority | null;
   initialCategory: TicketCategory | null;
@@ -163,8 +165,9 @@ export function TicketDetailClient({
   project,
   activity,
   canLinkProjectActivity,
-  allProjects,
-  allActivities,
+  effectiveDepartmentId,
+  canCreateProjectInDept,
+  canCreateActivityInDept,
   initialStatus,
   initialPriority,
   initialCategory,
@@ -507,8 +510,9 @@ export function TicketDetailClient({
             canChangeStatus={canChangeStatus}
             canAssign={canAssign}
             canLinkProjectActivity={canLinkProjectActivity}
-            projects={allProjects}
-            activities={allActivities}
+            effectiveDepartmentId={effectiveDepartmentId}
+            canCreateProjectInDept={canCreateProjectInDept}
+            canCreateActivityInDept={canCreateActivityInDept}
           />
         )}
 

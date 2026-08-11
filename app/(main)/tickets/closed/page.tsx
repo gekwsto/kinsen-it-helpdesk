@@ -14,6 +14,7 @@ import {
   splitFilterParam,
   reconcileTicketFilterParam,
 } from "@/lib/services/ticket-filter-options-service";
+import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 
 /** Same purpose as app/(main)/tickets/page.tsx's own helper — see there for the full rationale. */
 function buildClosedTicketsUrlWithCorrections(
@@ -33,8 +34,20 @@ function buildClosedTicketsUrlWithCorrections(
   return `/tickets/closed?${merged.toString()}`;
 }
 
+/** Preserves every param except `page` — used for the out-of-range canonical redirect, same pattern as app/(main)/projects/page.tsx. */
+function buildCanonicalUrl(params: SearchParams, page: number): string {
+  const canonical = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "page") continue;
+    if (typeof value === "string" && value) canonical.set(key, value);
+  }
+  canonical.set("page", String(page));
+  return `/tickets/closed?${canonical.toString()}`;
+}
+
 interface SearchParams {
   page?: string;
+  pageSize?: string;
   search?: string;
   statusId?: string;
   priorityId?: string;
@@ -57,18 +70,21 @@ export default async function ClosedTicketsPage({
   if (!isAdmin(session.user.role)) redirect("/dashboard");
 
   const params = await searchParams;
-  const page = Math.max(1, parseInt(params.page ?? "1"));
-  const limit = 20;
-  const skip = (page - 1) * limit;
+  const requestedPage = parsePageParam(params.page);
+  const pageSize = parsePageSizeParam(params.pageSize);
+  const skip = (requestedPage - 1) * pageSize;
 
   const sortBy = params.sortBy ?? "createdAt";
   const sortDir = (params.sortDir ?? "desc") as "asc" | "desc";
-  const orderBy: any =
+  const primarySort =
     sortBy === "priority"
       ? { priority: { level: sortDir } }
       : sortBy === "status"
       ? { status: { order: sortDir } }
       : { [sortBy]: sortDir };
+  // `id` as a secondary sort key guarantees fully deterministic pagination
+  // — see app/(main)/tickets/page.tsx's identical comment.
+  const orderBy: any = [primarySort, { id: "asc" }];
 
   // Admin's default is now their active workspace too (Phase 2B decision:
   // keep department-specific selection rather than an unscoped "all
@@ -138,7 +154,7 @@ export default async function ClosedTicketsPage({
     prisma.ticket.findMany({
       where,
       skip,
-      take: limit,
+      take: pageSize,
       orderBy,
       include: {
         requester: { select: { id: true, name: true, email: true, image: true } },
@@ -163,6 +179,11 @@ export default async function ClosedTicketsPage({
     }),
   ]);
 
+  const pagination = computePagination(total, requestedPage, pageSize);
+  if (isOutOfRange(requestedPage, pagination)) {
+    redirect(buildCanonicalUrl(params, pagination.page));
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
@@ -183,9 +204,7 @@ export default async function ClosedTicketsPage({
 
       <TicketTable
         tickets={tickets as any}
-        total={total}
-        page={page}
-        totalPages={Math.ceil(total / limit)}
+        pagination={pagination}
         showRequester={true}
       />
     </div>

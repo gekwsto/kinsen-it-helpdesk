@@ -12,6 +12,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import { PaginationControls } from "@/components/ui/pagination";
+import type { PaginationMeta } from "@/lib/pagination";
 import { StatusBadge, PriorityBadge, SourceBadge } from "@/components/tickets/ticket-badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatTicketNumber, formatDateTime, getInitials } from "@/lib/utils";
@@ -37,18 +39,15 @@ interface Ticket {
 
 interface TicketTableProps {
   tickets: Ticket[];
-  total: number;
-  page: number;
-  totalPages: number;
+  /** Single source of truth for page/pageSize/total — see lib/pagination.ts. */
+  pagination: PaginationMeta;
   showRequester?: boolean;
   emptyMessage?: string;
 }
 
 export function TicketTable({
   tickets,
-  total,
-  page,
-  totalPages,
+  pagination,
   showRequester = true,
   emptyMessage = "No tickets match your filters.",
 }: TicketTableProps) {
@@ -56,11 +55,19 @@ export function TicketTable({
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const updateParam = useCallback(
-    (key: string, value: string) => {
+  // Same convention as components/projects/project-pagination-bar.tsx /
+  // components/activities/activity-pagination-bar.tsx: a page change
+  // preserves every other URL param (filters, sort, pageSize); a page-size
+  // change resets back to page 1, since the current page number may no
+  // longer mean anything once the page size changes.
+  const updateParams = useCallback(
+    (updates: Record<string, string | null>, opts: { resetPage?: boolean } = {}) => {
       const params = new URLSearchParams(searchParams.toString());
-      if (value) params.set(key, value);
-      else params.delete(key);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === null) params.delete(key);
+        else params.set(key, value);
+      }
+      if (opts.resetPage) params.delete("page");
       router.push(`${pathname}?${params.toString()}`);
     },
     [pathname, router, searchParams]
@@ -68,11 +75,6 @@ export function TicketTable({
 
   return (
     <div className="space-y-4">
-      {/* Count */}
-      <p className="text-sm text-muted-foreground">
-        {total} ticket{total !== 1 ? "s" : ""}
-      </p>
-
       {/* Table */}
       <div className="rounded-lg border overflow-hidden">
         <Table>
@@ -231,32 +233,12 @@ export function TicketTable({
         </Table>
       </div>
 
-      {/* Pagination */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            Page {page} of {totalPages}
-          </p>
-          <div className="flex gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page <= 1}
-              onClick={() => updateParam("page", String(page - 1))}
-            >
-              Previous
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={page >= totalPages}
-              onClick={() => updateParam("page", String(page + 1))}
-            >
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      <PaginationControls
+        pagination={pagination}
+        onPageChange={(page) => updateParams({ page: page === 1 ? null : String(page) })}
+        onPageSizeChange={(pageSize) => updateParams({ pageSize: pageSize === 20 ? null : String(pageSize) }, { resetPage: true })}
+        itemLabel="tickets"
+      />
     </div>
   );
 }

@@ -143,7 +143,9 @@ async function main() {
     const element = await AllTicketsPage({ searchParams: Promise.resolve(params) });
     const [tableEl] = findElementsByType(element, TicketTable);
     const tickets = (tableEl?.props.tickets as any[]) ?? [];
-    return { total: tableEl?.props.total as number, ids: tickets.map((t) => t.id) };
+    // TicketTable now receives a single `pagination: PaginationMeta` prop
+    // instead of a separate `total` — see components/tickets/ticket-table.tsx.
+    return { total: tableEl?.props.pagination?.totalCount as number, ids: tickets.map((t) => t.id) };
   };
 
   const jsonReq = (url: string, body: unknown, method = "PATCH") =>

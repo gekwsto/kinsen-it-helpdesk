@@ -38,14 +38,38 @@ interface SubDepartmentOption {
   name: string;
 }
 
+export interface CreatedProject {
+  id: string;
+  title: string;
+  departmentId: string | null;
+}
+
 interface ProjectFormProps {
   departments: DepartmentOption[];
   /** Preselected department — the active workspace's department if it's in `departments`, or the sole option if there's exactly one. Undefined forces an explicit choice. */
   defaultDepartmentId?: string;
+  /**
+   * "standalone" (default) — the full /projects/new page experience:
+   * department is a real choice, success redirects to /projects/{id}.
+   * "inline" — embedded in a modal (e.g. from the Ticket create/link flow):
+   * department is FIXED to `fixedDepartmentId` (never a Select — this is
+   * the actual enforcement point that a ticket can never end up linked to a
+   * project from another department; POST /api/projects itself is still
+   * the authoritative validator, this just never offers the invalid choice
+   * in the first place), and success calls `onCreated` instead of
+   * navigating away.
+   */
+  mode?: "standalone" | "inline";
+  /** Required when mode="inline" — the department this project MUST belong to. */
+  fixedDepartmentId?: string;
+  fixedDepartmentName?: string;
+  onCreated?: (project: CreatedProject) => void;
+  onCancel?: () => void;
 }
 
-export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormProps) {
+export function ProjectForm({ departments, defaultDepartmentId, mode = "standalone", fixedDepartmentId, fixedDepartmentName, onCreated, onCancel }: ProjectFormProps) {
   const router = useRouter();
+  const inline = mode === "inline";
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
@@ -63,11 +87,11 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
       priority: 2,
       memberIds: [],
       isGoal: false,
-      departmentId: defaultDepartmentId,
+      departmentId: inline ? fixedDepartmentId : defaultDepartmentId,
     },
   });
 
-  const departmentId = watch("departmentId");
+  const departmentId = inline ? fixedDepartmentId : watch("departmentId");
   const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
 
   // Eligible members depend on the selected workspace — re-fetched whenever
@@ -106,7 +130,11 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
   };
 
   const onSubmit = async (data: CreateProjectInput) => {
-    if (!data.departmentId) {
+    // In inline mode the department is never user-editable, so this can
+    // only trip if the caller forgot to pass fixedDepartmentId — a real
+    // programming error, not a user-facing validation case.
+    const effectiveDepartmentId = inline ? fixedDepartmentId : data.departmentId;
+    if (!effectiveDepartmentId) {
       toast.error("Choose a workspace for this project.");
       return;
     }
@@ -115,7 +143,10 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...data, memberIds: Array.from(selectedMemberIds) }),
+        // POST /api/projects is the authoritative scope validator (resolveDepartmentForCreate)
+        // regardless of what's sent here — this only ever narrows what the
+        // UI OFFERS, never widens what the backend accepts.
+        body: JSON.stringify({ ...data, departmentId: effectiveDepartmentId, memberIds: Array.from(selectedMemberIds) }),
       });
 
       if (!res.ok) {
@@ -124,7 +155,11 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
       }
       const project = await res.json();
       toast.success("Project created!");
-      router.push(`/projects/${project.id}`);
+      if (inline) {
+        onCreated?.({ id: project.id, title: project.title, departmentId: project.departmentId ?? null });
+      } else {
+        router.push(`/projects/${project.id}`);
+      }
     } catch (error: any) {
       toast.error(error.message ?? "Failed to create project");
     } finally {
@@ -132,7 +167,7 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
     }
   };
 
-  if (departments.length === 0) {
+  if (!inline && departments.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[40vh] text-center gap-4">
         <ShieldOff className="h-12 w-12 text-muted-foreground" />
@@ -146,11 +181,13 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
 
   return (
     <form onSubmit={handleSubmit(onSubmit)}>
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Project Details</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
+      <Card className={inline ? "border-none shadow-none" : undefined}>
+        {!inline && (
+          <CardHeader>
+            <CardTitle className="text-base">Project Details</CardTitle>
+          </CardHeader>
+        )}
+        <CardContent className={inline ? "space-y-4 px-0" : "space-y-4"}>
           <div className="space-y-2">
             <Label htmlFor="title">
               Title <span className="text-destructive">*</span>
@@ -171,6 +208,17 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
             />
           </div>
 
+          {inline ? (
+            // Fixed, never a Select — this IS the enforcement point that an
+            // inline-created project can never end up in a different
+            // department than the ticket it's being created from.
+            <div className="space-y-2">
+              <Label>Workspace</Label>
+              <div className="flex h-9 items-center rounded-md border bg-muted/40 px-3 text-sm">
+                {fixedDepartmentName ?? "This ticket's department"}
+              </div>
+            </div>
+          ) : (
           <div className="space-y-2">
             <Label>
               Workspace <span className="text-destructive">*</span>
@@ -194,6 +242,7 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
               This project will belong to the selected workspace.
             </p>
           </div>
+          )}
 
           {subDepartments.length > 0 && (
             <div className="space-y-2">
@@ -319,9 +368,15 @@ export function ProjectForm({ departments, defaultDepartmentId }: ProjectFormPro
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <Button type="button" variant="outline" asChild>
-              <Link href="/projects">Cancel</Link>
-            </Button>
+            {inline ? (
+              <Button type="button" variant="outline" onClick={onCancel} disabled={isSubmitting}>
+                Cancel
+              </Button>
+            ) : (
+              <Button type="button" variant="outline" asChild>
+                <Link href="/projects">Cancel</Link>
+              </Button>
+            )}
             <Button type="submit" disabled={isSubmitting}>
               {isSubmitting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Create Project

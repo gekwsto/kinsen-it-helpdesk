@@ -684,6 +684,8 @@ model User {
   activityAssignments      ProjectActivity[]     @relation("ActivityAssignees")
   createdActivities        ProjectActivity[]     @relation("ActivityCreator")
   createdDependencies      ActivityDependency[]  @relation("ActivityDependenciesCreatedBy")
+  projectNotes             ProjectNote[]         @relation("ProjectNoteAuthor")
+  activityNotes            ActivityNote[]        @relation("ActivityNoteAuthor")
   ownedGoals               YearlyGoal[]          @relation("GoalOwner")
   notifications            Notification[]
   pushSubscriptions        PushSubscription[]
@@ -1168,6 +1170,7 @@ model Project {
   activities  ProjectActivity[]
   tickets     Ticket[]
   yearlyGoals YearlyGoal[]      @relation("GoalProjects")
+  notes       ProjectNote[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1212,6 +1215,7 @@ model ProjectActivity {
   tickets         Ticket[]
   predecessorDeps ActivityDependency[] @relation("ActivityDependencyPredecessor")
   successorDeps   ActivityDependency[] @relation("ActivityDependencySuccessor")
+  notes           ActivityNote[]
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
@@ -1225,6 +1229,43 @@ model ProjectActivity {
   // orders by createdAt desc, id asc, the same pattern Ticket already has
   // this index for.
   @@index([createdAt])
+}
+
+// A ProjectNote is an authenticated user's plain internal collaboration note
+// attached to a Project — NOT a ticket-style reply/message. Deliberately has
+// none of TicketMessage's communication-channel concepts (direction,
+// isInternal, emailMessageId, fromEmail/fromName, attachments): a note is
+// always internal, always plain text, never emailed, never part of a
+// requester-facing conversation. See components/notes/ for the shared
+// read/create UI and app/api/projects/[id]/notes/route.ts for the
+// authoritative create/read rules (project.view to read, project.edit to
+// write — no separate `project.note` permission is introduced).
+model ProjectNote {
+  id        String   @id @default(cuid())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+  author    User?    @relation("ProjectNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  authorId  String?
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([projectId, createdAt])
+}
+
+// Same concept as ProjectNote, for a ProjectActivity — see that model's own
+// doc comment for what this deliberately does NOT contain.
+model ActivityNote {
+  id         String          @id @default(cuid())
+  activity   ProjectActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  activityId String
+  author     User?           @relation("ActivityNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  authorId   String?
+  body       String          @db.Text
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  @@index([activityId, createdAt])
 }
 
 // Per-department, editable status->progress% mapping — Activity progress is

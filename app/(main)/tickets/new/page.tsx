@@ -72,7 +72,16 @@ export default async function NewTicketPage() {
     departmentId: { in: accessibleDepartmentIds },
   };
 
-  const [categories, priorities, itAgents, projects, activities] =
+  // Project/Activity options themselves are no longer loaded here — the
+  // form fetches them client-side, department-scoped, from the same
+  // GET /api/projects / GET /api/activities the standalone list pages use
+  // (see components/tickets/ticket-form.tsx), never an unbounded
+  // "every project/activity in the system" query. Only the (small, bounded)
+  // set of departments the user also holds project.create/activity.create
+  // in is resolved here — reused as-is by the shared
+  // getAccessibleDepartmentSummaries department-permission helper, not a
+  // new/parallel permission check.
+  const [categories, priorities, itAgents, projectCreateDepartments, activityCreateDepartments] =
     await Promise.all([
       prisma.ticketCategory.findMany({
         where: scopedWhere,
@@ -90,20 +99,11 @@ export default async function NewTicketPage() {
         select: { id: true, name: true, image: true },
         take: 6,
       }),
-      // Only load projects and activities for admin users (non-admins cannot link tickets)
-      userIsAdmin
-        ? prisma.project.findMany({
-            orderBy: { title: "asc" },
-            select: { id: true, title: true },
-          })
-        : Promise.resolve([]),
-      userIsAdmin
-        ? prisma.projectActivity.findMany({
-            where: { isCompleted: false },
-            orderBy: { title: "asc" },
-            select: { id: true, title: true, projectId: true },
-          })
-        : Promise.resolve([]),
+      // Only System Admin can ever link a ticket to a Project/Activity (see
+      // canLinkProjectActivity below) — no need to resolve these for anyone
+      // else.
+      userIsAdmin ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create") : Promise.resolve([]),
+      userIsAdmin ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.create") : Promise.resolve([]),
     ]);
 
   return (
@@ -136,8 +136,9 @@ export default async function NewTicketPage() {
         departments={accessibleDepartments}
         defaultDepartmentId={activeWorkspace.departmentId}
         itAgents={itAgents}
-        projects={projects}
-        activities={activities}
+        canLinkProjectActivity={userIsAdmin}
+        projectCreateDepartmentIds={projectCreateDepartments.map((d) => d.id)}
+        activityCreateDepartmentIds={activityCreateDepartments.map((d) => d.id)}
       />
     </div>
   );

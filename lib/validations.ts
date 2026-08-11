@@ -193,6 +193,20 @@ export const createActivitySchema = z.object({
 
 export const updateActivitySchema = createActivitySchema.partial();
 
+// ─── Notes Schemas ─────────────────────────────────────────────────────────────
+// Shared by ProjectNote and ActivityNote — deliberately just a plain-text
+// body. No isInternal/direction/visibility/email fields exist here or ever
+// should: a Project/Activity note has exactly one concept (see
+// components/notes/ and app/api/{projects,activities}/[id]/notes/route.ts).
+// authorId is never accepted from the client — it always comes from the
+// authenticated session in the route handler.
+
+export const createNoteSchema = z.object({
+  body: z.string().trim().min(1, "Note cannot be empty").max(10000, "Note must not exceed 10,000 characters"),
+});
+
+export type CreateNoteInput = z.infer<typeof createNoteSchema>;
+
 export const createDependencySchema = z.object({
   predecessorId: z.string().min(1),
   successorId: z.string().min(1),

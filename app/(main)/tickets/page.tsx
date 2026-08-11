@@ -20,6 +20,7 @@ import {
   splitFilterParam,
   reconcileTicketFilterParam,
 } from "@/lib/services/ticket-filter-options-service";
+import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 import { Role } from "@prisma/client";
 
 /**
@@ -62,8 +63,26 @@ function buildClosedRedirectUrl(params: SearchParams): string {
   return qs ? `/tickets/closed?${qs}` : "/tickets/closed";
 }
 
+/**
+ * Canonical-page redirect target when the requested `?page=` is out of
+ * range (e.g. a bookmarked page past the end, or the last row on the last
+ * page was just deleted/reassigned out of scope) — preserves every other
+ * param (including pageSize) exactly, same pattern as
+ * app/(main)/projects/page.tsx's own buildCanonicalUrl.
+ */
+function buildCanonicalUrl(params: SearchParams, page: number): string {
+  const canonical = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "page") continue;
+    if (typeof value === "string" && value) canonical.set(key, value);
+  }
+  canonical.set("page", String(page));
+  return `/tickets?${canonical.toString()}`;
+}
+
 interface SearchParams {
   page?: string;
+  pageSize?: string;
   search?: string;
   /**
    * Legacy/deep-link-only status GROUP — no longer user-selectable in the UI
@@ -129,18 +148,23 @@ export default async function AllTicketsPage({
   }
 
   const params = await searchParams;
-  const page = Math.max(1, parseInt(params.page ?? "1"));
-  const limit = 20;
-  const skip = (page - 1) * limit;
+  const requestedPage = parsePageParam(params.page);
+  const pageSize = parsePageSizeParam(params.pageSize);
+  const skip = (requestedPage - 1) * pageSize;
 
   const sortBy = params.sortBy ?? "createdAt";
   const sortDir = (params.sortDir ?? "desc") as "asc" | "desc";
-  const orderBy: any =
+  const primarySort =
     sortBy === "priority"
       ? { priority: { level: sortDir } }
       : sortBy === "status"
       ? { status: { order: sortDir } }
       : { [sortBy]: sortDir };
+  // `id` as a secondary sort key guarantees fully deterministic pagination
+  // even when two tickets share the exact same primary sort value (e.g.
+  // identical createdAt from bulk-seeded/imported data) — same pattern as
+  // app/(main)/projects/page.tsx and app/(main)/activities/page.tsx.
+  const orderBy: any = [primarySort, { id: "asc" }];
 
   // Active workspace is the default scope now (Phase 2B) — an explicit
   // ?departmentId= still wins as an "explicit scoped view," but omitting it
@@ -283,7 +307,7 @@ export default async function AllTicketsPage({
     prisma.ticket.findMany({
       where,
       skip,
-      take: limit,
+      take: pageSize,
       orderBy,
       include: {
         requester: { select: { id: true, name: true, email: true, image: true } },
@@ -303,6 +327,16 @@ export default async function AllTicketsPage({
     getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
     prisma.user.findMany({ where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
   ]);
+
+  const pagination = computePagination(total, requestedPage, pageSize);
+  // The requested page doesn't exist for this result set (a bookmarked/typed
+  // page past the end, or the last row on the last page was just
+  // deleted/reassigned out of scope) — canonicalize to the real last valid
+  // page rather than rendering the empty skip, same pattern as
+  // app/(main)/projects/page.tsx / app/(main)/admin/users/page.tsx.
+  if (isOutOfRange(requestedPage, pagination)) {
+    redirect(buildCanonicalUrl(params, pagination.page));
+  }
 
   return (
     <div className="space-y-6">
@@ -329,9 +363,7 @@ export default async function AllTicketsPage({
 
       <TicketTable
         tickets={tickets as any}
-        total={total}
-        page={page}
-        totalPages={Math.ceil(total / limit)}
+        pagination={pagination}
         showRequester
       />
     </div>

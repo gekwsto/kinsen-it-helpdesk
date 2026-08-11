@@ -13,15 +13,28 @@ import { PendingTicketFilters } from "@/components/tickets/pending-ticket-filter
 import { redirect } from "next/navigation";
 import { Inbox } from "lucide-react";
 import { PendingTicketStatus } from "@prisma/client";
+import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 
 interface SearchParams {
   page?: string;
+  pageSize?: string;
   departmentId?: string;
   fromEmail?: string;
   subject?: string;
   status?: string;
   receivedAfter?: string;
   receivedBefore?: string;
+}
+
+/** Preserves every param except `page` — same pattern as app/(main)/projects/page.tsx's own buildCanonicalUrl. */
+function buildCanonicalUrl(params: SearchParams, page: number): string {
+  const canonical = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (key === "page") continue;
+    if (typeof value === "string" && value) canonical.set(key, value);
+  }
+  canonical.set("page", String(page));
+  return `/tickets/pending?${canonical.toString()}`;
 }
 
 export default async function PendingTicketsPage({
@@ -36,9 +49,9 @@ export default async function PendingTicketsPage({
   if (!navFlags.canViewPendingTickets) redirect("/dashboard");
 
   const params = await searchParams;
-  const page = Math.max(1, parseInt(params.page ?? "1"));
-  const limit = 20;
-  const skip = (page - 1) * limit;
+  const requestedPage = parsePageParam(params.page);
+  const pageSize = parsePageSizeParam(params.pageSize);
+  const skip = (requestedPage - 1) * pageSize;
 
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
   const effectiveDepartmentId =
@@ -69,8 +82,11 @@ export default async function PendingTicketsPage({
     prisma.pendingTicket.findMany({
       where,
       skip,
-      take: limit,
-      orderBy: { receivedAt: "desc" },
+      take: pageSize,
+      // `id` as a secondary sort key guarantees fully deterministic
+      // pagination even when two pending tickets share the exact same
+      // receivedAt — same pattern as the Ticket list pages.
+      orderBy: [{ receivedAt: "desc" }, { id: "asc" }],
       include: {
         department: { select: { id: true, name: true } },
         requester: { select: { id: true, name: true, email: true } },
@@ -83,6 +99,11 @@ export default async function PendingTicketsPage({
     getAccessibleDepartmentSummaries(session.user.id, session.user.role, "ticket.pending.reject"),
     getAccessibleDepartmentSummaries(session.user.id, session.user.role, "ticket.pending.view"),
   ]);
+
+  const pagination = computePagination(total, requestedPage, pageSize);
+  if (isOutOfRange(requestedPage, pagination)) {
+    redirect(buildCanonicalUrl(params, pagination.page));
+  }
 
   // UI-only hint for whether to render the Accept/Reject buttons at all —
   // the API routes are the real, per-pending-ticket-department gate
@@ -112,9 +133,7 @@ export default async function PendingTicketsPage({
 
       <PendingTicketTable
         pendingTickets={pendingTickets as any}
-        total={total}
-        page={page}
-        totalPages={Math.ceil(total / limit)}
+        pagination={pagination}
         canAccept={canAccept}
         canReject={canReject}
         showDepartmentPicker={!effectiveDepartmentId}

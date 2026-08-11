@@ -23,7 +23,19 @@ import {
 import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials } from "@/lib/utils";
-import { UserCheck, GitBranch, Tag, Layers, Loader2, FolderKanban } from "lucide-react";
+import { UserCheck, GitBranch, Tag, Layers, Loader2, FolderKanban, Plus } from "lucide-react";
+import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
+import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
+
+interface LinkableProject {
+  id: string;
+  title: string;
+}
+interface LinkableActivity {
+  id: string;
+  title: string;
+  projectId: string | null;
+}
 
 interface TicketActionsProps {
   ticket: {
@@ -48,8 +60,10 @@ interface TicketActionsProps {
   canAssign: boolean;
   /** Same hard rule as Create Ticket and the generic PATCH route — only System Admin may link a ticket to a Project/Activity. */
   canLinkProjectActivity: boolean;
-  projects: Array<{ id: string; title: string }>;
-  activities: Array<{ id: string; title: string; projectId: string | null }>;
+  /** The ticket's effective department (legacy-fallback-resolved) — Project/Activity options are fetched scoped to exactly this department, and this is the department a "+ New" inline creation targets. */
+  effectiveDepartmentId: string | null;
+  canCreateProjectInDept: boolean;
+  canCreateActivityInDept: boolean;
 }
 
 export function TicketActions({
@@ -61,8 +75,9 @@ export function TicketActions({
   canChangeStatus,
   canAssign,
   canLinkProjectActivity,
-  projects,
-  activities,
+  effectiveDepartmentId,
+  canCreateProjectInDept,
+  canCreateActivityInDept,
 }: TicketActionsProps) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
@@ -72,6 +87,44 @@ export function TicketActions({
   const [priorityOpen, setPriorityOpen] = useState(false);
   const [categoryOpen, setCategoryOpen] = useState(false);
   const [linkOpen, setLinkOpen] = useState(false);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [activityDialogOpen, setActivityDialogOpen] = useState(false);
+
+  const [projects, setProjects] = useState<LinkableProject[]>([]);
+  const [activities, setActivities] = useState<LinkableActivity[]>([]);
+
+  // Fetched once, scoped to the ticket's own (fixed — never changes within
+  // this dialog) department, from the same GET /api/projects / GET
+  // /api/activities the standalone list pages use — never an unbounded
+  // "every project/activity in the system" query (the previous behavior,
+  // loaded server-side with no department filter at all).
+  //
+  // Merged into (never overwrites) local state — this fetch can still be in
+  // flight when the user inline-creates a Project/Activity via the "+ New"
+  // buttons (a separate, faster local state update); a slow response
+  // resolving afterward must never wipe out that freshly-added, already-
+  // selected entry.
+  useEffect(() => {
+    if (!canLinkProjectActivity || !effectiveDepartmentId) return;
+    let cancelled = false;
+    Promise.all([
+      fetch(`/api/projects?departmentId=${effectiveDepartmentId}&limit=100`).then((r) => (r.ok ? r.json() : { projects: [] })),
+      fetch(`/api/activities?departmentId=${effectiveDepartmentId}`).then((r) => (r.ok ? r.json() : [])),
+    ])
+      .then(([projectsRes, activitiesRes]) => {
+        if (cancelled) return;
+        const fetchedProjects: LinkableProject[] = Array.isArray(projectsRes?.projects) ? projectsRes.projects.map((p: any) => ({ id: p.id, title: p.title })) : [];
+        const fetchedActivities: LinkableActivity[] = Array.isArray(activitiesRes)
+          ? activitiesRes.filter((a: any) => !a.isCompleted).map((a: any) => ({ id: a.id, title: a.title, projectId: a.projectId ?? null }))
+          : [];
+        setProjects((prev) => [...fetchedProjects, ...prev.filter((p) => !fetchedProjects.some((fp) => fp.id === p.id))]);
+        setActivities((prev) => [...fetchedActivities, ...prev.filter((a) => !fetchedActivities.some((fa) => fa.id === a.id))]);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [canLinkProjectActivity, effectiveDepartmentId]);
 
   const [selectedStatus, setSelectedStatus] = useState(ticket.statusId);
   const [selectedAgent, setSelectedAgent] = useState(ticket.assignedAgentId ?? "");
@@ -97,12 +150,21 @@ export function TicketActions({
     if (!categoryOpen) setSelectedCategory(ticket.categoryId ?? "");
   }, [ticket.categoryId, categoryOpen]);
 
+  // Resets the pending selection back to the ticket's real, saved values
+  // whenever the Link dialog is genuinely closed WITHOUT saving (so
+  // reopening it later starts fresh, not from a stale abandoned edit) —
+  // but NOT when `linkOpen` goes false as part of the create-dialog swap
+  // (openProjectCreate/openActivityCreate below also set it false, to show
+  // exactly one Radix Dialog at a time). That's an in-progress pause, not a
+  // cancel — resetting here would wipe the selection the user is actively
+  // building (e.g. a project they just picked, right before creating an
+  // Activity under it) out from under them.
   useEffect(() => {
-    if (!linkOpen) {
+    if (!linkOpen && !projectDialogOpen && !activityDialogOpen) {
       setSelectedProject(ticket.projectId ?? "");
       setSelectedActivity(ticket.activityId ?? "");
     }
-  }, [ticket.projectId, ticket.activityId, linkOpen]);
+  }, [ticket.projectId, ticket.activityId, linkOpen, projectDialogOpen, activityDialogOpen]);
 
   const patch = async (endpoint: string, data: object, label: string) => {
     setLoading(label);
@@ -188,6 +250,87 @@ export function TicketActions({
     } finally {
       setLoading(null);
     }
+  };
+
+  const selectActivityWithConsistency = (activity: LinkableActivity) => {
+    setSelectedActivity(activity.id);
+    // Keep Project/Activity consistent regardless of how the activity was
+    // chosen (manual select or inline creation) — never allow saving
+    // projectId=A + activityId=<an activity under B>.
+    // validateTicketProjectActivityLink is still the real, final authority
+    // server-side (see handleLinkSave -> PATCH /api/tickets/[id]); this
+    // just keeps the dialog from ever assembling the invalid combination.
+    if (activity.projectId && activity.projectId !== selectedProject) {
+      setSelectedProject(activity.projectId);
+    }
+  };
+
+  // Dialog-swap pattern (never two Radix Dialogs open at once): opening a
+  // create dialog closes the Link dialog in the SAME state update (React
+  // batches these), and the create dialog's own onOpenChange — which fires
+  // on Cancel, Escape, an overlay click, AND after a successful onCreated —
+  // always restores the Link dialog. This avoids Dialog-inside-Dialog
+  // entirely: focus trap/restore, Escape, and body-scroll locking are each
+  // handled by exactly one Radix Dialog instance at a time.
+  const openProjectCreate = () => {
+    setLinkOpen(false);
+    setProjectDialogOpen(true);
+  };
+  const openActivityCreate = () => {
+    setLinkOpen(false);
+    setActivityDialogOpen(true);
+  };
+  const closeProjectCreate = (open: boolean) => {
+    setProjectDialogOpen(open);
+    if (!open) setLinkOpen(true);
+  };
+  const closeActivityCreate = (open: boolean) => {
+    setActivityDialogOpen(open);
+    if (!open) setLinkOpen(true);
+  };
+
+  // Selecting a JUST-inline-created Project/Activity can't happen in the
+  // SAME commit as adding it to the `projects`/`activities` list: Radix
+  // Select's hidden native-<select> autofill sync (SelectBubbleInput) can
+  // fire a spurious empty-value change event when the value changes to an
+  // id whose <SelectItem>/<option> wasn't registered in the DOM yet at that
+  // exact moment — this app's own onValueChange would otherwise read that
+  // as "the user cleared the selection". Queuing the selection as "pending"
+  // and applying it only once the corresponding effect below observes the
+  // item is REALLY present guarantees the <SelectItem> exists before the
+  // value ever points at it — see components/tickets/ticket-form.tsx's
+  // identical fix/comment for the full explanation.
+  const [pendingProjectSelection, setPendingProjectSelection] = useState<string | null>(null);
+  const [pendingActivitySelection, setPendingActivitySelection] = useState<LinkableActivity | null>(null);
+
+  useEffect(() => {
+    if (pendingProjectSelection && projects.some((p) => p.id === pendingProjectSelection)) {
+      setSelectedProject(pendingProjectSelection);
+      setSelectedActivity("");
+      setPendingProjectSelection(null);
+    }
+  }, [projects, pendingProjectSelection]);
+
+  useEffect(() => {
+    if (pendingActivitySelection && activities.some((a) => a.id === pendingActivitySelection.id)) {
+      selectActivityWithConsistency(pendingActivitySelection);
+      setPendingActivitySelection(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activities, pendingActivitySelection]);
+
+  const handleProjectCreated = (project: LinkableProject) => {
+    setProjects((prev) => (prev.some((p) => p.id === project.id) ? prev : [...prev, project]));
+    setPendingProjectSelection(project.id);
+  };
+
+  const handleActivityCreated = (activity: { id: string; title: string; projectId: string | null; project: { id: string; title: string } | null }) => {
+    const linkable: LinkableActivity = { id: activity.id, title: activity.title, projectId: activity.projectId };
+    setActivities((prev) => (prev.some((a) => a.id === linkable.id) ? prev : [...prev, linkable]));
+    if (activity.project) {
+      setProjects((prev) => (prev.some((p) => p.id === activity.project!.id) ? prev : [...prev, activity.project!]));
+    }
+    setPendingActivitySelection(linkable);
   };
 
   return (
@@ -403,38 +546,76 @@ export function TicketActions({
               </DialogHeader>
               <div className="space-y-3 py-2">
                 <Label>Project</Label>
-                <Select
-                  value={selectedProject || "_none"}
-                  onValueChange={(v) => {
-                    setSelectedProject(v === "_none" ? "" : v);
-                    setSelectedActivity("");
-                  }}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="No project" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="_none">No project</SelectItem>
-                    {projects.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex gap-1.5">
+                  <Select
+                    value={selectedProject || "_none"}
+                    onValueChange={(v) => {
+                      setSelectedProject(v === "_none" ? "" : v);
+                      setSelectedActivity("");
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="No project" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">No project</SelectItem>
+                      {projects.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 gap-1"
+                    disabled={!canCreateProjectInDept}
+                    title={!canCreateProjectInDept ? "You don't have permission to create a project in this department" : undefined}
+                    onClick={openProjectCreate}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    New
+                  </Button>
+                </div>
 
                 <Label>Activity</Label>
-                <Select value={selectedActivity || "_none"} onValueChange={(v) => setSelectedActivity(v === "_none" ? "" : v)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="No activity" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="_none">No activity</SelectItem>
-                    {activities
-                      .filter((a) => !selectedProject || a.projectId === selectedProject)
-                      .map((a) => (
-                        <SelectItem key={a.id} value={a.id}>{a.title}</SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex gap-1.5">
+                  <Select
+                    value={selectedActivity || "_none"}
+                    onValueChange={(v) => {
+                      if (v === "_none") {
+                        setSelectedActivity("");
+                        return;
+                      }
+                      const activity = activities.find((a) => a.id === v);
+                      if (activity) selectActivityWithConsistency(activity);
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="No activity" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="_none">No activity</SelectItem>
+                      {activities
+                        .filter((a) => !selectedProject || a.projectId === selectedProject)
+                        .map((a) => (
+                          <SelectItem key={a.id} value={a.id}>{a.title}</SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 gap-1"
+                    disabled={!canCreateActivityInDept}
+                    title={!canCreateActivityInDept ? "You don't have permission to create an activity in this department" : undefined}
+                    onClick={openActivityCreate}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    New
+                  </Button>
+                </div>
               </div>
               <DialogFooter>
                 <Button onClick={handleLinkSave} disabled={loading === "Link"}>
@@ -448,6 +629,24 @@ export function TicketActions({
           </Dialog>
         )}
       </CardContent>
+
+      {canLinkProjectActivity && effectiveDepartmentId && (
+        <>
+          <ProjectCreateDialog
+            open={projectDialogOpen}
+            onOpenChange={closeProjectCreate}
+            departmentId={effectiveDepartmentId}
+            onCreated={handleProjectCreated}
+          />
+          <ActivityCreateDialog
+            open={activityDialogOpen}
+            onOpenChange={closeActivityCreate}
+            departmentId={effectiveDepartmentId}
+            preselectedProjectId={selectedProject || null}
+            onCreated={handleActivityCreated}
+          />
+        </>
+      )}
     </Card>
   );
 }

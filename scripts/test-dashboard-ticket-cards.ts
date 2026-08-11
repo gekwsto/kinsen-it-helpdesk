@@ -166,7 +166,10 @@ async function main() {
       try {
         const element = await AllTicketsPage({ searchParams: Promise.resolve(params) });
         const [tableEl] = findElementsByType(element, TicketTable);
-        return { total: tableEl?.props.total as number, ids: (tableEl?.props.tickets as any[])?.map((t) => t.id) ?? [] };
+        // TicketTable now receives a single `pagination: PaginationMeta`
+        // prop (lib/pagination.ts) instead of a separate `total` — see
+        // components/tickets/ticket-table.tsx.
+        return { total: tableEl?.props.pagination?.totalCount as number, ids: (tableEl?.props.tickets as any[])?.map((t) => t.id) ?? [] };
       } catch (err: any) {
         if (typeof err?.digest === "string" && err.digest.startsWith("NEXT_REDIRECT")) {
           return { redirectTo: err.digest.split(";")[2] ?? "" };

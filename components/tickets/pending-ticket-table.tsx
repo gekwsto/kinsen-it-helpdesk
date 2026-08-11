@@ -27,8 +27,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatDateTime, stripHtmlToText } from "@/lib/utils";
-import { CheckCircle2, XCircle, Loader2, Inbox } from "lucide-react";
+import { PaginationControls } from "@/components/ui/pagination";
+import type { PaginationMeta } from "@/lib/pagination";
+import { formatDateTime, stripHtmlToText, htmlToReadableText } from "@/lib/utils";
+import { CheckCircle2, XCircle, Loader2, Inbox, Eye } from "lucide-react";
 
 interface PendingTicket {
   id: string;
@@ -44,9 +46,8 @@ interface PendingTicket {
 
 interface PendingTicketTableProps {
   pendingTickets: PendingTicket[];
-  total: number;
-  page: number;
-  totalPages: number;
+  /** Single source of truth for page/pageSize/total — see lib/pagination.ts. */
+  pagination: PaginationMeta;
   canAccept: boolean;
   canReject: boolean;
   /** True when no single department is in scope (Admin/Director "All Workspaces") — an unmatched pending ticket needs an explicit department chosen at accept time. */
@@ -62,9 +63,7 @@ const STATUS_BADGE: Record<string, { label: string; className: string }> = {
 
 export function PendingTicketTable({
   pendingTickets,
-  total,
-  page,
-  totalPages,
+  pagination,
   canAccept,
   canReject,
   showDepartmentPicker,
@@ -76,14 +75,21 @@ export function PendingTicketTable({
 
   const [acceptTarget, setAcceptTarget] = useState<PendingTicket | null>(null);
   const [rejectTarget, setRejectTarget] = useState<PendingTicket | null>(null);
+  const [previewTarget, setPreviewTarget] = useState<PendingTicket | null>(null);
   const [acceptDepartmentId, setAcceptDepartmentId] = useState<string>("");
   const [processing, setProcessing] = useState(false);
 
-  const updateParam = useCallback(
-    (key: string, value: string) => {
+  // Same convention as components/tickets/ticket-table.tsx / components/
+  // projects/project-pagination-bar.tsx: a page change preserves every
+  // other URL param, a page-size change resets back to page 1.
+  const updateParams = useCallback(
+    (updates: Record<string, string | null>, opts: { resetPage?: boolean } = {}) => {
       const params = new URLSearchParams(searchParams.toString());
-      if (value) params.set(key, value);
-      else params.delete(key);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === null) params.delete(key);
+        else params.set(key, value);
+      }
+      if (opts.resetPage) params.delete("page");
       router.push(`${pathname}?${params.toString()}`);
     },
     [pathname, router, searchParams]
@@ -170,7 +176,14 @@ export function PendingTicketTable({
                 return (
                   <TableRow key={pt.id}>
                     <TableCell className="max-w-[280px]">
-                      <p className="text-sm font-medium truncate">{pt.subject}</p>
+                      <button
+                        type="button"
+                        onClick={() => setPreviewTarget(pt)}
+                        className="text-sm font-medium truncate hover:text-primary hover:underline text-left block w-full"
+                        title="Preview full email"
+                      >
+                        {pt.subject}
+                      </button>
                       <p className="text-xs text-muted-foreground truncate">{stripHtmlToText(pt.body).slice(0, 120)}</p>
                     </TableCell>
                     <TableCell>
@@ -193,22 +206,23 @@ export function PendingTicketTable({
                       </Badge>
                     </TableCell>
                     <TableCell className="text-right">
-                      {pt.status === "PENDING" && (
-                        <div className="flex justify-end gap-1.5">
-                          {canAccept && (
-                            <Button size="sm" variant="outline" onClick={() => openAccept(pt)}>
-                              <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600" />
-                              Accept
-                            </Button>
-                          )}
-                          {canReject && (
-                            <Button size="sm" variant="outline" onClick={() => setRejectTarget(pt)}>
-                              <XCircle className="h-3.5 w-3.5 mr-1.5 text-destructive" />
-                              Reject
-                            </Button>
-                          )}
-                        </div>
-                      )}
+                      <div className="flex justify-end gap-1.5">
+                        <Button size="sm" variant="ghost" onClick={() => setPreviewTarget(pt)} title="Preview full email">
+                          <Eye className="h-3.5 w-3.5" />
+                        </Button>
+                        {pt.status === "PENDING" && canAccept && (
+                          <Button size="sm" variant="outline" onClick={() => openAccept(pt)}>
+                            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600" />
+                            Accept
+                          </Button>
+                        )}
+                        {pt.status === "PENDING" && canReject && (
+                          <Button size="sm" variant="outline" onClick={() => setRejectTarget(pt)}>
+                            <XCircle className="h-3.5 w-3.5 mr-1.5 text-destructive" />
+                            Reject
+                          </Button>
+                        )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
@@ -218,21 +232,12 @@ export function PendingTicketTable({
         </Table>
       </div>
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            Page {page} of {totalPages} · {total} total
-          </p>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => updateParam("page", String(page - 1))}>
-              Previous
-            </Button>
-            <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => updateParam("page", String(page + 1))}>
-              Next
-            </Button>
-          </div>
-        </div>
-      )}
+      <PaginationControls
+        pagination={pagination}
+        onPageChange={(page) => updateParams({ page: page === 1 ? null : String(page) })}
+        onPageSizeChange={(pageSize) => updateParams({ pageSize: pageSize === 20 ? null : String(pageSize) }, { resetPage: true })}
+        itemLabel="pending tickets"
+      />
 
       {/* Accept confirm dialog */}
       <Dialog open={!!acceptTarget} onOpenChange={(o) => !o && setAcceptTarget(null)}>
@@ -289,6 +294,55 @@ export function PendingTicketTable({
               {processing && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Reject
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Preview dialog — read-only, works for PENDING/ACCEPTED/REJECTED
+          alike. The body is inbound external content (an email), so it is
+          NEVER rendered as HTML (no dangerouslySetInnerHTML) — htmlToReadableText
+          (lib/utils.ts) converts it to a plain-text string with paragraph/
+          line-break structure preserved, which React renders as an inert
+          text node inside a whitespace-pre-wrap container. Any literal
+          markup/script in the original email shows up as visible, inert
+          text if at all — it can never execute. */}
+      <Dialog open={!!previewTarget} onOpenChange={(o) => !o && setPreviewTarget(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="pr-6 break-words">{previewTarget?.subject}</DialogTitle>
+          </DialogHeader>
+          {previewTarget && (
+            <div className="flex-1 min-h-0 flex flex-col gap-3">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm border rounded-md p-3 bg-muted/30 flex-shrink-0">
+                <div>
+                  <span className="text-muted-foreground">From: </span>
+                  <span className="font-medium">{previewTarget.fromName || previewTarget.fromEmail}</span>
+                  {previewTarget.fromName && <span className="text-muted-foreground"> &lt;{previewTarget.fromEmail}&gt;</span>}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Status: </span>
+                  <Badge className={STATUS_BADGE[previewTarget.status].className} variant="secondary">
+                    {STATUS_BADGE[previewTarget.status].label}
+                  </Badge>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Department: </span>
+                  <span className="font-medium">{previewTarget.department?.name ?? "Unmatched"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Received: </span>
+                  <span className="font-medium">{formatDateTime(previewTarget.receivedAt)}</span>
+                </div>
+              </div>
+              <div className="flex-1 min-h-0 overflow-y-auto rounded-md border p-4">
+                <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
+                  {htmlToReadableText(previewTarget.body) || <span className="text-muted-foreground italic">(empty message)</span>}
+                </p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreviewTarget(null)}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

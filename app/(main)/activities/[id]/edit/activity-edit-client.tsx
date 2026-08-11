@@ -16,13 +16,45 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ChevronRight, Loader2 } from "lucide-react";
+import { ChevronRight, Loader2, Plus } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
+import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 
 interface Project { id: string; title: string }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface StatusOption { status: ActivityStatus; label: string; color: string }
+
+/**
+ * Shape of GET /api/activities/[id]'s JSON response, as actually consumed
+ * by this client. Declared explicitly (rather than treating the fetch
+ * result as `any`) so that if a future change to that route ever renames or
+ * drops `canCreateProjectInDept`/`canEditActivity`, `tsc` fails loudly instead of
+ * the field silently defaulting to `false`/`undefined` at runtime — closing
+ * exactly the "response mapping silently drops a field" failure class.
+ */
+interface ActivityDetailResponse {
+  error?: string;
+  title?: string;
+  description?: string | null;
+  projectId?: string | null;
+  status?: ActivityStatus;
+  priority?: ActivityPriority;
+  assignedUsers?: { id: string }[];
+  startDate?: string | null;
+  dueDate?: string | null;
+  progress?: number | null;
+  isMilestone?: boolean;
+  subDepartmentId?: string | null;
+  departmentId?: string | null;
+  /** The department actually used to resolve status/progress config — `departmentId` when set, otherwise the app's configured legacy department. See app/api/activities/[id]/route.ts and the final report for why this is required (not `departmentId` directly) to fetch this activity's status options. */
+  effectiveDepartmentId?: string | null;
+  statusLabel?: string;
+  statusColor?: string;
+  /** Whether the current user holds project.create in this activity's department — see app/api/activities/[id]/route.ts. A UI hint only; POST /api/projects independently re-checks it. */
+  canCreateProjectInDept?: boolean;
+  canEditActivity?: boolean;
+}
 
 interface Props {
   id: string;
@@ -49,10 +81,19 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [subDepartments, setSubDepartments] = useState<{ id: string; name: string }[]>([]);
   const [subDepartmentId, setSubDepartmentId] = useState("");
   const [statusOptions, setStatusOptions] = useState<StatusOption[]>([]);
+  const [activityDepartmentId, setActivityDepartmentId] = useState<string | null>(null);
+  const [canCreateProjectInDept, setCanCreateProjectInDept] = useState(false);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  // Same deferred/pending-selection pattern reused verbatim from the Ticket
+  // inline creation flow (components/tickets/ticket-form.tsx) and from
+  // ActivityNewForm above — a just-created Project can't be selected in the
+  // same commit as adding it to `projects`, see those files' own doc
+  // comments for the full Radix SelectBubbleInput explanation.
+  const [pendingProjectSelection, setPendingProjectSelection] = useState<string | null>(null);
 
   useEffect(() => {
     fetch(`/api/activities/${id}`)
-      .then((r) => (r.ok ? r.json() : null))
+      .then((r) => (r.ok ? (r.json() as Promise<ActivityDetailResponse>) : null))
       .then((activity) => {
         if (activity && !activity.error) {
           setTitle(activity.title ?? "");
@@ -63,9 +104,11 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           setSelectedUserIds((activity.assignedUsers ?? []).map((usr: any) => usr.id));
           setStartDate(activity.startDate ? activity.startDate.substring(0, 10) : "");
           setDueDate(activity.dueDate ? activity.dueDate.substring(0, 10) : "");
-          setProgress(activity.progress);
+          setProgress(activity.progress ?? null);
           setIsMilestone(activity.isMilestone ?? false);
           setSubDepartmentId(activity.subDepartmentId ?? "");
+          setActivityDepartmentId(activity.departmentId ?? null);
+          setCanCreateProjectInDept(activity.canCreateProjectInDept ?? false);
 
           // Eligible assignees/sub-departments/projects all depend on the
           // activity's own department — fetched once we know it, not in
@@ -84,22 +127,6 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
             fetch(`/api/projects?departmentId=${activity.departmentId}&limit=100`)
               .then((r) => (r.ok ? r.json() : null))
               .then((p) => setProjects(Array.isArray(p?.projects) ? p.projects : []));
-            // Only ENABLED statuses are offered for selection — but if this
-            // activity's CURRENT status has since been disabled, it must
-            // still appear (using its own historical label/color, already
-            // returned by GET /api/activities/[id] above) so the dropdown
-            // doesn't silently drop the activity's real, current value.
-            fetch(`/api/departments/${activity.departmentId}/activity-statuses`)
-              .then((r) => (r.ok ? r.json() : []))
-              .then((s) => {
-                const enabled: StatusOption[] = Array.isArray(s) ? s.map((row: any) => ({ status: row.status, label: row.label, color: row.color })) : [];
-                const hasCurrent = enabled.some((o) => o.status === activity.status);
-                setStatusOptions(
-                  hasCurrent || !activity.status
-                    ? enabled
-                    : [...enabled, { status: activity.status, label: activity.statusLabel ?? activity.status, color: activity.statusColor ?? "#94a3b8" }]
-                );
-              });
           } else {
             // Legacy deptless activity — no single department to scope by;
             // falls back to whatever the viewer can already see, same as
@@ -112,10 +139,55 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
               .then((r) => (r.ok ? r.json() : null))
               .then((p) => setProjects(Array.isArray(p?.projects) ? p.projects : []));
           }
+
+          // Status options are resolved off the EFFECTIVE department
+          // (`effectiveDepartmentId` — `departmentId` when set, otherwise
+          // the app's configured legacy department; see the GET route) —
+          // deliberately OUTSIDE the if/else above. Gating this fetch on
+          // the raw, possibly-null `departmentId` (as the assignees/
+          // sub-departments/projects fetches above intentionally still do)
+          // meant a legacy Activity (departmentId: null) never fetched its
+          // status options at all, leaving this Select permanently empty —
+          // the same root cause the Quick Status dropdown had; see the
+          // final report. Only ENABLED statuses are offered for selection —
+          // but if this activity's CURRENT status has since been disabled,
+          // it must still appear (using its own historical label/color,
+          // already returned by GET /api/activities/[id] above) so the
+          // dropdown doesn't silently drop the activity's real, current
+          // value.
+          if (activity.effectiveDepartmentId) {
+            fetch(`/api/departments/${activity.effectiveDepartmentId}/activity-statuses`)
+              .then((r) => (r.ok ? r.json() : []))
+              .then((s) => {
+                const enabled: StatusOption[] = Array.isArray(s) ? s.map((row: any) => ({ status: row.status, label: row.label, color: row.color })) : [];
+                const hasCurrent = enabled.some((o) => o.status === activity.status);
+                setStatusOptions(
+                  hasCurrent || !activity.status
+                    ? enabled
+                    : [...enabled, { status: activity.status, label: activity.statusLabel ?? activity.status, color: activity.statusColor ?? "#94a3b8" }]
+                );
+              });
+          }
         }
       })
       .finally(() => setLoading(false));
   }, [id]);
+
+  useEffect(() => {
+    if (pendingProjectSelection && projects.some((p) => p.id === pendingProjectSelection)) {
+      setProjectId(pendingProjectSelection);
+      setPendingProjectSelection(null);
+    }
+  }, [projects, pendingProjectSelection]);
+
+  const handleProjectCreated = (project: { id: string; title: string }) => {
+    // Insert + auto-select only — creation and linking are separate
+    // operations here. The Activity itself is NOT auto-saved; the user
+    // still presses "Save Changes" normally, and if that later fails the
+    // newly-created Project is left exactly as-is (never deleted).
+    setProjects((prev) => (prev.some((p) => p.id === project.id) ? prev : [...prev, { id: project.id, title: project.title }]));
+    setPendingProjectSelection(project.id);
+  };
 
   const toggleUser = (userId: string) => {
     setSelectedUserIds((prev) =>
@@ -245,17 +317,37 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
 
             <div className="space-y-2">
               <Label>Project</Label>
-              <Select value={projectId || ""} onValueChange={setProjectId}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Standalone" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="">Standalone</SelectItem>
-                  {projects.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <div className="flex gap-1.5">
+                <Select value={projectId || ""} onValueChange={setProjectId}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Standalone" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="">Standalone</SelectItem>
+                    {projects.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0 gap-1"
+                  disabled={!activityDepartmentId || !canCreateProjectInDept}
+                  title={
+                    !activityDepartmentId
+                      ? "Select a department first."
+                      : !canCreateProjectInDept
+                      ? "You don't have permission to create projects in this department."
+                      : undefined
+                  }
+                  onClick={() => setProjectDialogOpen(true)}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  New
+                </Button>
+              </div>
               <p className="text-xs text-muted-foreground">
                 Only projects in this activity&apos;s department are listed.
               </p>
@@ -383,6 +475,15 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           </form>
         </CardContent>
       </Card>
+
+      {activityDepartmentId && (
+        <ProjectCreateDialog
+          open={projectDialogOpen}
+          onOpenChange={setProjectDialogOpen}
+          departmentId={activityDepartmentId}
+          onCreated={handleProjectCreated}
+        />
+      )}
 
       {isAdmin && (
         <Card className="border-destructive/30">

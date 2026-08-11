@@ -3,27 +3,19 @@ import { prisma } from "@/lib/prisma";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
-import { ChevronRight, Calendar, Users, Target, Plus, Ticket, Pencil } from "lucide-react";
-import { ProjectStatus, GoalStatus, Role } from "@prisma/client";
+import { ChevronRight, Calendar, Users, Target, Ticket } from "lucide-react";
+import { GoalStatus, Role } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
-import { ProjectDeleteButton } from "@/components/projects/project-delete-button";
 import { ActivityCompleteCheckbox } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
-
-const STATUS_COLORS: Record<ProjectStatus, string> = {
-  PLANNING: "bg-blue-100 text-blue-700",
-  IN_PROGRESS: "bg-amber-100 text-amber-700",
-  ON_HOLD: "bg-orange-100 text-orange-700",
-  COMPLETED: "bg-green-100 text-green-700",
-  CANCELLED: "bg-gray-100 text-gray-700",
-};
+import { EntityNotes } from "@/components/notes/entity-notes";
+import { ProjectDetailHeader } from "@/components/projects/project-detail-header";
 
 export default async function ProjectDetailPage({
   params,
@@ -57,6 +49,18 @@ export default async function ProjectDetailPage({
   // page previously had no per-project check at all beyond that global gate.
   const canView = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.view");
   if (!canView) redirect("/dashboard");
+
+  // project.edit — computed server-side and passed down as a boolean, used
+  // by BOTH the Notes composer's visibility AND the quick-status dropdown's
+  // interactivity. In both cases this is only a UI convenience; POST
+  // /api/projects/[id]/notes and PATCH /api/projects/[id] independently
+  // re-check this same permission and are the actual authority.
+  const canEditProject = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.edit");
+  const notes = await prisma.projectNote.findMany({
+    where: { projectId: id },
+    include: { author: { select: { id: true, name: true, email: true, image: true } } },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
 
   const isAdmin = session.user.role === Role.ADMIN;
   const activityIds = project.activities.map((a) => a.id);
@@ -96,46 +100,15 @@ export default async function ProjectDetailPage({
       </div>
 
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
-            <h1 className="text-2xl font-bold">{project.title}</h1>
-            <span
-              className={`text-xs font-medium px-2.5 py-1 rounded-full ${STATUS_COLORS[project.status]}`}
-            >
-              {project.status.replace("_", " ")}
-            </span>
-            {project.isGoal && (
-              <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-purple-100 text-purple-700">
-                Goal
-              </span>
-            )}
-          </div>
-          {project.description && (
-            <p className="text-muted-foreground">{project.description}</p>
-          )}
-        </div>
-        <div className="flex gap-2">
-          <Button asChild variant="outline">
-            <Link href={`/projects/${project.id}/edit`}>
-              <Pencil className="h-4 w-4 mr-2" />
-              Edit
-            </Link>
-          </Button>
-          <Button asChild>
-            <Link href={`/activities?projectId=${project.id}`}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add Activity
-            </Link>
-          </Button>
-          {isAdmin && (
-            <ProjectDeleteButton
-              projectId={project.id}
-              projectTitle={project.title}
-            />
-          )}
-        </div>
-      </div>
+      <ProjectDetailHeader
+        projectId={project.id}
+        title={project.title}
+        description={project.description}
+        initialStatus={project.status}
+        isGoal={project.isGoal}
+        canEditProject={canEditProject}
+        isAdmin={isAdmin}
+      />
 
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Activities */}
@@ -215,6 +188,12 @@ export default async function ProjectDetailPage({
               )}
             </CardContent>
           </Card>
+
+          <EntityNotes
+            apiBasePath={`/api/projects/${project.id}`}
+            initialNotes={notes.map((n) => ({ ...n, createdAt: n.createdAt.toISOString() }))}
+            canAddNote={canEditProject}
+          />
         </div>
 
         {/* Related Tickets */}

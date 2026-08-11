@@ -9,6 +9,7 @@ import { updateActivitySchema } from "@/lib/validations";
 import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 import { tryGetActivityProgressFromStatus, getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { getActivityStatusDisplay } from "@/lib/services/activity-status-config";
+import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { Role } from "@prisma/client";
 
 export async function GET(
@@ -46,7 +47,37 @@ export async function GET(
     const progressConfigError = resolution.ok ? null : { reason: resolution.reason };
     const statusDisplay = await getActivityStatusDisplay(activity.departmentId, activity.status);
 
-    return NextResponse.json({ ...activity, progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color });
+    // Lets the Edit Activity client know whether to offer "+ New Project"
+    // without a second round-trip — same canActOnEntity gate POST
+    // /api/projects itself enforces (via resolveDepartmentForCreate), this
+    // is only ever a UI hint; the backend remains the authoritative check.
+    const canCreateProjectInDept = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "project.create");
+
+    // Lets the Activity detail client know whether to offer the Notes
+    // composer and the quick-status dropdown without a second round-trip —
+    // POST /api/activities/[id]/notes and PATCH /api/activities/[id]
+    // independently re-check activity.edit and are the actual authority;
+    // this is only ever a UI hint, shared by both controls since they need
+    // the exact same permission.
+    const canEditActivity = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.edit");
+
+    // The SAME fallback tryGetActivityProgressFromStatus/getActivityStatusDisplay
+    // already applied internally, exposed explicitly — a legacy Activity
+    // with departmentId: null still resolves its status/progress config
+    // through the configured legacy department (never a gap, never
+    // "no department"). Without this, the client has no way to know WHICH
+    // department's status list to fetch for such an Activity (its own raw
+    // `departmentId` is null) and silently never fetches one at all — the
+    // root cause of the empty Quick Status dropdown for these Activities.
+    // Standalone-vs-legacy are different concepts: `projectId: null` means
+    // no parent Project; `departmentId: null` means a pre-department-scoping
+    // row that still needs a real department to resolve status config
+    // against — this field lets every client-side consumer (Quick Status,
+    // Activity Edit) fetch the correct one without re-deriving the fallback
+    // themselves.
+    const effectiveDepartmentId = activity.departmentId ?? (await getDefaultLegacyDepartmentId());
+
+    return NextResponse.json({ ...activity, progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, canCreateProjectInDept, canEditActivity, effectiveDepartmentId });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

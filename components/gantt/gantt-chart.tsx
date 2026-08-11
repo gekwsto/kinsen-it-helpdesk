@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useRef, useEffect, Fragment } from "react";
+import { useState, useMemo, useRef, useEffect, useLayoutEffect, Fragment } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -288,6 +288,47 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     if (!el) return;
     el.scrollLeft = Math.max(0, todayPx - (el.clientWidth - LEFT_W) / 2);
   }
+
+  // ── Initial viewport position: open on today, once ─────────────────────────
+  // Requirement: the Gantt should never make the user press "Today" manually
+  // on open — the full (unfiltered) timeline already always includes today
+  // (see the viewStart/viewEnd useMemo above) and is rendered in full; only
+  // the initial horizontal SCROLL POSITION changes, nothing is hidden or
+  // re-queried. Runs exactly once per mount (hasAutoScrolledRef), reusing
+  // the exact same scrollToToday() the manual "Today" button calls — never a
+  // separate/duplicated centering formula.
+  //
+  // useLayoutEffect (not useEffect) so scrollLeft is set BEFORE the browser
+  // paints the first frame — the user never sees the left (unscrolled) edge
+  // flash before jumping to today, which useEffect's post-paint timing would
+  // cause. clientWidth is measured directly from the just-committed DOM, so
+  // this only runs once the scroll container has real, laid-out width — a
+  // requestAnimationFrame retry (not an arbitrary setTimeout) covers the
+  // rare case a still-hidden/animating ancestor reports 0 width on the very
+  // first layout pass.
+  const hasAutoScrolledRef = useRef(false);
+  useLayoutEffect(() => {
+    if (hasAutoScrolledRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+
+    if (el.clientWidth === 0) {
+      const raf = requestAnimationFrame(() => {
+        if (hasAutoScrolledRef.current || !scrollRef.current) return;
+        scrollToToday();
+        hasAutoScrolledRef.current = true;
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+
+    scrollToToday();
+    hasAutoScrolledRef.current = true;
+    // Deliberately mount-only: re-running this on every filter/drag/refresh
+    // re-render (which would happen if todayPx/scrollToToday were listed as
+    // deps) is exactly the "keeps forcing the user back to today" behavior
+    // this must NOT do — the ref guard above is the actual one-time gate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Header cells ──────────────────────────────────────────────────────────
   const { topCells, btmCells } = useMemo(() => {

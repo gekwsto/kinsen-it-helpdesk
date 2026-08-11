@@ -21,7 +21,11 @@ import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
 import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
+import { ActivityQuickStatus, type ActivityStatusUpdate } from "@/components/activities/activity-quick-status";
+import type { QuickStatusOption } from "@/components/status/quick-status-select";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { EntityNotes } from "@/components/notes/entity-notes";
+import type { Note } from "@/components/notes/types";
 
 const PRIORITY_COLORS: Record<ActivityPriority, string> = {
   LOW: "bg-green-50 text-green-700",
@@ -51,6 +55,18 @@ interface Activity {
   project?: { id: string; title: string } | null;
   assignedUsers: { id: string; name?: string | null; email: string; image?: string | null }[];
   department?: { id: string; name: string } | null;
+  /** Whether the current user holds activity.edit here — governs the Notes composer AND the quick-status dropdown. POST /api/activities/[id]/notes and PATCH /api/activities/[id] independently re-check this; this is only a UI hint. */
+  canEditActivity?: boolean;
+  /**
+   * The department actually used to resolve this Activity's status/progress
+   * config — `departmentId` when set, otherwise the app's configured legacy
+   * department (see app/api/activities/[id]/route.ts). A legacy Activity
+   * (departmentId: null) still needs a REAL department id here to fetch its
+   * status options from; using the raw (possibly null) `departmentId` for
+   * that fetch was the root cause of a permanently-empty Quick Status
+   * dropdown for such Activities.
+   */
+  effectiveDepartmentId?: string | null;
 }
 
 interface RelatedTicket {
@@ -96,6 +112,17 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
   const router = useRouter();
   const [activity, setActivity] = useState<Activity | null>(null);
   const [relatedTickets, setRelatedTickets] = useState<RelatedTicket[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [statusOptions, setStatusOptions] = useState<QuickStatusOption[]>([]);
+  /**
+   * Distinct from `statusOptions.length === 0` — an EMPTY array can mean
+   * "still loading", "the request failed", or "the department genuinely
+   * has zero configured statuses". QuickStatusSelect renders a different,
+   * explicit message for each rather than a silently blank menu (see the
+   * regression this caused: a real fetch failure and a real empty list
+   * were previously visually indistinguishable from each other).
+   */
+  const [statusOptionsState, setStatusOptionsState] = useState<"loading" | "ready" | "error">("loading");
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState(false);
 
@@ -108,28 +135,103 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
   const [removingDepId, setRemovingDepId] = useState<string | null>(null);
 
   useEffect(() => {
+    // Reset at the START of every load (not just the initial mount) — this
+    // component has no `key={id}`, so navigating between two DIFFERENT
+    // activities via an in-app <Link> (client-side routing) reuses the
+    // SAME component instance and would otherwise leave the PREVIOUS
+    // activity's status/statusOptions/notes visible/stale for the entire
+    // window the new fetches are in flight, instead of the loading state.
+    setLoading(true);
+    setActivity(null);
+    setStatusOptions([]);
+    setStatusOptionsState("loading");
     const fetches: Promise<any>[] = [
       fetch(`/api/activities/${id}`).then((r) => (r.ok ? r.json() : null)),
       fetch(`/api/tickets?activityId=${id}&limit=10`)
         .then((r) => (r.ok ? r.json() : { tickets: [] }))
         .then((d) => d.tickets ?? []),
       fetch(`/api/dependencies?activityId=${id}`).then((r) => (r.ok ? r.json() : [])),
+      fetch(`/api/activities/${id}/notes`).then((r) => (r.ok ? r.json() : [])),
     ];
     if (isAdmin) {
       fetches.push(fetch("/api/activities?limit=200").then((r) => (r.ok ? r.json() : [])));
     }
     Promise.all(fetches)
-      .then(([act, tickets, deps, acts]) => {
+      .then(([act, tickets, deps, fetchedNotes, acts]) => {
         setActivity(act);
         setRelatedTickets(tickets);
         setDependencies(Array.isArray(deps) ? deps : []);
+        setNotes(Array.isArray(fetchedNotes) ? fetchedNotes : []);
         if (acts) {
           const list = (Array.isArray(acts) ? acts : []) as ActivityOption[];
           setAllActivities(list.filter((a: ActivityOption) => a.id !== id));
         }
+
+        // Status options depend on the activity's EFFECTIVE department
+        // (`effectiveDepartmentId` — `departmentId` when set, otherwise the
+        // app's configured legacy department; see the GET route). Using the
+        // raw, possibly-null `departmentId` here was the root cause of a
+        // permanently-empty Quick Status dropdown for legacy Activities
+        // (departmentId: null) — this `if` was simply never entered for
+        // them, so `statusOptions` stayed `[]` forever, and the dropdown
+        // opened with nothing to render (the trigger still showed the
+        // correct current status independently, since that comes from
+        // `activity.statusLabel` directly — the two are unrelated, which is
+        // exactly what made this gap hard to notice).
+        //
+        // Same department-scoped, ENABLED-only source (GET
+        // /api/departments/[id]/activity-statuses, backed by
+        // getEnabledActivityStatusesForDepartment) the Edit Activity form
+        // already uses for this exact dropdown. The activity's CURRENT
+        // status is always included even if it's since been disabled for
+        // NEW selections — same "never make the entity's real value
+        // un-displayable" merge rule activity-edit-client.tsx already
+        // applies, not a new heuristic.
+        if (act?.effectiveDepartmentId) {
+          fetch(`/api/departments/${act.effectiveDepartmentId}/activity-statuses`)
+            .then((r) => {
+              if (!r.ok) throw new Error(`activity-statuses fetch failed: ${r.status}`);
+              return r.json();
+            })
+            .then((rows) => {
+              const enabled: QuickStatusOption[] = Array.isArray(rows)
+                ? rows.map((row: any) => ({ id: row.status, label: row.label, color: row.color }))
+                : [];
+              const hasCurrent = enabled.some((o) => o.id === act.status);
+              setStatusOptions(
+                hasCurrent || !act.status
+                  ? enabled
+                  : [...enabled, { id: act.status, label: act.statusLabel ?? act.status, color: act.statusColor }]
+              );
+              setStatusOptionsState("ready");
+            })
+            .catch(() => setStatusOptionsState("error"));
+        } else {
+          // No department could be resolved at all (not even the legacy
+          // fallback is configured) — a real, reportable configuration gap,
+          // never silently treated as "zero statuses available".
+          setStatusOptionsState("error");
+        }
       })
       .finally(() => setLoading(false));
   }, [id, isAdmin]);
+
+  const handleStatusChanged = (updated: ActivityStatusUpdate) => {
+    setActivity((prev) =>
+      prev
+        ? {
+            ...prev,
+            status: updated.status as ActivityStatus,
+            statusLabel: updated.statusLabel,
+            statusColor: updated.statusColor,
+            progress: updated.progress,
+            progressConfigError: null,
+            isCompleted: updated.isCompleted,
+            completedAt: updated.completedAt,
+          }
+        : prev
+    );
+  };
 
   const addDependency = async () => {
     if (!newPredId) { toast.error("Select a predecessor activity"); return; }
@@ -244,15 +346,16 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
                 <Pencil className="h-3.5 w-3.5 mr-1.5" />
                 Edit
               </Button>
-              <Button
-                size="sm"
-                variant={activity.isCompleted ? "outline" : "default"}
-                onClick={toggleComplete}
-                disabled={toggling}
-              >
-                {toggling && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
-                {activity.isCompleted ? "Reopen" : "Mark Complete"}
-              </Button>
+              <ActivityQuickStatus
+                activityId={id}
+                currentStatus={activity.status}
+                currentStatusLabel={activity.statusLabel}
+                currentStatusColor={activity.statusColor}
+                statuses={statusOptions}
+                optionsState={statusOptionsState}
+                canEdit={activity.canEditActivity ?? false}
+                onChanged={handleStatusChanged}
+              />
               {isAdmin && (
                 <ActivityDeleteButton
                   activityId={id}
@@ -481,6 +584,12 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
           )}
         </CardContent>
       </Card>
+
+      <EntityNotes
+        apiBasePath={`/api/activities/${id}`}
+        initialNotes={notes}
+        canAddNote={activity.canEditActivity ?? false}
+      />
     </div>
   );
 }
