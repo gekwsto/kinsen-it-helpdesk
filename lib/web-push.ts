@@ -34,6 +34,26 @@ export function isWebPushConfigured(): boolean {
   return VAPID_CONFIGURED;
 }
 
+/**
+ * The VAPID PUBLIC key only — this value is, by design, meant to reach the
+ * browser (it's the `applicationServerKey` PushManager.subscribe() needs)
+ * and is never a secret on its own. Returns null unless the server is FULLY
+ * configured (all 3 VAPID env vars) — a client that received a public key
+ * but whose server can't actually send (missing private key/contact email)
+ * would be able to "successfully" subscribe yet never receive a single
+ * real push, which is worse than clearly reporting unconfigured.
+ *
+ * Read live from process.env (not the frozen VAPID_CONFIGURED value's
+ * inputs) so this always reflects the CURRENT runtime environment — see
+ * app/api/notifications/push/config/route.ts's doc comment for why this
+ * must be resolved at request time on the server, never build-time-inlined
+ * into the client bundle via NEXT_PUBLIC_*.
+ */
+export function getWebPushPublicKey(): string | null {
+  if (!VAPID_CONFIGURED) return null;
+  return process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY || null;
+}
+
 export interface PushPayload {
   title: string;
   body: string;

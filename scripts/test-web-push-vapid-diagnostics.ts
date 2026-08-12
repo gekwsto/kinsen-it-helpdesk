@@ -46,7 +46,7 @@ async function main() {
     warnCalls.push(args.map(String).join(" "));
   };
 
-  const { isWebPushConfigured, sendPushNotificationsToUser } = await import("@/lib/web-push");
+  const { isWebPushConfigured, getWebPushPublicKey, sendPushNotificationsToUser } = await import("@/lib/web-push");
 
   console.warn = originalWarn;
 
@@ -56,6 +56,9 @@ async function main() {
   const message = warnCalls[0] ?? "";
   check("   The diagnostic mentions Web Push is disabled", message.includes("Web Push is disabled"));
   check("   The diagnostic never contains an actual key/email-looking value (only booleans)", !/mailto:/.test(message) && !/BP3|bZTa/.test(message));
+
+  console.log("\n=== 2. GET /api/notifications/push/config's underlying getWebPushPublicKey() safely returns null when incomplete ===\n");
+  check("2. getWebPushPublicKey() returns null (never an empty string or the incomplete public key value) when the server VAPID setup is incomplete", getWebPushPublicKey() === null);
 
   let threw = false;
   let result: Awaited<ReturnType<typeof sendPushNotificationsToUser>> | null = null;
