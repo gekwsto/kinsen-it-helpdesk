@@ -6,7 +6,7 @@ import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink, valid
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
-import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
+import { notifyRequesterClosed, notifyTicketRequesterTerminalTransition } from "@/lib/ticket-notification-service";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import path from "path";
@@ -288,6 +288,13 @@ export async function PATCH(
           ticketId: id,
           statusName: newStatus.name,
           closingMessage: updatedTicket.cancelReason?.name,
+        })
+      );
+      after(() =>
+        notifyTicketRequesterTerminalTransition({
+          ticketId: id,
+          actorId: session.user.id,
+          statusName: newStatus.name,
         })
       );
     }

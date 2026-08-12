@@ -5,8 +5,15 @@ import {
   buildTicketClosedNotificationHtml,
   buildTicketCreatedNotificationHtml,
 } from "@/lib/email-ticket-parser";
-import { formatTicketNumber } from "@/lib/utils";
-import { EmailNotificationType, EmailNotificationStatus, Prisma } from "@prisma/client";
+import { formatTicketNumber, truncate } from "@/lib/utils";
+import { sendPushNotificationsToUser } from "@/lib/web-push";
+import {
+  EmailNotificationType,
+  EmailNotificationStatus,
+  PushNotificationType,
+  PushNotificationStatus,
+  Prisma,
+} from "@prisma/client";
 
 const SUPPORT_EMAIL = (
   process.env.GRAPH_USER_EMAIL ||
@@ -341,6 +348,191 @@ async function notifyRequesterClosedImpl(params: {
   }
 }
 
+// ── Web Push: public reply ──────────────────────────────────────────────────
+// The business event is "another user posted a public reply to the
+// requester's ticket" — deliberately NOT gated by canManageTickets()/Role
+// (unlike the email path above, which keeps its existing, more conservative
+// gate untouched). This function independently re-derives eligibility from
+// the message/ticket rows themselves (never trusts a caller-passed flag),
+// mirroring how notifyRequesterReply above does its own
+// direction/isInternal check rather than trusting the route.
+
+export async function notifyTicketRequesterPublicReply(params: {
+  ticketId: string;
+  messageId: string;
+}): Promise<void> {
+  try {
+    await notifyTicketRequesterPublicReplyImpl(params);
+  } catch (err) {
+    // Same final safety net as the CREATED/CLOSED email functions above —
+    // every call site schedules this via next/server's after(), detached
+    // from the response, so this must never surface as an unhandled
+    // rejection there regardless of where the failure occurred.
+    console.error(`[notification] notifyTicketRequesterPublicReply crashed for ticket ${params.ticketId}:`, err);
+  }
+}
+
+async function notifyTicketRequesterPublicReplyImpl(params: { ticketId: string; messageId: string }): Promise<void> {
+  const msg = await prisma.ticketMessage.findUnique({
+    where: { id: params.messageId },
+    select: { isInternal: true, authorId: true, body: true, author: { select: { name: true } } },
+  });
+  // Internal notes never notify the requester; a message with no resolved
+  // author (e.g. a pure inbound-email-originated row) has no "another user"
+  // to attribute the reply to.
+  if (!msg || msg.isInternal || !msg.authorId) return;
+
+  const ticket = await prisma.ticket.findUnique({
+    where: { id: params.ticketId },
+    select: { id: true, requesterId: true },
+  });
+  if (!ticket) return;
+
+  // The requester replying to their own ticket is not "another user posted
+  // a public reply to my ticket" — never notify for that, and never
+  // hardcode any Role-specific exception beyond this.
+  if (msg.authorId === ticket.requesterId) return;
+
+  // One fixed key per message, ever — a given TicketMessage is created
+  // exactly once, so a retried/duplicate request for the same messageId
+  // always collapses onto the same row.
+  const eventKey = `ticket:${ticket.id}:reply:${params.messageId}`;
+  const claim = await claimPushEvent({
+    eventKey,
+    ticketId: ticket.id,
+    messageId: params.messageId,
+    userId: ticket.requesterId,
+    type: PushNotificationType.REPLY,
+  });
+  if (!claim.claimed) return;
+
+  const authorName = msg.author?.name ?? "Someone";
+  const title = "New reply on your ticket";
+  const body = `${authorName}: ${truncate(msg.body, 100)}`;
+  const link = `/tickets/${ticket.id}`;
+
+  await deliverRequesterPush({ logId: claim.logId, userId: ticket.requesterId, title, body, link, ticketId: ticket.id });
+}
+
+// ── Web Push: terminal (open -> closed) transition ──────────────────────────
+// Fired once per real non-terminal -> terminal TRANSITION, mirroring
+// notifyRequesterClosed above — callers must only invoke this once they've
+// confirmed `oldStatus.isClosed === false && newStatus.isClosed === true`
+// for the write they just made. Unlike the email equivalent, this
+// deliberately does NOT notify when the actor themselves caused the
+// transition (actorId === requesterId) — a push telling someone "your
+// ticket was closed" when THEY just closed it is noise, not information;
+// the confirmation email (unchanged) still covers that case.
+
+export async function notifyTicketRequesterTerminalTransition(params: {
+  ticketId: string;
+  actorId: string;
+  statusName: string;
+}): Promise<void> {
+  try {
+    await notifyTicketRequesterTerminalTransitionImpl(params);
+  } catch (err) {
+    console.error(`[notification] notifyTicketRequesterTerminalTransition crashed for ticket ${params.ticketId}:`, err);
+  }
+}
+
+async function notifyTicketRequesterTerminalTransitionImpl(params: {
+  ticketId: string;
+  actorId: string;
+  statusName: string;
+}): Promise<void> {
+  const ticket = await prisma.ticket.findUnique({
+    where: { id: params.ticketId },
+    select: { id: true, ticketNumber: true, title: true, requesterId: true, closedAt: true },
+  });
+  if (!ticket) return;
+
+  if (!ticket.closedAt) {
+    // Should be unreachable — every call site sets closedAt in the same
+    // write that led to this call, same invariant as notifyRequesterClosed.
+    console.error(`[notification] notifyTicketRequesterTerminalTransition called for ticket ${ticket.id} with no closedAt set — skipping.`);
+    return;
+  }
+
+  if (params.actorId === ticket.requesterId) return;
+
+  // Scoped to THIS close transition via its own closedAt — see this file's
+  // header note on eventKey format; a genuine reopen-then-reclose later
+  // gets a new closedAt and is correctly allowed to send a new push.
+  const eventKey = `ticket:${ticket.id}:terminal:${ticket.closedAt.toISOString()}`;
+  const claim = await claimPushEvent({
+    eventKey,
+    ticketId: ticket.id,
+    messageId: null,
+    userId: ticket.requesterId,
+    type: PushNotificationType.TERMINAL,
+  });
+  if (!claim.claimed) return;
+
+  const ref = formatTicketNumber(ticket.ticketNumber);
+  const title = "Your ticket has been closed";
+  const body = `${ref} · ${ticket.title} is now ${params.statusName}`;
+  const link = `/tickets/${ticket.id}`;
+
+  await deliverRequesterPush({ logId: claim.logId, userId: ticket.requesterId, title, body, link, ticketId: ticket.id });
+}
+
+/**
+ * Shared delivery tail for both push functions above: mirrors the existing
+ * in-app Notification (bell) feed — deliberately created here, once, so
+ * refactoring the reply push path can never leave a duplicate/orphaned
+ * Notification row behind, and a terminal push gets the same in-app parity
+ * reply already had — then sends the actual Web Push fan-out and resolves
+ * the claim to a status that reflects what really happened:
+ * SKIPPED (no subscriptions to deliver to / push not configured), SENT (at
+ * least one subscription received it), or FAILED (subscriptions existed but
+ * every delivery attempt failed). A push provider failure is caught and
+ * recorded, never rethrown — the caller's ticket operation has already
+ * committed by the time this runs (every call site fires it only via
+ * after()), so a push failure must never look like anything went wrong with
+ * the ticket action itself.
+ */
+async function deliverRequesterPush(params: {
+  logId: string;
+  userId: string;
+  title: string;
+  body: string;
+  link: string;
+  ticketId: string;
+}): Promise<void> {
+  try {
+    await prisma.notification.create({
+      data: { userId: params.userId, title: params.title, body: params.body, link: params.link },
+    });
+  } catch (err) {
+    // Non-fatal — the in-app bell feed is a nice-to-have alongside the real
+    // push; a failure here must not stop the push attempt below.
+    console.error(`[notification] Failed to create in-app notification for ticket ${params.ticketId}:`, err);
+  }
+
+  try {
+    const result = await sendPushNotificationsToUser(params.userId, {
+      title: params.title,
+      body: params.body,
+      link: params.link,
+    });
+    if (result.subscriptionCount === 0) {
+      await resolvePushClaim(params.logId, "SKIPPED");
+    } else if (result.sentCount > 0) {
+      await resolvePushClaim(params.logId, "SENT");
+    } else {
+      await resolvePushClaim(params.logId, "FAILED", "All push deliveries failed");
+    }
+  } catch (err) {
+    // sendPushNotificationsToUser itself never throws (Promise.allSettled
+    // internally) — this catch is defensive-only, same reasoning as the
+    // email try/catch blocks above.
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(`[notification] Failed to send push for ticket ${params.ticketId}:`, error);
+    await resolvePushClaim(params.logId, "FAILED", error);
+  }
+}
+
 // ── Idempotent claim/resolve for CREATED/CLOSED (eventKey-backed) ──────────
 //
 // Why this and not "findFirst then create": a findFirst-before-create check
@@ -418,5 +610,55 @@ async function writeLog(params: {
     })
     .catch((err) => {
       console.error("[notification] Failed to write notification log:", err);
+    });
+}
+
+// ── Idempotent claim/resolve for Web Push events (eventKey-backed) ─────────
+// Exact same atomic-INSERT-as-claim architecture as claimEvent/resolveClaim
+// above (see that pair's doc comment for the full TOCTOU-race reasoning) —
+// a sibling implementation over PushNotificationLog instead of
+// EmailNotificationLog, since push events are keyed by userId, not
+// recipientEmail, and REPLY push events (unlike REPLY emails) DO need this
+// same-message-collapses-onto-one-row guarantee.
+
+async function claimPushEvent(params: {
+  eventKey: string;
+  ticketId: string;
+  messageId: string | null;
+  userId: string;
+  type: PushNotificationType;
+}): Promise<{ claimed: true; logId: string } | { claimed: false }> {
+  try {
+    const row = await prisma.pushNotificationLog.create({
+      data: {
+        eventKey: params.eventKey,
+        ticketId: params.ticketId,
+        messageId: params.messageId,
+        userId: params.userId,
+        type: params.type,
+        status: PushNotificationStatus.PENDING,
+      },
+      select: { id: true },
+    });
+    return { claimed: true, logId: row.id };
+  } catch (err) {
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
+      // Another call (concurrent request, application-level retry, or a
+      // second status-mutation path racing the same transition) already
+      // owns this eventKey — nothing more to do here.
+      return { claimed: false };
+    }
+    throw err;
+  }
+}
+
+async function resolvePushClaim(logId: string, status: "SENT" | "FAILED" | "SKIPPED", error?: string): Promise<void> {
+  await prisma.pushNotificationLog
+    .update({
+      where: { id: logId },
+      data: { status: status as PushNotificationStatus, error: error ?? null },
+    })
+    .catch((err) => {
+      console.error("[notification] Failed to update push notification log:", err);
     });
 }

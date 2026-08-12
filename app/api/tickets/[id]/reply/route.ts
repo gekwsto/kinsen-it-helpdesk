@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, canManageTickets, hasPermission } from "@/lib/permissions";
 import { replyTicketSchema } from "@/lib/validations";
-import { notifyRequesterReply } from "@/lib/ticket-notification-service";
-import { sendPushNotificationsToUser } from "@/lib/web-push";
+import { notifyRequesterReply, notifyTicketRequesterPublicReply } from "@/lib/ticket-notification-service";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { Role } from "@prisma/client";
 
@@ -65,46 +65,40 @@ export async function POST(
       },
     });
 
-    // Notify requester when agent posts a public reply (skip if requester is an admin)
+    // Email: agent/staff public reply to a non-admin requester — the
+    // existing, intentionally unchanged gate (see the doc comment on
+    // notifyTicketRequesterPublicReply in lib/ticket-notification-service.ts
+    // for why the Web Push path below deliberately does NOT reuse this same
+    // condition).
     if (
       !data.isInternal &&
       canManageTickets(session.user.role) &&
       ticket.requesterId !== session.user.id &&
       ticket.requester.role !== Role.ADMIN
     ) {
-      const agentName = session.user.name ?? "IT Support";
-      const ticketLink = `/tickets/${id}`;
-
-      // Email notification (fire-and-forget)
       notifyRequesterReply({
         ticketId: id,
         messageId: message.id,
-        agentName,
+        agentName: session.user.name ?? "IT Support",
         replyBody: data.body,
       }).catch((err) => {
         console.error("[notification] Failed to send reply email:", err);
       });
+    }
 
-      // In-app notification + web push (fire-and-forget)
-      Promise.resolve().then(async () => {
-        try {
-          await prisma.notification.create({
-            data: {
-              userId: ticket.requesterId,
-              title: `New reply on your ticket`,
-              body: `${agentName} replied: ${data.body.slice(0, 120)}${data.body.length > 120 ? "…" : ""}`,
-              link: ticketLink,
-            },
-          });
-          await sendPushNotificationsToUser(ticket.requesterId, {
-            title: `New reply on your ticket`,
-            body: `${agentName}: ${data.body.slice(0, 100)}${data.body.length > 100 ? "…" : ""}`,
-            link: ticketLink,
-          });
-        } catch (err) {
-          console.error("[notification] Failed to send in-app/push notification:", err);
-        }
-      });
+    // Web Push (+ in-app bell): the real business event — "another user
+    // posted a public reply to my ticket" — never role-gated, independent
+    // of canManageTickets()/Role. Recipient resolution, idempotency, and
+    // delivery all live in notifyTicketRequesterPublicReply; deferred via
+    // after() so a push-provider failure can never affect this response
+    // (the message is already committed above).
+    if (!data.isInternal && ticket.requesterId !== session.user.id) {
+      after(() =>
+        notifyTicketRequesterPublicReply({
+          ticketId: id,
+          messageId: message.id,
+        })
+      );
     }
 
     // Publish real-time event

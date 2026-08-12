@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, isAdmin } from "@/lib/permissions";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
-import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
+import { notifyRequesterClosed, notifyTicketRequesterTerminalTransition } from "@/lib/ticket-notification-service";
 import { z } from "zod";
 
 const cancelSchema = z.object({
@@ -127,6 +127,13 @@ export async function POST(
           ticketId: id,
           statusName: result.status.name,
           closingMessage: cancelReason.name,
+        })
+      );
+      after(() =>
+        notifyTicketRequesterTerminalTransition({
+          ticketId: id,
+          actorId: session.user.id,
+          statusName: result.status.name,
         })
       );
     }

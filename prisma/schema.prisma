@@ -1654,3 +1654,59 @@ model EmailNotificationLog {
   @@index([type])
   @@index([status])
 }
+
+// ─── Web Push Notification Log (requester lifecycle pushes) ───────────────────
+//
+// Same atomic-claim idempotency architecture as EmailNotificationLog above
+// (see that model's eventKey doc comment for the full TOCTOU-race reasoning)
+// — a sibling table, not a reuse of EmailNotificationLog, because push
+// events target a userId (PushSubscription lookup), not a recipientEmail,
+// and because REPLY push events need a real, always-present eventKey (email
+// leaves REPLY's eventKey null; push does not — see PushNotificationType
+// below). Deliberately NOT the PushSubscription model — that stores a
+// browser's subscription keys; this stores "did we already attempt to
+// notify the requester about THIS business event."
+//
+// eventKey format:
+//   `ticket:{ticketId}:reply:{messageId}`      — one key per reply message,
+//     ever; a retried/duplicate request for the same message collapses onto
+//     the same row.
+//   `ticket:{ticketId}:terminal:{closedAt ISO}` — scoped to the specific
+//     close TRANSITION via the ticket's own persisted closedAt, exactly like
+//     EmailNotificationLog's CLOSED key — a genuine reopen-then-reclose gets
+//     a new closedAt and therefore a new key/new push, while a retry of the
+//     same transition collapses onto the same row.
+enum PushNotificationType {
+  REPLY
+  TERMINAL
+}
+
+enum PushNotificationStatus {
+  SENT
+  FAILED
+  // No PushSubscription rows existed for the recipient at send time (or
+  // VAPID isn't configured in this environment) — the event was still
+  // legitimately claimed/logged, just nothing to deliver to.
+  SKIPPED
+  // Claimed but not yet resolved — see eventKey above; same PENDING-then-
+  // resolved lifecycle as EmailNotificationStatus.PENDING.
+  PENDING
+}
+
+model PushNotificationLog {
+  id        String                 @id @default(cuid())
+  ticketId  String
+  messageId String?
+  userId    String
+  type      PushNotificationType
+  status    PushNotificationStatus
+  error     String?                @db.Text
+  createdAt DateTime               @default(now())
+  eventKey  String                 @unique
+
+  @@index([ticketId])
+  @@index([userId])
+  @@index([createdAt])
+  @@index([type])
+  @@index([status])
+}

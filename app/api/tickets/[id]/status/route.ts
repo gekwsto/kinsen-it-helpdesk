@@ -6,7 +6,7 @@ import { canActOnEntity, validateTicketConfigOwnership } from "@/lib/services/de
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { changeStatusSchema } from "@/lib/validations";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
-import { notifyRequesterClosed } from "@/lib/ticket-notification-service";
+import { notifyRequesterClosed, notifyTicketRequesterTerminalTransition } from "@/lib/ticket-notification-service";
 
 export async function PATCH(
   req: NextRequest,
@@ -97,6 +97,16 @@ export async function PATCH(
           ticketId: id,
           statusName: newStatus.name,
           closingMessage: updated.cancelReason?.name,
+        })
+      );
+      // Web Push — independent side effect, own eventKey/idempotency (see
+      // notifyTicketRequesterTerminalTransition), skips the actor if they
+      // closed their own ticket.
+      after(() =>
+        notifyTicketRequesterTerminalTransition({
+          ticketId: id,
+          actorId: session.user.id,
+          statusName: newStatus.name,
         })
       );
     }
