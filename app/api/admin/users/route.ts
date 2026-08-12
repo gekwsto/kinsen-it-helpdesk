@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireAuth, hasPermission, canAssignUserToDepartment } from "@/lib/permissions";
 import { createUserSchema } from "@/lib/validations";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
-import { setPrimaryDepartmentMembership, grantManualMembership } from "@/lib/services/department-membership-service";
+import { setPrimaryDepartmentMembership, grantManualMembership, DepartmentRoleAssignmentError } from "@/lib/services/department-membership-service";
 import bcrypt from "bcryptjs";
 import { AuthProvider, MembershipSource } from "@prisma/client";
 
@@ -12,7 +12,10 @@ const USER_INCLUDE = {
   businessUnit: { select: { id: true, name: true } },
   customRole: { select: { id: true, key: true, name: true } },
   departmentMemberships: {
-    include: { department: { select: { id: true, name: true, slug: true } } },
+    include: {
+      department: { select: { id: true, name: true, slug: true } },
+      customRole: { select: { id: true, name: true, isActive: true } },
+    },
     orderBy: { createdAt: "asc" as const },
   },
   subDepartmentMemberships: {
@@ -44,7 +47,10 @@ export async function GET(req: NextRequest) {
         businessUnit: { select: { id: true, name: true } },
         customRole: { select: { id: true, key: true, name: true } },
         departmentMemberships: {
-          include: { department: { select: { id: true, name: true, slug: true } } },
+          include: {
+            department: { select: { id: true, name: true, slug: true } },
+            customRole: { select: { id: true, name: true, isActive: true } },
+          },
           orderBy: { createdAt: "asc" },
         },
         globalRoleMicrosoftMapping: {
@@ -207,6 +213,12 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
+    }
+    if (error instanceof DepartmentRoleAssignmentError) {
+      if (error.code === "ROLE_INACTIVE") {
+        return NextResponse.json({ error: "One of the selected department roles is disabled and cannot be assigned.", code: "role_inactive" }, { status: 409 });
+      }
+      return NextResponse.json({ error: "Invalid department role.", code: "invalid_role" }, { status: 400 });
     }
     if (error.message === "Forbidden" || error.message === "Unauthorized") {
       return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });

@@ -11,7 +11,10 @@ const USER_INCLUDE = {
   businessUnit: { select: { id: true, name: true } },
   customRole: { select: { id: true, key: true, name: true } },
   departmentMemberships: {
-    include: { department: { select: { id: true, name: true, slug: true } } },
+    include: {
+      department: { select: { id: true, name: true, slug: true } },
+      customRole: { select: { id: true, name: true, isActive: true } },
+    },
     orderBy: { createdAt: "asc" as const },
   },
   subDepartmentMemberships: {

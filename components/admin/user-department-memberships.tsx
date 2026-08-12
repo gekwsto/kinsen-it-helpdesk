@@ -22,8 +22,6 @@ import {
 import { formatDateTime } from "@/lib/utils";
 import { Loader2, UserCheck, UserX, Plus } from "lucide-react";
 import {
-  DEPARTMENT_ROLE_LABELS,
-  DEPARTMENT_ROLE_OPTIONS,
   MEMBERSHIP_SOURCE_LABELS,
   MEMBERSHIP_SOURCE_COLORS,
 } from "@/components/admin/department-role-info";
@@ -32,6 +30,9 @@ export interface UserMembership {
   id: string;
   departmentId: string;
   role: DepartmentRole;
+  /** Set when this membership's real role is a custom department role — `role` above is then just the required-but-unused VIEWER placeholder (see grantManualMembership). */
+  customRoleId: string | null;
+  customRole: { id: string; name: string; isActive: boolean } | null;
   source: MembershipSource;
   isActive: boolean;
   createdAt: string;
@@ -45,6 +46,12 @@ interface DeptRoleOption {
   label: string;
   isCustom: boolean;
   customRoleId?: string;
+  isActive: boolean;
+}
+
+/** The <Select> value for a membership's current role — matches how Microsoft Mapping's role selects encode the same built-in/custom distinction. */
+function membershipRoleValue(m: Pick<UserMembership, "role" | "customRoleId">): string {
+  return m.customRoleId ? `custom:${m.customRoleId}` : m.role;
 }
 
 interface UserDepartmentMembershipsProps {
@@ -69,14 +76,49 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
   const [addDeptId, setAddDeptId] = useState("");
   const [addRoleValue, setAddRoleValue] = useState("");
   const [adding, setAdding] = useState(false);
-  const [deptRoleOptions, setDeptRoleOptions] = useState<DeptRoleOption[]>([]);
+  // Fetched WITH disabled roles included (includeInactive=true) so an
+  // existing membership already on a since-disabled role can still be shown
+  // correctly (see membershipRoleOptions below) — `assignableRoleOptions`
+  // (active only) is what's actually offered for a NEW selection, exactly
+  // matching the pre-existing "Add Membership" behavior.
+  const [allDeptRoleOptions, setAllDeptRoleOptions] = useState<DeptRoleOption[]>([]);
+  const assignableRoleOptions = allDeptRoleOptions.filter((o) => o.isActive);
 
   useEffect(() => {
-    fetch("/api/admin/department-roles/options")
+    fetch("/api/admin/department-roles/options?includeInactive=true")
       .then((r) => (r.ok ? r.json() : []))
-      .then((options) => setDeptRoleOptions(Array.isArray(options) ? options : []))
+      .then((options) => setAllDeptRoleOptions(Array.isArray(options) ? options : []))
       .catch(() => {});
   }, []);
+
+  /**
+   * The options a SPECIFIC membership row's Select should render: the
+   * normal assignable (active) list, plus — only if this row's CURRENT role
+   * isn't already in that list (i.e. it's since been disabled) — a
+   * synthetic entry built from the row's own persisted data so the real
+   * current role is shown clearly instead of silently falling back to
+   * nothing/a default. Selecting anything else from the list still only
+   * ever offers active roles, per the "disabled roles aren't offered for
+   * new assignments" requirement.
+   */
+  function membershipRoleOptions(m: UserMembership): DeptRoleOption[] {
+    const currentValue = membershipRoleValue(m);
+    if (assignableRoleOptions.some((o) => o.value === currentValue)) return assignableRoleOptions;
+    const known = allDeptRoleOptions.find((o) => o.value === currentValue);
+    const currentLabel = m.customRoleId
+      ? (m.customRole?.name ?? known?.label ?? "Unknown role")
+      : (known?.label ?? m.role);
+    return [
+      {
+        value: currentValue,
+        label: `${currentLabel} (disabled)`,
+        isCustom: !!m.customRoleId,
+        customRoleId: m.customRoleId ?? undefined,
+        isActive: false,
+      },
+      ...assignableRoleOptions,
+    ];
+  }
 
   // Departments the user doesn't already have an active membership in —
   // adding one where they're already active would just be a role change,
@@ -92,7 +134,10 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
 
   const handleAddMembership = async () => {
     if (!addDeptId || !addRoleValue) return;
-    const option = deptRoleOptions.find((o) => o.value === addRoleValue);
+    // A brand-new membership only ever offers currently-assignable
+    // (active) roles — never the disabled-role synthetic entry, which only
+    // ever appears for an EXISTING row via membershipRoleOptions above.
+    const option = assignableRoleOptions.find((o) => o.value === addRoleValue);
     const body = option?.isCustom && option.customRoleId ? { userId, customRoleId: option.customRoleId } : { userId, role: addRoleValue };
     setAdding(true);
     try {
@@ -112,6 +157,8 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
         id: created.id,
         departmentId: addDeptId,
         role: created.role,
+        customRoleId: created.customRoleId ?? null,
+        customRole: option?.isCustom && option.customRoleId ? { id: option.customRoleId, name: option.label, isActive: true } : null,
         source: created.source,
         isActive: true,
         createdAt: created.createdAt ?? new Date().toISOString(),
@@ -132,13 +179,19 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
     }
   };
 
-  const handleChangeRole = async (membership: UserMembership, role: DepartmentRole) => {
+  /** `value` is whatever membershipRoleOptions(m) offered — a built-in DepartmentRole enum string or `custom:<id>` (see membershipRoleValue). */
+  const handleChangeRole = async (membership: UserMembership, value: string) => {
+    const option = [...assignableRoleOptions, ...allDeptRoleOptions].find((o) => o.value === value);
+    const body =
+      option?.isCustom && option.customRoleId
+        ? { userId, customRoleId: option.customRoleId }
+        : { userId, role: (option?.value ?? value) as DepartmentRole };
     setBusyId(membership.id);
     try {
       const res = await fetch(`/api/admin/departments/${membership.departmentId}/members`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, role }),
+        body: JSON.stringify(body),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -148,7 +201,15 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
       onChange(
         memberships.map((m) =>
           m.id === membership.id
-            ? { ...m, role, source: MembershipSource.MANUAL, isActive: true, updatedAt: updated.updatedAt ?? new Date().toISOString() }
+            ? {
+                ...m,
+                role: updated.role,
+                customRoleId: updated.customRoleId ?? null,
+                customRole: option?.isCustom && option.customRoleId ? { id: option.customRoleId, name: option.label, isActive: option.isActive } : null,
+                source: MembershipSource.MANUAL,
+                isActive: true,
+                updatedAt: updated.updatedAt ?? new Date().toISOString(),
+              }
             : m
         )
       );
@@ -199,7 +260,7 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
           <Select value={addRoleValue} onValueChange={setAddRoleValue}>
             <SelectTrigger className="h-8 w-40 text-xs"><SelectValue placeholder="Role…" /></SelectTrigger>
             <SelectContent>
-              {deptRoleOptions.map((o) => (
+              {assignableRoleOptions.map((o) => (
                 <SelectItem key={o.value} value={o.value} className="text-xs">
                   {o.label}{o.isCustom ? " (Custom)" : ""}
                 </SelectItem>
@@ -254,17 +315,17 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
                 </TableCell>
                 <TableCell>
                   <Select
-                    value={m.role}
-                    onValueChange={(v) => handleChangeRole(m, v as DepartmentRole)}
+                    value={membershipRoleValue(m)}
+                    onValueChange={(v) => handleChangeRole(m, v)}
                     disabled={busyId === m.id || !m.isActive}
                   >
                     <SelectTrigger className="h-8 w-40 text-xs">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {DEPARTMENT_ROLE_OPTIONS.map((role) => (
-                        <SelectItem key={role} value={role} className="text-xs">
-                          {DEPARTMENT_ROLE_LABELS[role]}
+                      {membershipRoleOptions(m).map((o) => (
+                        <SelectItem key={o.value} value={o.value} className="text-xs">
+                          {o.label}{o.isCustom && o.isActive ? " (Custom)" : ""}
                         </SelectItem>
                       ))}
                     </SelectContent>
@@ -311,7 +372,7 @@ export function UserDepartmentMemberships({ userId, memberships, departments, on
                       size="sm"
                       variant="ghost"
                       className="text-green-600 hover:text-green-700 hover:bg-green-50"
-                      onClick={() => handleChangeRole(m, m.role)}
+                      onClick={() => handleChangeRole(m, membershipRoleValue(m))}
                       title="Reactivates as a manual admin override"
                     >
                       Reactivate

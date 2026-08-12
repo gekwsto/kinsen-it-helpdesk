@@ -5,6 +5,7 @@ import { grantMembershipSchema } from "@/lib/validations";
 import {
   getDepartmentMemberships,
   grantManualMembership,
+  DepartmentRoleAssignmentError,
 } from "@/lib/services/department-membership-service";
 
 export async function GET(
@@ -53,23 +54,28 @@ export async function POST(
     const user = await prisma.user.findUnique({ where: { id: data.userId }, select: { id: true } });
     if (!user) return NextResponse.json({ error: "User not found", code: "user_not_found" }, { status: 404 });
 
-    if (data.customRoleId) {
-      // Never trust a client-submitted customRoleId at face value — must be
-      // a real, non-GLOBAL role (a GLOBAL-scope custom role has no meaning
-      // as a DepartmentMembership role).
-      const customRole = await prisma.customRole.findUnique({ where: { id: data.customRoleId } });
-      if (!customRole || customRole.scope === "GLOBAL") {
-        return NextResponse.json({ error: "Invalid department role.", code: "invalid_department" }, { status: 400 });
-      }
-      const membership = await grantManualMembership(data.userId, id, { customRoleId: data.customRoleId });
-      return NextResponse.json(membership, { status: 201 });
-    }
-
-    const membership = await grantManualMembership(data.userId, id, { role: data.role! });
+    // Role eligibility (exists, correct scope, active for a genuinely new
+    // assignment) is validated once, centrally, inside grantManualMembership
+    // — never re-checked here, so there is exactly one place that decides
+    // whether a role selection is assignable.
+    const membership = data.customRoleId
+      ? await grantManualMembership(data.userId, id, { customRoleId: data.customRoleId })
+      : await grantManualMembership(data.userId, id, { role: data.role! });
     return NextResponse.json(membership, { status: 201 });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
+    }
+    if (error instanceof DepartmentRoleAssignmentError) {
+      if (error.code === "ROLE_NOT_FOUND") {
+        return NextResponse.json({ error: "Role not found.", code: "invalid_department" }, { status: 400 });
+      }
+      if (error.code === "ROLE_WRONG_SCOPE") {
+        return NextResponse.json({ error: "This role cannot be assigned to a Department Membership.", code: "invalid_department" }, { status: 400 });
+      }
+      if (error.code === "ROLE_INACTIVE") {
+        return NextResponse.json({ error: "This role is disabled and cannot be assigned to new memberships.", code: "role_inactive" }, { status: 409 });
+      }
     }
     if (error.message === "Unauthorized") return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     if (error.message === "Forbidden") return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });

@@ -42,7 +42,7 @@ interface Membership {
   userId: string;
   role: DepartmentRole;
   customRoleId: string | null;
-  customRole: { id: string; key: string; name: string } | null;
+  customRole: { id: string; key: string; name: string; isActive: boolean } | null;
   source: "MANUAL" | "MICROSOFT_DEPARTMENT" | "MICROSOFT_GROUP" | "MICROSOFT_APP_ROLE";
   isPrimary: boolean;
   isActive: boolean;
@@ -55,6 +55,7 @@ interface RoleOption {
   description?: string;
   isCustom: boolean;
   customRoleId?: string;
+  isActive: boolean;
 }
 
 /** value like "AGENT_ASSIGNEE" or "custom:<id>" for a membership row, matching RoleOption.value. */
@@ -96,16 +97,34 @@ export function DepartmentMembersManagement({
   const [userResults, setUserResults] = useState<SearchUser[]>([]);
   const [searching, setSearching] = useState(false);
   const [selectedUser, setSelectedUser] = useState<SearchUser | null>(null);
-  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
+  // Fetched WITH disabled roles included so an existing membership already
+  // on a since-disabled role still displays/behaves correctly (see
+  // membershipRoleOptions below) — `assignableRoleOptions` (active only) is
+  // what's actually offered for Add Member / a brand-new role choice,
+  // unchanged from before this existed.
+  const [allRoleOptions, setAllRoleOptions] = useState<RoleOption[]>([]);
+  const roleOptions = allRoleOptions.filter((o) => o.isActive);
   const [selectedRoleValue, setSelectedRoleValue] = useState<string>(DepartmentRole.REQUESTER);
   const [adding, setAdding] = useState(false);
 
   useEffect(() => {
-    fetch("/api/admin/department-roles/options")
+    fetch("/api/admin/department-roles/options?includeInactive=true")
       .then((r) => (r.ok ? r.json() : []))
-      .then((options) => setRoleOptions(Array.isArray(options) ? options : []))
+      .then((options) => setAllRoleOptions(Array.isArray(options) ? options : []))
       .catch(() => {});
   }, []);
+
+  /** Same reasoning as user-department-memberships.tsx's identically-named helper: the assignable list, plus a synthetic "current (disabled)" entry only when this row's actual role isn't in that list. */
+  function membershipRoleOptions(m: Membership): RoleOption[] {
+    const currentValue = membershipRoleValue(m);
+    if (roleOptions.some((o) => o.value === currentValue)) return roleOptions;
+    const known = allRoleOptions.find((o) => o.value === currentValue);
+    const currentLabel = m.customRoleId ? (m.customRole?.name ?? known?.label ?? "Unknown role") : (known?.label ?? m.role);
+    return [
+      { value: currentValue, label: `${currentLabel} (disabled)`, isCustom: !!m.customRoleId, customRoleId: m.customRoleId ?? undefined, isActive: false },
+      ...roleOptions,
+    ];
+  }
 
   useEffect(() => {
     if (!userQuery.trim() || selectedUser) {
@@ -134,9 +153,18 @@ export function DepartmentMembersManagement({
     setSelectedRoleValue(DepartmentRole.REQUESTER);
   };
 
-  /** Builds the POST body for either a built-in role or a custom department role, from a RoleOption.value. */
+  /**
+   * Builds the POST body for either a built-in role or a custom department
+   * role, from a RoleOption.value. Looks up against the FULL list
+   * (allRoleOptions, active + inactive) rather than just the assignable
+   * subset — this function also has to correctly resolve a REACTIVATE call
+   * (membershipRoleValue of a membership whose role may since have been
+   * disabled), not only a brand-new pick from the (active-only) dropdown.
+   * What's actually offered as a NEW selectable choice is restricted by the
+   * dropdown's own options list, not by this lookup.
+   */
   const roleBody = (value: string): { role: DepartmentRole } | { customRoleId: string } => {
-    const option = roleOptions.find((o) => o.value === value);
+    const option = allRoleOptions.find((o) => o.value === value);
     if (option?.isCustom && option.customRoleId) return { customRoleId: option.customRoleId };
     return { role: value as DepartmentRole };
   };
@@ -273,16 +301,16 @@ export function DepartmentMembersManagement({
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {roleOptions.map((option) => (
+                        {membershipRoleOptions(m).map((option) => (
                           <SelectItem key={option.value} value={option.value} className="text-xs">
-                            {option.label}{option.isCustom ? " (Custom)" : ""}
+                            {option.label}{option.isCustom && option.isActive ? " (Custom)" : ""}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   ) : (
                     <span className="text-xs text-muted-foreground">
-                      {roleOptions.find((o) => o.value === membershipRoleValue(m))?.label ?? m.role}
+                      {m.customRoleId ? (m.customRole?.name ?? "Unknown role") : (allRoleOptions.find((o) => o.value === membershipRoleValue(m))?.label ?? m.role)}
                     </span>
                   )}
                 </TableCell>

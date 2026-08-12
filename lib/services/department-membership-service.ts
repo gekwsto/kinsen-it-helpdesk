@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import type { DepartmentMembership, Prisma } from "@prisma/client";
-import { DepartmentRole, MembershipSource } from "@prisma/client";
+import { DepartmentRole, MembershipSource, RoleScope } from "@prisma/client";
 import type { DepartmentMembershipView, ResolvedMembership } from "@/types/department";
 
 /** A plain PrismaClient or an in-flight $transaction callback client — lets a caller opt a write into its own transaction without every service function needing its own. */
@@ -46,7 +46,7 @@ export interface DepartmentMembershipAdminView {
   departmentId: string;
   role: DepartmentRole;
   customRoleId: string | null;
-  customRole: { id: string; key: string; name: string } | null;
+  customRole: { id: string; key: string; name: string; isActive: boolean } | null;
   source: MembershipSource;
   isPrimary: boolean;
   isActive: boolean;
@@ -64,7 +64,7 @@ export async function getDepartmentMemberships(departmentId: string): Promise<De
     where: { departmentId },
     include: {
       user: { select: memberUserSelect },
-      customRole: { select: { id: true, key: true, name: true } },
+      customRole: { select: { id: true, key: true, name: true, isActive: true } },
     },
     orderBy: [{ isActive: "desc" }, { createdAt: "asc" }],
   });
@@ -175,6 +175,61 @@ export async function syncDepartmentMemberships(
 
 export type DepartmentRoleSelection = { role: DepartmentRole; customRoleId?: null } | { role?: null; customRoleId: string };
 
+// Thrown by grantManualMembership so callers (the members-add API, the
+// admin user-edit modal's membership editor) can surface a specific,
+// actionable error instead of a generic 500.
+export class DepartmentRoleAssignmentError extends Error {
+  constructor(
+    public code: "ROLE_NOT_FOUND" | "ROLE_WRONG_SCOPE" | "ROLE_INACTIVE"
+  ) {
+    super(code);
+    this.name = "DepartmentRoleAssignmentError";
+  }
+}
+
+/**
+ * Never trusts a submitted role selection at face value — mirrors
+ * lib/services/microsoft-mapping-service.ts's
+ * assertGlobalCustomRoleEligible/assertDepartmentCustomRoleEligible (same
+ * reasoning, department-membership-scoped): a GLOBAL-scope custom role id
+ * is rejected outright, and a role that is currently `isActive: false`
+ * (whether built-in or custom) is rejected for a genuinely NEW assignment.
+ *
+ * "Genuinely new" is the key distinction: if `current` already holds this
+ * EXACT role/customRoleId, the check is skipped entirely — reactivating a
+ * revoked membership back to its own historical role, or re-saving a
+ * membership without actually changing its role, must never be blocked
+ * merely because that role was disabled sometime after the fact. This is
+ * what lets an admin still read/manage a user already on a disabled role
+ * without corrupting the existing assignment.
+ *
+ * A built-in role with no mirrored CustomRole row at all (should be
+ * unreachable once every environment has run the
+ * 20260812091426_backfill_builtin_department_roles migration) fails OPEN,
+ * not closed — the DepartmentRole enum value itself remains the ultimate
+ * identity for a genuinely built-in role; this only blocks a role that is
+ * POSITIVELY KNOWN to be disabled, never one this lookup simply couldn't find.
+ */
+async function assertDepartmentRoleAssignable(
+  selection: DepartmentRoleSelection,
+  current: { role: DepartmentRole; customRoleId: string | null } | null,
+  db: Db
+): Promise<void> {
+  if (selection.customRoleId) {
+    if (current?.customRoleId === selection.customRoleId) return; // unchanged — never blocked
+    const role = await db.customRole.findUnique({ where: { id: selection.customRoleId } });
+    if (!role) throw new DepartmentRoleAssignmentError("ROLE_NOT_FOUND");
+    if (role.scope === RoleScope.GLOBAL) throw new DepartmentRoleAssignmentError("ROLE_WRONG_SCOPE");
+    if (!role.isActive) throw new DepartmentRoleAssignmentError("ROLE_INACTIVE");
+    return;
+  }
+
+  const targetRole = selection.role!;
+  if (!current?.customRoleId && current?.role === targetRole) return; // unchanged — never blocked
+  const role = await db.customRole.findUnique({ where: { key: targetRole } });
+  if (role && !role.isActive) throw new DepartmentRoleAssignmentError("ROLE_INACTIVE");
+}
+
 /**
  * Grants (or updates, upsert-by-[userId,departmentId]) a manual membership —
  * either a built-in DepartmentRole or a custom department role
@@ -190,6 +245,12 @@ export async function grantManualMembership(
   selection: DepartmentRoleSelection,
   db: Db = prisma
 ): Promise<DepartmentMembership> {
+  const existing = await db.departmentMembership.findUnique({
+    where: { userId_departmentId: { userId, departmentId } },
+    select: { role: true, customRoleId: true },
+  });
+  await assertDepartmentRoleAssignable(selection, existing, db);
+
   const role = selection.customRoleId ? DepartmentRole.VIEWER : selection.role!;
   const customRoleId = selection.customRoleId ?? null;
   return db.departmentMembership.upsert({
