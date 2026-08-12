@@ -21,11 +21,17 @@
  * (e.g. "the component no longer reads the build-time env var") rather
  * than decision logic.
  *
+ * The test VAPID key pair is generated fresh on every run (never a static
+ * hardcoded string) — a hardcoded value, even one truly never registered
+ * with any push service, is still a real-format private key and gets
+ * flagged by secret scanners (GitGuardian etc.) the moment it's committed.
+ *
  * Usage: npx tsx scripts/test-web-push-runtime-config.ts
  */
-process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY =
-  "BP37wV3PociDKeuwfefsNPqqNvlKvIxblTkBJbSEjsdniwfzLmf8R9Bn2XdaykpTzwYDOdlR0oalpxvE6tNjeLM";
-process.env.WEB_PUSH_VAPID_PRIVATE_KEY = "bZTaAuvDGfHuf6geK0UHCe-C3hzFtnKw6ZhpKEf82Kc";
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const testVapidKeys = require("web-push").generateVAPIDKeys();
+process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY = testVapidKeys.publicKey;
+process.env.WEB_PUSH_VAPID_PRIVATE_KEY = testVapidKeys.privateKey;
 process.env.WEB_PUSH_CONTACT_EMAIL = "test-push@example.com";
 
 import fs from "fs";
