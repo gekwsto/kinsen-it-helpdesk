@@ -375,9 +375,57 @@ async function main() {
 
     // ══════════════════════ SERVICE WORKER ══════════════════════
 
-    console.log("\n=== 17. Real public/sw.js notificationclick behavior (sandboxed) ===\n");
+    console.log("\n=== 11-13. Real public/sw.js push event -> showNotification (sandboxed) ===\n");
     const swPath = path.join(process.cwd(), "public", "sw.js");
     const swSource = fs.readFileSync(swPath, "utf8");
+
+    {
+      let shown: any = null;
+      const listeners: Record<string, ((event: any) => void)[]> = {};
+      const selfMock: any = {
+        location: { origin: "http://localhost:3000" },
+        registration: {
+          showNotification: async (title: string, options: any) => {
+            shown = { title, options };
+          },
+        },
+        addEventListener: (t: string, h: any) => ((listeners[t] ??= []).push(h)),
+      };
+      // eslint-disable-next-line no-new-func
+      new Function("self", "clients", swSource)(selfMock, {});
+      let waited: Promise<any> = Promise.resolve();
+      const pushData = { title: "New reply on your ticket", body: "John Smith: We have updated your request...", link: "/tickets/abc123" };
+      const event = { data: { json: () => pushData }, waitUntil: (p: Promise<any>) => { waited = p; } };
+      for (const h of listeners["push"] ?? []) h(event);
+      await waited;
+      check("11. A push event invokes the real Service Worker's self.registration.showNotification", !!shown);
+      check("12. Title is propagated correctly", shown?.title === pushData.title);
+      check("   Body is propagated correctly", shown?.options.body === pushData.body);
+      check("13. Notification data carries the /tickets/{id} link", shown?.options.data?.link === "/tickets/abc123");
+      check("   icon/badge point to a real branding asset (not the previously-missing /favicon.ico)", shown?.options.icon === "/kinsen_vertical.webp" && shown?.options.badge === "/kinsen_vertical.webp");
+      check("   tag is set (stable per-link, so repeat pushes for the same ticket replace rather than pile up) and renotify is true", shown?.options.tag === pushData.link && shown?.options.renotify === true);
+      check("   timestamp is a real epoch-ms number", typeof shown?.options.timestamp === "number" && shown!.options.timestamp > 0);
+    }
+
+    // A payload with no link falls back to "/" — never throws, never shows an undefined data.link.
+    {
+      let shown: any = null;
+      const listeners: Record<string, ((event: any) => void)[]> = {};
+      const selfMock: any = {
+        location: { origin: "http://localhost:3000" },
+        registration: { showNotification: async (title: string, options: any) => { shown = { title, options }; } },
+        addEventListener: (t: string, h: any) => ((listeners[t] ??= []).push(h)),
+      };
+      // eslint-disable-next-line no-new-func
+      new Function("self", "clients", swSource)(selfMock, {});
+      let waited: Promise<any> = Promise.resolve();
+      const event = { data: { json: () => ({ title: "No link case", body: "b" }) }, waitUntil: (p: Promise<any>) => { waited = p; } };
+      for (const h of listeners["push"] ?? []) h(event);
+      await waited;
+      check("   A payload with no link defaults data.link to '/' rather than undefined", shown?.options.data?.link === "/");
+    }
+
+    console.log("\n=== 14-17. Real public/sw.js notificationclick behavior (sandboxed) ===\n");
 
     // Case A: an existing window already on the exact ticket URL -> focus only, no navigate.
     {

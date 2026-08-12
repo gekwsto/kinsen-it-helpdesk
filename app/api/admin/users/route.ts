@@ -4,13 +4,14 @@ import { requireAdmin, requireAuth, hasPermission, canAssignUserToDepartment } f
 import { createUserSchema } from "@/lib/validations";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
 import { setPrimaryDepartmentMembership, grantManualMembership, DepartmentRoleAssignmentError } from "@/lib/services/department-membership-service";
+import { assertGlobalRoleAssignable, GlobalRoleAssignmentError, type GlobalRoleSelection } from "@/lib/services/global-role-assignment-service";
 import bcrypt from "bcryptjs";
 import { AuthProvider, MembershipSource } from "@prisma/client";
 
 const USER_INCLUDE = {
   department: { select: { id: true, name: true } },
   businessUnit: { select: { id: true, name: true } },
-  customRole: { select: { id: true, key: true, name: true } },
+  customRole: { select: { id: true, key: true, name: true, isActive: true, isBuiltIn: true } },
   departmentMemberships: {
     include: {
       department: { select: { id: true, name: true, slug: true } },
@@ -45,7 +46,7 @@ export async function GET(req: NextRequest) {
       include: {
         department: { select: { id: true, name: true } },
         businessUnit: { select: { id: true, name: true } },
-        customRole: { select: { id: true, key: true, name: true } },
+        customRole: { select: { id: true, key: true, name: true, isActive: true, isBuiltIn: true } },
         departmentMemberships: {
           include: {
             department: { select: { id: true, name: true, slug: true } },
@@ -85,6 +86,15 @@ export async function POST(req: NextRequest) {
     if (existing) {
       return NextResponse.json({ error: "Email already in use" }, { status: 409 });
     }
+
+    // Never trust the submitted role/customRoleId at face value — see
+    // lib/services/global-role-assignment-service.ts's doc comment (ghost
+    // DIRECTOR scenario). A brand-new user has no "current" role to compare
+    // against, so this always validates against the live catalogue.
+    const globalRoleSelection: GlobalRoleSelection = data.customRoleId
+      ? { customRoleId: data.customRoleId }
+      : { role: data.role };
+    await assertGlobalRoleAssignable(globalRoleSelection, null, prisma);
 
     // ── Validate every department-membership row up front — nothing is
     // written until every row (and the resolved primary) is known-good, so
@@ -173,6 +183,7 @@ export async function POST(req: NextRequest) {
           email: data.email,
           passwordHash,
           role: data.role,
+          customRoleId: data.customRoleId ?? null,
           isActive: data.isActive,
           businessUnitId: data.businessUnitId || null,
           authProvider: AuthProvider.CREDENTIALS,
@@ -219,6 +230,12 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: "One of the selected department roles is disabled and cannot be assigned.", code: "role_inactive" }, { status: 409 });
       }
       return NextResponse.json({ error: "Invalid department role.", code: "invalid_role" }, { status: 400 });
+    }
+    if (error instanceof GlobalRoleAssignmentError) {
+      if (error.code === "ROLE_INACTIVE") {
+        return NextResponse.json({ error: "The selected global role is disabled and cannot be assigned.", code: "role_inactive" }, { status: 409 });
+      }
+      return NextResponse.json({ error: "Invalid global role.", code: "invalid_role" }, { status: 400 });
     }
     if (error.message === "Forbidden" || error.message === "Unauthorized") {
       return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });

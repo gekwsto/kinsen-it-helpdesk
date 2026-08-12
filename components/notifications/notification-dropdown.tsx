@@ -10,15 +10,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 import Link from "next/link";
 import { formatRelative } from "@/lib/utils";
-
-interface AppNotification {
-  id: string;
-  title: string;
-  body: string;
-  link: string | null;
-  isRead: boolean;
-  createdAt: string;
-}
+import { useNotificationRealtime, type NotificationRealtimeEvent } from "@/hooks/use-notification-realtime";
+import {
+  EMPTY_NOTIFICATION_STATE,
+  applyNotificationCreated,
+  applyMarkRead,
+  applyMarkAllRead,
+  applyReconcile,
+  type NotificationState,
+} from "@/lib/notifications/notification-state";
 
 const VAPID_PUBLIC_KEY = process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY ?? "";
 
@@ -31,8 +31,7 @@ function urlBase64ToUint8Array(base64: string): ArrayBuffer {
 
 export function NotificationDropdown() {
   const [open, setOpen] = useState(false);
-  const [items, setItems] = useState<AppNotification[]>([]);
-  const [unreadCount, setUnreadCount] = useState(0);
+  const [state, setState] = useState<NotificationState>(EMPTY_NOTIFICATION_STATE);
   const [loading, setLoading] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
 
@@ -40,45 +39,70 @@ export function NotificationDropdown() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushLoading, setPushLoading] = useState(false);
 
+  // The database is always authoritative — this fetch is used for the
+  // initial load AND for reconnect reconciliation (realtime is an
+  // acceleration mechanism, not the source of truth; see
+  // useNotificationRealtime's onReconnect below).
   const fetchNotifications = useCallback(async () => {
     setLoading(true);
     try {
       const res = await fetch("/api/notifications");
       if (res.ok) {
         const data = await res.json();
-        setItems(data.notifications ?? []);
-        setUnreadCount(data.unreadCount ?? 0);
+        setState(applyReconcile({ items: data.notifications ?? [], unreadCount: data.unreadCount ?? 0 }));
       }
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Initial load — always populated on mount (not only when the dropdown is
+  // first opened), so the bell badge is correct immediately and a realtime
+  // event arriving before the user ever opens the dropdown has a real base
+  // list to prepend onto.
+  useEffect(() => {
+    fetchNotifications();
+  }, [fetchNotifications]);
+
+  // Cheap staleness guard on open — realtime keeps this live in between, so
+  // this is not the primary update mechanism, just an extra reconciliation
+  // point that matches the previous "refetch on open" UX.
   useEffect(() => {
     if (open) fetchNotifications();
   }, [open, fetchNotifications]);
 
-  // Poll unread count every 60s
-  useEffect(() => {
-    const poll = async () => {
-      const res = await fetch("/api/notifications");
-      if (res.ok) {
-        const data = await res.json();
-        setUnreadCount(data.unreadCount ?? 0);
-      }
-    };
-    poll();
-    const id = setInterval(poll, 60_000);
-    return () => clearInterval(id);
+  const handleRealtimeEvent = useCallback((event: NotificationRealtimeEvent) => {
+    if (!event.payload) return;
+    setState((prev) => applyNotificationCreated(prev, event.payload!));
   }, []);
 
-  // Check push support and current subscription state
+  const handleReconnect = useCallback(() => {
+    fetchNotifications();
+  }, [fetchNotifications]);
+
+  useNotificationRealtime(handleRealtimeEvent, handleReconnect);
+
+  // Check push support and whether a subscription is BOTH present in this
+  // browser AND still known server-side — a browser-side subscription can
+  // outlive its server-side row (e.g. removed after a 404/410 delivery
+  // failure), and only checking navigator.serviceWorker locally would then
+  // wrongly report push as enabled.
   useEffect(() => {
     if (!VAPID_PUBLIC_KEY || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
     setPushSupported(true);
     navigator.serviceWorker.register("/sw.js").then(async (reg) => {
       const sub = await reg.pushManager.getSubscription();
-      setPushEnabled(!!sub);
+      if (!sub) {
+        setPushEnabled(false);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/notifications/push/subscribe?endpoint=${encodeURIComponent(sub.endpoint)}`);
+        const data = res.ok ? await res.json() : { subscribed: false };
+        setPushEnabled(!!data.subscribed);
+      } catch {
+        setPushEnabled(false);
+      }
     });
   }, []);
 
@@ -88,18 +112,28 @@ export function NotificationDropdown() {
     try {
       const reg = await navigator.serviceWorker.register("/sw.js");
       await navigator.serviceWorker.ready;
-      const existing = await reg.pushManager.getSubscription();
-      if (existing) {
-        await existing.unsubscribe();
-        await fetch("/api/notifications/push/unsubscribe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ endpoint: existing.endpoint }),
-        });
+
+      if (pushEnabled) {
+        const existing = await reg.pushManager.getSubscription();
+        if (existing) {
+          await existing.unsubscribe();
+          await fetch("/api/notifications/push/unsubscribe", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ endpoint: existing.endpoint }),
+          });
+        }
         setPushEnabled(false);
       } else {
+        // requestPermission is only ever called from this explicit,
+        // user-initiated click — never automatically on page load.
         const permission = await Notification.requestPermission();
         if (permission !== "granted") return;
+        // Clear out any stale/orphaned local subscription first so a fresh
+        // one is always created and correctly re-registered server-side,
+        // rather than reusing one the server may no longer know about.
+        const stale = await reg.pushManager.getSubscription();
+        if (stale) await stale.unsubscribe().catch(() => {});
         const sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
           applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY),
@@ -122,23 +156,23 @@ export function NotificationDropdown() {
     }
   };
 
-  const markRead = async (n: AppNotification) => {
+  const markRead = async (n: { id: string; isRead: boolean }) => {
     if (n.isRead) return;
+    setState((prev) => applyMarkRead(prev, n.id));
     await fetch(`/api/notifications/${n.id}/read`, { method: "PATCH" });
-    setItems((prev) => prev.map((x) => (x.id === n.id ? { ...x, isRead: true } : x)));
-    setUnreadCount((c) => Math.max(0, c - 1));
   };
 
   const markAllRead = async () => {
     setMarkingAll(true);
     try {
+      setState((prev) => applyMarkAllRead(prev));
       await fetch("/api/notifications/mark-all-read", { method: "POST" });
-      setItems((prev) => prev.map((n) => ({ ...n, isRead: true })));
-      setUnreadCount(0);
     } finally {
       setMarkingAll(false);
     }
   };
+
+  const { items, unreadCount } = state;
 
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
@@ -204,7 +238,7 @@ export function NotificationDropdown() {
 
         {/* List */}
         <div className="max-h-[360px] overflow-y-auto">
-          {loading ? (
+          {loading && items.length === 0 ? (
             <div className="flex items-center justify-center py-10">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
             </div>

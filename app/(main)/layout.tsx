@@ -28,11 +28,15 @@ export default async function MainLayout({
   // fresh here instead, same single-column-by-id pattern already used by
   // Settings/Users-admin/assigned-avatar rendering. Cheap: one indexed PK
   // lookup, one column, run alongside the other per-navigation queries below.
+  // customRole.name is fetched the same way — session only carries
+  // customRoleId (see lib/auth.ts), never the resolved persisted name, and
+  // the Topbar's role badge must prefer that name over a static label (see
+  // lib/services/global-role-options-service.ts's doc comment).
   const [canCreateTicket, activeWorkspace, navFlags, avatarUser] = await Promise.all([
     hasPermission(session.user.role, "ticket.create", session.user.customRoleId),
     getActiveWorkspace(session.user.id, session.user.role),
     getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId),
-    prisma.user.findUnique({ where: { id: session.user.id }, select: { image: true } }),
+    prisma.user.findUnique({ where: { id: session.user.id }, select: { image: true, customRole: { select: { name: true } } } }),
   ]);
 
   return (
@@ -47,7 +51,7 @@ export default async function MainLayout({
         <div className="flex h-screen overflow-hidden bg-background">
           <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
           <div className="flex-1 flex flex-col overflow-hidden">
-            <Topbar user={{ ...session.user, image: avatarUser?.image ?? null }} />
+            <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
             <main className="flex-1 overflow-y-auto p-6">{children}</main>
           </div>
         </div>

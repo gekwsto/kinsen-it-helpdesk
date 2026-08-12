@@ -1,11 +1,19 @@
 self.addEventListener("push", (event) => {
   const data = event.data ? event.data.json() : {};
+  const link = data.link || "/";
   event.waitUntil(
     self.registration.showNotification(data.title || "Kinsen IT Helpdesk", {
       body: data.body || "",
-      icon: "/favicon.ico",
-      badge: "/favicon.ico",
-      data: { link: data.link || "/" },
+      icon: "/kinsen_vertical.webp",
+      badge: "/kinsen_vertical.webp",
+      // Same-link pushes replace each other in the notification center
+      // instead of piling up (e.g. a rapid pair of replies on the same
+      // ticket) — renotify:true still alerts the user on the replacement,
+      // so a genuinely new event is never silently swallowed.
+      tag: link,
+      renotify: true,
+      timestamp: Date.now(),
+      data: { link },
     })
   );
 });

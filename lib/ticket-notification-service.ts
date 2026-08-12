@@ -7,6 +7,7 @@ import {
 } from "@/lib/email-ticket-parser";
 import { formatTicketNumber, truncate } from "@/lib/utils";
 import { sendPushNotificationsToUser } from "@/lib/web-push";
+import { publishNotificationCreated } from "@/lib/realtime/notification-publisher";
 import {
   EmailNotificationType,
   EmailNotificationStatus,
@@ -482,7 +483,12 @@ async function notifyTicketRequesterTerminalTransitionImpl(params: {
  * in-app Notification (bell) feed — deliberately created here, once, so
  * refactoring the reply push path can never leave a duplicate/orphaned
  * Notification row behind, and a terminal push gets the same in-app parity
- * reply already had — then sends the actual Web Push fan-out and resolves
+ * reply already had. The Notification row and the realtime
+ * NOTIFICATION_CREATED publish (see lib/realtime/notification-publisher.ts)
+ * are this function's ONLY writer/publisher for either — the two delivery
+ * channels below (in-app bell, Web Push) fan out from this single
+ * choke point, never duplicated at any call site. Then sends the actual Web
+ * Push fan-out and resolves
  * the claim to a status that reflects what really happened:
  * SKIPPED (no subscriptions to deliver to / push not configured), SENT (at
  * least one subscription received it), or FAILED (subscriptions existed but
@@ -501,8 +507,23 @@ async function deliverRequesterPush(params: {
   ticketId: string;
 }): Promise<void> {
   try {
-    await prisma.notification.create({
+    const created = await prisma.notification.create({
       data: { userId: params.userId, title: params.title, body: params.body, link: params.link },
+    });
+    // Realtime publish happens only after the row is actually committed —
+    // the DB remains authoritative; this is purely an acceleration
+    // mechanism for the bell UI. publishNotificationCreated/the event bus
+    // never throw, but this is wrapped in the same try/catch as the create
+    // above anyway so a hypothetical failure here can never look like a
+    // failure of the ticket action that triggered it (see the shared
+    // catch below and this function's own doc comment).
+    publishNotificationCreated(params.userId, {
+      id: created.id,
+      title: created.title,
+      body: created.body,
+      link: created.link,
+      isRead: created.isRead,
+      createdAt: created.createdAt.toISOString(),
     });
   } catch (err) {
     // Non-fatal — the in-app bell feed is a nice-to-have alongside the real

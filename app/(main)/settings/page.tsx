@@ -37,10 +37,17 @@ export default async function SettingsPage() {
       businessUnit: { select: { id: true, name: true } },
       subDepartment: { select: { id: true, name: true } },
       company: { select: { id: true, name: true } },
+      customRole: { select: { name: true } },
     },
   });
 
   if (!user) redirect("/login");
+
+  // Prefer the persisted, admin-editable CustomRole.name (covers both a
+  // renamed built-in role and a genuinely custom role) — ROLE_LABELS is a
+  // defensive fallback only, for a built-in role with no CustomRole row at
+  // all (see lib/services/global-role-options-service.ts's doc comment).
+  const roleLabel = user.customRole?.name ?? ROLE_LABELS[user.role];
 
   const isCredentialsAdmin =
     user.role === Role.ADMIN && user.authProvider === AuthProvider.CREDENTIALS;
@@ -76,7 +83,7 @@ export default async function SettingsPage() {
               <span
                 className={`mt-1.5 inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-medium ${ROLE_COLORS[user.role]}`}
               >
-                {ROLE_LABELS[user.role]}
+                {roleLabel}
               </span>
             </div>
           </div>

@@ -2,16 +2,36 @@ import "server-only";
 import webpush from "web-push";
 import { prisma } from "@/lib/prisma";
 
-if (
+// Computed once at module load — never re-read per call, and never logs the
+// actual key/email values (only whether each is present), so this can be
+// safely printed without leaking secrets.
+const VAPID_CONFIGURED = !!(
   process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY &&
   process.env.WEB_PUSH_VAPID_PRIVATE_KEY &&
   process.env.WEB_PUSH_CONTACT_EMAIL
-) {
+);
+
+if (VAPID_CONFIGURED) {
   webpush.setVapidDetails(
     `mailto:${process.env.WEB_PUSH_CONTACT_EMAIL}`,
-    process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY,
-    process.env.WEB_PUSH_VAPID_PRIVATE_KEY
+    process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY!,
+    process.env.WEB_PUSH_VAPID_PRIVATE_KEY!
   );
+} else {
+  // A clear, one-time, secret-free diagnostic — Web Push silently no-ops on
+  // every call below when this fires (never breaks a ticket action), but an
+  // administrator/developer should still be able to tell it's disabled and
+  // why, without any log ever containing a key/email value.
+  console.warn(
+    "[web-push] VAPID configuration is incomplete — Web Push is disabled. " +
+      "Set NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY, WEB_PUSH_VAPID_PRIVATE_KEY and WEB_PUSH_CONTACT_EMAIL to enable it. " +
+      `(present: publicKey=${!!process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY}, privateKey=${!!process.env.WEB_PUSH_VAPID_PRIVATE_KEY}, contactEmail=${!!process.env.WEB_PUSH_CONTACT_EMAIL})`
+  );
+}
+
+/** Whether Web Push is currently configured (all 3 VAPID env vars present) — never exposes the values themselves. Safe to surface in diagnostics/admin UI. */
+export function isWebPushConfigured(): boolean {
+  return VAPID_CONFIGURED;
 }
 
 export interface PushPayload {
@@ -42,10 +62,7 @@ export async function sendPushNotificationsToUser(
   userId: string,
   payload: PushPayload
 ): Promise<PushSendResult> {
-  if (
-    !process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY ||
-    !process.env.WEB_PUSH_VAPID_PRIVATE_KEY
-  ) {
+  if (!VAPID_CONFIGURED) {
     return NO_SUBSCRIPTIONS;
   }
 

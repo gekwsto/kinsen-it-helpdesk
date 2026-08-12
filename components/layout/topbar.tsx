@@ -42,6 +42,8 @@ interface TopbarProps {
     email?: string | null;
     image?: string | null;
     role: Role;
+    /** Persisted CustomRole.name — preferred over ROLE_LABELS below when present (renamed built-in role or a genuinely custom role). */
+    roleName?: string | null;
   };
 }
 
@@ -86,7 +88,7 @@ export function Topbar({ user }: TopbarProps) {
                 <span
                   className={`mt-1 inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium w-fit ${ROLE_BADGE_VARIANTS[user.role]}`}
                 >
-                  {ROLE_LABELS[user.role]}
+                  {user.roleName ?? ROLE_LABELS[user.role]}
                 </span>
               </div>
             </DropdownMenuLabel>

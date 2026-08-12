@@ -37,8 +37,6 @@ import { MEMBERSHIP_SOURCE_COLORS } from "@/components/admin/department-role-inf
 import { PaginationControls } from "@/components/ui/pagination";
 import type { PaginationMeta } from "@/lib/pagination";
 
-interface CustomRole { id: string; key: string; name: string; isBuiltIn: boolean }
-
 /** A department-role choice — built-in DepartmentRole enum value or `custom:<CustomRole.id>` — from GET /api/admin/department-roles/options. */
 interface DeptRoleOption {
   value: string;
@@ -46,6 +44,16 @@ interface DeptRoleOption {
   description?: string;
   isCustom: boolean;
   customRoleId?: string;
+}
+
+/** A Global Role choice — a Role enum value with a persisted, active CustomRole mirror, or `custom:<CustomRole.id>` — from GET /api/admin/roles/options. Mirrors DeptRoleOption exactly (see lib/services/global-role-options-service.ts). */
+interface GlobalRoleOption {
+  value: string;
+  label: string;
+  description?: string;
+  isCustom: boolean;
+  customRoleId?: string;
+  isActive: boolean;
 }
 
 /** One "Department Memberships" row in the Add User dialog before the user is created. */
@@ -65,7 +73,7 @@ interface User {
   createdAt: string;
   department?: { id: string; name: string } | null;
   businessUnit?: { id: string; name: string } | null;
-  customRole?: { id: string; key: string; name: string } | null;
+  customRole?: { id: string; key: string; name: string; isActive: boolean; isBuiltIn: boolean } | null;
   microsoftUserId?: string | null;
   lastMicrosoftSyncAt?: string | null;
   departmentMemberships: UserMembership[];
@@ -91,6 +99,13 @@ interface UserManagementProps {
   pagination: PaginationMeta;
 }
 
+// Defensive legacy fallback ONLY — the normal display source is the
+// persisted CustomRole.name via GlobalRoleOption/user.customRole (see
+// getUserRoleDisplay below). Used only when a built-in enum role has no
+// resolvable CustomRole row at all (e.g. a legacy user whose enum role, like
+// DIRECTOR, has since lost its mirrored CustomRole — see
+// lib/services/global-role-options-service.ts's doc comment on the ghost
+// DIRECTOR production scenario). Never used to generate assignment options.
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
   IT_AGENT: "IT Agent",
@@ -108,15 +123,6 @@ const ROLE_COLORS: Record<Role, string> = {
   DIRECTOR: "bg-indigo-100 text-indigo-700",
   USER: "bg-gray-100 text-gray-700",
 };
-
-// Represents a selectable role option (built-in enum or custom DB role)
-interface RoleOption {
-  value: string;       // enum role value for built-in, "custom:" + id for custom
-  label: string;
-  isCustom: boolean;
-  customRoleId?: string;
-  enumRole: Role;      // the enum role to store (USER as base for custom roles)
-}
 
 export function UserManagement({
   users: initialUsers,
@@ -137,7 +143,14 @@ export function UserManagement({
   // navigation (back/forward, a bookmarked/shared URL, or the debounce
   // itself landing) rather than only ever being set once at mount.
   const [searchDraft, setSearchDraft] = useState(serverSearch);
-  const [customRoles, setCustomRoles] = useState<CustomRole[]>([]);
+  // Fetched WITH disabled roles included (includeInactive=true) so an
+  // existing user already on a since-disabled — or, for a built-in enum
+  // role, entirely CustomRole-less (ghost) — role can still be shown
+  // correctly (see userGlobalRoleOptions below). `assignableGlobalRoleOptions`
+  // (active only) is what's actually offered for a NEW selection. Mirrors
+  // UserDepartmentMemberships' identical allDeptRoleOptions pattern.
+  const [allGlobalRoleOptions, setAllGlobalRoleOptions] = useState<GlobalRoleOption[]>([]);
+  const assignableGlobalRoleOptions = allGlobalRoleOptions.filter((o) => o.isActive);
 
   useEffect(() => {
     setSearchDraft(serverSearch);
@@ -188,7 +201,10 @@ export function UserManagement({
   const [createName, setCreateName] = useState("");
   const [createEmail, setCreateEmail] = useState("");
   const [createPassword, setCreatePassword] = useState("");
-  const [createRole, setCreateRole] = useState<Role>(Role.USER);
+  // "AGENT_ASSIGNEE"-style raw enum value for a built-in role, or
+  // `custom:<CustomRole.id>` — same encoding as editRoleValue, resolved via
+  // resolveGlobalRoleSelection below.
+  const [createRoleValue, setCreateRoleValue] = useState<string>(Role.USER);
   const [createDept, setCreateDept] = useState("");
   const [createBU, setCreateBU] = useState("");
   // Repeatable Department Memberships rows — only used once at least one
@@ -199,15 +215,50 @@ export function UserManagement({
   const [deptRoleOptions, setDeptRoleOptions] = useState<DeptRoleOption[]>([]);
 
   useEffect(() => {
-    fetch("/api/admin/roles")
-      .then((r) => r.json())
-      .then((data) => setCustomRoles(data.roles ?? []))
+    fetch("/api/admin/roles/options?includeInactive=true")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((options) => setAllGlobalRoleOptions(Array.isArray(options) ? options : []))
       .catch(() => {});
     fetch("/api/admin/department-roles/options")
       .then((r) => (r.ok ? r.json() : []))
       .then((options) => setDeptRoleOptions(Array.isArray(options) ? options : []))
       .catch(() => {});
   }, []);
+
+  /** Resolves a GlobalRoleOption.value ("ADMIN" or "custom:<id>") into the {role, customRoleId} shape the API expects — mirrors deptRoleBody above. Deliberately does NOT require the value to be present in allGlobalRoleOptions: an existing user's current value (see openEdit) must resolve correctly even when it's a legacy enum role with no persisted CustomRole row at all (ghost DIRECTOR) — the value's own encoding (raw enum string vs `custom:` prefix) is sufficient, the server is the real authority (assertGlobalRoleAssignable). */
+  const resolveGlobalRoleSelection = (value: string): { role: Role; customRoleId: string | null } => {
+    if (value.startsWith("custom:")) {
+      return { role: Role.USER, customRoleId: value.slice("custom:".length) };
+    }
+    return { role: value as Role, customRoleId: null };
+  };
+
+  /**
+   * The options a SPECIFIC user's Global Role Select should render: the
+   * normal assignable (active) list, plus — only if this user's CURRENT
+   * role/customRoleId isn't already in that list (since disabled, or a
+   * legacy enum role with no CustomRole row at all) — a synthetic entry so
+   * the real current role is shown clearly instead of silently defaulting
+   * to something else. Mirrors UserDepartmentMemberships.membershipRoleOptions.
+   */
+  function userGlobalRoleOptions(user: User): GlobalRoleOption[] {
+    const currentValue = user.customRole ? `custom:${user.customRole.id}` : user.role;
+    if (assignableGlobalRoleOptions.some((o) => o.value === currentValue)) return assignableGlobalRoleOptions;
+    const known = allGlobalRoleOptions.find((o) => o.value === currentValue);
+    const currentLabel = user.customRole
+      ? (user.customRole.name ?? known?.label ?? "Unknown role")
+      : (known?.label ?? ROLE_LABELS[user.role] ?? user.role);
+    return [
+      {
+        value: currentValue,
+        label: `${currentLabel} (disabled)`,
+        isCustom: !!user.customRole,
+        customRoleId: user.customRole?.id,
+        isActive: false,
+      },
+      ...assignableGlobalRoleOptions,
+    ];
+  }
 
   /** Resolves a DeptRoleOption.value ("AGENT_ASSIGNEE" or "custom:<id>") into the {role} or {customRoleId} shape the API expects — mirrors the same pattern in department-members-management.tsx. */
   const deptRoleBody = (value: string): { role: string } | { customRoleId: string } => {
@@ -254,37 +305,25 @@ export function UserManagement({
     updateParams({ pageSize: pageSize === 20 ? null : String(pageSize) }, { resetPage: true });
   };
 
-  // Build unified role options: built-in enum roles first, then custom non-built-in roles
-  const roleOptions: RoleOption[] = [
-    ...Object.entries(ROLE_LABELS).map(([value, label]) => ({
-      value,
-      label,
-      isCustom: false,
-      enumRole: value as Role,
-    })),
-    ...customRoles
-      .filter((cr) => !cr.isBuiltIn)
-      .map((cr) => ({
-        value: `custom:${cr.id}`,
-        label: `${cr.name} (Custom)`,
-        isCustom: true,
-        customRoleId: cr.id,
-        enumRole: Role.USER,
-      })),
-  ];
-
   const getUserRoleDisplay = (user: User) => {
-    if (user.customRole && !user.customRole.key.match(/^(ADMIN|IT_AGENT|DEPARTMENT_MANAGER|DIRECTOR|USER)$/)) {
+    if (user.customRole) {
       return { label: `${user.customRole.name} (Custom)`, color: "bg-teal-100 text-teal-700" };
     }
-    return { label: ROLE_LABELS[user.role], color: ROLE_COLORS[user.role] };
+    // Prefer the persisted CustomRole.name for a renamed built-in role — the
+    // static ROLE_LABELS fallback only fires when no matching CustomRole
+    // row exists at all (see resolveGlobalRoleSelection's doc comment).
+    const builtInOption = allGlobalRoleOptions.find((o) => !o.isCustom && o.value === user.role);
+    return {
+      label: builtInOption?.label ?? ROLE_LABELS[user.role] ?? user.role,
+      color: ROLE_COLORS[user.role] ?? "bg-gray-100 text-gray-700",
+    };
   };
 
   const resetCreate = () => {
     setCreateName("");
     setCreateEmail("");
     setCreatePassword("");
-    setCreateRole(Role.USER);
+    setCreateRoleValue(Role.USER);
     setCreateDept("");
     setCreateBU("");
     setCreateMemberships([]);
@@ -311,6 +350,7 @@ export function UserManagement({
     setCreating(true);
     try {
       const primaryRow = createMemberships.find((r) => r.id === createPrimaryRowId);
+      const { role: createRole, customRoleId: createCustomRoleId } = resolveGlobalRoleSelection(createRoleValue);
       const res = await fetch("/api/admin/users", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -319,6 +359,7 @@ export function UserManagement({
           email: createEmail,
           password: createPassword,
           role: createRole,
+          customRoleId: createCustomRoleId,
           primaryDepartmentId: primaryRow ? primaryRow.departmentId : (createDept || null),
           departmentMemberships: createMemberships.map((r) => ({
             departmentId: r.departmentId,
@@ -405,8 +446,10 @@ export function UserManagement({
 
   const openEdit = (user: User) => {
     setEditUser(user);
-    // Determine current role value
-    if (user.customRole && !user.customRole.key.match(/^(ADMIN|IT_AGENT|DEPARTMENT_MANAGER|DIRECTOR|USER)$/)) {
+    // Determine current role value — user.customRole is only ever populated
+    // for a genuinely custom role (a built-in role's User row always has
+    // customRoleId: null, role: <the enum value> — see resolveGlobalRoleSelection).
+    if (user.customRole) {
       setEditRoleValue(`custom:${user.customRole.id}`);
     } else {
       setEditRoleValue(user.role);
@@ -426,10 +469,7 @@ export function UserManagement({
     if (!editUser || !isEditEmailValid) return;
     setSaving(true);
     try {
-      // Resolve role option
-      const option = roleOptions.find((o) => o.value === editRoleValue);
-      const role = option?.enumRole ?? Role.USER;
-      const customRoleId = option?.isCustom ? (option.customRoleId ?? null) : null;
+      const { role, customRoleId } = resolveGlobalRoleSelection(editRoleValue);
 
       const res = await fetch(`/api/admin/users/${editUser.id}`, {
         method: "PATCH",
@@ -683,12 +723,22 @@ export function UserManagement({
             </div>
             <div className="space-y-2">
               <Label>Global Role</Label>
-              <Select value={createRole} onValueChange={(v) => setCreateRole(v as Role)}>
+              <Select value={createRoleValue} onValueChange={setCreateRoleValue}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {Object.entries(ROLE_LABELS).map(([value, label]) => (
-                    <SelectItem key={value} value={value}>{label}</SelectItem>
+                  {assignableGlobalRoleOptions.filter((o) => !o.isCustom).map((o) => (
+                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
                   ))}
+                  {assignableGlobalRoleOptions.some((o) => o.isCustom) && (
+                    <>
+                      <SelectItem value="__sep__" disabled className="text-muted-foreground text-xs font-semibold">
+                        — Custom Roles —
+                      </SelectItem>
+                      {assignableGlobalRoleOptions.filter((o) => o.isCustom).map((o) => (
+                        <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                      ))}
+                    </>
+                  )}
                 </SelectContent>
               </Select>
             </div>
@@ -854,26 +904,31 @@ export function UserManagement({
                     >
                       <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="" disabled className="text-muted-foreground text-xs font-semibold">
-                          — Built-in Roles —
-                        </SelectItem>
-                        {Object.entries(ROLE_LABELS).map(([value, label]) => (
-                          <SelectItem key={value} value={value}>{label}</SelectItem>
-                        ))}
-                        {customRoles.filter((cr) => !cr.isBuiltIn).length > 0 && (
-                          <>
-                            <SelectItem value="__sep__" disabled className="text-muted-foreground text-xs font-semibold">
-                              — Custom Roles —
-                            </SelectItem>
-                            {customRoles
-                              .filter((cr) => !cr.isBuiltIn)
-                              .map((cr) => (
-                                <SelectItem key={cr.id} value={`custom:${cr.id}`}>
-                                  {cr.name}
-                                </SelectItem>
+                        {(() => {
+                          const options = userGlobalRoleOptions(editUser);
+                          const builtIns = options.filter((o) => !o.isCustom);
+                          const customs = options.filter((o) => o.isCustom);
+                          return (
+                            <>
+                              <SelectItem value="__builtin__" disabled className="text-muted-foreground text-xs font-semibold">
+                                — Built-in Roles —
+                              </SelectItem>
+                              {builtIns.map((o) => (
+                                <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
                               ))}
-                          </>
-                        )}
+                              {customs.length > 0 && (
+                                <>
+                                  <SelectItem value="__sep__" disabled className="text-muted-foreground text-xs font-semibold">
+                                    — Custom Roles —
+                                  </SelectItem>
+                                  {customs.map((o) => (
+                                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                                  ))}
+                                </>
+                              )}
+                            </>
+                          );
+                        })()}
                       </SelectContent>
                     </Select>
                   </div>

@@ -265,6 +265,11 @@ export const createUserSchema = z.object({
   email: z.string().trim().toLowerCase().email("Invalid email address"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   role: z.nativeEnum(Role).default(Role.USER),
+  // Custom GLOBAL/BOTH-scope role (see getGlobalRoleOptions) — mirrors
+  // updateUserRoleSchema's field. `role` still carries the required-column
+  // placeholder (Role.USER) when this is set, exactly as the edit path
+  // already does.
+  customRoleId: z.string().nullable().optional(),
   // Legacy single-department field — kept for backward compatibility with
   // any other caller; the Add User UI now sends primaryDepartmentId +
   // departmentMemberships instead (see app/api/admin/users/route.ts).

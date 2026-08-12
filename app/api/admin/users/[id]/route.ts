@@ -5,11 +5,12 @@ import { requireAdmin, requireAuth, hasPermission, canAssignUserToDepartment } f
 import { updateUserRoleSchema } from "@/lib/validations";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
 import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
+import { assertGlobalRoleAssignable, GlobalRoleAssignmentError, type GlobalRoleSelection } from "@/lib/services/global-role-assignment-service";
 
 const USER_INCLUDE = {
   department: { select: { id: true, name: true } },
   businessUnit: { select: { id: true, name: true } },
-  customRole: { select: { id: true, key: true, name: true } },
+  customRole: { select: { id: true, key: true, name: true, isActive: true, isBuiltIn: true } },
   departmentMemberships: {
     include: {
       department: { select: { id: true, name: true, slug: true } },
@@ -121,6 +122,18 @@ export async function PATCH(
     // unrelated field like email doesn't silently lock out Microsoft sync.
     const isRoleChange = data.role !== target.role;
 
+    // Never trust the submitted role/customRoleId at face value — a Role
+    // enum value being accepted by z.nativeEnum(Role) does not mean it is
+    // currently assignable (see the ghost DIRECTOR production scenario:
+    // Role.DIRECTOR exists in the enum, but has no active, mirrored
+    // CustomRole row). "Unchanged" (re-saving the user's current role) is
+    // never blocked, so an existing user already on a disabled/ghost role
+    // stays readable/manageable.
+    const roleSelection: GlobalRoleSelection = data.customRoleId
+      ? { customRoleId: data.customRoleId }
+      : { role: data.role };
+    await assertGlobalRoleAssignable(roleSelection, { role: target.role, customRoleId: target.customRoleId }, prisma);
+
     await prisma.user.update({
       where: { id },
       data: {
@@ -154,6 +167,12 @@ export async function PATCH(
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
+    }
+    if (error instanceof GlobalRoleAssignmentError) {
+      if (error.code === "ROLE_INACTIVE") {
+        return NextResponse.json({ error: "The selected global role is disabled and cannot be assigned.", code: "role_inactive" }, { status: 409 });
+      }
+      return NextResponse.json({ error: "Invalid global role.", code: "invalid_role" }, { status: 400 });
     }
     if (error.message === "Forbidden" || error.message === "Unauthorized") {
       return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
