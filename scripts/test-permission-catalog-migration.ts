@@ -73,6 +73,13 @@ async function runMigrationSql(): Promise<void> {
   );
 }
 
+// ticket.view.all/ticket.closed.view were added by a LATER migration
+// (20260813150000_add_ticket_view_all_and_closed_view_permissions), not by
+// the 20260813113000 migration this file specifically re-executes — but
+// they're real, permanent rows in the live catalogue this file's baseline
+// counts read from, so they're included here too (this file verifies the
+// 20260813113000 migration's OWN idempotent restore behavior against
+// whatever the CURRENT full catalogue is, not a frozen historical one).
 const CANONICAL_TICKET_KEYS = [
   "ticket.view",
   "ticket.create",
@@ -87,14 +94,16 @@ const CANONICAL_TICKET_KEYS = [
   "ticket.pending.view",
   "ticket.pending.accept",
   "ticket.pending.reject",
+  "ticket.view.all",
+  "ticket.closed.view",
 ].sort();
 
-/** Exact per-module counts from the current prisma/seed.ts PERMISSIONS catalogue (76 total) — verified module-by-module, not just a global count, so a drift confined to one module (e.g. department/subdepartment/organization) can't hide behind an otherwise-correct total. */
+/** Exact per-module counts from the current prisma/seed.ts PERMISSIONS catalogue (78 total) — verified module-by-module, not just a global count, so a drift confined to one module (e.g. department/subdepartment/organization) can't hide behind an otherwise-correct total. */
 const CANONICAL_MODULE_COUNTS: Record<string, number> = {
   activities: 6,
   projects: 6,
   goals: 4,
-  tickets: 13,
+  tickets: 15,
   admin: 7,
   department: 9,
   company: 3,
@@ -122,9 +131,9 @@ async function main() {
     // ══════════════════════ 1. Canonical catalogue baseline ══════════════════════
     console.log("\n=== 1. Canonical permission catalogue (baseline, before this test mutates anything) ===\n");
     const baselineCount = await prisma.permission.count();
-    check("1. Canonical catalogue currently has all 76 permissions", baselineCount === 76);
+    check("1. Canonical catalogue currently has all 78 permissions", baselineCount === 78);
     const baselineTicketKeys = (await prisma.permission.findMany({ where: { module: "tickets" }, select: { key: true } })).map((p) => p.key).sort();
-    check("2. Tickets module currently has exactly the 13 canonical keys", JSON.stringify(baselineTicketKeys) === JSON.stringify(CANONICAL_TICKET_KEYS));
+    check("2. Tickets module currently has exactly the 15 canonical keys", JSON.stringify(baselineTicketKeys) === JSON.stringify(CANONICAL_TICKET_KEYS));
 
     console.log("\n=== 1b. Every module's permission count matches the canonical catalogue exactly (not just tickets) ===\n");
     for (const [module, expectedCount] of Object.entries(CANONICAL_MODULE_COUNTS)) {
@@ -132,7 +141,7 @@ async function main() {
       check(`1b. Module "${module}" has exactly ${expectedCount} permissions`, actual === expectedCount);
     }
     const sumOfModules = Object.values(CANONICAL_MODULE_COUNTS).reduce((a, b) => a + b, 0);
-    check("1b. Per-module counts sum to the full canonical catalogue size (76)", sumOfModules === 76);
+    check("1b. Per-module counts sum to the full canonical catalogue size (78)", sumOfModules === 78);
 
     // ══════════════════════ Simulate stale production: delete 2 permissions entirely ══════════════════════
     console.log("\n=== Simulating a stale/partial catalogue (the production symptom) ===\n");
@@ -145,7 +154,7 @@ async function main() {
     // reproducing "this key never existed in this database".
     await prisma.permission.delete({ where: { key: "ticket.pending.reject" } });
     await prisma.permission.delete({ where: { key: "organization.tree.view" } });
-    check("Fixture: catalogue now genuinely missing 2 keys (74 remain)", (await prisma.permission.count()) === 74);
+    check("Fixture: catalogue now genuinely missing 2 keys (76 remain)", (await prisma.permission.count()) === 76);
 
     // Simulate "an admin manually removed one specific grant from an
     // EXISTING permission" — the permission itself is untouched, only its
@@ -172,9 +181,9 @@ async function main() {
     await runMigrationSql();
 
     const afterCount = await prisma.permission.count();
-    check("3. Only the missing records were inserted — catalogue is back to all 76", afterCount === 76);
+    check("3. Only the missing records were inserted — catalogue is back to all 78", afterCount === 78);
     const afterTicketKeys = (await prisma.permission.findMany({ where: { module: "tickets" }, select: { key: true } })).map((p) => p.key).sort();
-    check("2 (post-migration). Tickets module has exactly the 13 canonical keys again", JSON.stringify(afterTicketKeys) === JSON.stringify(CANONICAL_TICKET_KEYS));
+    check("2 (post-migration). Tickets module has exactly the 15 canonical keys again", JSON.stringify(afterTicketKeys) === JSON.stringify(CANONICAL_TICKET_KEYS));
 
     // ══════════════════════ 5. Newly-inserted permissions get their canonical default grants ══════════════════════
     console.log("\n=== 5. Newly (re-)inserted permissions get their intended fresh-install default grants ===\n");

@@ -26,7 +26,6 @@ import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { useHelpGuide } from "@/components/help/help-guide-provider";
 import { resolveActiveHref } from "@/lib/sidebar-active-route";
-import { canManageProjects, isAdmin } from "@/lib/nav-access";
 
 // `visible`, when defined, wins outright over `roles` — lets specific items
 // be gated by a server-computed permission flag (e.g. subdepartment.view)
@@ -84,9 +83,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
   };
 
   const ticketChildren = [
-    ...(canManageProjects(userRole)
-      ? [{ label: "All Tickets", href: "/tickets" }]
-      : []),
+    { label: "All Tickets", href: "/tickets", visible: navFlags.canViewAllTickets },
     { label: "Assigned to Me", href: "/tickets/assigned-to-me" },
     { label: "Created by Me", href: "/tickets/created-by-me" },
     { label: "Create Ticket", href: "/tickets/new", visible: navFlags.canCreateTickets },
@@ -96,9 +93,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
     // PendingTicket lifecycle (PENDING -> REJECTED, recoverable into
     // ACCEPTED), not a separate permission concept.
     { label: "Rejected Tickets", href: "/tickets/rejected", visible: navFlags.canViewPendingTickets },
-    ...(isAdmin(userRole)
-      ? [{ label: "Closed Tickets", href: "/tickets/closed", roles: ["ADMIN"] as Role[] }]
-      : []),
+    { label: "Closed Tickets", href: "/tickets/closed", visible: navFlags.canViewClosedTickets },
   ];
 
   const navItems: NavItem[] = [

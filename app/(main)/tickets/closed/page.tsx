@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { isAdmin } from "@/lib/permissions";
-import { buildTicketListWhere } from "@/lib/services/department-scope-service";
+import { buildTicketListWhere, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { TicketTable } from "@/components/tickets/ticket-table";
@@ -67,7 +66,16 @@ export default async function ClosedTicketsPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  if (!isAdmin(session.user.role)) redirect("/dashboard");
+  // Same union sidebar's "Closed Tickets" link uses (navFlags.canViewClosedTickets)
+  // — department-scoped OR global ticket.closed.view. Previously hardcoded
+  // to isAdmin(role) — ADMIN was (and by default still is, via the seed
+  // migration's default grant) the only role with this permission, but it
+  // is now a real, independently grantable key rather than a role check;
+  // buildTicketListWhere below already scopes the actual list correctly
+  // for any non-ADMIN grantee (own-view/full-view split), so opening this
+  // up needed no other change.
+  const closedNavFlags = await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId);
+  if (!closedNavFlags.canViewClosedTickets) redirect("/dashboard");
 
   const params = await searchParams;
   const requestedPage = parsePageParam(params.page);

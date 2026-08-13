@@ -62,6 +62,16 @@ const PERMISSIONS = [
   { key: "ticket.department.change", description: "Change a ticket's department/sub-department", module: "tickets" },
   { key: "ticket.share.department", description: "Share a ticket with the whole department", module: "tickets" },
   { key: "ticket.share.subdepartment", description: "Share a ticket with the whole sub-department", module: "tickets" },
+  // Distinct from ticket.view: ticket.view alone only ever grants a user
+  // their OWN tickets (requested/assigned/shared-with) — this key is what
+  // additionally grants the full department ticket list ("All Tickets").
+  // See splitTicketViewScope/hasAnyFullTicketView in
+  // department-scope-service.ts, the sole place this key is consulted.
+  { key: "ticket.view.all", description: "View the full department ticket list, not just your own", module: "tickets" },
+  // Gates the dedicated "Closed Tickets" archive view (resolved/closed/
+  // cancelled tickets) — separate from ticket.view so a role can see the
+  // active queue without also seeing the historical archive, or vice versa.
+  { key: "ticket.closed.view", description: "View closed, resolved, and cancelled tickets", module: "tickets" },
   // Pending Tickets (Department Email -> Pending review flow) — see
   // lib/services/pending-ticket-service.ts. Distinct from ticket.view/create:
   // a pending row is never a real Ticket, so seeing/acting on it needs its
@@ -192,7 +202,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
     "project.view", "project.create", "project.edit", "resourcePlanning.view",
     "goal.view",
-    "ticket.view", "ticket.create", "ticket.reply",
+    "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.share.department", "ticket.share.subdepartment",
     "ticket.pending.view", "ticket.pending.accept",
@@ -205,7 +215,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
     "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view",
     "goal.view", "goal.create", "goal.edit",
-    "ticket.view", "ticket.create", "ticket.reply", "ticket.assignable",
+    "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply", "ticket.assignable",
     "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
     "department.view", "department.user.assign", "department.user.unassign", "department.email.manage",
     "subdepartment.view", "subdepartment.create", "subdepartment.update", "subdepartment.delete",
@@ -221,7 +231,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // but never admin.*/user.manage/role.manage/department.manage* — those
   // stay Administrator-only. See canViewAllDepartments() in lib/permissions.ts.
   DIRECTOR: [
-    "ticket.view",
+    "ticket.view", "ticket.view.all",
     "project.view", "project.create", "resourcePlanning.view",
     "activity.view", "activity.create",
     "goal.view",
@@ -239,7 +249,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "activity.view", "activity.create", "activity.edit", "activity.delete", "activity.assign", "activity.assignable",
     "project.view", "project.create", "project.edit", "project.delete", "project.assignable", "resourcePlanning.view",
     "goal.view", "goal.create", "goal.edit", "goal.delete",
-    "ticket.view", "ticket.create", "ticket.reply",
+    "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
     "department.view", "department.manageSettings", "department.manageMembers", "department.email.manage",
@@ -265,19 +275,23 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   AGENT_ASSIGNEE: [
     "activity.view", "activity.edit", "activity.assignable",
     "project.view", "resourcePlanning.view",
-    "ticket.view", "ticket.create", "ticket.reply",
+    "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.share.department", "ticket.share.subdepartment",
     "ticket.pending.view", "ticket.pending.accept",
   ],
-  // Creates and tracks own tickets within the department.
+  // Creates and tracks own tickets within the department — deliberately
+  // does NOT get ticket.view.all: this is the one built-in department role
+  // that must stay own-tickets-only in the ticket list (see
+  // splitTicketViewScope in department-scope-service.ts, the sole
+  // consumer of ticket.view.all).
   REQUESTER: [
     "activity.view",
     "ticket.view", "ticket.create", "ticket.reply",
   ],
   // Read-only.
   VIEWER: [
-    "activity.view", "project.view", "goal.view", "ticket.view",
+    "activity.view", "project.view", "goal.view", "ticket.view", "ticket.view.all",
   ],
 };
 

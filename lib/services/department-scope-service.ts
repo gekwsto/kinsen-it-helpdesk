@@ -134,7 +134,20 @@ async function getUserShareEligibleSubDepartmentIds(userId: string, ownOnlyDepar
   return rows.map((r) => r.subDepartmentId);
 }
 
-/** Splits a user's ticket-viewable departments into "sees everyone's tickets" vs "own tickets only" (DepartmentRole.REQUESTER). */
+/**
+ * Splits a user's ticket-viewable departments into "sees everyone's
+ * tickets" (ticket.view.all) vs "own tickets only" (ticket.view without
+ * ticket.view.all). Permission-key-driven, not role-name-driven — a
+ * membership's *effective* role for this decision is whichever the
+ * customRoleId-authoritative invariant says it is (see
+ * hasDepartmentPermission): a custom role must explicitly hold
+ * ticket.view.all to get full-department visibility, regardless of what
+ * its required-but-unused `role` enum placeholder happens to be. Built-in
+ * REQUESTER is the one seeded role that has ticket.view but not
+ * ticket.view.all (see prisma/seed.ts) — every other built-in ticket-
+ * viewing role keeps its previous full-view behavior via an explicit grant,
+ * not by falling through an enum comparison.
+ */
 async function splitTicketViewScope(userId: string): Promise<{ fullView: string[]; ownOnly: string[] }> {
   const memberships = await getUserDepartmentMemberships(userId);
   const fullView: string[] = [];
@@ -142,8 +155,9 @@ async function splitTicketViewScope(userId: string): Promise<{ fullView: string[
   for (const m of memberships) {
     const allowed = await hasDepartmentPermission(m.role, "ticket.view", m.customRoleId);
     if (!allowed) continue;
-    if (m.role === DepartmentRole.REQUESTER) ownOnly.push(m.departmentId);
-    else fullView.push(m.departmentId);
+    const seesAll = await hasDepartmentPermission(m.role, "ticket.view.all", m.customRoleId);
+    if (seesAll) fullView.push(m.departmentId);
+    else ownOnly.push(m.departmentId);
   }
   return { fullView, ownOnly };
 }
@@ -458,6 +472,21 @@ export interface NavVisibilityFlags {
   canCreateProjects: boolean;
   canCreateActivities: boolean;
   canCreateGoals: boolean;
+  /**
+   * Gates the "All Tickets" sidebar entry — reuses hasAnyFullTicketView
+   * (the SAME resolver app/(main)/tickets/page.tsx already uses to decide
+   * whether to redirect to /tickets/created-by-me), not a separate re-
+   * implementation. Previously this link was gated by
+   * canManageProjects(role) — a hardcoded ADMIN/IT_AGENT/DEPARTMENT_MANAGER/
+   * DIRECTOR enum check, completely disconnected from what the page itself
+   * actually required (ticket.view.all in at least one department, or the
+   * ADMIN/DIRECTOR canViewAllDepartments bypass) — so the link could show
+   * for a role with zero eligible departments (redirecting immediately) or
+   * hide for a custom role that genuinely had full ticket visibility.
+   */
+  canViewAllTickets: boolean;
+  /** Gates the "Closed Tickets" sidebar entry and app/(main)/tickets/closed's own page-level check — ticket.closed.view, department-scoped or global, same union shape as every other canView* flag. Previously hardcoded to isAdmin(role)/roles:["ADMIN"]. */
+  canViewClosedTickets: boolean;
 }
 
 // cache()-wrapped: app/(main)/layout.tsx computes this once for Sidebar,
@@ -485,6 +514,8 @@ export const getNavVisibilityFlags = cache(async (
       canCreateProjects: true,
       canCreateActivities: true,
       canCreateGoals: true,
+      canViewAllTickets: true,
+      canViewClosedTickets: true,
     };
   }
 
@@ -516,6 +547,8 @@ export const getNavVisibilityFlags = cache(async (
     canCreateProjects,
     canCreateActivities,
     canCreateGoals,
+    canViewAllTickets,
+    canViewClosedTickets,
   ] = await Promise.all([
     getAccessibleDepartmentSummaries(userId, role, "subdepartment.view"),
     getUserDepartmentMemberships(userId),
@@ -534,6 +567,8 @@ export const getNavVisibilityFlags = cache(async (
     moduleGrant("project.create"),
     moduleGrant("activity.create"),
     moduleGrant("goal.create"),
+    hasAnyFullTicketView(userId, role),
+    moduleGrant("ticket.closed.view"),
   ]);
 
   return {
@@ -550,6 +585,8 @@ export const getNavVisibilityFlags = cache(async (
     canCreateProjects,
     canCreateActivities,
     canCreateGoals,
+    canViewAllTickets,
+    canViewClosedTickets,
   };
 });
 
