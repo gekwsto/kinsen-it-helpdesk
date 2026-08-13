@@ -42,6 +42,27 @@ export const ADMIN_USER_LIST_SELECT = {
       id: true,
       departmentId: true,
       role: true,
+      // customRoleId/customRole were missing here — the root cause of a
+      // real production bug: a department membership's role IS this
+      // enum column ONLY when customRoleId is null; a custom-role
+      // assignment (e.g. Viewer -> a custom "test role") has role stuck
+      // at its required VIEWER placeholder, with customRoleId as the
+      // ACTUAL identity (see grantManualMembership's schema comment).
+      // Without selecting customRoleId/customRole here, every full page
+      // load AND every router.refresh() (called after every outer Edit
+      // User Save) fed the client a departmentMemberships row shape
+      // components/admin/user-department-memberships.tsx's
+      // membershipRoleValue() couldn't distinguish from a genuinely
+      // built-in VIEWER assignment — `m.customRoleId` was `undefined`
+      // (falsy), so the dropdown silently fell back to displaying `m.role`
+      // ("Viewer") even though the database's DepartmentMembership row was
+      // already correctly persisted with the custom role. The database was
+      // never wrong; this SELECT just never asked for the field that
+      // proves it. Shape now matches USER_INCLUDE (used by the PATCH/POST
+      // user routes) exactly, so every surface that reads a user's
+      // department memberships agrees on what fields exist.
+      customRoleId: true,
+      customRole: { select: { id: true, name: true, isActive: true } },
       source: true,
       isActive: true,
       createdAt: true,

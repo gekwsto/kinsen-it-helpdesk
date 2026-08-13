@@ -1,10 +1,10 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
 import {
   buildTicketListWhere,
   hasAnyFullTicketView,
   getAccessibleDepartmentSummaries,
+  getNavVisibilityFlags,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
@@ -126,10 +126,19 @@ export default async function AllTicketsPage({
   const role = session.user.role;
   const customRoleId = session.user.customRoleId;
 
-  const [canView, canCreate] = await Promise.all([
-    hasPermission(role, "ticket.view", customRoleId),
-    hasPermission(role, "ticket.create", customRoleId),
-  ]);
+  // canView is the same union canFlags.canViewTickets computes for the
+  // sidebar (cache()-wrapped — app/(main)/layout.tsx already computes it
+  // once per render, so this call is free, not a second query) — a raw
+  // hasPermission(...) call here would only see GLOBAL grants and wrongly
+  // wall off a user whose ticket.view comes solely from a department
+  // built-in/custom role, exactly the class of bug this mirrors for
+  // Projects/Activities (see department-scope-service.ts's NavVisibilityFlags
+  // doc comment).
+  const navFlags = await getNavVisibilityFlags(session.user.id, role, customRoleId);
+  const canView = navFlags.canViewTickets;
+  // Same union sidebar's "Create Ticket" link uses — never derived from
+  // canView above (VIEW does not imply CREATE).
+  const canCreate = navFlags.canCreateTickets;
 
   if (!canView) {
     return (

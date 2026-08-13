@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, canManageProjects, isAdmin } from "@/lib/permissions";
-import { buildActivityListWhere } from "@/lib/services/department-scope-service";
+import { hasPermission, isAdmin } from "@/lib/permissions";
+import { buildActivityListWhere, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
@@ -29,13 +29,13 @@ export default async function ActivityGanttPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  if (!canManageProjects(session.user.role)) redirect("/dashboard");
-
-  const canView = await hasPermission(
-    session.user.role,
-    "activity.view",
-    session.user.customRoleId
-  );
+  // Same union canFlags.canViewActivities computes for the sidebar and for
+  // app/(main)/activities/page.tsx — see that page's comment for why the
+  // previous canManageProjects(role) pre-gate here was wrong (global-enum-
+  // only, blind to custom roles and department-scoped grants).
+  const canView = (
+    await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
+  ).canViewActivities;
   if (!canView) redirect("/dashboard");
 
   const params = await searchParams;

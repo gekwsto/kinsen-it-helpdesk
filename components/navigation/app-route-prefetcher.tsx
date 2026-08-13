@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import type { Role } from "@prisma/client";
-import { canManageProjects, isAdmin } from "@/lib/nav-access";
+import { isAdmin } from "@/lib/nav-access";
 import { useActiveWorkspace } from "@/components/workspace/active-workspace-provider";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { runPrefetchQueue, isConnectionConstrained, type PrefetchTarget } from "@/lib/route-prefetch-scheduler";
@@ -12,7 +12,6 @@ const DEV = process.env.NODE_ENV !== "production";
 
 interface AppRoutePrefetcherProps {
   userRole: Role;
-  canCreateTicket: boolean;
   navFlags: NavVisibilityFlags;
 }
 
@@ -21,9 +20,9 @@ interface AppRoutePrefetcherProps {
  * (departmentId) — must be re-warmed every time the workspace changes, or a
  * page could otherwise show a Finance-scoped prefetch after switching to
  * another department. Gating mirrors Sidebar's OWN visibility logic exactly
- * (canManageProjects/isAdmin from lib/nav-access.ts, navFlags computed once
- * in app/(main)/layout.tsx and passed down here unchanged) — never a second,
- * independently-hardcoded authorization system.
+ * (navFlags.canView* computed once via getNavVisibilityFlags in
+ * app/(main)/layout.tsx and passed down here unchanged, same as Sidebar's
+ * own props) — never a second, independently-hardcoded authorization system.
  *
  * Tier 1 (kind: "full") — the two highest-traffic landing pages get a REAL
  * prefetch: Next.js actually executes the destination page's Server
@@ -45,11 +44,9 @@ interface AppRoutePrefetcherProps {
  */
 function buildWorkspaceScopedTargets(role: Role, navFlags: NavVisibilityFlags): PrefetchTarget[] {
   const targets: PrefetchTarget[] = [{ href: "/dashboard", kind: "full" }];
-  if (canManageProjects(role)) targets.push({ href: "/tickets", kind: "full" });
-  if (canManageProjects(role)) {
-    targets.push({ href: "/projects", kind: "auto" });
-    targets.push({ href: "/activities", kind: "auto" });
-  }
+  if (navFlags.canViewTickets) targets.push({ href: "/tickets", kind: "full" });
+  if (navFlags.canViewProjects) targets.push({ href: "/projects", kind: "auto" });
+  if (navFlags.canViewActivities) targets.push({ href: "/activities", kind: "auto" });
   if (navFlags.canViewPendingTickets) targets.push({ href: "/tickets/pending", kind: "auto" });
   if (isAdmin(role)) targets.push({ href: "/tickets/closed", kind: "auto" });
   return targets;
@@ -64,16 +61,14 @@ function buildWorkspaceScopedTargets(role: Role, navFlags: NavVisibilityFlags): 
  * ownerUserId only). Warmed once and never re-triggered by a workspace
  * switch — nothing about their result set depends on it.
  */
-function buildPersonalScopedTargets(role: Role): PrefetchTarget[] {
+function buildPersonalScopedTargets(navFlags: NavVisibilityFlags): PrefetchTarget[] {
   const targets: PrefetchTarget[] = [
     { href: "/tickets/assigned-to-me", kind: "auto" },
     { href: "/tickets/created-by-me", kind: "auto" },
   ];
-  if (canManageProjects(role)) {
-    targets.push({ href: "/my-projects", kind: "auto" });
-    targets.push({ href: "/my-activities", kind: "auto" });
-    targets.push({ href: "/goals", kind: "auto" });
-  }
+  if (navFlags.canViewProjects) targets.push({ href: "/my-projects", kind: "auto" });
+  if (navFlags.canViewActivities) targets.push({ href: "/my-activities", kind: "auto" });
+  if (navFlags.canViewGoals) targets.push({ href: "/goals", kind: "auto" });
   return targets;
 }
 
@@ -104,7 +99,7 @@ function logPrefetchStart(href: string, kind: PrefetchTarget["kind"]) {
  * bulk data load. See the module-level doc comments above for the exact
  * tiering/permission/workspace-reactivity rules.
  */
-export function AppRoutePrefetcher({ userRole, canCreateTicket, navFlags }: AppRoutePrefetcherProps) {
+export function AppRoutePrefetcher({ userRole, navFlags }: AppRoutePrefetcherProps) {
   const router = useRouter();
   const pathname = usePathname();
   const { departmentId, isAllSelected, switching } = useActiveWorkspace();
@@ -163,10 +158,10 @@ export function AppRoutePrefetcher({ userRole, canCreateTicket, navFlags }: AppR
     if (hasWarmedPersonalRef.current) return;
     if (isConnectionConstrained()) return;
     hasWarmedPersonalRef.current = true;
-    const cancel = runPrefetchQueue(buildPersonalScopedTargets(userRole), runTarget);
+    const cancel = runPrefetchQueue(buildPersonalScopedTargets(navFlags), runTarget);
     return cancel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userRole, runTarget]);
+  }, [navFlags, runTarget]);
 
   // Tier 4 — cheap, obviously-useful extras, warmed last and only if the
   // user can actually reach them; deliberately NOT the admin subtree (a
@@ -175,11 +170,11 @@ export function AppRoutePrefetcher({ userRole, canCreateTicket, navFlags }: AppR
   useEffect(() => {
     if (isConnectionConstrained()) return;
     const targets: PrefetchTarget[] = [{ href: "/settings", kind: "auto" }];
-    if (canCreateTicket) targets.push({ href: "/tickets/new", kind: "auto" });
+    if (navFlags.canCreateTickets) targets.push({ href: "/tickets/new", kind: "auto" });
     const cancel = runPrefetchQueue(targets, runTarget, 4000);
     return cancel;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canCreateTicket, runTarget]);
+  }, [navFlags, runTarget]);
 
   return null;
 }

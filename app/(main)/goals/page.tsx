@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
+import { getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -27,7 +28,14 @@ export default async function GoalsPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const canView = await hasPermission(session.user.role, "goal.view", session.user.customRoleId);
+  // Same union canFlags.canViewGoals computes for the sidebar (cache()-
+  // wrapped, so this reuses app/(main)/layout.tsx's already-computed result
+  // within the same render) — a raw hasPermission(...) call only sees
+  // GLOBAL grants and would wrongly deny a user whose goal.view comes solely
+  // from a department built-in/custom role.
+  const canView = (
+    await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
+  ).canViewGoals;
   if (!canView) redirect("/dashboard");
 
   const canCreate = await hasPermission(session.user.role, "goal.create", session.user.customRoleId);

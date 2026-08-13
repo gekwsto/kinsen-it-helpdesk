@@ -1,7 +1,6 @@
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { ActiveWorkspaceProvider } from "@/components/workspace/active-workspace-provider";
@@ -32,8 +31,7 @@ export default async function MainLayout({
   // customRoleId (see lib/auth.ts), never the resolved persisted name, and
   // the Topbar's role badge must prefer that name over a static label (see
   // lib/services/global-role-options-service.ts's doc comment).
-  const [canCreateTicket, activeWorkspace, navFlags, avatarUser] = await Promise.all([
-    hasPermission(session.user.role, "ticket.create", session.user.customRoleId),
+  const [activeWorkspace, navFlags, avatarUser] = await Promise.all([
     getActiveWorkspace(session.user.id, session.user.role),
     getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId),
     prisma.user.findUnique({ where: { id: session.user.id }, select: { image: true, customRole: { select: { name: true } } } }),
@@ -49,7 +47,7 @@ export default async function MainLayout({
     >
       <HelpGuideProvider>
         <div className="flex h-screen overflow-hidden bg-background">
-          <Sidebar userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
+          <Sidebar userRole={session.user.role} navFlags={navFlags} />
           <div className="flex-1 flex flex-col overflow-hidden">
             <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
             <main className="flex-1 overflow-y-auto p-6">{children}</main>
@@ -64,7 +62,7 @@ export default async function MainLayout({
           per-page useEffect fetch. Must live inside ActiveWorkspaceProvider
           (it reads useActiveWorkspace() to re-warm on workspace switches).
           See components/navigation/app-route-prefetcher.tsx. */}
-      <AppRoutePrefetcher userRole={session.user.role} canCreateTicket={canCreateTicket} navFlags={navFlags} />
+      <AppRoutePrefetcher userRole={session.user.role} navFlags={navFlags} />
     </ActiveWorkspaceProvider>
   );
 }

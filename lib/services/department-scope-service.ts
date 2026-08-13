@@ -415,6 +415,49 @@ export interface NavVisibilityFlags {
   canViewPendingTickets: boolean;
   /** Gates the "Organization Chart" admin nav entry — the page itself is reachable by any authenticated user (own-slice view), but only full-tree-access roles get a nav shortcut into it, matching every other Administration entry's role-gated visibility. */
   canViewOrganizationChart: boolean;
+  /**
+   * Top-level module nav visibility (Tickets/Projects/Activities/Goals) —
+   * the union of the effective ticket.view/project.view/activity.view/
+   * goal.view permission across BOTH global scope (built-in Role enum OR a
+   * global CustomRole) and department scope (any active DepartmentMembership
+   * whose built-in DepartmentRole OR department CustomRole grants the key),
+   * exactly mirroring canViewPendingTickets's own union above. Deliberately
+   * NOT derived from canManageProjects/any Role[] check — a custom role
+   * (global or department-scoped) that grants only "view" must be enough to
+   * see these entries, with zero special-casing per role/key. See
+   * components/layout/sidebar.tsx, which used to gate Projects/Activities/
+   * Goals (and app/(main)/activities/page.tsx + .../gantt/page.tsx, which
+   * used to gate the whole page) on canManageProjects(role) alone — a
+   * hardcoded ADMIN/IT_AGENT/DEPARTMENT_MANAGER/DIRECTOR enum check with no
+   * knowledge of custom roles or department-scoped grants at all, so a user
+   * whose ONLY project.view/activity.view grant came from a custom role
+   * (global or department) was silently denied both the nav entry and the
+   * page itself, even though the effective-permission resolver already
+   * correctly said `true`.
+   */
+  canViewTickets: boolean;
+  canViewProjects: boolean;
+  canViewActivities: boolean;
+  canViewGoals: boolean;
+  /**
+   * CREATE capability, computed the exact same union way as the canView*
+   * flags above but from the module's OWN *.create permission key — never
+   * inferred from the matching canView* flag. VIEW and CREATE are
+   * independent capabilities (see prisma/seed.ts's PERMISSIONS catalogue:
+   * "ticket.view"/"ticket.create" etc. are separate rows, separately
+   * grantable per role); a role/CustomRole that grants only *.view must
+   * never see or reach *.create-gated UI. Fixes the sibling bug to the
+   * canView* one above: after canView* started correctly returning true for
+   * a view-only custom role, components/layout/sidebar.tsx's "New Project"/
+   * "New Activity" child links (which had no gate of their own at all —
+   * they only inherited the newly-true parent's visibility) and
+   * app/(main)/projects/page.tsx's unconditional "New Project" button
+   * became reachable for a user with project.view but NOT project.create.
+   */
+  canCreateTickets: boolean;
+  canCreateProjects: boolean;
+  canCreateActivities: boolean;
+  canCreateGoals: boolean;
 }
 
 // cache()-wrapped: app/(main)/layout.tsx computes this once for Sidebar,
@@ -434,10 +477,46 @@ export const getNavVisibilityFlags = cache(async (
       canViewMySubDepartments: true,
       canViewPendingTickets: true,
       canViewOrganizationChart: true,
+      canViewTickets: true,
+      canViewProjects: true,
+      canViewActivities: true,
+      canViewGoals: true,
+      canCreateTickets: true,
+      canCreateProjects: true,
+      canCreateActivities: true,
+      canCreateGoals: true,
     };
   }
 
-  const [accessibleSubDeptDepartments, memberships, subDeptIds, pendingTicketDepartmentIds, globalPendingView, canViewOrgChart] = await Promise.all([
+  // Same "department-scoped OR global" union shape as canViewPendingTickets
+  // below, applied to any module permission key — one shared helper so the
+  // union logic exists exactly once, not re-implemented per key. Used for
+  // both the four *.view keys and the four *.create keys; each call is
+  // independent (a *.create key is never derived from its *.view sibling).
+  const moduleGrant = async (key: string) => {
+    const [deptIds, global] = await Promise.all([
+      getDepartmentIdsWithPermission(userId, key),
+      hasPermission(role, key, customRoleId),
+    ]);
+    return deptIds.length > 0 || global;
+  };
+
+  const [
+    accessibleSubDeptDepartments,
+    memberships,
+    subDeptIds,
+    pendingTicketDepartmentIds,
+    globalPendingView,
+    canViewOrgChart,
+    canViewTickets,
+    canViewProjects,
+    canViewActivities,
+    canViewGoals,
+    canCreateTickets,
+    canCreateProjects,
+    canCreateActivities,
+    canCreateGoals,
+  ] = await Promise.all([
     getAccessibleDepartmentSummaries(userId, role, "subdepartment.view"),
     getUserDepartmentMemberships(userId),
     getUserSubDepartmentIds(userId),
@@ -447,6 +526,14 @@ export const getNavVisibilityFlags = cache(async (
     // membership-based check above (which covers AGENT_ASSIGNEE etc.).
     hasPermission(role, "ticket.pending.view", customRoleId),
     canViewFullOrganizationTree(role, customRoleId),
+    moduleGrant("ticket.view"),
+    moduleGrant("project.view"),
+    moduleGrant("activity.view"),
+    moduleGrant("goal.view"),
+    moduleGrant("ticket.create"),
+    moduleGrant("project.create"),
+    moduleGrant("activity.create"),
+    moduleGrant("goal.create"),
   ]);
 
   return {
@@ -455,6 +542,14 @@ export const getNavVisibilityFlags = cache(async (
     canViewMySubDepartments: accessibleSubDeptDepartments.length > 0 || subDeptIds.length > 0,
     canViewPendingTickets: pendingTicketDepartmentIds.length > 0 || globalPendingView,
     canViewOrganizationChart: canViewOrgChart,
+    canViewTickets,
+    canViewProjects,
+    canViewActivities,
+    canViewGoals,
+    canCreateTickets,
+    canCreateProjects,
+    canCreateActivities,
+    canCreateGoals,
   };
 });
 

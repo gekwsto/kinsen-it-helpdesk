@@ -10,7 +10,7 @@ export async function GET(
   try {
     const { id } = await params;
     const session = await requireAuth();
-    const allowed = await hasPermission(session.user.role, "goal.view");
+    const allowed = await hasPermission(session.user.role, "goal.view", session.user.customRoleId);
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const goal = await prisma.yearlyGoal.findUnique({
@@ -47,7 +47,7 @@ export async function PATCH(
   try {
     const { id } = await params;
     const session = await requireAuth();
-    const allowed = await hasPermission(session.user.role, "goal.edit");
+    const allowed = await hasPermission(session.user.role, "goal.edit", session.user.customRoleId);
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const existing = await prisma.yearlyGoal.findUnique({ where: { id }, select: { ownerUserId: true } });
@@ -90,7 +90,7 @@ export async function DELETE(
   try {
     const { id } = await params;
     const session = await requireAuth();
-    const allowed = await hasPermission(session.user.role, "goal.delete");
+    const allowed = await hasPermission(session.user.role, "goal.delete", session.user.customRoleId);
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const existing = await prisma.yearlyGoal.findUnique({ where: { id }, select: { ownerUserId: true } });

@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
-import { buildProjectListWhere, getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import { buildProjectListWhere, getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { ViewToggle } from "@/components/ui/view-toggle";
@@ -86,10 +85,21 @@ export default async function ProjectsPage({
   if (!session?.user) redirect("/login");
   const params = await searchParams;
 
-  const canView = await hasPermission(session.user.role, "project.view", session.user.customRoleId);
+  // Same union canFlags.canViewProjects computes for the sidebar
+  // (cache()-wrapped, so this reuses app/(main)/layout.tsx's already-computed
+  // result within the same render) — a raw hasPermission(...) call only sees
+  // GLOBAL grants and would wrongly deny a user whose project.view comes
+  // solely from a department built-in/custom role.
+  const projectsNavFlags = await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId);
+  const canView = projectsNavFlags.canViewProjects;
   if (!canView) {
     redirect("/dashboard");
   }
+  // Never derived from canView above — VIEW does not imply CREATE. This
+  // page's own "New Project" button (below) previously had NO gate at all,
+  // rendering unconditionally for any user who could reach this page —
+  // the exact in-page counterpart of the sidebar's "New Project" bug.
+  const canCreate = projectsNavFlags.canCreateProjects;
 
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
   if (!activeWorkspace.departmentId && !activeWorkspace.isAllSelected) {
@@ -247,12 +257,14 @@ export default async function ProjectsPage({
         </div>
         <div className="flex items-center gap-2">
           <ViewToggle />
-          <Button asChild>
-            <Link href="/projects/new">
-              <Plus className="h-4 w-4 mr-2" />
-              New Project
-            </Link>
-          </Button>
+          {canCreate && (
+            <Button asChild>
+              <Link href="/projects/new">
+                <Plus className="h-4 w-4 mr-2" />
+                New Project
+              </Link>
+            </Button>
+          )}
         </div>
       </div>
 

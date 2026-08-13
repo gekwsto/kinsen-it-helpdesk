@@ -1,12 +1,24 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { canActOnEntity, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { ActivityNewForm } from "@/components/activities/activity-new-form";
 
 export default async function NewActivityPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
+
+  // This page previously had NO activity.create check at all — it rendered
+  // the create form (and POST /api/activities was the only real gate,
+  // correctly enforced there via resolveDepartmentForCreate) for ANY
+  // authenticated user, including one with only activity.view. Same union
+  // sidebar's "New Activity" link uses (navFlags.canCreateActivities) —
+  // department-scoped OR global activity.create, never derived from
+  // activity.view.
+  const canCreate = (
+    await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
+  ).canCreateActivities;
+  if (!canCreate) redirect("/activities");
 
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
   const departmentId = activeWorkspace.isAllSelected ? null : activeWorkspace.departmentId;

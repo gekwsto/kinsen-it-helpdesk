@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasPermission } from "@/lib/permissions";
+import { requireAuth } from "@/lib/permissions";
 import {
   buildTicketListWhere,
   resolveDepartmentForCreate,
@@ -10,6 +10,7 @@ import {
   resolveDefaultStatusId,
   validateTicketProjectActivityLink,
   validateTicketConfigOwnership,
+  getNavVisibilityFlags,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -22,7 +23,13 @@ export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth();
 
-    const canView = await hasPermission(session.user.role, "ticket.view", session.user.customRoleId);
+    // Same union app/(main)/tickets/page.tsx and the sidebar use — a raw
+    // hasPermission(...) call only sees GLOBAL grants and would 403 a user
+    // whose ticket.view comes solely from a department built-in/custom role,
+    // even though buildTicketListWhere below already scopes correctly.
+    const canView = (
+      await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
+    ).canViewTickets;
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const { searchParams } = new URL(req.url);
@@ -141,9 +148,6 @@ export async function POST(req: NextRequest) {
   try {
     const session = await requireAuth();
 
-    const canCreate = await hasPermission(session.user.role, "ticket.create", session.user.customRoleId);
-    if (!canCreate) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-
     const body = await req.json();
     const data = createTicketSchema.parse(body);
 
@@ -181,6 +185,16 @@ export async function POST(req: NextRequest) {
       effectiveRequestedDepartmentId = activeWorkspace.departmentId ?? undefined;
     }
 
+    // The sole authoritative ticket.create check — department-scoped OR the
+    // ADMIN/DIRECTOR bypass (canViewAllDepartments), exactly like
+    // POST /api/projects and POST /api/activities use "project.create"/
+    // "activity.create" here. A prior standalone `hasPermission(role,
+    // "ticket.create", customRoleId)` pre-check used to gate this route
+    // first — GLOBAL-only, so it wrongly 403'd a user whose ticket.create
+    // came solely from a department built-in/custom role (e.g. the built-in
+    // AGENT_ASSIGNEE department role) before ever reaching this correct,
+    // department-aware check. Removed rather than fixed-in-place, since
+    // resolveDepartmentForCreate already IS the correct, single check.
     const deptResolution = await resolveDepartmentForCreate(
       session.user.id,
       session.user.role,

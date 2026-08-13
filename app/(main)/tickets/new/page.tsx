@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, isAdmin } from "@/lib/permissions";
-import { getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import { isAdmin } from "@/lib/permissions";
+import { getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { Role } from "@prisma/client";
@@ -15,11 +15,15 @@ export default async function NewTicketPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const canCreate = await hasPermission(
-    session.user.role,
-    "ticket.create",
-    session.user.customRoleId
-  );
+  // Same union sidebar's "Create Ticket" link uses (navFlags.canCreateTickets)
+  // — department-scoped OR global ticket.create, never derived from
+  // ticket.view. A raw hasPermission(...) call here only sees GLOBAL grants
+  // and would wrongly deny a user whose ticket.create comes solely from a
+  // department built-in/custom role (e.g. the built-in AGENT_ASSIGNEE
+  // department role).
+  const canCreate = (
+    await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
+  ).canCreateTickets;
 
   if (!canCreate) {
     return (

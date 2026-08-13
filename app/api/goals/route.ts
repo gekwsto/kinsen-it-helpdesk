@@ -6,7 +6,11 @@ import { createGoalSchema } from "@/lib/validations";
 export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth();
-    const allowed = await hasPermission(session.user.role, "goal.view");
+    // customRoleId was previously omitted here — hasPermission's customRoleId
+    // param is optional, so leaving it out silently skipped the active
+    // CustomRole entirely and checked only the base enum Role, meaning a
+    // global custom role's goal.view grant was ignored outright.
+    const allowed = await hasPermission(session.user.role, "goal.view", session.user.customRoleId);
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const { searchParams } = new URL(req.url);
@@ -37,7 +41,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await requireAuth();
-    const allowed = await hasPermission(session.user.role, "goal.create");
+    const allowed = await hasPermission(session.user.role, "goal.create", session.user.customRoleId);
     if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const body = await req.json();

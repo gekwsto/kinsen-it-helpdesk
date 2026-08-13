@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { hasPermission } from "@/lib/permissions";
-import { getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { Button } from "@/components/ui/button";
 import { ProjectForm } from "@/components/projects/project-form";
@@ -12,7 +11,17 @@ export default async function NewProjectPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const canCreate = await hasPermission(session.user.role, "project.create", session.user.customRoleId);
+  // Same union sidebar's "New Project" link uses (navFlags.canCreateProjects)
+  // — department-scoped OR global project.create, never derived from
+  // project.view. A raw hasPermission(...) call here only sees GLOBAL
+  // grants and would wrongly deny a user whose project.create comes solely
+  // from a department built-in/custom role. The actual per-department
+  // eligibility (getAccessibleDepartmentSummaries below, and
+  // resolveDepartmentForCreate in POST /api/projects) remains the
+  // authoritative, workspace-aware check this page-level gate only mirrors.
+  const canCreate = (
+    await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
+  ).canCreateProjects;
   if (!canCreate) redirect("/projects");
 
   // Only departments this user can actually create a project in — the same

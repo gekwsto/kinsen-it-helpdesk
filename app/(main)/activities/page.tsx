@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, canManageProjects } from "@/lib/permissions";
-import { buildActivityListWhere, buildProjectListWhere, getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
+import { buildActivityListWhere, buildProjectListWhere, getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
@@ -75,12 +74,20 @@ export default async function ActivitiesPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  if (!canManageProjects(session.user.role)) redirect("/dashboard");
-
-  const canView = await hasPermission(session.user.role, "activity.view", session.user.customRoleId);
+  // Same union computes for the sidebar (cache()-wrapped, so this reuses
+  // app/(main)/layout.tsx's already-computed result within the same
+  // render). The previous canManageProjects(role) pre-gate here was the
+  // exact page-level counterpart of the sidebar bug — a hardcoded
+  // global-enum check that walled off any user whose activity.view came
+  // only from a custom role (global or department), even though the very
+  // next check below already asked the correct question.
+  const activityNavFlags = await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId);
+  const canView = activityNavFlags.canViewActivities;
   if (!canView) redirect("/dashboard");
 
-  const canCreate = await hasPermission(session.user.role, "activity.create", session.user.customRoleId);
+  // Same union sidebar's "New Activity" link uses — never derived from
+  // canView above (VIEW does not imply CREATE).
+  const canCreate = activityNavFlags.canCreateActivities;
 
   const params = await searchParams;
 

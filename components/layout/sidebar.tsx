@@ -50,7 +50,6 @@ interface NavItem {
 
 interface SidebarProps {
   userRole: Role;
-  canCreateTicket: boolean;
   navFlags: NavVisibilityFlags;
 }
 
@@ -66,7 +65,7 @@ const NAV_ITEM_SIZE = "min-h-[44px] py-2.5 maxh-800:min-h-[40px] maxh-800:py-2 m
 const NAV_CHILD_SIZE = "min-h-[40px] py-2 maxh-800:min-h-[38px] maxh-800:py-1.5 maxh-700:min-h-[34px] maxh-700:py-1";
 const NAV_ICON_SIZE = "p-2.5 maxh-700:p-2";
 
-export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
+export function Sidebar({ userRole, navFlags }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [expandedItems, setExpandedItems] = useState<string[]>(["Tickets"]);
   // Help Guide is available to every user regardless of role/permissions —
@@ -90,7 +89,7 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       : []),
     { label: "Assigned to Me", href: "/tickets/assigned-to-me" },
     { label: "Created by Me", href: "/tickets/created-by-me" },
-    ...(canCreateTicket ? [{ label: "Create Ticket", href: "/tickets/new" }] : []),
+    { label: "Create Ticket", href: "/tickets/new", visible: navFlags.canCreateTickets },
     { label: "Pending Tickets", href: "/tickets/pending", visible: navFlags.canViewPendingTickets },
     // Same review capability as Pending Tickets — a rejected email request
     // is still an inbound-review record, just further along the same
@@ -112,38 +111,47 @@ export function Sidebar({ userRole, canCreateTicket, navFlags }: SidebarProps) {
       label: "Tickets",
       href: "/tickets",
       icon: Ticket,
+      // At least one child (a *.view read link or the *.create "Create
+      // Ticket" link) must be reachable for the section to be worth
+      // showing — mirrors the Projects/Activities sections below. Clicking
+      // this parent itself never navigates (it only toggles expand/collapse
+      // — see the `hasChildren` branch further down), so this can never
+      // route a create-only, view-less user into a *.view-gated list page.
+      visible: navFlags.canViewTickets || navFlags.canCreateTickets,
       children: ticketChildren,
     },
     {
       label: "Projects",
       href: "/projects",
       icon: FolderKanban,
-      visible: canManageProjects(userRole),
+      // Same "at least one visible child" rule as Tickets above.
+      visible: navFlags.canViewProjects || navFlags.canCreateProjects,
       children: [
-        { label: "All Projects", href: "/projects" },
-        { label: "My Projects", href: "/my-projects" },
-        { label: "New Project", href: "/projects/new" },
-        { label: "Project Gantt", href: "/projects/gantt" },
-        { label: "Resource Planning", href: "/projects/resource-planning" },
+        { label: "All Projects", href: "/projects", visible: navFlags.canViewProjects },
+        { label: "My Projects", href: "/my-projects", visible: navFlags.canViewProjects },
+        { label: "New Project", href: "/projects/new", visible: navFlags.canCreateProjects },
+        { label: "Project Gantt", href: "/projects/gantt", visible: navFlags.canViewProjects },
+        { label: "Resource Planning", href: "/projects/resource-planning", visible: navFlags.canViewProjects },
       ],
     },
     {
       label: "Activities",
       href: "/activities",
       icon: CheckSquare,
-      visible: canManageProjects(userRole),
+      // Same "at least one visible child" rule as Tickets above.
+      visible: navFlags.canViewActivities || navFlags.canCreateActivities,
       children: [
-        { label: "All Activities", href: "/activities" },
-        { label: "My Activities", href: "/my-activities" },
-        { label: "Activity Gantt", href: "/activities/gantt" },
-        { label: "New Activity", href: "/activities/new" },
+        { label: "All Activities", href: "/activities", visible: navFlags.canViewActivities },
+        { label: "My Activities", href: "/my-activities", visible: navFlags.canViewActivities },
+        { label: "Activity Gantt", href: "/activities/gantt", visible: navFlags.canViewActivities },
+        { label: "New Activity", href: "/activities/new", visible: navFlags.canCreateActivities },
       ],
     },
     {
       label: "Goals",
       href: "/goals",
       icon: Target,
-      visible: canManageProjects(userRole),
+      visible: navFlags.canViewGoals,
     },
     {
       // Full company tree + reporting-lines chart (department tree / people

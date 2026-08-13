@@ -409,26 +409,47 @@ export async function setPrimaryDepartmentMembership(
     // MICROSOFT_DEPARTMENT for sync). Same protection rules, generalized to
     // any source:
     //  - no row yet -> create with the caller's role/source.
-    //  - existing row already source:MANUAL, but THIS call's source isn't
-    //    MANUAL -> a Microsoft signal must never downgrade/touch an admin's
-    //    manual choice — role/source preserved, only isActive/isPrimary set.
+    //  - existing row already source:MANUAL -> its role/customRoleId is
+    //    NEVER touched by this function, regardless of the CALLER's own
+    //    source (including another MANUAL call — see below), only
+    //    isActive/isPrimary are ever set. `role` here is only ever a
+    //    placement default (translated from the user's GLOBAL role), never
+    //    an explicit admin choice for THIS membership's department role —
+    //    that's the per-row "Change Role" control's job
+    //    (grantManualMembership), a completely separate decision. Root
+    //    cause this specifically fixes: an admin grants a department
+    //    membership with a deliberately-chosen role (e.g. Agent/Assignee,
+    //    source MANUAL), then also sets that SAME department as the user's
+    //    Primary Department in the same Edit User save — both actions are
+    //    admin-driven (source MANUAL on both), so the OLD "protect MANUAL
+    //    only from a NON-manual caller" rule did not apply between them,
+    //    and the primary-department call silently overwrote the
+    //    just-chosen role back to the global-role-derived default. Setting
+    //    "this department is primary" and setting "this is the role in
+    //    this department" are two independent decisions; neither may
+    //    silently clobber the other.
     //  - existing row has a custom department role (customRoleId) -> never
-    //    downgraded to a plain enum role, same as ensurePrimaryDepartmentMembership.
+    //    downgraded to a plain enum role, same as ensurePrimaryDepartmentMembership
+    //    (subsumed by the MANUAL-row protection above in practice, since a
+    //    custom-role row is always source: MANUAL — kept as its own
+    //    explicit condition for defense-in-depth / clarity).
     //  - existing ACTIVE row whose role already matches the desired role ->
     //    left untouched (no silent source downgrade for a true no-op).
-    //  - otherwise (inactive row being reactivated, or an active row whose
-    //    role genuinely differs) -> role/source updated to the caller's values.
+    //  - otherwise (inactive row being reactivated, or an active
+    //    non-MANUAL row whose role genuinely differs, e.g. a stale
+    //    MICROSOFT_DEPARTMENT-sourced row) -> role/source updated to the
+    //    caller's values.
     let targetRow: DepartmentMembership;
     if (!targetExisting) {
       targetRow = await tx.departmentMembership.create({
         data: { userId, departmentId, role, source, customRoleId: null, isActive: true, isPrimary: true },
       });
     } else {
-      const protectManualFromNonManual = targetExisting.source === MembershipSource.MANUAL && source !== MembershipSource.MANUAL;
+      const protectManualRole = targetExisting.source === MembershipSource.MANUAL;
       const protectCustomRole = !!targetExisting.customRoleId;
       const roleAlreadyMatches = targetExisting.isActive && targetExisting.role === role;
 
-      if (protectManualFromNonManual || protectCustomRole || roleAlreadyMatches) {
+      if (protectManualRole || protectCustomRole || roleAlreadyMatches) {
         targetRow =
           targetExisting.isActive && targetExisting.isPrimary
             ? targetExisting
