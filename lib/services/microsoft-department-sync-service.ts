@@ -106,12 +106,13 @@ export async function syncMicrosoftUserDepartment(
 
   const claims = buildClaimsFromGraphProfile({ oid, email, name, fallbackGroups, fallbackRoles }, result.profile);
 
-  // Opportunistic cache fill (Operation A side-effect — see
-  // microsoft-directory-service.ts header comment): zero extra Graph calls,
-  // zero extra permissions, independent of whether any mapping matches.
-  if (claims.department) await upsertDiscoveredMicrosoftDirectoryValue("department", claims.department);
-  if (claims.jobTitle) await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", claims.jobTitle);
-
+  // Computed FIRST, before the opportunistic cache-fill below — this
+  // user's own eligible domain (one of possibly several allowed
+  // organization domains, see lib/allowed-email-domains.ts) is needed for
+  // BOTH the job-title cache fill and the organizational placement below,
+  // so it's derived exactly once and reused, never guessed or re-derived
+  // per call site.
+  //
   // Organizational placement (PRIMARY department) — FIND-003
   // (docs/roadmap-handoff-register.md): uses the exact same
   // organization-directory-eligibility-service.ts rule AND the same
@@ -119,14 +120,45 @@ export async function syncMicrosoftUserDepartment(
   // Company/Department resolution the full Directory Sync uses (never a
   // second, independent department-resolution mechanism) — so a full sync
   // and a first Microsoft login for the same Graph profile converge on the
-  // identical organizational placement. Gated on eligibility: a non-Kinsen
+  // identical organizational placement. Gated on eligibility: a non-allowed-domain
   // or Guest account (in practice, close to unreachable here at all — see
   // lib/auth.ts's own `signIn` callback, which already blocks Microsoft SSO
-  // outside `@<ALLOWED_EMAIL_DOMAIN>` before this code ever runs — this
-  // check exists for its own correctness/defense-in-depth, not because it's
-  // the only gate) is skipped entirely: no company/department resolution,
-  // no primary membership change, existing data left exactly as-is.
-  //
+  // outside an allowed organization domain before this code ever runs —
+  // this check exists for its own correctness/defense-in-depth, not
+  // because it's the only gate) is skipped entirely: no company/department
+  // resolution, no primary membership change, existing data left exactly
+  // as-is.
+  const eligibility = getOrganizationDirectoryEligibility({
+    userType: claims.userType,
+    // `result.profile.mail` first (this call's own GET /me fetch); falls
+    // back to `claims.email` (the email lib/auth.ts's signIn callback
+    // already gated to an allowed organization domain for this exact
+    // signed-in user, before this function ever ran) only when Graph's own
+    // `mail` is null — the same "mail can legitimately be null for a real
+    // account, fall back to another trustworthy identity" pattern already
+    // used throughout this codebase (e.g. validateDirectoryUser's own
+    // mail-then-userPrincipalName fallback), not a special case invented
+    // just for this check.
+    mail: result.profile.mail ?? claims.email,
+    userPrincipalName: result.profile.userPrincipalName,
+  });
+  // FIND-006: the SAME matched domain that gates organizational placement
+  // below now also flows into the job-title cache fill AND the
+  // (secondary-membership/global-role) MicrosoftDepartmentMapping
+  // resolution further down — a domain-scoped PROFILE_JOB_TITLE mapping
+  // can only ever match/cache under the exact domain eligibility already
+  // confirmed, never re-derived or guessed separately. null when not
+  // eligible at all — buildCandidates (microsoft-mapping-service.ts) then
+  // simply never builds a PROFILE_JOB_TITLE candidate for this login,
+  // exactly like "no eligible domain" should behave.
+  const eligibleDomain = eligibility.eligible ? extractEmailDomain(eligibility.matchedEmail) : null;
+
+  // Opportunistic cache fill (Operation A side-effect — see
+  // microsoft-directory-service.ts header comment): zero extra Graph calls,
+  // zero extra permissions, independent of whether any mapping matches.
+  if (claims.department) await upsertDiscoveredMicrosoftDirectoryValue("department", claims.department);
+  if (claims.jobTitle) await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", claims.jobTitle, eligibleDomain);
+
   // Runs BEFORE the SECONDARY MicrosoftDepartmentMapping resolution below —
   // deliberately, not incidentally: syncDepartmentMemberships's own tail
   // fallback ("exactly one active membership and none flagged primary ->
@@ -148,29 +180,6 @@ export async function syncMicrosoftUserDepartment(
   // function allowed to write User.departmentId (see its own header
   // comment) and already protects a MANUAL primary from being silently
   // replaced by an automated sync signal — no separate guard needed here.
-  const eligibility = getOrganizationDirectoryEligibility({
-    userType: claims.userType,
-    // `result.profile.mail` first (this call's own GET /me fetch); falls
-    // back to `claims.email` (the email lib/auth.ts's signIn callback
-    // already gated to `@<ALLOWED_EMAIL_DOMAIN>` for this exact signed-in
-    // user, before this function ever ran) only when Graph's own `mail` is
-    // null — the same "mail can legitimately be null for a real account,
-    // fall back to another trustworthy identity" pattern already used
-    // throughout this codebase (e.g. validateDirectoryUser's own
-    // mail-then-userPrincipalName fallback), not a special case invented
-    // just for this check.
-    mail: result.profile.mail ?? claims.email,
-    userPrincipalName: result.profile.userPrincipalName,
-  });
-  // FIND-006: the SAME matched domain that gates organizational placement
-  // below now also flows into the (secondary-membership/global-role)
-  // MicrosoftDepartmentMapping resolution further down — a domain-scoped
-  // PROFILE_JOB_TITLE mapping can only ever match under the exact domain
-  // eligibility already confirmed, never re-derived or guessed separately.
-  // null when not eligible at all — buildCandidates (microsoft-mapping-service.ts)
-  // then simply never builds a PROFILE_JOB_TITLE candidate for this login,
-  // exactly like "no eligible domain" should behave.
-  const eligibleDomain = eligibility.eligible ? extractEmailDomain(eligibility.matchedEmail) : null;
   let primaryDepartmentSynced = false;
   if (eligibility.eligible) {
     try {

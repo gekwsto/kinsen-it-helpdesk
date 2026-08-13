@@ -168,6 +168,8 @@ interface MicrosoftMappingManagementProps {
   jobTitleDirectory: DirectoryCache;
   jobTitleDiscoveryDomain: string;
   jobTitleDiscoveryRows: JobTitleDiscoveryRow[];
+  /** Every configured allowed organization domain (lib/allowed-email-domains.ts) — e.g. ["kinsen.gr"] or ["kinsen.gr", "saracakis.gr"]. Drives whether the Domain field below is a fixed badge (one domain) or a picker (more than one). */
+  allowedDomains: string[];
   /** Server-rendered, always-fresh-at-page-load role options — see the RoleOptionDto comment above. */
   initialGlobalRoleOptions: RoleOptionDto[];
   initialDepartmentRoleOptions: RoleOptionDto[];
@@ -188,6 +190,7 @@ export function MicrosoftMappingManagement({
   jobTitleDirectory: initialJobTitleDirectory,
   jobTitleDiscoveryDomain,
   jobTitleDiscoveryRows: initialJobTitleDiscoveryRows,
+  allowedDomains,
   initialGlobalRoleOptions,
   initialDepartmentRoleOptions,
 }: MicrosoftMappingManagementProps) {
@@ -394,9 +397,16 @@ export function MicrosoftMappingManagement({
       const extra = summary.otherDomainsObserved?.length
         ? ` (other domains observed in the tenant, not processed: ${summary.otherDomainsObserved.join(", ")})`
         : "";
-      toast.success(
-        `Job titles synced for @${summary.domain}: ${summary.discovered} discovered, ${summary.added} new, ${summary.staled} no longer seen${extra}`
-      );
+      // One clause per configured allowed domain (today usually one, but a
+      // deployment with more than one — e.g. kinsen.gr + saracakis.gr —
+      // sees each domain's own counts, never a single merged/misleading
+      // total).
+      const perDomainText = Array.isArray(summary.perDomain) && summary.perDomain.length > 0
+        ? summary.perDomain
+            .map((d: { domain: string; discovered: number; added: number; staled: number }) => `@${d.domain}: ${d.discovered} discovered, ${d.added} new, ${d.staled} no longer seen`)
+            .join("; ")
+        : `@${summary.domain}: ${summary.discovered} discovered, ${summary.added} new, ${summary.staled} no longer seen`;
+      toast.success(`Job titles synced — ${perDomainText}${extra}`);
     } catch (error: any) {
       toast.error(error.message ?? "Failed to sync Microsoft job titles");
     } finally {
@@ -738,7 +748,23 @@ export function MicrosoftMappingManagement({
                   {sourceType === MicrosoftMappingSourceType.ENTRA_GROUP ? " group name or object id" : " app role value"} manually.
                 </p>
               )}
-              {isProfileJobTitle && domain && (
+              {isProfileJobTitle && allowedDomains.length > 1 && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Domain</Label>
+                  <Select value={domain} onValueChange={setDomain}>
+                    <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {allowedDomains.map((d) => (
+                        <SelectItem key={d} value={d}>{d}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Which organization domain this Job Title mapping applies to — only users on this exact domain match it.
+                  </p>
+                </div>
+              )}
+              {isProfileJobTitle && allowedDomains.length <= 1 && domain && (
                 <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
                   Domain:
                   <span className="rounded-full border bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700 border-blue-200">

@@ -9,6 +9,7 @@ import {
   getMicrosoftMappingDepartmentRoleOptions,
 } from "@/lib/services/microsoft-mapping-role-options-service";
 import { MicrosoftMappingManagement } from "@/components/admin/microsoft-mapping-management";
+import { ALLOWED_ORGANIZATION_EMAIL_DOMAINS } from "@/lib/allowed-email-domains";
 
 export default async function MicrosoftMappingsAdminPage() {
   const session = await auth();
@@ -46,6 +47,7 @@ export default async function MicrosoftMappingsAdminPage() {
           lastSyncedAt: jobTitleDirectory.lastSyncedAt ? jobTitleDirectory.lastSyncedAt.toISOString() : null,
         }}
         jobTitleDiscoveryDomain={jobTitleDirectoryDiscovery.domain}
+        allowedDomains={[...ALLOWED_ORGANIZATION_EMAIL_DOMAINS]}
         jobTitleDiscoveryRows={jobTitleDirectoryDiscovery.rows.map((r) => ({
           ...r,
           firstSeenAt: r.firstSeenAt.toISOString(),

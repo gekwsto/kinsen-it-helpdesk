@@ -6,7 +6,7 @@ import {
   isGlobalRoleAllowedForMicrosoftMapping,
 } from "@/lib/services/department-role-translation";
 import { normalizeJobTitleValue } from "@/lib/services/microsoft-directory-service";
-import { ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
+import { ALLOWED_ORGANIZATION_EMAIL_DOMAINS } from "@/lib/allowed-email-domains";
 import type {
   MicrosoftIdentityClaims,
   MicrosoftMappingView,
@@ -301,11 +301,12 @@ export class MicrosoftMappingValidationError extends Error {
       // was given no domain at all.
       | "DOMAIN_REQUIRED_FOR_SOURCE_TYPE"
       // FIND-006: a domain-scoped sourceType was given a domain that isn't
-      // in organization-directory-eligibility-service.ts's allowed-domain
-      // set — today that set is exactly one domain (ORGANIZATION_SYNC_ALLOWED_DOMAIN),
-      // so this rejects any OTHER domain string, keeping "only kinsen.gr is
-      // enabled" enforced at the mapping layer too, not just at sync/login
-      // eligibility.
+      // in lib/allowed-email-domains.ts's ALLOWED_ORGANIZATION_EMAIL_DOMAINS
+      // set — rejects any domain string outside that configured set,
+      // keeping "only our real organization domains are enabled" enforced
+      // at the mapping layer too, not just at sync/login eligibility. That
+      // set may contain more than one domain (e.g. kinsen.gr AND
+      // saracakis.gr) — any one of them is accepted here.
       | "DOMAIN_NOT_ALLOWED"
       // globalCustomRoleId/departmentCustomRoleId type-safety — enforced here
       // (not just hidden by dropdown filtering client-side), so a direct API
@@ -397,7 +398,7 @@ function resolveMappingIdentity(
     return { domain: GLOBAL_MAPPING_DOMAIN, normalizedMicrosoftValue: normalizeMicrosoftMappingValue(sourceType, microsoftValue) };
   }
   const domain = resolveMappingDomain(sourceType, domainInput);
-  if (domain !== ORGANIZATION_SYNC_ALLOWED_DOMAIN) {
+  if (!ALLOWED_ORGANIZATION_EMAIL_DOMAINS.includes(domain)) {
     throw new MicrosoftMappingValidationError("DOMAIN_NOT_ALLOWED");
   }
   return { domain, normalizedMicrosoftValue: normalizeMicrosoftMappingValue(sourceType, microsoftValue) };

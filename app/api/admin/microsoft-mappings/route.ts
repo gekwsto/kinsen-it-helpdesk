@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
       }
       if (error.code === "DOMAIN_NOT_ALLOWED") {
         return NextResponse.json(
-          { error: "This domain is not enabled for organization sync — only the configured ALLOWED_EMAIL_DOMAIN is accepted today.", code: "domain_not_allowed" },
+          { error: "This domain is not enabled for organization sync — only the configured allowed organization domains are accepted.", code: "domain_not_allowed" },
           { status: 400 }
         );
       }

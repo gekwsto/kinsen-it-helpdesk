@@ -10,6 +10,7 @@ import { adminLoginSchema as credentialsLoginSchema } from "@/lib/validations";
 import { handleMicrosoftJwtSignIn, SYNC_ELIGIBLE_USER_SELECT } from "@/lib/services/microsoft-department-sync-service";
 import { normalizeEmail } from "@/lib/services/email-identity";
 import { isAbsoluteSessionExpired, stampAbsoluteSessionExpiryIfAbsent } from "@/lib/session-expiry";
+import { isAllowedOrganizationEmail } from "@/lib/allowed-email-domains";
 
 /**
  * PrismaAdapter's own createUser/getUserByEmail do an exact-match lookup
@@ -38,7 +39,6 @@ export function withNormalizedEmail(adapter: Adapter): Adapter {
   };
 }
 
-const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
 const isDev = process.env.NODE_ENV === "development";
 
 // Typed credential errors — codes flow through to SignInResponse.code on the client
@@ -112,7 +112,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
 
       // Microsoft SSO: domain check
       const email = user.email ?? "";
-      if (!email.endsWith(`@${ALLOWED_DOMAIN}`)) {
+      if (!isAllowedOrganizationEmail(email)) {
         return `/unauthorized?reason=domain`;
       }
 

@@ -1,8 +1,7 @@
 import type { NextAuthConfig } from "next-auth";
 import MicrosoftEntraID from "next-auth/providers/microsoft-entra-id";
 import { SESSION_ABSOLUTE_DURATION_SECONDS, readRawSessionExpiryState, isAbsoluteSessionExpired } from "@/lib/session-expiry";
-
-const ALLOWED_DOMAIN = process.env.ALLOWED_EMAIL_DOMAIN || "kinsen.gr";
+import { isAllowedOrganizationEmail } from "@/lib/allowed-email-domains";
 
 const PUBLIC_PATHS = [
   "/login",
@@ -146,10 +145,7 @@ export const authConfig = {
       }
 
       const email = auth?.user?.email;
-      if (
-        email &&
-        !email.toLowerCase().endsWith(`@${ALLOWED_DOMAIN}`)
-      ) {
+      if (email && !isAllowedOrganizationEmail(email)) {
         return false;
       }
       return true;

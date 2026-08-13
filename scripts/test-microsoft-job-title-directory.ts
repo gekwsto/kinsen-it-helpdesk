@@ -119,8 +119,9 @@ async function section2_domainFilteredFetch() {
   const result = await fetchAllGraphUserDirectoryValues();
   check("fetch ok", result.ok === true);
   if (result.ok) {
-    const countA = result.values.jobTitleCounts.find((c) => c.normalizedValue === normalizeJobTitleValue(TITLE_A));
-    const countB = result.values.jobTitleCounts.find((c) => c.normalizedValue === normalizeJobTitleValue(TITLE_B));
+    const kinsenCounts = result.values.jobTitleCountsByDomain["kinsen.gr"] ?? [];
+    const countA = kinsenCounts.find((c) => c.normalizedValue === normalizeJobTitleValue(TITLE_A));
+    const countB = kinsenCounts.find((c) => c.normalizedValue === normalizeJobTitleValue(TITLE_B));
     check("Title A counted exactly twice (u1 + u2, case-merged), Guest/other-domain excluded", countA?.count === 2);
     check("Title A display value keeps FIRST-seen casing", countA?.value === TITLE_A);
     check("Title B counted once", countB?.count === 1);
@@ -210,8 +211,8 @@ async function section4_operationALoginCacheFillSafety() {
   // separate logins must never collide on the (domain, normalizedValue)
   // compound unique index just because both used to default to an empty
   // domain/normalizedValue.
-  await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", titleC);
-  await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", titleD);
+  await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", titleC, "kinsen.gr");
+  await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", titleD, "kinsen.gr");
 
   const rows = await prisma.microsoftDirectoryJobTitleValue.findMany({ where: { value: { in: [titleC, titleD] } } });
   check("both distinct titles created without throwing/colliding", rows.length === 2);
@@ -219,7 +220,7 @@ async function section4_operationALoginCacheFillSafety() {
 
   // Re-observing the SAME title with different casing must reuse the same
   // row via (domain, normalizedValue), never create a second one.
-  await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", titleC.toUpperCase());
+  await upsertDiscoveredMicrosoftDirectoryValue("jobTitle", titleC.toUpperCase(), "kinsen.gr");
   const rowsAfterRecast = await prisma.microsoftDirectoryJobTitleValue.findMany({ where: { normalizedValue: normalizeJobTitleValue(titleC) } });
   check("re-observing a different casing reuses the existing row (no duplicate)", rowsAfterRecast.length === 1);
   check("display casing stays first-seen (not overwritten to the new casing)", rowsAfterRecast[0]?.value === titleC);

@@ -29,14 +29,18 @@ import {
   syncMicrosoftDirectoryValues,
   type DirectoryFetchFailureReason,
 } from "@/lib/services/microsoft-directory-service";
-import { ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
+import { ALLOWED_ORGANIZATION_EMAIL_DOMAINS } from "@/lib/allowed-email-domains";
 
 export interface JobTitleDirectorySyncSummary {
+  /** Kept for backward compatibility — the FIRST configured allowed domain. Prefer perDomain for a deployment with more than one allowed domain. */
   domain: string;
+  /** Sum across every configured allowed domain. */
   discovered: number;
   added: number;
   updated: number;
   staled: number;
+  /** One entry per configured allowed domain — see microsoft-directory-service.ts's DirectorySyncSummary.perDomainJobTitles. */
+  perDomain: Array<{ domain: string; discovered: number; added: number; updated: number; staled: number }>;
   otherDomainsObserved: string[];
 }
 
@@ -54,11 +58,12 @@ export async function syncMicrosoftJobTitleDirectory(): Promise<JobTitleDirector
 
   return {
     ok: true,
-    domain: ORGANIZATION_SYNC_ALLOWED_DOMAIN,
+    domain: ALLOWED_ORGANIZATION_EMAIL_DOMAINS[0],
     discovered: result.discoveredJobTitles,
     added: result.addedJobTitles,
     updated: result.updatedJobTitles,
     staled: result.staledJobTitles,
+    perDomain: result.perDomainJobTitles,
     otherDomainsObserved: result.otherDomainsObserved,
   };
 }
@@ -93,21 +98,32 @@ export interface JobTitleDirectoryRow {
  * domain-scoped value cache, joined in-memory (no N+1) against active
  * PROFILE_JOB_TITLE mappings so the admin sees, per title, whether it's
  * already configured and what it currently grants.
+ *
+ * `domain` selects WHICH configured allowed domain to view — defaults to
+ * the first one (preserves the exact previous single-domain behavior for a
+ * deployment that only ever configured one). An admin with more than one
+ * allowed domain configured can pass any of ALLOWED_ORGANIZATION_EMAIL_DOMAINS
+ * to view/manage that domain's discovered titles instead. An unrecognized
+ * domain falls back to the first configured one rather than silently
+ * returning an empty/wrong view.
  */
-export async function listJobTitleDirectoryForAdmin(): Promise<{ domain: string; rows: JobTitleDirectoryRow[] }> {
-  const domain = ORGANIZATION_SYNC_ALLOWED_DOMAIN;
+export async function listJobTitleDirectoryForAdmin(domain?: string): Promise<{ domain: string; rows: JobTitleDirectoryRow[] }> {
+  const requested = domain?.trim().toLowerCase();
+  const resolvedDomain = requested && ALLOWED_ORGANIZATION_EMAIL_DOMAINS.includes(requested)
+    ? requested
+    : ALLOWED_ORGANIZATION_EMAIL_DOMAINS[0];
 
   const [values, mappings] = await Promise.all([
     prisma.microsoftDirectoryJobTitleValue.findMany({
-      where: { domain },
+      where: { domain: resolvedDomain },
       orderBy: { value: "asc" },
     }),
     // FIND-006: filtered by THIS domain too, not just sourceType — a
-    // kinsen.at mapping (once/if that domain is ever enabled) must never
-    // make a kinsen.gr discovered title show as "Configured", and vice
-    // versa. Matches this table's own `where: {domain}` above exactly.
+    // saracakis.gr mapping must never make a kinsen.gr discovered title
+    // show as "Configured", and vice versa. Matches this table's own
+    // `where: {domain}` above exactly.
     prisma.microsoftDepartmentMapping.findMany({
-      where: { sourceType: "PROFILE_JOB_TITLE", domain },
+      where: { sourceType: "PROFILE_JOB_TITLE", domain: resolvedDomain },
       include: {
         department: { select: { id: true, name: true } },
         globalCustomRole: { select: { name: true } },
@@ -148,5 +164,5 @@ export async function listJobTitleDirectoryForAdmin(): Promise<{ domain: string;
     };
   });
 
-  return { domain, rows };
+  return { domain: resolvedDomain, rows };
 }

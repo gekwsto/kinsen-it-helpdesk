@@ -51,7 +51,8 @@
  */
 import { prisma } from "@/lib/prisma";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
-import { getOrganizationDirectoryEligibility, extractEmailDomain, ORGANIZATION_SYNC_ALLOWED_DOMAIN } from "@/lib/services/organization-directory-eligibility-service";
+import { getOrganizationDirectoryEligibility, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
+import { ALLOWED_ORGANIZATION_EMAIL_DOMAINS } from "@/lib/allowed-email-domains";
 
 const GRAPH_USERS_PAGE_URL =
   "https://graph.microsoft.com/v1.0/users?$select=id,department,jobTitle,userType,mail,userPrincipalName&$top=999";
@@ -84,13 +85,23 @@ export interface JobTitleCount {
 export interface DirectoryFetchValues {
   departments: string[];
   jobTitles: string[];
-  jobTitleCounts: JobTitleCount[];
   /**
-   * Distinct email domains seen on Member-type users that did NOT match
-   * `ORGANIZATION_SYNC_ALLOWED_DOMAIN` — pure visibility for an admin
-   * ("we also saw these domains in the tenant but only kinsen.gr is
-   * processed"), never used to gate or process anything. Empty when every
-   * Member account in the tenant is on the configured domain.
+   * Job title counts, bucketed by the domain the OBSERVING eligible users
+   * actually belong to (never a single assumed domain) — a title seen only
+   * among saracakis.gr users must never be tagged/counted under kinsen.gr,
+   * and vice versa. Keyed by domain string (one of
+   * ALLOWED_ORGANIZATION_EMAIL_DOMAINS, see lib/allowed-email-domains.ts).
+   * The same title text can legitimately appear under more than one
+   * domain's bucket — each domain's MicrosoftDirectoryJobTitleValue rows
+   * are a fully independent, separately keyed set (domain, normalizedValue).
+   */
+  jobTitleCountsByDomain: Record<string, JobTitleCount[]>;
+  /**
+   * Distinct email domains seen on Member-type users that did NOT match any
+   * configured allowed domain — pure visibility for an admin ("we also saw
+   * these domains in the tenant but they aren't enabled"), never used to
+   * gate or process anything. Empty when every Member account in the
+   * tenant is on a configured domain.
    */
   otherDomainsObserved: string[];
 }
@@ -145,8 +156,8 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
 
   const departments = new Set<string>();
   const jobTitles = new Set<string>();
-  // normalizedValue -> {value: first-seen raw casing, count}
-  const jobTitleCounts = new Map<string, JobTitleCount>();
+  // domain -> normalizedValue -> {value: first-seen raw casing, count}
+  const jobTitleCountsByDomain = new Map<string, Map<string, JobTitleCount>>();
   const otherDomainsObserved = new Set<string>();
   let url: string | undefined = GRAPH_USERS_PAGE_URL;
   let pages = 0;
@@ -187,7 +198,7 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
 
       if (!eligibility.eligible) {
         // Only report OTHER domains for a real Member account that simply
-        // isn't on the configured domain — a Guest/service account (reason
+        // isn't on an allowed domain — a Guest/service account (reason
         // "not_member") tells us nothing useful about tenant domains.
         if (eligibility.reason === "no_matching_domain") {
           const candidate = user.mail?.trim() || user.userPrincipalName?.trim() || "";
@@ -206,14 +217,31 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
       const title = typeof user.jobTitle === "string" ? user.jobTitle.trim() : "";
       if (title) {
         jobTitles.add(title);
-        const normalized = normalizeJobTitleValue(title);
-        const existing = jobTitleCounts.get(normalized);
-        if (existing) existing.count += 1;
-        else jobTitleCounts.set(normalized, { value: title, normalizedValue: normalized, count: 1 });
+        // This user's OWN matched domain (never a single assumed one) — a
+        // title observed on a saracakis.gr user is counted/tagged under
+        // saracakis.gr, a title observed on a kinsen.gr user under
+        // kinsen.gr, even within the same tenant scan.
+        const userDomain = extractEmailDomain(eligibility.matchedEmail);
+        if (userDomain) {
+          const normalized = normalizeJobTitleValue(title);
+          let domainBucket = jobTitleCountsByDomain.get(userDomain);
+          if (!domainBucket) {
+            domainBucket = new Map<string, JobTitleCount>();
+            jobTitleCountsByDomain.set(userDomain, domainBucket);
+          }
+          const existing = domainBucket.get(normalized);
+          if (existing) existing.count += 1;
+          else domainBucket.set(normalized, { value: title, normalizedValue: normalized, count: 1 });
+        }
       }
     }
 
     url = data["@odata.nextLink"];
+  }
+
+  const jobTitleCountsByDomainResult: Record<string, JobTitleCount[]> = {};
+  for (const [domain, counts] of jobTitleCountsByDomain) {
+    jobTitleCountsByDomainResult[domain] = Array.from(counts.values()).sort((a, b) => a.value.localeCompare(b.value));
   }
 
   return {
@@ -221,7 +249,7 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
     values: {
       departments: Array.from(departments).sort((a, b) => a.localeCompare(b)),
       jobTitles: Array.from(jobTitles).sort((a, b) => a.localeCompare(b)),
-      jobTitleCounts: Array.from(jobTitleCounts.values()).sort((a, b) => a.value.localeCompare(b.value)),
+      jobTitleCountsByDomain: jobTitleCountsByDomainResult,
       otherDomainsObserved: Array.from(otherDomainsObserved).sort((a, b) => a.localeCompare(b)),
     },
   };
@@ -333,11 +361,14 @@ export interface DirectorySyncSummary {
   addedDepartments: number;
   updatedDepartments: number;
   staledDepartments: number;
+  /** Sum across every configured allowed domain — see perDomainJobTitles for the per-domain breakdown. */
   discoveredJobTitles: number;
   addedJobTitles: number;
   updatedJobTitles: number;
   staledJobTitles: number;
-  /** Non-configured-domain Member accounts observed this run — visibility only, see DirectoryFetchValues.otherDomainsObserved. */
+  /** One entry per configured allowed domain (lib/allowed-email-domains.ts) — every domain is synced (and stale-marked) every run, even one with zero eligible users this time, exactly like the single-domain behavior this replaces always did for its one domain. */
+  perDomainJobTitles: Array<{ domain: string; discovered: number; added: number; updated: number; staled: number }>;
+  /** Non-allowed-domain Member accounts observed this run — visibility only, see DirectoryFetchValues.otherDomainsObserved. */
   otherDomainsObserved: string[];
 }
 
@@ -347,8 +378,11 @@ export type DirectorySyncResult =
 
 /**
  * Admin-triggered only. Fetches the current distinct department + jobTitle
- * values from Graph in one combined scan (eligible `@<ALLOWED_EMAIL_DOMAIN>`
- * Member users only, see this file's header) and upserts both cache tables.
+ * values from Graph in one combined scan (eligible Member users on any
+ * configured allowed domain only, see this file's header) and upserts both
+ * cache tables — job titles once per configured allowed domain, each
+ * domain's own MicrosoftDirectoryJobTitleValue rows kept fully independent
+ * (see DirectoryFetchValues.jobTitleCountsByDomain's doc comment).
  */
 export async function syncMicrosoftDirectoryValues(): Promise<DirectorySyncResult> {
   const result = await fetchAllGraphUserDirectoryValues();
@@ -360,13 +394,34 @@ export async function syncMicrosoftDirectoryValues(): Promise<DirectorySyncResul
   const seenDepartments = new Set(result.values.departments);
 
   const deptSummary = await syncDirectoryValueTable(prisma.microsoftDirectoryDepartmentValue, seenDepartments);
-  const titleSummary = await syncJobTitleDirectoryTable(ORGANIZATION_SYNC_ALLOWED_DOMAIN, result.values.jobTitleCounts);
+
+  // Every configured allowed domain is synced — not just domains that
+  // happened to have an eligible user with a job title THIS run — so a
+  // domain that temporarily has zero eligible users still gets its stale
+  // rows correctly marked inactive (self-healing), matching exactly what
+  // the single-domain implementation always did for its one domain.
+  const perDomainJobTitles: DirectorySyncSummary["perDomainJobTitles"] = [];
+  let discoveredJobTitles = 0;
+  let addedJobTitles = 0;
+  let updatedJobTitles = 0;
+  let staledJobTitles = 0;
+  for (const domain of ALLOWED_ORGANIZATION_EMAIL_DOMAINS) {
+    const counts = result.values.jobTitleCountsByDomain[domain] ?? [];
+    const summary = await syncJobTitleDirectoryTable(domain, counts);
+    perDomainJobTitles.push({ domain, discovered: counts.length, ...summary });
+    discoveredJobTitles += counts.length;
+    addedJobTitles += summary.added;
+    updatedJobTitles += summary.updated;
+    staledJobTitles += summary.staled;
+  }
+  const titleSummary = { added: addedJobTitles, updated: updatedJobTitles, staled: staledJobTitles };
 
   console.log("[microsoft-directory] Directory sync completed", {
     discoveredDepartments: seenDepartments.size,
     ...deptSummary,
-    discoveredJobTitles: result.values.jobTitleCounts.length,
+    discoveredJobTitles,
     ...titleSummary,
+    perDomainJobTitles,
     otherDomainsObserved: result.values.otherDomainsObserved,
   });
 
@@ -376,10 +431,11 @@ export async function syncMicrosoftDirectoryValues(): Promise<DirectorySyncResul
     addedDepartments: deptSummary.added,
     updatedDepartments: deptSummary.updated,
     staledDepartments: deptSummary.staled,
-    discoveredJobTitles: result.values.jobTitleCounts.length,
-    addedJobTitles: titleSummary.added,
-    updatedJobTitles: titleSummary.updated,
-    staledJobTitles: titleSummary.staled,
+    discoveredJobTitles,
+    addedJobTitles,
+    updatedJobTitles,
+    staledJobTitles,
+    perDomainJobTitles,
     otherDomainsObserved: result.values.otherDomainsObserved,
   };
 }
@@ -419,10 +475,20 @@ export async function getCachedDirectoryJobTitleValues(): Promise<{
  * an empty value; trims before storing/comparing. Never throws — a cache
  * fill must never break a real Microsoft sign-in (see the try/catch in the
  * jobTitle branch below, added specifically for this reason).
+ *
+ * `domain` is REQUIRED for `kind: "jobTitle"` (ignored for "department",
+ * which isn't domain-scoped) — this function only ever runs for an
+ * already-authenticated Microsoft sign-in, which lib/auth.ts already gated
+ * to an allowed organization domain, but with more than one allowed domain
+ * configured there is no longer a single correct constant to assume; the
+ * caller (microsoft-department-sync-service.ts) must pass THIS user's own
+ * matched domain. A missing domain for a job title is a safe no-op (never
+ * guesses) rather than mistagging it under the wrong domain.
  */
 export async function upsertDiscoveredMicrosoftDirectoryValue(
   kind: "department" | "jobTitle",
-  value: string
+  value: string,
+  domain?: string | null
 ): Promise<void> {
   const trimmed = value.trim();
   if (!trimmed) return;
@@ -436,17 +502,16 @@ export async function upsertDiscoveredMicrosoftDirectoryValue(
     return;
   }
 
+  if (!domain) return;
+
   // Job title: upsert by the (domain, normalizedValue) compound key, never
-  // by `value` — this function only ever runs for an already-authenticated
-  // Microsoft sign-in, which lib/auth.ts already domain-gated, so the
-  // configured ORGANIZATION_SYNC_ALLOWED_DOMAIN is always the correct
-  // domain here (see the model's schema comment). userCount is
-  // deliberately left untouched (this call only ever observes ONE user, so
-  // it cannot know the real tenant-wide count) — only the admin-triggered
-  // syncJobTitleDirectoryTable (a full, eligibility-filtered tenant scan)
-  // is authoritative for userCount.
+  // by `value` — domain is this specific user's own matched allowed
+  // domain (see this function's doc comment), never a single assumed
+  // constant. userCount is deliberately left untouched (this call only
+  // ever observes ONE user, so it cannot know the real tenant-wide count)
+  // — only the admin-triggered syncJobTitleDirectoryTable (a full,
+  // eligibility-filtered tenant scan) is authoritative for userCount.
   try {
-    const domain = ORGANIZATION_SYNC_ALLOWED_DOMAIN;
     const normalizedValue = normalizeJobTitleValue(trimmed);
     const existing = await prisma.microsoftDirectoryJobTitleValue.findUnique({
       where: { domain_normalizedValue: { domain, normalizedValue } },
