@@ -11,7 +11,7 @@
 --   * CustomRole: only key=ADMIN
 --   * Department roles: none
 --   * Permission definitions: preserved
---   * Permission mappings: only mappings belonging to ADMIN/admin user
+--   * Permission mappings: RolePermission.roleKey=ADMIN only
 --   * Departments / memberships: empty
 --   * Microsoft mappings: empty
 --   * Tickets / comments / attachment DB rows / history: empty
@@ -396,6 +396,22 @@ BEGIN
     LOOP
         v_predicate := 'TRUE';
 
+        -- RolePermission in the current TicketApp schema stores the role as
+        -- plain text (roleKey), not as a foreign key to CustomRole.
+        -- Therefore it must be filtered explicitly.
+        IF r.table_name = 'RolePermission'
+           AND EXISTS
+           (
+               SELECT 1
+                 FROM information_schema.columns
+                WHERE table_schema = r.schema_name
+                  AND table_name = r.table_name
+                  AND column_name = 'roleKey'
+           )
+        THEN
+            v_predicate := v_predicate || ' AND c."roleKey" = ''ADMIN''';
+        END IF;
+
         -- Restrict any FK to CustomRole to ADMIN.
         FOR fk IN
             SELECT parent_ns.nspname AS parent_schema,
@@ -674,6 +690,22 @@ BEGIN
         IF v_bad_count <> 0 THEN
             RAISE EXCEPTION
                 'FINAL CHECK FAILED: non-admin or department CustomRole survived.';
+        END IF;
+    END IF;
+
+    -- RolePermission must contain ADMIN mappings only.  This explicit
+    -- invariant protects against the text roleKey representation used by
+    -- this schema (there is no FK from RolePermission.roleKey to CustomRole).
+    IF to_regclass('public."RolePermission"') IS NOT NULL THEN
+        SELECT count(*)
+          INTO v_bad_count
+          FROM public."RolePermission"
+         WHERE "roleKey" IS DISTINCT FROM 'ADMIN';
+
+        IF v_bad_count <> 0 THEN
+            RAISE EXCEPTION
+                'FINAL CHECK FAILED: RolePermission contains % non-ADMIN mapping(s).',
+                v_bad_count;
         END IF;
     END IF;
 
