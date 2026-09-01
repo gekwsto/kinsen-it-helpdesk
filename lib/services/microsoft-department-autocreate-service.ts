@@ -12,9 +12,10 @@
  * the value — explicit mappings must always win and are never reconsidered
  * here.
  */
-import { DepartmentRole, MembershipSource, MicrosoftMappingSourceType, Prisma, Role } from "@prisma/client";
+import { MembershipSource, MicrosoftMappingSourceType, Prisma } from "@prisma/client";
 import { createDepartment, getDepartmentBySlug, slugify } from "@/lib/services/department-service";
 import { createMapping } from "@/lib/services/microsoft-mapping-service";
+import { resolveDefaultGlobalRoleAssignment, resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
 import type { ResolvedMembership } from "@/types/department";
 
 function isAutoCreateEnabled(): boolean {
@@ -22,12 +23,13 @@ function isAutoCreateEnabled(): boolean {
 }
 
 /**
- * Returns a ResolvedMembership (REQUESTER in a found-or-newly-created
- * department) if auto-create is enabled and applicable, or null if the
- * feature is disabled, the value is empty/whitespace, or a matching
- * department already exists and mapping creation is left to the admin.
- * Never throws — a race on the department slug or the mapping's unique
- * constraint is treated as "someone else already handled it," not an error.
+ * Returns a ResolvedMembership (the configured Default Department Role, or
+ * REQUESTER when none is configured, in a found-or-newly-created department)
+ * if auto-create is enabled and applicable, or null if the feature is
+ * disabled, the value is empty/whitespace, or a matching department already
+ * exists and mapping creation is left to the admin. Never throws — a race
+ * on the department slug or the mapping's unique constraint is treated as
+ * "someone else already handled it," not an error.
  */
 export async function maybeAutoCreateDepartmentForGraphValue(
   value: string
@@ -58,15 +60,28 @@ export async function maybeAutoCreateDepartmentForGraphValue(
     }
   }
 
+  // The bootstrap mapping's own role grant — resolved from the configured
+  // Default Global/Department Role (lib/services/default-role-service.ts)
+  // instead of hardcoding Role.USER/DepartmentRole.REQUESTER, so an
+  // auto-created mapping reflects whatever an admin has configured as "what
+  // a newly-discovered, unmapped signal should grant" — exactly the concept
+  // this feature exists for. Falls back to the pre-existing USER/REQUESTER
+  // enum values (no custom role) when nothing is configured, unchanged from
+  // before this feature.
+  const [globalDefault, departmentDefault] = await Promise.all([
+    resolveDefaultGlobalRoleAssignment(),
+    resolveDefaultDepartmentRoleAssignment(),
+  ]);
+
   try {
     await createMapping({
       sourceType: MicrosoftMappingSourceType.PROFILE_DEPARTMENT,
       microsoftValue: trimmed,
       departmentId: department.id,
-      // Role.USER / DepartmentRole.REQUESTER is the auto-create default for
-      // both fields — matches the ResolvedMembership returned below.
-      role: Role.USER,
-      departmentRole: DepartmentRole.REQUESTER,
+      role: globalDefault.role,
+      globalCustomRoleId: globalDefault.customRoleId,
+      departmentRole: departmentDefault.role,
+      departmentCustomRoleId: departmentDefault.customRoleId,
     });
     console.log("[microsoft-directory] Auto-created default mapping", {
       microsoftValue: trimmed,
@@ -83,9 +98,8 @@ export async function maybeAutoCreateDepartmentForGraphValue(
 
   return {
     departmentId: department.id,
-    role: DepartmentRole.REQUESTER,
-    // Auto-created mapping is always the built-in REQUESTER default above — never a custom role.
-    customRoleId: null,
+    role: departmentDefault.role,
+    customRoleId: departmentDefault.customRoleId,
     source: MembershipSource.MICROSOFT_DEPARTMENT,
   };
 }

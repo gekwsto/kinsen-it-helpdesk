@@ -9,7 +9,7 @@
  * never reads a user id from anywhere else, so it works identically for a
  * brand-new user's first login and a returning user's Nth login.
  */
-import { DepartmentRole, GlobalRoleSource, MembershipSource, Prisma, Role } from "@prisma/client";
+import { GlobalRoleSource, MembershipSource, Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
   resolveDepartmentMemberships,
@@ -17,6 +17,7 @@ import {
   resolvePrimaryMicrosoftMapping,
 } from "@/lib/services/microsoft-mapping-service";
 import { syncDepartmentMemberships, setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
+import { resolveDefaultGlobalRoleAssignment, resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
 import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
@@ -195,8 +196,20 @@ export async function syncMicrosoftUserDepartment(
           organizationSyncedAt: new Date(),
         },
       });
+      // No MicrosoftDepartmentMapping concept applies to PRIMARY placement
+      // (see this block's own header comment — it's driven entirely by
+      // organization-company-department-resolver.ts) — resolving straight
+      // to the configured Default Department Role (or the pre-existing
+      // REQUESTER/no-custom-role fallback when none is configured) is the
+      // full "explicit mapping -> default -> no role" precedence collapsed
+      // to its last two tiers. setPrimaryDepartmentMembership's own
+      // MANUAL/custom-role protection decides whether this is actually
+      // applied to an existing row (never overwrites the invariant in
+      // rule #1 above).
+      const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
       await setPrimaryDepartmentMembership(userId, placement.departmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
-        role: DepartmentRole.REQUESTER,
+        role: departmentDefault.role,
+        customRoleId: departmentDefault.customRoleId,
         deactivateObsoleteMicrosoftPrimary: true,
       });
       primaryDepartmentSynced = true;
@@ -238,11 +251,11 @@ export async function syncMicrosoftUserDepartment(
   const primaryMapping = await resolvePrimaryMicrosoftMapping(claims, eligibleDomain);
   const globalRoleUpdate: Prisma.UserUpdateInput = { lastMicrosoftSyncAt: new Date() };
   let globalRoleSynced = false;
+  const dbUser = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { role: true, customRoleId: true, globalRoleSource: true },
+  });
   if (primaryMapping) {
-    const dbUser = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { role: true, globalRoleSource: true },
-    });
     if (dbUser && shouldSyncGlobalRole(dbUser)) {
       // primaryMapping.role IS the global Role directly now (a previous
       // phase moved MicrosoftDepartmentMapping.role from DepartmentRole to
@@ -265,6 +278,32 @@ export async function syncMicrosoftUserDepartment(
       globalRoleUpdate.globalRoleSource = "MICROSOFT_DEPARTMENT";
       globalRoleUpdate.globalRoleUpdatedAt = new Date();
       globalRoleUpdate.globalRoleMicrosoftMapping = { connect: { id: primaryMapping.id } };
+      globalRoleSynced = true;
+    }
+  } else if (
+    dbUser &&
+    dbUser.customRoleId === null &&
+    dbUser.globalRoleSource === GlobalRoleSource.SYSTEM &&
+    shouldSyncGlobalRole(dbUser)
+  ) {
+    // No explicit mapping matched — the "configured Default Global Role"
+    // tier (lib/services/default-role-service.ts) applies ONLY to a user
+    // whose global role has genuinely never been set (customRoleId still
+    // null AND globalRoleSource still the untouched SYSTEM default — never
+    // MANUAL or MICROSOFT_DEPARTMENT-from-a-now-stale-mapping, both of
+    // which are an "existing" assignment rule #1 protects). Re-applying
+    // this on every subsequent no-mapping login is intentional and
+    // idempotent — it lets an admin changing the configured default
+    // propagate to still-never-assigned users going forward, and is a
+    // true no-op once applied (customRoleId becomes non-null, so this
+    // branch never re-enters for that user again unless a later mapping
+    // match or an admin's MANUAL edit changes globalRoleSource first).
+    const globalDefault = await resolveDefaultGlobalRoleAssignment();
+    if (globalDefault.customRoleId) {
+      globalRoleUpdate.role = globalDefault.role;
+      globalRoleUpdate.customRole = { connect: { id: globalDefault.customRoleId } };
+      globalRoleUpdate.globalRoleSource = GlobalRoleSource.SYSTEM;
+      globalRoleUpdate.globalRoleUpdatedAt = new Date();
       globalRoleSynced = true;
     }
   }

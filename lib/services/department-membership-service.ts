@@ -324,6 +324,18 @@ export interface SetPrimaryDepartmentMembershipOptions {
   /** Role to apply to the target row — ignored (existing value preserved) for an existing MANUAL-source or custom-role row, same protection as ensurePrimaryDepartmentMembership. */
   role: DepartmentRole;
   /**
+   * Custom department role to apply alongside `role` (which becomes a
+   * required-but-unused placeholder once this is set — same convention as
+   * grantManualMembership). Resolved by the caller via
+   * lib/services/default-role-service.ts's resolveDefaultDepartmentRoleAssignment
+   * — this function has no opinion on WHERE the value comes from, it just
+   * applies it with the exact same protection rules as `role` (never
+   * touched on an existing MANUAL-source or already-custom-role row).
+   * Omit/null for the pre-existing "plain enum role, no custom role"
+   * behavior.
+   */
+  customRoleId?: string | null;
+  /**
    * Microsoft-sourced calls ONLY (organization-directory-sync-service.ts,
    * microsoft-department-sync-service.ts): when the CURRENT primary is being
    * replaced and its source is itself Microsoft-derived (not MANUAL), fully
@@ -378,7 +390,7 @@ export async function setPrimaryDepartmentMembership(
   source: MembershipSource,
   options: SetPrimaryDepartmentMembershipOptions
 ): Promise<SetPrimaryDepartmentMembershipResult> {
-  const { role, deactivateObsoleteMicrosoftPrimary = false } = options;
+  const { role, customRoleId = null, deactivateObsoleteMicrosoftPrimary = false } = options;
 
   return prisma.$transaction(async (tx) => {
     const allMemberships = await tx.departmentMembership.findMany({ where: { userId } });
@@ -429,20 +441,22 @@ export async function setPrimaryDepartmentMembership(
     //    this department" are two independent decisions; neither may
     //    silently clobber the other.
     //  - existing row has a custom department role (customRoleId) -> never
-    //    downgraded to a plain enum role, same as ensurePrimaryDepartmentMembership
-    //    (subsumed by the MANUAL-row protection above in practice, since a
-    //    custom-role row is always source: MANUAL — kept as its own
-    //    explicit condition for defense-in-depth / clarity).
+    //    downgraded/reassigned, checked as its own independent condition
+    //    (NOT merely subsumed by the MANUAL-row protection above — since
+    //    the configurable Default Department Role, resolved via
+    //    lib/services/default-role-service.ts, a source: MICROSOFT_DEPARTMENT
+    //    call CAN now also create a customRoleId-bearing row here, not just
+    //    a MANUAL one).
     //  - existing ACTIVE row whose role already matches the desired role ->
     //    left untouched (no silent source downgrade for a true no-op).
     //  - otherwise (inactive row being reactivated, or an active
     //    non-MANUAL row whose role genuinely differs, e.g. a stale
-    //    MICROSOFT_DEPARTMENT-sourced row) -> role/source updated to the
-    //    caller's values.
+    //    MICROSOFT_DEPARTMENT-sourced row) -> role/customRoleId/source
+    //    updated to the caller's values.
     let targetRow: DepartmentMembership;
     if (!targetExisting) {
       targetRow = await tx.departmentMembership.create({
-        data: { userId, departmentId, role, source, customRoleId: null, isActive: true, isPrimary: true },
+        data: { userId, departmentId, role, source, customRoleId, isActive: true, isPrimary: true },
       });
     } else {
       const protectManualRole = targetExisting.source === MembershipSource.MANUAL;
@@ -457,7 +471,7 @@ export async function setPrimaryDepartmentMembership(
       } else {
         targetRow = await tx.departmentMembership.update({
           where: { id: targetExisting.id },
-          data: { isActive: true, isPrimary: true, role, source, customRoleId: null },
+          data: { isActive: true, isPrimary: true, role, source, customRoleId },
         });
       }
     }

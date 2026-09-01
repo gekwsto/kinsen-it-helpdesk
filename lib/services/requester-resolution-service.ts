@@ -2,13 +2,16 @@ import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
 import type { User } from "@prisma/client";
 import { normalizeEmail } from "@/lib/services/email-identity";
+import { resolveDefaultGlobalRoleAssignment } from "@/lib/services/default-role-service";
 
 /**
  * Finds an existing User by email (case-insensitively — trimmed + lowered
  * before lookup, so "User@Kinsen.gr" and "user@kinsen.gr" always resolve to
- * the same row) or creates a brand-new one with default, unprivileged
- * standing (Role.USER via the schema default, isActive: true, no
- * department/customRole/authProvider override).
+ * the same row) or creates a brand-new one with default standing: the
+ * configured Default Global Role (lib/services/default-role-service.ts) if
+ * an admin has set one, otherwise the pre-existing Role.USER/no-customRole
+ * fallback — isActive: true, no department/authProvider override either
+ * way.
  *
  * Deliberately narrow: never mutates an *existing* user's role, department,
  * customRoleId, or auth settings, and never reactivates one that's been
@@ -37,8 +40,14 @@ export async function resolveOrCreateRequester(rawEmail: string, rawName?: strin
   const existing = await prisma.user.findUnique({ where: { email } });
   if (existing) return existing;
 
+  // No Microsoft mapping concept applies to an inbound-email-derived
+  // requester — this resolves straight to the configured Default Global
+  // Role (or the pre-existing role:USER/customRoleId:null fallback when
+  // none is configured), same "no mapping tier here at all" reasoning as
+  // organization-directory-sync-service.ts's own brand-new-user creation.
+  const globalDefault = await resolveDefaultGlobalRoleAssignment();
   try {
-    return await prisma.user.create({ data: { email, name } });
+    return await prisma.user.create({ data: { email, name, role: globalDefault.role, customRoleId: globalDefault.customRoleId } });
   } catch (error) {
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       const winner = await prisma.user.findUnique({ where: { email } });

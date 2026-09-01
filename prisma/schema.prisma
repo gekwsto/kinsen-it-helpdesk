@@ -1473,8 +1473,40 @@ model CustomRole {
   // by a mapping can never be silently orphaned by a hard delete.
   microsoftMappingsAsGlobalRole     MicrosoftDepartmentMapping[] @relation("MicrosoftMappingGlobalCustomRole")
   microsoftMappingsAsDepartmentRole MicrosoftDepartmentMapping[] @relation("MicrosoftMappingDepartmentCustomRole")
+  // The configurable "Default Global Role" / "Default Department Role" —
+  // see DefaultRoleConfig. A CustomRole currently configured as either
+  // default can never be deleted or deactivated until the default is
+  // changed/cleared first (app/api/admin/roles/[id]/route.ts).
+  defaultRoleConfigsAsGlobal     DefaultRoleConfig[] @relation("DefaultRoleConfigGlobal")
+  defaultRoleConfigsAsDepartment DefaultRoleConfig[] @relation("DefaultRoleConfigDepartment")
   createdAt             DateTime               @default(now())
   updatedAt             DateTime               @updatedAt
+}
+
+// Singleton (fixed id "singleton", same idiom as OrganizationSyncLock) admin
+// config: which CustomRole a newly-provisioned user/department-membership
+// gets when nothing more specific (an explicit MicrosoftDepartmentMapping)
+// applies. See lib/services/default-role-service.ts — the sole reader/writer
+// of this table; every provisioning call site (Microsoft login sync,
+// tenant-wide directory sync, inbound-email requester creation, the
+// department-auto-create bootstrap mapping) resolves through it rather than
+// hardcoding Role.USER/DepartmentRole.REQUESTER directly. Both fields
+// reference CustomRole (never a bare Role/DepartmentRole enum value) so an
+// admin can point either default at any active role, built-in or custom.
+model DefaultRoleConfig {
+  id String @id @default("singleton")
+
+  // Must be an active CustomRole with scope GLOBAL or BOTH — enforced in
+  // lib/services/default-role-service.ts, not just here (onDelete: SetNull
+  // alone can't express "or deactivated").
+  defaultGlobalCustomRole   CustomRole? @relation("DefaultRoleConfigGlobal", fields: [defaultGlobalCustomRoleId], references: [id], onDelete: SetNull)
+  defaultGlobalCustomRoleId String?
+
+  // Must be an active CustomRole with scope DEPARTMENT or BOTH.
+  defaultDepartmentCustomRole   CustomRole? @relation("DefaultRoleConfigDepartment", fields: [defaultDepartmentCustomRoleId], references: [id], onDelete: SetNull)
+  defaultDepartmentCustomRoleId String?
+
+  updatedAt DateTime @updatedAt
 }
 
 // ─── Permissions ──────────────────────────────────────────────────────────────

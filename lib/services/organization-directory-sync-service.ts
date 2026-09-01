@@ -26,12 +26,13 @@
  * parallel mapping logic.
  */
 import { prisma } from "@/lib/prisma";
-import { AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
+import { AuthProvider, MembershipSource } from "@prisma/client";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { fetchWithGraphRetry } from "@/lib/microsoft-graph-retry";
 import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
 import { syncDepartmentMemberships, setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { normalizeEmail } from "@/lib/services/email-identity";
+import { resolveDefaultGlobalRoleAssignment, resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
 import {
   createOrganizationResolutionCache,
   resolveOrganizationPlacement,
@@ -368,6 +369,14 @@ async function upsertOneDirectoryUser(
       return { action, dbUserId: updated.id, name: updated.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId };
     }
 
+    // This flow has no MicrosoftDepartmentMapping-based global-role
+    // resolution at all (only the per-login sync path does — see
+    // microsoft-department-sync-service.ts) — so for a brand-new user
+    // discovered by a tenant-wide scan, "explicit mapping" simply isn't a
+    // tier that applies here; this resolves straight to the configured
+    // Default Global Role (or the pre-existing role:USER/customRoleId:null
+    // fallback when none is configured).
+    const globalDefault = await resolveDefaultGlobalRoleAssignment();
     const created = await prisma.user.create({
       data: {
         email,
@@ -384,6 +393,8 @@ async function upsertOneDirectoryUser(
         entraUserType: user.userType ?? null,
         organizationSyncedAt: new Date(),
         companyId: placement.companyId,
+        role: globalDefault.role,
+        customRoleId: globalDefault.customRoleId,
       },
       select: { id: true, name: true },
     });
@@ -550,11 +561,12 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
   // together (see the User/Department/Member canonical-membership
   // architecture). This is what used to write User.departmentId directly in
   // upsertOneDirectoryUser above WITHOUT ever creating a matching
-  // membership — the real bug this closes. DepartmentRole.REQUESTER matches
-  // the existing auto-create default elsewhere in this codebase
-  // (microsoft-department-autocreate-service.ts) — Microsoft sync never
-  // does role mapping (see this file's own role-protection rules below),
-  // this is just the least-privileged starting DepartmentRole for a
+  // membership — the real bug this closes. Resolves to the configured
+  // Default Department Role (lib/services/default-role-service.ts) — or the
+  // pre-existing DepartmentRole.REQUESTER/no-custom-role fallback when none
+  // is configured — since Microsoft sync never does mapping-based role
+  // resolution for the PRIMARY placement (see this file's own role-
+  // protection rules below); this is just the starting DepartmentRole for a
   // membership that exists purely to reflect organizational placement.
   // deactivateObsoleteMicrosoftPrimary: true — an organizational move
   // detected by Microsoft sync must not leave a stale Microsoft-granted
@@ -567,11 +579,13 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
   // admin-configured mapping (group/app-role/job-title) — completely
   // independent of the primary placement above, and never touches MANUAL
   // memberships (syncDepartmentMemberships's own existing protection).
+  const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
   for (const synced of syncedForMembership) {
     if (synced.resolvedDepartmentId) {
       try {
         await setPrimaryDepartmentMembership(synced.dbUserId, synced.resolvedDepartmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
-          role: DepartmentRole.REQUESTER,
+          role: departmentDefault.role,
+          customRoleId: departmentDefault.customRoleId,
           deactivateObsoleteMicrosoftPrimary: true,
         });
       } catch (err) {

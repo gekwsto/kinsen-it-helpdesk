@@ -2,7 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, canManageRoleScope } from "@/lib/permissions";
 import { wouldOrphanAdminAccessByDisablingRole } from "@/lib/services/role-safety-service";
+import { isCustomRoleConfiguredAsDefault } from "@/lib/services/default-role-service";
 import { z } from "zod";
+
+/** Shared message/code for both PATCH(isActive:false) and DELETE below — a role configured as a default can never be removed or disabled until the default is changed/cleared first (Default Roles section on this page). */
+function defaultRoleInUseResponse(defaultKinds: { asGlobalDefault: boolean; asDepartmentDefault: boolean }) {
+  const parts: string[] = [];
+  if (defaultKinds.asGlobalDefault) parts.push("the Default Global Role");
+  if (defaultKinds.asDepartmentDefault) parts.push("the Default Department Role");
+  return NextResponse.json(
+    { error: `This role is currently configured as ${parts.join(" and ")} and cannot be removed or disabled. Change or clear the default first.`, code: "role_is_configured_default" },
+    { status: 409 }
+  );
+}
 
 const updateRoleSchema = z.object({
   name: z.string().min(2).max(50).optional(),
@@ -40,6 +52,10 @@ export async function PATCH(
           { error: "Disabling this role would leave no path to admin access.", code: "cannot_remove_last_admin" },
           { status: 409 }
         );
+      }
+      const defaultKinds = await isCustomRoleConfiguredAsDefault(id);
+      if (defaultKinds.asGlobalDefault || defaultKinds.asDepartmentDefault) {
+        return defaultRoleInUseResponse(defaultKinds);
       }
     }
 
@@ -86,6 +102,11 @@ export async function DELETE(
         { error: "Built-in roles cannot be permanently deleted. Disable it instead.", code: "builtin_role_locked" },
         { status: 409 }
       );
+    }
+
+    const defaultKinds = await isCustomRoleConfiguredAsDefault(id);
+    if (defaultKinds.asGlobalDefault || defaultKinds.asDepartmentDefault) {
+      return defaultRoleInUseResponse(defaultKinds);
     }
 
     const [usersWithRole, membershipsWithRole, globalMappingsWithRole, departmentMappingsWithRole] = await Promise.all([

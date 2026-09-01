@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Loader2, Plus, Pencil, Trash2, ShieldCheck, Shield, Ban, RotateCcw, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { DefaultRolesConfig } from "@/components/admin/default-roles-config";
 
 type RoleScope = "GLOBAL" | "DEPARTMENT" | "BOTH";
 
@@ -336,6 +337,8 @@ export default function RolesAdminPage() {
           have permissions changed, but use Disable instead of Delete.
         </p>
       </div>
+
+      <DefaultRolesConfig roles={roles} />
 
       {/* Global Roles / Department Roles tabs */}
       <div className="flex items-center gap-1 border-b">
