@@ -1742,3 +1742,52 @@ model PushNotificationLog {
   @@index([type])
   @@index([status])
 }
+
+// ─── One-time legacy migration (scripts/migrate-legacy-ticketapp.ts) ──────────
+
+enum LegacyMigrationEntityType {
+  USER
+  TICKET
+  COMMENT
+  ATTACHMENT
+}
+
+enum LegacyMigrationStatus {
+  SUCCEEDED
+  FAILED
+}
+
+// Durable idempotency ledger for the one-time legacy TicketApp import — the
+// SOLE mechanism the migration runner consults to decide "has this exact
+// source record already been migrated." A second `--execute` run reads this
+// table before creating anything for a given (source, entityType, legacyKey)
+// triple; on a hit it reuses `targetId` instead of creating a duplicate.
+// `legacyKey` is always the source system's own stable identifier as a
+// string (legacy UserName, Tickets.Id, CommentsTbl.Id, FileDataTbl.Id) —
+// never a derived/guessed value. A FAILED row records why a specific source
+// record could not be migrated (see errorMessage) without blocking retry of
+// everything else; rerunning after a fix reprocesses only rows that are
+// still missing a SUCCEEDED entry.
+model MigrationLedger {
+  id           String                    @id @default(cuid())
+  // Fixed to "TICKETAPP_V1" today — kept as a real column (not hardcoded
+  // into the unique index) so a future, unrelated legacy source could reuse
+  // this same table without colliding on legacyKey identity.
+  source       String
+  entityType   LegacyMigrationEntityType
+  legacyKey    String
+  // Null when status is FAILED and nothing was actually persisted.
+  targetId     String?
+  status       LegacyMigrationStatus
+  // Optional content fingerprint (e.g. a hash of the fields that determine
+  // whether a re-run's source data changed) — populated only where the
+  // runner finds it useful; never required for idempotency itself, which is
+  // keyed purely on (source, entityType, legacyKey) existing at all.
+  checksum     String?
+  errorMessage String?                   @db.Text
+  createdAt    DateTime                  @default(now())
+  updatedAt    DateTime                  @updatedAt
+
+  @@unique([source, entityType, legacyKey])
+  @@index([source, entityType, status])
+}
