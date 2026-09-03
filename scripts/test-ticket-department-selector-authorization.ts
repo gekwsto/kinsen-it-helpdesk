@@ -1,15 +1,25 @@
 /**
  * End-to-end proof that the New Ticket page's Department selector cannot be
  * bypassed by a manually crafted request — POST /api/tickets's
- * resolveDepartmentForCreate("ticket.create") is the sole, fail-closed
- * authority over which department a ticket actually lands in, regardless of
- * what the client sends. Exercises the REAL route handler (not just the
- * lower-level department-scope-service function already covered by
- * scripts/test-department-manager-scope.ts), and then proves the resulting
+ * resolveTicketDestinationDepartment is the sole, fail-closed authority over
+ * which department a ticket actually lands in, regardless of what the
+ * client sends. Exercises the REAL route handler, then proves the resulting
  * ticket is visible to an eligible agent of the destination department and
  * invisible to an unrelated department's agent — through the EXISTING
  * buildTicketListWhere/GET /api/tickets visibility path, never a second
  * system.
+ *
+ * REVISED per the corrected business requirement (see
+ * scripts/test-ticket-destination-department-selector.ts for the full
+ * root-cause reproduction/fix): a ticket's destination department is who
+ * it's being SENT TO, not a department the requester must already hold
+ * DepartmentMembership in — §2 below used to assert the OPPOSITE (a
+ * cross-department departmentId was rejected purely for lack of
+ * membership), which was exactly the incorrect coupling this app's product
+ * requirement identified and corrected. §2 now proves the requester CAN
+ * address a department they don't belong to, as long as they can create
+ * tickets at all; §3/§4 (cross-department config-ownership rejection,
+ * resulting agent visibility) are unaffected and still hold.
  *
  * Usage: node --require ./scripts/test-support-server-only-stub.cjs --experimental-test-module-mocks --import tsx scripts/test-ticket-department-selector-authorization.ts
  */
@@ -112,26 +122,27 @@ async function main() {
     if (legitBody?.id) ticketIds.push(legitBody.id);
     check("Ticket persisted with departmentId = Dept A (the ACTUAL Ticket.departmentId column, not a parallel field)", legitBody.departmentId === deptA.id);
 
-    // ══════════════ 2. Manually crafted bypass attempt: requesterA submits Dept B (no membership at all) ══════════════
-    console.log("\n=== 2. Manually crafted request: departmentId the user has NO membership in ===\n");
-    const ticketCountBefore = await prisma.ticket.count();
-    const bypassRes = await POST(
+    // ══════════════ 2. requesterA addresses a ticket to Dept B — a real destination they have NO membership in ══════════════
+    console.log("\n=== 2. Destination department the requester has NO membership in is a VALID choice (corrected behavior) ===\n");
+    const crossDeptRes = await POST(
       new NextRequest("http://localhost/api/tickets", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          title: "Attempted cross-department ticket",
-          description: "A UI would never offer Dept B to this user — this simulates a hand-crafted POST body.",
+          title: "Ticket addressed to a department I'm not a member of",
+          description: "requesterA has zero DepartmentMembership in Dept B — must still succeed; the destination is who the ticket is SENT TO, not somewhere the requester operates.",
           departmentId: deptB.id,
           categoryId: categoryB.id,
         }),
       })
     );
-    check("POST with a departmentId the user has NO membership in -> rejected (not 201)", bypassRes.status !== 201);
-    check("...specifically 403 (invalid_department, per departmentDenialStatus)", bypassRes.status === 403);
-    const bypassBody = await bypassRes.json();
-    check("...with an explicit denial message, never a silent/ambiguous failure", typeof bypassBody.error === "string" && bypassBody.error.length > 0);
-    check("No ticket was created by the rejected request", (await prisma.ticket.count()) === ticketCountBefore);
+    check("POST addressed to a department the requester has NO membership in -> 201 (not 403)", crossDeptRes.status === 201);
+    const crossDeptBody = await crossDeptRes.json();
+    if (crossDeptBody?.id) ticketIds.push(crossDeptBody.id);
+    check("Ticket.departmentId is the DESTINATION (Dept B), never silently redirected to the requester's own department", crossDeptBody.departmentId === deptB.id);
+    check("Dept B's own category was accepted", crossDeptBody.categoryId === categoryB.id);
+    const requesterAMembershipInB = await prisma.departmentMembership.findUnique({ where: { userId_departmentId: { userId: requesterA.id, departmentId: deptB.id } } });
+    check("requesterA still has NO DepartmentMembership in Dept B afterward — addressing a ticket never grants membership", requesterAMembershipInB === null);
 
     // ══════════════ 3. Manually crafted bypass attempt: cross-department categoryId paired with the user's OWN legitimate department ══════════════
     console.log("\n=== 3. Manually crafted request: legitimate department, but a categoryId belonging to a DIFFERENT department ===\n");
@@ -180,6 +191,13 @@ async function main() {
       "Dept B agent's own ticket list (no filter) never includes the unrelated Dept A ticket — no cross-department leak",
       !agentBOwnList.tickets?.some((t: any) => t.id === legitBody.id)
     );
+
+    // And the §2 ticket (requesterA -> Dept B, cross-department address) IS
+    // visible to Dept B's own eligible agent — agent visibility follows the
+    // DESTINATION department's membership, never the requester's.
+    const agentBCrossDeptListRes = await GET(new NextRequest(`http://localhost/api/tickets?departmentId=${deptB.id}`));
+    const agentBCrossDeptList = await agentBCrossDeptListRes.json();
+    check("Dept B agent DOES see the ticket requesterA addressed to Dept B, despite requesterA having no membership there", agentBCrossDeptList.tickets?.some((t: any) => t.id === crossDeptBody.id));
   } finally {
     console.log("\nCleaning up test data...\n");
     try {

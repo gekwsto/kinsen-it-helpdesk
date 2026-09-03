@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import {
   buildTicketListWhere,
-  resolveDepartmentForCreate,
+  resolveTicketDestinationDepartment,
   departmentDenialMessage,
   departmentDenialStatus,
   resolveDefaultStatusId,
@@ -185,21 +185,29 @@ export async function POST(req: NextRequest) {
       effectiveRequestedDepartmentId = activeWorkspace.departmentId ?? undefined;
     }
 
-    // The sole authoritative ticket.create check — department-scoped OR the
-    // ADMIN/DIRECTOR bypass (canViewAllDepartments), exactly like
-    // POST /api/projects and POST /api/activities use "project.create"/
-    // "activity.create" here. A prior standalone `hasPermission(role,
-    // "ticket.create", customRoleId)` pre-check used to gate this route
-    // first — GLOBAL-only, so it wrongly 403'd a user whose ticket.create
-    // came solely from a department built-in/custom role (e.g. the built-in
-    // AGENT_ASSIGNEE department role) before ever reaching this correct,
-    // department-aware check. Removed rather than fixed-in-place, since
-    // resolveDepartmentForCreate already IS the correct, single check.
-    const deptResolution = await resolveDepartmentForCreate(
+    // The sole authoritative ticket.create check. Deliberately
+    // resolveTicketDestinationDepartment, NOT resolveDepartmentForCreate
+    // (which Project/Activity creation still uses, and correctly still
+    // requires DepartmentMembership in the department being created into) —
+    // a ticket's destination department is who it's being SENT TO, not a
+    // department the requester must already operate inside of (e.g. a
+    // Finance user addressing a ticket to IT without ever holding an IT
+    // DepartmentMembership row). Authorization here is two independent
+    // checks: can this user submit a ticket AT ALL (department-scoped
+    // ticket.create ANYWHERE, or global, or the ADMIN/DIRECTOR bypass —
+    // never dependent on which department they pick), and is the requested
+    // department a real, active department accepting new tickets (never
+    // dependent on the requester's membership in it). A prior standalone
+    // `hasPermission(role, "ticket.create", customRoleId)` pre-check used to
+    // gate this route first — GLOBAL-only, so it wrongly 403'd a user whose
+    // ticket.create came solely from a department built-in/custom role
+    // before ever reaching this check. Removed rather than fixed-in-place,
+    // since this resolver already IS the correct, single check.
+    const deptResolution = await resolveTicketDestinationDepartment(
       session.user.id,
       session.user.role,
-      effectiveRequestedDepartmentId,
-      "ticket.create"
+      session.user.customRoleId,
+      effectiveRequestedDepartmentId
     );
     if ("denied" in deptResolution) {
       return NextResponse.json(

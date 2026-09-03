@@ -63,8 +63,9 @@ interface TicketFormActivity {
 interface CreateTicketFormProps {
   categories: Array<{ id: string; name: string; departmentId: string | null }>;
   priorities: Array<{ id: string; name: string; color: string; level: number; departmentId: string | null }>;
+  /** Every valid ticket DESTINATION department (every active department in the org — see getTicketDestinationDepartments) — NOT scoped to ones the requester belongs to. Always rendered, even when it's a single entry. */
   departments: Array<{ id: string; name: string }>;
-  /** Active workspace's department — pre-selected, and the only choice shown when there's nothing to pick between. */
+  /** Active workspace's department — pre-selected as the default destination, but always changeable via the always-rendered Department field above. */
   defaultDepartmentId?: string | null;
   itAgents: Agent[];
   /** Same hard rule as the Ticket detail page and the generic PATCH route — only System Admin may link a ticket to a Project/Activity (and therefore may inline-create one from here). */
@@ -436,43 +437,46 @@ export function CreateTicketForm({
             <CardContent className="space-y-4">
               {/* Destination department — the ticket's actual owning
                   departmentId (existing Ticket data model/creation
-                  architecture; see resolveDepartmentForCreate server-side).
-                  Distinct from the "Share with my department/sub-department"
-                  checkboxes below, which only widen VISIBILITY of a ticket
-                  that already belongs to this department — they never change
-                  which department owns it. Only rendered when there's a real
-                  choice to make (a single accessible department is already
-                  pre-selected via defaultDepartmentId, guaranteed non-null
-                  before this form ever renders — see the New Ticket page's
-                  workspace guard). Category/Priority below are re-filtered to
-                  whichever department is selected here — see
+                  architecture; see resolveTicketDestinationDepartment
+                  server-side). `departments` is every ACTIVE department in
+                  the organization (getTicketDestinationDepartments), NOT
+                  scoped to ones the requester is a DepartmentMembership
+                  member of — addressing a ticket to a department the
+                  requester doesn't belong to (e.g. Finance -> IT) is the
+                  whole point of this field, so it's never hidden just
+                  because there'd only be one choice; a genuinely
+                  single-department organization still shows the field with
+                  that department pre-selected. Distinct from the "Share with
+                  my department/sub-department" checkboxes below, which only
+                  widen VISIBILITY of a ticket that already belongs to this
+                  department — they never change which department owns it.
+                  Category/Priority below are re-filtered to whichever
+                  department is selected here — see
                   visibleCategories/visiblePriorities and the effect that
                   clears an invalid selection when this changes. */}
-              {departments.length > 1 && (
-                <div className="space-y-1.5">
-                  <Label>
-                    Department <span className="text-destructive">*</span>
-                  </Label>
-                  <Select
-                    value={selectedDepartmentId ?? ""}
-                    onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select department…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {departments.map((d) => (
-                        <SelectItem key={d.id} value={d.id}>
-                          {d.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {errors.departmentId && (
-                    <p className="text-xs text-destructive">{errors.departmentId.message}</p>
-                  )}
-                </div>
-              )}
+              <div className="space-y-1.5">
+                <Label>
+                  Department <span className="text-destructive">*</span>
+                </Label>
+                <Select
+                  value={selectedDepartmentId ?? ""}
+                  onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select department…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {departments.map((d) => (
+                      <SelectItem key={d.id} value={d.id}>
+                        {d.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {errors.departmentId && (
+                  <p className="text-xs text-destructive">{errors.departmentId.message}</p>
+                )}
+              </div>
 
               <div className="space-y-1.5">
                 <Label>Category</Label>

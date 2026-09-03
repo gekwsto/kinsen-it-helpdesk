@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { isAdmin } from "@/lib/permissions";
-import { getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, getTicketDestinationDepartments, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { Role } from "@prisma/client";
@@ -55,25 +55,31 @@ export default async function NewTicketPage() {
     );
   }
 
-  // Scope the department + category choices to what the backend will
-  // actually accept — showing a department/category the create call would
-  // just reject is confusing, and the underlying query never needs to load
-  // rows the user isn't allowed to pick anyway.
-  const accessibleDepartments = await getAccessibleDepartmentSummaries(
-    session.user.id,
-    session.user.role,
-    "ticket.create"
-  );
-  const accessibleDepartmentIds = accessibleDepartments.map((d) => d.id);
+  // Department here means the ticket's DESTINATION — who it's being sent
+  // to — not a department the requester must already belong to (a Finance
+  // user must be able to address a ticket to IT without ever holding an IT
+  // DepartmentMembership row). So this is every ACTIVE department in the
+  // organization (getTicketDestinationDepartments), NOT
+  // getAccessibleDepartmentSummaries(..., "ticket.create") — that helper
+  // stays membership-scoped and is still correctly used below for
+  // project.create/activity.create, where operating inside the department
+  // genuinely is required. Whether this user may create a ticket AT ALL
+  // (independent of which destination they pick) is the separate
+  // `canCreate` gate above; POST /api/tickets re-derives both independently
+  // via resolveTicketDestinationDepartment — a client-supplied departmentId
+  // is never trusted here either.
+  const destinationDepartments = await getTicketDestinationDepartments();
+  const destinationDepartmentIds = destinationDepartments.map((d) => d.id);
 
   // Both category and priority are strictly department-owned now (no more
-  // global fallback) — scoped to the union of every department the user can
-  // create tickets in; the ticket form then re-filters this list down to
-  // just the currently-selected department client-side (see
-  // ticket-form.tsx), the same pattern already used for sub-departments.
+  // global fallback) — scoped to every valid destination department, since
+  // the user can address the ticket to any of them; the ticket form then
+  // re-filters this list down to just the currently-selected department
+  // client-side (see ticket-form.tsx), the same pattern already used for
+  // sub-departments.
   const scopedWhere = {
     isActive: true,
-    departmentId: { in: accessibleDepartmentIds },
+    departmentId: { in: destinationDepartmentIds },
   };
 
   // Project/Activity options themselves are no longer loaded here — the
@@ -137,7 +143,7 @@ export default async function NewTicketPage() {
       <CreateTicketForm
         categories={categories}
         priorities={priorities}
-        departments={accessibleDepartments}
+        departments={destinationDepartments}
         defaultDepartmentId={activeWorkspace.departmentId}
         itAgents={itAgents}
         canLinkProjectActivity={userIsAdmin}

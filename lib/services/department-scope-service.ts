@@ -743,6 +743,98 @@ export async function resolveDepartmentForCreate(
   return { departmentId: resolvedDepartmentId };
 }
 
+/**
+ * Every ACTIVE department in the organization — the full set of valid
+ * ticket DESTINATIONS. A ticket's destination department is who it's being
+ * SENT TO, not a department the requester must already operate inside of
+ * (see resolveTicketDestinationDepartment below) — e.g. a Finance user must
+ * be able to address a ticket to IT without ever holding a DepartmentMembership
+ * row in IT. Reuses the SAME listDepartments() source of truth
+ * getAccessibleDepartmentSummaries already falls back to for its
+ * canViewAllDepartments(role) branch — there is no separate "which
+ * departments may receive tickets" configuration anywhere in this schema
+ * beyond Department.isActive (see isDepartmentAcceptingTickets, the same
+ * flag this list is implicitly filtered by via listDepartments' default).
+ * Deliberately NOT membership/permission-scoped like
+ * getAccessibleDepartmentSummaries is for project.create/activity.create,
+ * where operating inside the department genuinely is required. This list
+ * only answers "which department can a ticket be addressed to" — it says
+ * nothing about whether the CALLER may create a ticket at all; that's a
+ * separate, requester-side check (canCreateTicketsAnywhere below /
+ * getNavVisibilityFlags(...).canCreateTickets), never derived from this list.
+ */
+export async function getTicketDestinationDepartments(): Promise<DepartmentSummary[]> {
+  return (await listDepartments()).map(toDepartmentSummary);
+}
+
+/** The broad "may this user submit a ticket AT ALL" ability — department-scoped ticket.create in ANY department, or a global ticket.create grant. The exact same union getNavVisibilityFlags(...).canCreateTickets computes (see its moduleGrant helper); pulled out as its own small primitive here so ticket-creation authorization doesn't need to fetch getNavVisibilityFlags' other, unrelated flags (sub-department/pending-ticket/organization-chart/etc.) just to answer this one question. This is a property of the REQUESTER only — independent of which destination department they go on to pick. */
+async function canCreateTicketsAnywhere(userId: string, role: Role, customRoleId: string | null | undefined): Promise<boolean> {
+  const [deptIds, global] = await Promise.all([
+    getDepartmentIdsWithPermission(userId, "ticket.create"),
+    hasPermission(role, "ticket.create", customRoleId),
+  ]);
+  return deptIds.length > 0 || global;
+}
+
+/**
+ * Resolves a ticket's DESTINATION department — deliberately separate from
+ * resolveDepartmentForCreate above, which Project/Activity creation still
+ * uses unchanged (and correctly still requires the caller to hold
+ * DepartmentMembership in the department they're creating into — operating
+ * inside a department is a real precondition for a Project/Activity, but
+ * NOT for addressing a ticket to it).
+ *
+ * Authorization is split into exactly two independent checks, matching the
+ * two independent concepts:
+ *   1. Can this user submit a ticket AT ALL (canCreateTicketsAnywhere /
+ *      the canViewAllDepartments(role) bypass) — a REQUESTER-side property,
+ *      never dependent on the chosen destination.
+ *   2. Is the requested department a real, active department currently
+ *      accepting new tickets (isDepartmentAcceptingTickets) — a
+ *      DESTINATION-side property, never dependent on the requester's
+ *      membership there.
+ * Neither check requires DepartmentMembership in the destination
+ * department — an explicit requestedDepartmentId is validated ONLY against
+ * #2 (it is never checked against the caller's own memberships/permissions
+ * in that specific department). Omitted -> falls back to the caller's
+ * active workspace department (Phase 1's resolveActiveWorkspace), exactly
+ * like resolveDepartmentForCreate's own fallback, for any caller that
+ * doesn't explicitly submit one (e.g. a legacy/external caller of this same
+ * route) — the New Ticket page's Department field is always rendered and
+ * required, so the web form itself always submits an explicit choice.
+ */
+export async function resolveTicketDestinationDepartment(
+  userId: string,
+  role: Role,
+  customRoleId: string | null | undefined,
+  requestedDepartmentId: string | null | undefined
+): Promise<{ departmentId: string } | CreateDenial> {
+  const canSubmitTickets = canViewAllDepartments(role) || (await canCreateTicketsAnywhere(userId, role, customRoleId));
+  if (!canSubmitTickets) return { denied: "invalid_department" };
+
+  let resolvedDepartmentId: string;
+  if (requestedDepartmentId) {
+    resolvedDepartmentId = requestedDepartmentId;
+  } else {
+    if (canViewAllDepartments(role)) return { denied: "workspace_required" };
+
+    const workspace = await resolveActiveWorkspace(userId, role);
+    if (!workspace.departmentId) {
+      return { denied: workspace.departments.length === 0 ? "pending_setup" : "workspace_required" };
+    }
+    resolvedDepartmentId = workspace.departmentId;
+  }
+
+  // Checked last — a nonexistent or inactive destination is rejected
+  // regardless of how the caller reached it, same shared gate
+  // resolveDepartmentForCreate uses.
+  if (!(await isDepartmentAcceptingTickets(resolvedDepartmentId))) {
+    return { denied: "department_inactive" };
+  }
+
+  return { departmentId: resolvedDepartmentId };
+}
+
 export type TicketLinkValidation =
   | { ok: true }
   | {
