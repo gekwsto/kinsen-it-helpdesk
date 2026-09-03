@@ -4,8 +4,9 @@ import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { z } from "zod";
 import { toast } from "sonner";
-import { createTicketSchema, type CreateTicketInput } from "@/lib/validations";
+import { createTicketSchema } from "@/lib/validations";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -24,6 +25,24 @@ import { LiveSupportPanel } from "@/components/tickets/live-support-panel";
 import { SimpleCommentBox } from "@/components/tickets/simple-comment-box";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
+
+// Client-form-only tightening of the shared createTicketSchema: departmentId
+// is required HERE (this form always has a real department to submit —
+// either the sole accessible one, pre-filled via defaultDepartmentId, or an
+// explicit user choice), so the field gets a real react-hook-form validation
+// error instead of silently allowing an empty value. The server-side
+// createTicketSchema itself is left untouched/optional — POST /api/tickets
+// legitimately accepts an omitted departmentId from other callers (it then
+// inherits one from a linked project or falls back to the caller's active
+// workspace; see resolveDepartmentForCreate), and that fallback chain is not
+// something this form should narrow. Whatever the user submits here is still
+// independently re-validated against real department membership/permission
+// server-side (resolveDepartmentForCreate) — this schema only improves the
+// client-side UX, it is never the authority on what's actually allowed.
+const createTicketFormSchema = createTicketSchema.extend({
+  departmentId: z.string().min(1, "Department is required"),
+});
+type CreateTicketFormValues = z.infer<typeof createTicketFormSchema>;
 
 interface Agent {
   id: string;
@@ -82,8 +101,8 @@ export function CreateTicketForm({
     setValue,
     watch,
     formState: { errors },
-  } = useForm<CreateTicketInput>({
-    resolver: zodResolver(createTicketSchema),
+  } = useForm<CreateTicketFormValues>({
+    resolver: zodResolver(createTicketFormSchema),
     defaultValues: { departmentId: defaultDepartmentId ?? undefined },
   });
 
@@ -283,7 +302,7 @@ export function CreateTicketForm({
     });
   };
 
-  const onSubmit = async (data: CreateTicketInput) => {
+  const onSubmit = async (data: CreateTicketFormValues) => {
     setIsSubmitting(true);
     try {
       const res = await fetch("/api/tickets", {
@@ -415,6 +434,46 @@ export function CreateTicketForm({
               <CardTitle className="text-base">Properties</CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              {/* Destination department — the ticket's actual owning
+                  departmentId (existing Ticket data model/creation
+                  architecture; see resolveDepartmentForCreate server-side).
+                  Distinct from the "Share with my department/sub-department"
+                  checkboxes below, which only widen VISIBILITY of a ticket
+                  that already belongs to this department — they never change
+                  which department owns it. Only rendered when there's a real
+                  choice to make (a single accessible department is already
+                  pre-selected via defaultDepartmentId, guaranteed non-null
+                  before this form ever renders — see the New Ticket page's
+                  workspace guard). Category/Priority below are re-filtered to
+                  whichever department is selected here — see
+                  visibleCategories/visiblePriorities and the effect that
+                  clears an invalid selection when this changes. */}
+              {departments.length > 1 && (
+                <div className="space-y-1.5">
+                  <Label>
+                    Department <span className="text-destructive">*</span>
+                  </Label>
+                  <Select
+                    value={selectedDepartmentId ?? ""}
+                    onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select department…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {departments.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>
+                          {d.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {errors.departmentId && (
+                    <p className="text-xs text-destructive">{errors.departmentId.message}</p>
+                  )}
+                </div>
+              )}
+
               <div className="space-y-1.5">
                 <Label>Category</Label>
                 <Select value={watch("categoryId") ?? ""} onValueChange={(v) => setValue("categoryId", v)}>
@@ -452,27 +511,6 @@ export function CreateTicketForm({
                   </SelectContent>
                 </Select>
               </div>
-
-              {departments.length > 1 && (
-                <div className="space-y-1.5">
-                  <Label>Department</Label>
-                  <Select
-                    defaultValue={defaultDepartmentId ?? undefined}
-                    onValueChange={(v) => setValue("departmentId", v)}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select department…" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {departments.map((d) => (
-                        <SelectItem key={d.id} value={d.id}>
-                          {d.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
 
               {subDepartments.length > 0 && (
                 <div className="space-y-1.5">
