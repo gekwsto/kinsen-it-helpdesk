@@ -11,6 +11,7 @@ import {
   resolveLegacyPlatformName,
   resolveLegacyCategoryTarget,
   allResolvedLegacyCategories,
+  LEGACY_UNCATEGORIZED_CATEGORY_NAME,
   LegacyEnumMappingError,
 } from "@/lib/services/legacy-migration/enum-maps";
 
@@ -59,72 +60,133 @@ check("4 -> Other", resolveLegacyPlatformName(4) === "Other");
 check("null Platform -> null (never throws — no target column exists for this concept)", resolveLegacyPlatformName(null) === null);
 check("Unknown platform value doesn't throw (cosmetic-only degrades gracefully)", resolveLegacyPlatformName(99) === "Unknown legacy platform (99)");
 
-console.log("\n=== Category / SubCategory — CORRECTED: Category is the parent int id, SubCategory is free TEXT matched within that parent, never a numeric id ===\n");
+console.log("\n=== Category / SubCategory — TIER A: Category (int FK) present, resolution unchanged ===\n");
 
 // The 4 exact real examples from the migration-safety correction.
 check(
   'Category=1, SubCategory="New Feature" -> New Feature (parent: Development)',
-  resolveLegacyCategoryTarget(1, "New Feature").name === "New Feature" && resolveLegacyCategoryTarget(1, "New Feature").description.includes("Development")
+  resolveLegacyCategoryTarget(1, null, "New Feature").name === "New Feature" && resolveLegacyCategoryTarget(1, null, "New Feature").description.includes("Development")
 );
 check(
   'Category=2, SubCategory="Data" -> Data (parent: Reporting)',
-  resolveLegacyCategoryTarget(2, "Data").name === "Data" && resolveLegacyCategoryTarget(2, "Data").description.includes("Reporting")
+  resolveLegacyCategoryTarget(2, null, "Data").name === "Data" && resolveLegacyCategoryTarget(2, null, "Data").description.includes("Reporting")
 );
 check(
   'Category=201, SubCategory="General" -> General (parent: Support)',
-  resolveLegacyCategoryTarget(201, "General").name === "General" && resolveLegacyCategoryTarget(201, "General").description.includes("Support")
+  resolveLegacyCategoryTarget(201, null, "General").name === "General" && resolveLegacyCategoryTarget(201, null, "General").description.includes("Support")
 );
 check(
   'Category=1, SubCategory="Bug/Error" -> Bug/Error (parent: Development)',
-  resolveLegacyCategoryTarget(1, "Bug/Error").name === "Bug/Error" && resolveLegacyCategoryTarget(1, "Bug/Error").description.includes("Development")
+  resolveLegacyCategoryTarget(1, null, "Bug/Error").name === "Bug/Error" && resolveLegacyCategoryTarget(1, null, "Bug/Error").description.includes("Development")
 );
 
 // The remaining explicit map entries.
-check('Category=1, SubCategory="Other" -> Other (parent: Development)', resolveLegacyCategoryTarget(1, "Other").name === "Other");
-check('Category=2, SubCategory="Power BI Report" -> Power BI Report (parent: Reporting)', resolveLegacyCategoryTarget(2, "Power BI Report").name === "Power BI Report");
-check('Category=201, SubCategory="Question" -> Question (parent: Support)', resolveLegacyCategoryTarget(201, "Question").name === "Question");
+check('Category=1, SubCategory="Other" -> Other (parent: Development)', resolveLegacyCategoryTarget(1, null, "Other").name === "Other");
+check('Category=2, SubCategory="Power BI Report" -> Power BI Report (parent: Reporting)', resolveLegacyCategoryTarget(2, null, "Power BI Report").name === "Power BI Report");
+check('Category=201, SubCategory="Question" -> Question (parent: Support)', resolveLegacyCategoryTarget(201, null, "Question").name === "Question");
 
 // Normalization: trim + case-insensitive, exact text match only.
 check(
   'Category=1, SubCategory=" new feature " (lowercase, padded) -> still New Feature',
-  resolveLegacyCategoryTarget(1, " new feature ").name === "New Feature"
+  resolveLegacyCategoryTarget(1, null, " new feature ").name === "New Feature"
 );
-check('Category=201, SubCategory="GENERAL" (uppercase) -> still General', resolveLegacyCategoryTarget(201, "GENERAL").name === "General");
+check('Category=201, SubCategory="GENERAL" (uppercase) -> still General', resolveLegacyCategoryTarget(201, null, "GENERAL").name === "General");
 
 // No SubCategory text at all -> falls back to the bare parent Category, not an error.
 check(
   "Category=1, SubCategory=null -> bare parent Development (not an error)",
-  resolveLegacyCategoryTarget(1, null).name === "Development" && resolveLegacyCategoryTarget(1, null).description.includes("no SubCategory text recorded")
+  resolveLegacyCategoryTarget(1, null, null).name === "Development" && resolveLegacyCategoryTarget(1, null, null).description.includes("no SubCategory text recorded")
 );
-check("Category=2, SubCategory='' (empty string) -> bare parent Reporting", resolveLegacyCategoryTarget(2, "").name === "Reporting");
+check("Category=2, SubCategory='' (empty string) -> bare parent Reporting", resolveLegacyCategoryTarget(2, null, "").name === "Reporting");
+
+// Categories text is IGNORED when Category (the FK) is present — Category
+// always wins outright, the two are never blended.
+check(
+  "Category=1 present -> Categories text is ignored even if it names a DIFFERENT parent",
+  resolveLegacyCategoryTarget(1, "Support", null).name === "Development"
+);
 
 // SubCategory text is scoped to its OWN parent — a text valid under one
 // Category must NOT resolve under a different Category (never cross-matched).
 threw = false;
-try { resolveLegacyCategoryTarget(2, "New Feature"); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
+try { resolveLegacyCategoryTarget(2, null, "New Feature"); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
 check('Category=2, SubCategory="New Feature" (valid text, WRONG parent) throws — never cross-matched across categories', threw);
 
 // Unrecognized SubCategory text for a Category that DOES exist -> hard error, never guessed.
 threw = false;
-try { resolveLegacyCategoryTarget(1, "Something Unrecognized"); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
+try { resolveLegacyCategoryTarget(1, null, "Something Unrecognized"); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
 check("Unrecognized SubCategory text for a known Category throws — never guessed", threw);
 
 // Category id outside {1, 2, 201} -> hard error regardless of SubCategory text.
 threw = false;
-try { resolveLegacyCategoryTarget(9999, null); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
-check("Unmapped Category id (9999) throws — never silently defaults to \"General\"", threw);
-threw = false;
-try { resolveLegacyCategoryTarget(null, "New Feature"); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
-check("Null Category id throws even when SubCategory text is present", threw);
+try { resolveLegacyCategoryTarget(9999, null, null); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
+check('Unmapped Category id (9999) throws — never silently defaults to "General"', threw);
 
-console.log("\n=== allResolvedLegacyCategories — 3 bare parents + 7 distinct subcategory names, no more, no less ===\n");
-const allCats = allResolvedLegacyCategories();
-check("Exactly 10 target category rows (3 parents + 7 subcategories)", allCats.length === 10);
-check("Names are exactly 10 distinct strings, no duplicates", new Set(allCats.map((c) => c.name)).size === 10);
+console.log("\n=== TIER B: Category NULL, Categories text present — resolved by exact match against the authoritative reference table ===\n");
 check(
-  "Set matches exactly {Development, Reporting, Support, New Feature, Other, Bug/Error, Power BI Report, Data, General, Question}",
+  'Category=null, Categories="Development" -> bare parent Development',
+  resolveLegacyCategoryTarget(null, "Development", null).name === "Development"
+);
+check(
+  'Category=null, Categories="reporting" (case-insensitive) -> Reporting',
+  resolveLegacyCategoryTarget(null, "reporting", null).name === "Reporting"
+);
+check(
+  'Category=null, Categories="Support" + SubCategory="Question" -> Question (SubCategory still applied within the Categories-resolved parent)',
+  resolveLegacyCategoryTarget(null, "Support", "Question").name === "Question"
+);
+threw = false;
+try { resolveLegacyCategoryTarget(null, "Not A Real Category", null); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
+check("Unrecognized Categories text throws — never fuzzy-matched", threw);
+
+console.log("\n=== TIER C: Category AND Categories both NULL — SubCategory text alone resolves via the closed 1:1 reverse mapping (real production dry-run: 107/164 null-Category tickets) ===\n");
+const tierCCases: Array<[string, string]> = [
+  ["General", "Support"],
+  ["New Feature", "Development"],
+  ["Data", "Reporting"],
+  ["Power BI Report", "Reporting"],
+  ["Other", "Development"],
+  ["Bug/Error", "Development"],
+  ["Question", "Support"],
+];
+for (const [subCategoryText, expectedParent] of tierCCases) {
+  const resolved = resolveLegacyCategoryTarget(null, null, subCategoryText);
+  check(
+    `Category=null, Categories=null, SubCategory="${subCategoryText}" -> ${subCategoryText} (parent inferred: ${expectedParent})`,
+    resolved.name === subCategoryText && resolved.description.includes(expectedParent) && resolved.description.includes("both absent")
+  );
+}
+// Case/whitespace normalization applies identically in tier C.
+check(
+  'Category=null, Categories=null, SubCategory=" general " -> still General (normalized)',
+  resolveLegacyCategoryTarget(null, null, " general ").name === "General"
+);
+// Unknown/ambiguous SubCategory text with no Category/Categories to confirm a parent -> hard failure, never guessed.
+threw = false;
+try { resolveLegacyCategoryTarget(null, null, "Totally Unknown Text"); } catch (e) { threw = e instanceof LegacyEnumMappingError; }
+check("Category=null, Categories=null, unrecognized SubCategory text throws — never guessed", threw);
+
+console.log('\n=== TIER D: Category, Categories, AND SubCategory ALL absent -> dedicated "Legacy Uncategorized" preservation category, NEVER a guess (real production dry-run: 57/164 null-Category tickets, including tickets 6204 and 11802) ===\n');
+const uncategorized = resolveLegacyCategoryTarget(null, null, null);
+check(`All three absent -> name is exactly "${LEGACY_UNCATEGORIZED_CATEGORY_NAME}"`, uncategorized.name === LEGACY_UNCATEGORIZED_CATEGORY_NAME);
+check("Legacy Uncategorized is NEVER Development/Reporting/Support — it is its own dedicated category", !["Development", "Reporting", "Support"].includes(uncategorized.name));
+check("Legacy Uncategorized's description explicitly states no category/subcategory information existed", uncategorized.description.toLowerCase().includes("no category") || uncategorized.description.toLowerCase().includes("no ") && uncategorized.description.includes("SubCategory"));
+check("All-absent case does NOT throw (tier D is a legitimate resolution, not an error)", (() => {
+  try { resolveLegacyCategoryTarget(null, null, null); return true; } catch { return false; }
+})());
+// Idempotent/deterministic: calling it again for the same all-absent input produces the identical target category.
+check("Tier D is deterministic across repeated calls (idempotent target category, never re-derived differently)", resolveLegacyCategoryTarget(null, null, null).name === resolveLegacyCategoryTarget(undefined, undefined, undefined).name);
+
+console.log("\n=== allResolvedLegacyCategories — 3 bare parents + 7 subcategories + 1 Legacy Uncategorized, no more, no less ===\n");
+const allCats = allResolvedLegacyCategories();
+check("Exactly 11 target category rows (3 parents + 7 subcategories + 1 Legacy Uncategorized)", allCats.length === 11);
+check("Names are exactly 11 distinct strings, no duplicates", new Set(allCats.map((c) => c.name)).size === 11);
+check(
+  "Set matches exactly {Development, Reporting, Support, New Feature, Other, Bug/Error, Power BI Report, Data, General, Question, Legacy Uncategorized}",
   JSON.stringify(allCats.map((c) => c.name).sort()) ===
-    JSON.stringify(["Development", "Reporting", "Support", "New Feature", "Other", "Bug/Error", "Power BI Report", "Data", "General", "Question"].sort())
+    JSON.stringify(
+      ["Development", "Reporting", "Support", "New Feature", "Other", "Bug/Error", "Power BI Report", "Data", "General", "Question", LEGACY_UNCATEGORIZED_CATEGORY_NAME].sort()
+    )
 );
 
 console.log(`\n${passed} passed, ${failed} failed`);

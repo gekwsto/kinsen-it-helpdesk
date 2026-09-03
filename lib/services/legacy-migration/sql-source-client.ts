@@ -88,6 +88,8 @@ export interface LegacyTicketRow {
   Platform: number | null;
   /** The parent legacy Category id (1/2/201) — NOT a subcategory id. See enum-maps.ts's Category/SubCategory header comment. */
   Category: number | null;
+  /** Separate free-text column (distinct from the Category int FK) sometimes naming the parent category directly (e.g. "Development") when Category is NULL — tier B of resolveLegacyCategoryTarget's fallback. Proven NULL on all 164 rows where Category is NULL in the real source, but read and honored regardless — never assumed empty. */
+  Categories: string | null;
   /** Free-text subcategory description as typed on the ticket (e.g. "New Feature", "Bug/Error") — matched against the explicit LEGACY_CATEGORY_SUBCATEGORY_TEXT_MAP, never parsed as a numeric id. */
   SubCategory: string | null;
   User: string | null;
@@ -162,7 +164,7 @@ export async function fetchLegacyApplicationUsers(pool: sql.ConnectionPool): Pro
 export async function fetchLegacyTickets(pool: sql.ConnectionPool): Promise<LegacyTicketRow[]> {
   const result = await pool.request().query<LegacyTicketRow>(`
     SELECT
-      t.Id, t.Title, t.Description, t.Priority, t.Status, t.Platform, t.Category, t.SubCategory,
+      t.Id, t.Title, t.Description, t.Priority, t.Status, t.Platform, t.Category, t.Categories, t.SubCategory,
       t.[User], t.Developer,
       t.OpenDate, t.LastUpdatedOn, t.CloseDate, t.CancelDate, t.reopenDate,
       t.CancelText, t.CancelledReason, t.CancelledBy
@@ -222,7 +224,7 @@ export const EXPECTED_SOURCE_COLUMNS: Record<string, string[]> = {
   "dbo.Users": ["UserName", "Id"],
   "security.ApplicationUsers": ["UserName", "Email", "Name"],
   "dbo.Tickets": [
-    "Id", "Title", "Description", "Priority", "Status", "Platform", "Category", "SubCategory",
+    "Id", "Title", "Description", "Priority", "Status", "Platform", "Category", "Categories", "SubCategory",
     "User", "Developer", "OpenDate", "LastUpdatedOn", "CloseDate", "CancelDate", "reopenDate",
     "CancelText", "CancelledReason", "CancelledBy",
   ],

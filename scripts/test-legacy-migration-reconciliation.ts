@@ -56,6 +56,7 @@ function baseTicketRow(overrides: Partial<LegacyTicketRow>): LegacyTicketRow {
     Status: 0,
     Platform: 0,
     Category: 1,
+    Categories: null,
     SubCategory: null,
     User: null,
     Developer: null,
@@ -237,7 +238,7 @@ async function main() {
     const referenceData = await ensureReferenceData(prisma, dept.id, false);
     check("7 target statuses prepared (one per legacy Status 0-6)", referenceData.statusIdByLegacyStatus.size === 7);
     check("3 target priorities prepared", referenceData.priorityIdByLegacyPriority.size === 3);
-    check("10 target categories prepared (3 bare parents + 7 distinct SubCategory-text-derived categories)", referenceData.categoryIdByName.size === 10);
+    check("11 target categories prepared (3 bare parents + 7 distinct SubCategory-text-derived categories + 1 Legacy Uncategorized)", referenceData.categoryIdByName.size === 11);
 
     // ══════════════ 6b. Membership safety (migration-safety Issue 1): an existing user's primary elsewhere is NEVER touched ══════════════
     console.log("\n=== 6b. Membership safety: existing primary/custom role elsewhere is preserved EXACTLY; only an additive secondary is granted ===\n");
@@ -382,6 +383,22 @@ async function main() {
     const outcome4 = await importOneLegacyTicket(prisma, ticketWithUnknownAssigneeUserName, ticketCtx);
     check("Ticket whose Developer UserName never resolved is a reported FAILURE, not silently unassigned or misassigned", outcome4.status === "failed");
 
+    // [CATEGORY CORRECTION] A "6204/11802-style" row — no legacy creator AND
+    // no category information at all (Category, Categories, SubCategory all
+    // absent, exactly as the real production dry-run proved for tickets 6204
+    // and 11802) — must reach BOTH the Legacy Unknown Creator placeholder AND
+    // the dedicated Legacy Uncategorized target category, never blocked and
+    // never guessed into Development/Reporting/Support or a real staff user.
+    const ticket6204Style = baseTicketRow({ Id: 90006 + RUN_ID, User: null, Developer: null, Category: null, Categories: null, SubCategory: null });
+    const outcome6204 = await importOneLegacyTicket(prisma, ticket6204Style, ticketCtx);
+    if (outcome6204.targetId) ticketIds.push(outcome6204.targetId);
+    check("6204/11802-style ticket (no creator, no category info) imports successfully, never blocked", outcome6204.status === "created");
+    check("...uses the Legacy Unknown Creator placeholder", outcome6204.usedUnknownCreator === true);
+    check("...uses the Legacy Uncategorized target category", outcome6204.usedLegacyUncategorized === true);
+    const targetTicket6204 = await prisma.ticket.findUniqueOrThrow({ where: { id: outcome6204.targetId! }, include: { category: true } });
+    check("requesterId is the dedicated placeholder, not a real user", targetTicket6204.requesterId === unknownCreatorUserId);
+    check('categoryId points at the "Legacy Uncategorized" TicketCategory row, never Development/Reporting/Support', targetTicket6204.category?.name === "Legacy Uncategorized");
+
     // ══════════════ 9. Idempotent rerun — ticket import ══════════════
     console.log("\n=== 9. Idempotent rerun: ticket import ===\n");
     const ticketCountBeforeRerun = await prisma.ticket.count();
@@ -512,9 +529,38 @@ async function main() {
     const attachmentCountBeforeMissing = await prisma.ticketAttachment.count();
     const a2 = await importOneLegacyAttachment(prisma, missingFileRow, attachCtx);
     check("A DB-linked attachment record with NO resolvable physical file is a HARD failure", a2.status === "failed");
+    check("[CLASSIFICATION] ...and is classified EXACTLY as PHYSICAL_FILE_MISSING (the only reason allowed to count toward missingPhysicalFiles)", a2.failureReason === "PHYSICAL_FILE_MISSING");
     check("No broken TicketAttachment row was created for the missing file", (await prisma.ticketAttachment.count()) === attachmentCountBeforeMissing);
     const missingLedger = await prisma.migrationLedger.findUnique({ where: { source_entityType_legacyKey: { source: LEGACY_MIGRATION_SOURCE, entityType: "ATTACHMENT", legacyKey: String(missingFileRow.Id) } } });
     check("Missing-physical-file failure is recorded in the ledger, not silently dropped", missingLedger?.status === "FAILED");
+
+    // [CLASSIFICATION] A ticket-link failure (linked ticket never
+    // migrated/planned) must NEVER be classified/counted as a
+    // missing-physical-file — the exact bug this correction pass fixes.
+    const attachmentLinkedToMissingTicket: LegacyFileDataRow = {
+      Id: 70003 + RUN_ID,
+      FileName: existingFileName,
+      UploadDateTime: new Date(2023, 0, 12),
+      Ticket_FileUpload: 999999900 + RUN_ID, // deliberately never migrated/planned
+      StorageMedium: 0,
+      FolderPath: "TicketFileUpload",
+      UploadedBy: null,
+      Description: null,
+    };
+    const resolvedFilenamesWithExtra = new Map(resolvedFilenames);
+    resolvedFilenamesWithExtra.set(attachmentLinkedToMissingTicket.Id, {
+      id: attachmentLinkedToMissingTicket.Id,
+      originalFileName: existingFileName,
+      physicalFileName: existingFileName,
+      groupSize: 1,
+      isNewestInGroup: true,
+    });
+    const a3 = await importOneLegacyAttachment(prisma, attachmentLinkedToMissingTicket, { ...attachCtx, resolvedFilenames: resolvedFilenamesWithExtra });
+    check("Attachment linked to a NEVER-migrated ticket is a failure...", a3.status === "failed");
+    check(
+      "...classified as TICKET_NOT_MIGRATED, NEVER as PHYSICAL_FILE_MISSING (even though its physical file genuinely exists on disk)",
+      a3.failureReason === "TICKET_NOT_MIGRATED"
+    );
 
     const orphans = await findPhysicalOrphans(tempAttachmentDir, [
       { id: goodFileRow.Id, originalFileName: existingFileName, physicalFileName: existingFileName, groupSize: 1, isNewestInGroup: true },
@@ -528,8 +574,91 @@ async function main() {
     check("Re-importing the same attachment reuses the ledger entry", a1Rerun.status === "reused" && a1Rerun.targetId === a1.targetId);
     check("No duplicate attachment created on rerun", (await prisma.ticketAttachment.count()) === attachmentCountBeforeRerun);
 
-    // ══════════════ 14. Duplicate target objects created = 0 (final cross-check) ══════════════
-    console.log("\n=== 14. Zero duplicate target objects across this entire run ===\n");
+    // ══════════════ 15. DRY-RUN TICKET GRAPH: a successful dry-run ticket gets a planned, downstream-linkable identity — zero DB/ledger writes ══════════════
+    console.log("\n=== 15. Dry-run ticket graph: planned identity, zero writes ===\n");
+    const dryRunTicketCtx = { ...ticketCtx, dryRun: true };
+    const dryRunTicketRow = baseTicketRow({ Id: 90007 + RUN_ID, User: "jdoe", Developer: "asmith" });
+    const ticketCountBeforeDryRun = await prisma.ticket.count();
+    const ledgerCountBeforeDryRunTicket = await prisma.migrationLedger.count();
+    const dryRunTicketOutcome = await importOneLegacyTicket(prisma, dryRunTicketRow, dryRunTicketCtx);
+    check("Dry-run ticket validates successfully", dryRunTicketOutcome.status === "created");
+    check("...and receives a deterministic synthetic planned identity (dry-run:ticket:<id>), never undefined", dryRunTicketOutcome.targetId === `dry-run:ticket:${dryRunTicketRow.Id}`);
+    check("...flagged isDryRunPlanned, distinguishing it from a real target id", dryRunTicketOutcome.isDryRunPlanned === true);
+    check("Zero Ticket rows were created by the dry run", (await prisma.ticket.count()) === ticketCountBeforeDryRun);
+    check("Zero MigrationLedger rows were created by the dry run", (await prisma.migrationLedger.count()) === ledgerCountBeforeDryRunTicket);
+
+    // A real ledger-SUCCEEDED ticket from an earlier (non-dry-run) part of
+    // this SAME test is still correctly "reused" with its REAL targetId even
+    // when this NEXT call passes dryRun:true — dry-run doesn't shadow a real
+    // prior success.
+    const dryRunRerunOfRealTicket = await importOneLegacyTicket(prisma, ticketWithCreatorAndAssignee, dryRunTicketCtx);
+    check("Dry run reuses a REAL already-ledgered ticket's REAL targetId (never a synthetic one) — 'existing real ledger SUCCEEDED targetIds may still be reused'", dryRunRerunOfRealTicket.status === "reused" && dryRunRerunOfRealTicket.targetId === outcome1.targetId);
+
+    const dryRunTicketMap = new Map<number, string>([[dryRunTicketRow.Id, dryRunTicketOutcome.targetId!]]);
+
+    // ══════════════ 16. DRY-RUN comment links to a planned ticket — zero DB writes ══════════════
+    console.log("\n=== 16. Dry-run comment: links to planned ticket, zero writes ===\n");
+    const dryRunComment: LegacyCommentRow = { Id: 80005 + RUN_ID, Message: "Dry-run comment", CreatedBy: "asmith", DateSent: new Date(2023, 0, 7), isPublic: true, isHidden: false, Ticket_Messages: dryRunTicketRow.Id };
+    const messageCountBeforeDryRunComment = await prisma.ticketMessage.count();
+    const dryRunCommentOutcome = await importOneLegacyComment(
+      prisma,
+      dryRunComment,
+      { usernameToUserId: reconcileResult.usernameToUserId, ticketIdByLegacyTicketId: dryRunTicketMap, dryRun: true },
+      emailToUserId
+    );
+    check("Dry-run comment links successfully to the PLANNED (not persisted) ticket — no longer skipped_no_ticket", dryRunCommentOutcome.status === "created");
+    check("Dry-run comment author still resolves correctly", dryRunCommentOutcome.authorResolved === true);
+    check("Zero TicketMessage rows were created by the dry-run comment", (await prisma.ticketMessage.count()) === messageCountBeforeDryRunComment);
+
+    // ══════════════ 17. DRY-RUN attachment links to a planned ticket and reaches REAL physical validation — zero DB writes, zero file copy ══════════════
+    console.log("\n=== 17. Dry-run attachment: links to planned ticket, real physical validation, zero writes/copies ===\n");
+    const dryRunAttachmentRow: LegacyFileDataRow = {
+      Id: 70004 + RUN_ID,
+      FileName: existingFileName,
+      UploadDateTime: new Date(2023, 0, 13),
+      Ticket_FileUpload: dryRunTicketRow.Id,
+      StorageMedium: 0,
+      FolderPath: "TicketFileUpload",
+      UploadedBy: "asmith",
+      Description: null,
+    };
+    const dryRunResolvedFilenames = new Map(resolvedFilenames);
+    dryRunResolvedFilenames.set(dryRunAttachmentRow.Id, { id: dryRunAttachmentRow.Id, originalFileName: existingFileName, physicalFileName: existingFileName, groupSize: 1, isNewestInGroup: true });
+    const attachmentCountBeforeDryRun = await prisma.ticketAttachment.count();
+    const uploadDirListingBeforeDryRun = await fs.readdir(uploadDir).catch(() => []);
+    const dryRunAttachmentOutcome = await importOneLegacyAttachment(prisma, dryRunAttachmentRow, {
+      legacyPhysicalDir: tempAttachmentDir,
+      uploadDir,
+      ticketIdByLegacyTicketId: dryRunTicketMap,
+      resolvedFilenames: dryRunResolvedFilenames,
+      usernameToUserId: reconcileResult.usernameToUserId,
+      dryRun: true,
+    });
+    check("Dry-run attachment links successfully to the PLANNED (not persisted) ticket", dryRunAttachmentOutcome.status === "created");
+    check("...and reaches REAL physical-file validation (resolvedPhysicalFileName populated from an actual disk read)", dryRunAttachmentOutcome.resolvedPhysicalFileName === existingFileName);
+    check("Zero TicketAttachment rows were created by the dry-run attachment", (await prisma.ticketAttachment.count()) === attachmentCountBeforeDryRun);
+    const uploadDirListingAfterDryRun = await fs.readdir(uploadDir).catch(() => []);
+    check("Zero files were copied into the target UPLOAD_DIR by the dry-run attachment", JSON.stringify(uploadDirListingAfterDryRun) === JSON.stringify(uploadDirListingBeforeDryRun));
+
+    // A dry-run attachment whose linked ticket was NEVER planned (absent from
+    // the map entirely) is still a genuine, correctly-classified failure —
+    // the fix makes VALID planned tickets linkable, it does not make
+    // ticket-link validation disappear.
+    const dryRunAttachmentBadLink: LegacyFileDataRow = { ...dryRunAttachmentRow, Id: 70005 + RUN_ID, Ticket_FileUpload: 999999901 + RUN_ID };
+    const dryRunResolvedFilenamesBadLink = new Map(dryRunResolvedFilenames);
+    dryRunResolvedFilenamesBadLink.set(dryRunAttachmentBadLink.Id, { id: dryRunAttachmentBadLink.Id, originalFileName: existingFileName, physicalFileName: existingFileName, groupSize: 1, isNewestInGroup: true });
+    const dryRunBadLinkOutcome = await importOneLegacyAttachment(prisma, dryRunAttachmentBadLink, {
+      legacyPhysicalDir: tempAttachmentDir,
+      uploadDir,
+      ticketIdByLegacyTicketId: dryRunTicketMap,
+      resolvedFilenames: dryRunResolvedFilenamesBadLink,
+      usernameToUserId: reconcileResult.usernameToUserId,
+      dryRun: true,
+    });
+    check("Dry-run attachment linked to a genuinely never-planned ticket still fails correctly (the fix doesn't weaken real validation)", dryRunBadLinkOutcome.status === "failed" && dryRunBadLinkOutcome.failureReason === "TICKET_NOT_MIGRATED");
+
+    // ══════════════ 18. Duplicate target objects created = 0 (final cross-check) ══════════════
+    console.log("\n=== 18. Zero duplicate target objects across this entire run ===\n");
     const finalUserCount = await prisma.user.count({ where: { id: { in: userIds } } });
     check("Exactly as many User rows exist as unique ids collected — zero unexpected duplicates", finalUserCount === new Set(userIds).size);
   } finally {

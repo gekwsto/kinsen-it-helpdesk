@@ -74,15 +74,29 @@ import { ensureUnknownCreatorPlaceholder } from "@/lib/services/legacy-migration
 import { importOneLegacyTicket } from "@/lib/services/legacy-migration/ticket-import";
 import { importOneLegacyComment } from "@/lib/services/legacy-migration/comment-import";
 import { resolveLegacyAttachmentFilenamesById, resolveLegacyAttachmentFilenames } from "@/lib/services/legacy-migration/attachment-filename-resolver";
-import { importOneLegacyAttachment, findPhysicalOrphans, findSameTicketFilenameCollisions } from "@/lib/services/legacy-migration/attachment-import";
+import {
+  importOneLegacyAttachment,
+  findPhysicalOrphans,
+  findSameTicketFilenameCollisions,
+  verifyPhysicalFilesExist,
+} from "@/lib/services/legacy-migration/attachment-import";
 import { resolveDefaultGlobalRoleAssignment } from "@/lib/services/default-role-service";
 
 const prisma = new PrismaClient();
 
+/**
+ * ADVISORY ONLY — these are reference counts observed at various points
+ * while building this migration, NOT a correctness authority. The source is
+ * a LIVE system (a real dry-run proved dbo.Tickets grew from 580 to 581
+ * between two runs): success/failure and every metric in MigrationReport
+ * are always derived from the ACTUAL row counts read during THIS run.
+ * A mismatch against these numbers below produces an informational warning
+ * only — it never fails preflight and never affects report.success.
+ */
 const EXPECTED = {
   businessUsers: 80,
   applicationUsers: 81,
-  tickets: 580,
+  tickets: 581,
   expectedMissingCreators: 2,
   expectedUnassignedTickets: 173,
   comments: 6,
@@ -187,22 +201,50 @@ interface MigrationReport {
   sourceCounts: Awaited<ReturnType<typeof fetchSourceRowCounts>> | null;
   users: { sourceBusinessUsers: number; reused: number; created: number; unresolved: number; duplicateEmailGroups: number };
   tickets: {
+    /** Actual dbo.Tickets row count read during THIS run — never the hardcoded EXPECTED.tickets. */
     sourceTotal: number;
+    /** Ticket validation successes (execute: actually created/reused; dry-run: successfully validated/planned — see plannedDryRunLinks for the dry-run-only subset). */
     createdOrReused: number;
+    /** Ticket validation failures. */
     failed: number;
     creatorsPreserved: number;
+    /** Legacy Unknown Creator ticket count — tickets with no legacy creator at all (expected: 2 — tickets 6204, 11802). */
     creatorsUsingUnknownPlaceholder: number;
+    /** Legacy Uncategorized ticket count — tickets with NO Category/Categories/SubCategory information at all (tier D of resolveLegacyCategoryTarget). */
+    legacyUncategorizedCount: number;
     assigneesPreserved: number;
     unassignedTickets: number;
+    /** Dry-run only: successfully validated tickets that received a synthetic planned identity ("dry-run:ticket:<id>") rather than a real target id — the count that makes the downstream Comments/Attachments phases fully linkable without any DB write. Always 0 in EXECUTE mode. */
+    plannedDryRunLinks: number;
   };
-  comments: { sourceTotal: number; createdOrReused: number; failed: number; skippedNoTicket: number; unresolvedAuthors: number };
+  comments: {
+    sourceTotal: number;
+    /** Comments imported (execute) or planned (dry-run). */
+    createdOrReused: number;
+    failed: number;
+    /** Comments whose source ticket genuinely failed validation/import (or is otherwise absent from the source) — NOT comments merely "skipped because dry-run didn't persist tickets" (that bug is fixed; a planned dry-run ticket is fully linkable). */
+    skippedNoTicket: number;
+    unresolvedAuthors: number;
+  };
   attachments: {
     fileDataTotal: number;
     ticketLinked: number;
     unlinkedHistorical: number;
-    resolvedPhysically: number;
+    /** Candidate physical filenames COMPUTED by the .old_N resolver across all 189 records — proves nothing about filesystem existence by itself (see physicalFilesVerified/linkedPhysicalFilesVerified for that). */
+    filenameMappingsResolved: number;
+    /** Physical preflight (verifyPhysicalFilesExist): count of ALL 189 resolved records whose expected physical filename was actually found on disk. */
+    physicalFilesVerified: number;
+    /** Subset of physicalFilesVerified restricted to the 143 ticket-linked records — the number that matters for import success. */
+    linkedPhysicalFilesVerified: number;
     createdOrReused: number;
+    /** Attachment import failures caused ONLY by a missing/unmigrated linked ticket — never conflated with a genuine physical-file problem. */
+    ticketLinkFailures: number;
+    /** ONLY a genuine missing physical file among the 143 ticket-linked records — never incremented for a ticket-link failure. */
     missingPhysicalFiles: number;
+    /** Informational only (never imported): missing physical files among the 46 UNLINKED historical FileDataTbl records, found by the physical preflight (the per-attachment import loop never even iterates these). */
+    unlinkedMissingPhysicalFiles: number;
+    /** Every other attachment failure reason (filename-resolution-missing, not-a-regular-file, DB/copy/import error) rolled into one catch-all bucket — see each outcome's own failureReason in errors[] for the precise cause. */
+    otherFailures: number;
     physicalOrphans: number;
   };
   duplicateTargetObjectsCreated: number;
@@ -228,9 +270,32 @@ async function main() {
     success: false,
     sourceCounts: null,
     users: { sourceBusinessUsers: 0, reused: 0, created: 0, unresolved: 0, duplicateEmailGroups: 0 },
-    tickets: { sourceTotal: 0, createdOrReused: 0, failed: 0, creatorsPreserved: 0, creatorsUsingUnknownPlaceholder: 0, assigneesPreserved: 0, unassignedTickets: 0 },
+    tickets: {
+      sourceTotal: 0,
+      createdOrReused: 0,
+      failed: 0,
+      creatorsPreserved: 0,
+      creatorsUsingUnknownPlaceholder: 0,
+      legacyUncategorizedCount: 0,
+      assigneesPreserved: 0,
+      unassignedTickets: 0,
+      plannedDryRunLinks: 0,
+    },
     comments: { sourceTotal: 0, createdOrReused: 0, failed: 0, skippedNoTicket: 0, unresolvedAuthors: 0 },
-    attachments: { fileDataTotal: 0, ticketLinked: 0, unlinkedHistorical: 0, resolvedPhysically: 0, createdOrReused: 0, missingPhysicalFiles: 0, physicalOrphans: 0 },
+    attachments: {
+      fileDataTotal: 0,
+      ticketLinked: 0,
+      unlinkedHistorical: 0,
+      filenameMappingsResolved: 0,
+      physicalFilesVerified: 0,
+      linkedPhysicalFilesVerified: 0,
+      createdOrReused: 0,
+      ticketLinkFailures: 0,
+      missingPhysicalFiles: 0,
+      unlinkedMissingPhysicalFiles: 0,
+      otherFailures: 0,
+      physicalOrphans: 0,
+    },
     duplicateTargetObjectsCreated: 0,
     warnings: [],
     errors: [],
@@ -357,8 +422,10 @@ async function main() {
       } else {
         report.tickets.createdOrReused++;
         if (outcome.targetId) ticketIdByLegacyTicketId.set(outcome.legacyTicketId, outcome.targetId);
+        if (outcome.isDryRunPlanned) report.tickets.plannedDryRunLinks++;
         if (outcome.usedUnknownCreator) report.tickets.creatorsUsingUnknownPlaceholder++;
         else report.tickets.creatorsPreserved++;
+        if (outcome.usedLegacyUncategorized) report.tickets.legacyUncategorizedCount++;
       }
       ticketBatchCount++;
       if (ticketBatchCount % config.batchSize === 0) console.log(`  ...${ticketBatchCount}/${legacyTickets.length} tickets processed`);
@@ -393,7 +460,7 @@ async function main() {
         report.errors.push(`Comment ${outcome.legacyCommentId}: ${outcome.error}`);
       } else if (outcome.status === "skipped_no_ticket") {
         report.comments.skippedNoTicket++;
-        report.warnings.push(`Comment ${outcome.legacyCommentId}: linked ticket not migrated/found — skipped.`);
+        report.warnings.push(`Comment ${outcome.legacyCommentId}: source ticket ${row.Ticket_Messages} genuinely absent/failed (not present in ticketIdByLegacyTicketId, including planned dry-run tickets) — skipped, a real migration-correctness gap, not a harmless dry-run artifact.`);
       } else {
         report.comments.createdOrReused++;
         if (!outcome.authorResolved) report.comments.unresolvedAuthors++;
@@ -429,7 +496,28 @@ async function main() {
     const resolvedById = resolveLegacyAttachmentFilenamesById(
       allFileData.map((r) => ({ id: r.Id, fileName: r.FileName, uploadDateTime: r.UploadDateTime }))
     );
-    report.attachments.resolvedPhysically = allResolved.length;
+    report.attachments.filenameMappingsResolved = allResolved.length;
+
+    // Explicit PHYSICAL PREFLIGHT — runs over the full 189 (unlinked
+    // included), AFTER filename resolution, BEFORE the import loop. Proves
+    // real filesystem existence; filename resolution above proves nothing
+    // about the disk by itself.
+    const linkedFileDataIds = new Set(allFileData.filter((r) => r.Ticket_FileUpload != null).map((r) => r.Id));
+    const physicalPreflight = await verifyPhysicalFilesExist(config.legacyPhysicalDir, allResolved);
+    report.attachments.physicalFilesVerified = physicalPreflight.verifiedIds.size;
+    report.attachments.linkedPhysicalFilesVerified = [...physicalPreflight.verifiedIds].filter((id) => linkedFileDataIds.has(id)).length;
+    const missingUnlinked = physicalPreflight.missingRecords.filter((m) => !linkedFileDataIds.has(m.id));
+    report.attachments.unlinkedMissingPhysicalFiles = missingUnlinked.length;
+    for (const m of missingUnlinked) {
+      report.warnings.push(
+        `UNLINKED_HISTORICAL_MISSING_PHYSICAL_FILE (informational, never imported): FileDataTbl ${m.id} expected physical file "${m.expectedFileName}" was not found in ${config.legacyPhysicalDir}.`
+      );
+    }
+    console.log(
+      `Physical preflight: ${report.attachments.physicalFilesVerified}/${allResolved.length} verified on disk overall ` +
+        `(${report.attachments.linkedPhysicalFilesVerified}/${linkedFileDataIds.size} of the ticket-linked records; ` +
+        `${missingUnlinked.length} missing among the ${report.attachments.unlinkedHistorical} unlinked historical records, informational only).`
+    );
 
     const linkedFileData = allFileData.filter((r) => r.Ticket_FileUpload != null);
     let attachmentBatchCount = 0;
@@ -443,8 +531,25 @@ async function main() {
         dryRun: !config.execute,
       });
       if (outcome.status === "failed") {
-        report.attachments.missingPhysicalFiles++;
-        report.errors.push(`Attachment (FileDataTbl ${outcome.legacyFileId}): ${outcome.error}`);
+        report.errors.push(`Attachment (FileDataTbl ${outcome.legacyFileId}) [${outcome.failureReason ?? "UNKNOWN"}]: ${outcome.error}`);
+        switch (outcome.failureReason) {
+          case "TICKET_LINK_MISSING":
+          case "TICKET_NOT_MIGRATED":
+            report.attachments.ticketLinkFailures++;
+            break;
+          case "PHYSICAL_FILE_MISSING":
+            // The ONLY reason ever allowed to increment this metric — a
+            // genuine failed disk lookup for the expected physical filename
+            // among the 143 ticket-linked records.
+            report.attachments.missingPhysicalFiles++;
+            break;
+          default:
+            // FILENAME_RESOLUTION_MISSING, NOT_A_REGULAR_FILE, IMPORT_ERROR
+            // (and any unclassified case) — never conflated with the two
+            // headline metrics above.
+            report.attachments.otherFailures++;
+            break;
+        }
       } else {
         report.attachments.createdOrReused++;
       }
@@ -458,13 +563,22 @@ async function main() {
     });
     report.attachments.physicalOrphans = orphans.length;
     for (const o of orphans) report.warnings.push(`PHYSICAL_ORPHAN: "${o}" exists on disk with no corresponding FileDataTbl record — reported only, never imported.`);
-    console.log(`Attachments: ${report.attachments.createdOrReused} created/reused, ${report.attachments.missingPhysicalFiles} missing-physical-file failures, ${orphans.length} physical orphans.`);
+    console.log(
+      `Attachments: ${report.attachments.createdOrReused} created/reused, ${report.attachments.ticketLinkFailures} ticket-link failures, ` +
+        `${report.attachments.missingPhysicalFiles} genuine missing-physical-file failures, ${report.attachments.otherFailures} other failures, ${orphans.length} physical orphans.`
+    );
 
     // ─── Phase 8: Full reconciliation report ──────────────────────────────
+    // A comment/attachment "skipped"/"failed" because its source ticket
+    // genuinely failed IS a migration correctness failure — every failure
+    // bucket gates success, not just missingPhysicalFiles.
     report.success =
       report.tickets.failed === 0 &&
       report.comments.failed === 0 &&
+      report.comments.skippedNoTicket === 0 &&
+      report.attachments.ticketLinkFailures === 0 &&
       report.attachments.missingPhysicalFiles === 0 &&
+      report.attachments.otherFailures === 0 &&
       report.users.unresolved === 0;
 
     console.log("\n─── Phase 8: Full reconciliation report ───");
@@ -487,18 +601,23 @@ async function main() {
 
 function printFinalReport(report: MigrationReport) {
   console.log(`Mode: ${report.mode}`);
-  console.log(`\nUsers — source business users: ${report.users.sourceBusinessUsers} (expected ${EXPECTED.businessUsers})`);
+  console.log(`\nUsers — source business users: ${report.users.sourceBusinessUsers} (advisory reference: ${EXPECTED.businessUsers})`);
   console.log(`  reused: ${report.users.reused}, created: ${report.users.created}, unresolved/errors: ${report.users.unresolved}, duplicate-email groups: ${report.users.duplicateEmailGroups}`);
-  console.log(`\nTickets — source: ${report.tickets.sourceTotal} (expected ${EXPECTED.tickets})`);
-  console.log(`  imported/reused: ${report.tickets.createdOrReused}, failed: ${report.tickets.failed}`);
-  console.log(`  creators preserved: ${report.tickets.creatorsPreserved}, using Unknown-Creator placeholder: ${report.tickets.creatorsUsingUnknownPlaceholder} (expected ${EXPECTED.expectedMissingCreators})`);
-  console.log(`  assignees preserved: ${report.tickets.assigneesPreserved}, unassigned: ${report.tickets.unassignedTickets} (expected ${EXPECTED.expectedUnassignedTickets})`);
-  console.log(`\nComments — source: ${report.comments.sourceTotal} (expected ${EXPECTED.comments})`);
-  console.log(`  imported/reused: ${report.comments.createdOrReused}, unresolved authors: ${report.comments.unresolvedAuthors}, failed: ${report.comments.failed}`);
-  console.log(`\nAttachments — FileDataTbl total: ${report.attachments.fileDataTotal} (expected ${EXPECTED.fileDataTotal})`);
-  console.log(`  ticket-linked: ${report.attachments.ticketLinked} (expected ${EXPECTED.fileDataLinked}), unlinked historical: ${report.attachments.unlinkedHistorical} (expected ${EXPECTED.fileDataUnlinked})`);
-  console.log(`  resolved physically: ${report.attachments.resolvedPhysically}, imported/reused: ${report.attachments.createdOrReused}`);
-  console.log(`  missing physical files: ${report.attachments.missingPhysicalFiles}, physical orphans: ${report.attachments.physicalOrphans}`);
+  console.log(`\nTickets — source: ${report.tickets.sourceTotal} (actual source snapshot this run; advisory reference only: ${EXPECTED.tickets})`);
+  console.log(`  validated successes: ${report.tickets.createdOrReused} (of which ${report.tickets.plannedDryRunLinks} are dry-run planned links, not real writes), failed: ${report.tickets.failed}`);
+  console.log(`  creators preserved: ${report.tickets.creatorsPreserved}, using Legacy Unknown Creator: ${report.tickets.creatorsUsingUnknownPlaceholder} (advisory reference: ${EXPECTED.expectedMissingCreators})`);
+  console.log(`  using Legacy Uncategorized (no Category/Categories/SubCategory at all): ${report.tickets.legacyUncategorizedCount}`);
+  console.log(`  assignees preserved: ${report.tickets.assigneesPreserved}, unassigned: ${report.tickets.unassignedTickets} (advisory reference: ${EXPECTED.expectedUnassignedTickets})`);
+  console.log(`\nComments — source: ${report.comments.sourceTotal} (advisory reference: ${EXPECTED.comments})`);
+  console.log(`  imported/planned: ${report.comments.createdOrReused}, unresolved authors: ${report.comments.unresolvedAuthors}, failed: ${report.comments.failed}, source ticket genuinely failed/absent: ${report.comments.skippedNoTicket}`);
+  console.log(`\nAttachments — FileDataTbl total: ${report.attachments.fileDataTotal} (advisory reference: ${EXPECTED.fileDataTotal})`);
+  console.log(`  ticket-linked: ${report.attachments.ticketLinked} (advisory reference: ${EXPECTED.fileDataLinked}), unlinked historical: ${report.attachments.unlinkedHistorical} (advisory reference: ${EXPECTED.fileDataUnlinked})`);
+  console.log(`  filename mappings resolved: ${report.attachments.filenameMappingsResolved} (candidate names only — NOT proof of disk existence)`);
+  console.log(`  physical files verified on disk: ${report.attachments.physicalFilesVerified}/${report.attachments.filenameMappingsResolved} overall, ${report.attachments.linkedPhysicalFilesVerified}/${report.attachments.ticketLinked} of the ticket-linked records`);
+  console.log(`  imported/reused: ${report.attachments.createdOrReused}`);
+  console.log(`  ticket-link failures: ${report.attachments.ticketLinkFailures}, genuine missing physical files (linked only): ${report.attachments.missingPhysicalFiles}, other failures: ${report.attachments.otherFailures}`);
+  console.log(`  unlinked historical missing physical files (informational, never imported): ${report.attachments.unlinkedMissingPhysicalFiles}`);
+  console.log(`  physical orphans (informational, never imported): ${report.attachments.physicalOrphans}`);
   console.log(`\nDuplicate target objects created: ${report.duplicateTargetObjectsCreated} (must be 0)`);
   console.log(`\nOverall success: ${report.success}`);
 }

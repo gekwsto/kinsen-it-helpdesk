@@ -29,6 +29,7 @@ import {
   resolveLegacyPriority,
   resolveLegacyCategoryTarget,
   resolveLegacyPlatformName,
+  LEGACY_UNCATEGORIZED_CATEGORY_NAME,
 } from "@/lib/services/legacy-migration/enum-maps";
 import type { ReferenceDataMaps } from "@/lib/services/legacy-migration/reference-data";
 
@@ -45,7 +46,11 @@ export interface TicketImportOutcome {
   legacyTicketId: number;
   status: "created" | "reused" | "failed";
   targetId?: string;
+  /** True when a synthetic, never-persisted planned identity ("dry-run:ticket:<id>") was returned — a dry-run-only concept; downstream dry-run phases (comments/attachments) use it to validate linkage without any DB write ever having occurred. Always false/absent for "reused" (a real ledger hit) and for any execute-mode outcome. */
+  isDryRunPlanned?: boolean;
   usedUnknownCreator?: boolean;
+  /** True when Category/Categories/SubCategory were ALL absent on the legacy row and the ticket was preserved under the dedicated "Legacy Uncategorized" target category (tier D of resolveLegacyCategoryTarget) rather than guessed. */
+  usedLegacyUncategorized?: boolean;
   missingAssignee?: boolean;
   error?: string;
 }
@@ -99,7 +104,8 @@ export async function importOneLegacyTicket(db: PrismaClient, row: LegacyTicketR
     const priorityId = ctx.referenceData.priorityIdByLegacyPriority.get(row.Priority!);
     if (!priorityId) throw new Error(`Ticket ${row.Id}: no prepared target TicketPriority for legacy Priority ${row.Priority} (${priority.name}).`);
 
-    const category = resolveLegacyCategoryTarget(row.Category, row.SubCategory);
+    const category = resolveLegacyCategoryTarget(row.Category, row.Categories, row.SubCategory);
+    const usedLegacyUncategorized = category.name === LEGACY_UNCATEGORIZED_CATEGORY_NAME;
     const categoryId = ctx.referenceData.categoryIdByName.get(category.name);
     if (!categoryId) throw new Error(`Ticket ${row.Id}: no prepared target TicketCategory "${category.name}".`);
 
@@ -120,7 +126,23 @@ export async function importOneLegacyTicket(db: PrismaClient, row: LegacyTicketR
       .join(" ");
 
     if (ctx.dryRun) {
-      return { legacyTicketId: row.Id, status: "created", usedUnknownCreator, missingAssignee: false };
+      // No DB write, no MigrationLedger write — but a successfully VALIDATED
+      // dry-run ticket must still produce a deterministic synthetic planned
+      // identity so downstream dry-run phases (comments/attachments) can
+      // link to it and validate their own logic (author resolution,
+      // physical-file existence, etc.) end to end, instead of the ticket
+      // silently vanishing from the graph. Never mistakable for a real
+      // target id (see department-preparation.ts / user-reconciliation.ts
+      // for the SAME "dry-run:<kind>:<key>" convention used elsewhere).
+      return {
+        legacyTicketId: row.Id,
+        status: "created",
+        targetId: `dry-run:ticket:${row.Id}`,
+        isDryRunPlanned: true,
+        usedUnknownCreator,
+        usedLegacyUncategorized,
+        missingAssignee: false,
+      };
     }
 
     const ticket = await db.$transaction(async (tx) => {
@@ -192,7 +214,7 @@ export async function importOneLegacyTicket(db: PrismaClient, row: LegacyTicketR
     });
 
     await recordLedgerSuccess(db, "TICKET", legacyKey, ticket.id);
-    return { legacyTicketId: row.Id, status: "created", targetId: ticket.id, usedUnknownCreator, missingAssignee: false };
+    return { legacyTicketId: row.Id, status: "created", targetId: ticket.id, usedUnknownCreator, usedLegacyUncategorized, missingAssignee: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!ctx.dryRun) await recordLedgerFailure(db, "TICKET", legacyKey, message);

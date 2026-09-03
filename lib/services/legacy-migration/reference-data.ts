@@ -1,12 +1,14 @@
 /**
  * Phase 4 — explicit reference-data mapping: ensures the target department
  * owns one TicketStatus row per legacy Status value, one TicketPriority row
- * per legacy Priority value, and one TicketCategory row per legacy
- * SubCategory value (see lib/services/legacy-migration/enum-maps.ts for the
- * explicit source tables this is built from). TicketCategory/TicketPriority/
- * TicketStatus are all required-departmentId models in the current schema
- * (no more global/shared row) — every row this creates is scoped to
- * LEGACY_MIGRATION_DEPARTMENT_ID.
+ * per legacy Priority value, and one TicketCategory row per entry returned
+ * by enum-maps.ts's allResolvedLegacyCategories() — the 3 bare parent
+ * categories, the 7 subcategory-derived ones, and the 1 dedicated "Legacy
+ * Uncategorized" preservation category (11 total; see enum-maps.ts's
+ * Category/SubCategory header comment for the full 4-tier resolution this
+ * mirrors). TicketCategory/TicketPriority/TicketStatus are all
+ * required-departmentId models in the current schema (no more global/shared
+ * row) — every row this creates is scoped to LEGACY_MIGRATION_DEPARTMENT_ID.
  *
  * find-by-(departmentId, name) then create-or-reuse-by-id — idempotent by
  * construction, safe to call on every migration run (including a resumed
