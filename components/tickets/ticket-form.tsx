@@ -473,6 +473,9 @@ export function CreateTicketForm({
                     ))}
                   </SelectContent>
                 </Select>
+                <p className="text-xs text-muted-foreground">
+                  This selection determines the department the ticket will be sent to, not your own department.
+                </p>
                 {errors.departmentId && (
                   <p className="text-xs text-destructive">{errors.departmentId.message}</p>
                 )}
