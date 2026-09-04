@@ -5,6 +5,7 @@ import { PendingTicketStatus } from "@prisma/client";
 import type { ParsedEmail } from "@/lib/email-ticket-parser";
 import { resolveDefaultStatusId, resolveDefaultPriorityId, isDepartmentAcceptingTickets } from "@/lib/services/department-scope-service";
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
+import { publishTicketListInvalidationInTransaction } from "@/lib/realtime/ticket-list-invalidation";
 
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
 
@@ -249,6 +250,12 @@ export async function acceptPendingTicket(
         // else) rather than leaving an orphaned duplicate.
         throw new AlreadyProcessedError();
       }
+
+      // EMAIL's actual "new ticket intake" moment — see this function's own
+      // header comment. Published from inside the transaction, so it can
+      // never fire for a ticket that ends up rolled back by the
+      // AlreadyProcessedError race guard above.
+      await publishTicketListInvalidationInTransaction(tx);
 
       return newTicket;
     });

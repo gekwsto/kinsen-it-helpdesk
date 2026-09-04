@@ -225,19 +225,19 @@ async function main() {
     currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
 
     // ── 1-2. Finance contains an In Progress ticket; Finance + In Progress returns it ──
+    // Explicit departmentId=finance.id (not a cookie) is what represents
+    // "viewing the Finance workspace" now — see item 7's note above for why.
     console.log("\n1-2. Finance + In Progress returns Ticket A ===\n");
-    currentCookieDepartmentId = finance.id;
-    currentCookieIsAllWorkspaces = false;
-    const defaultView = await callList({});
+    const defaultView = await callList({ departmentId: finance.id });
     if ("total" in defaultView) {
-      check("Finance default view (no status filter) visibly includes Ticket A (In Progress)", defaultView.ids.includes(ticketA.id));
-      check("Finance default view visibly includes Ticket B (Open)", defaultView.ids.includes(ticketB.id));
-      check("Finance default view does NOT include Ticket C (Closed) — preserved implicit default scope", !defaultView.ids.includes(ticketC.id));
+      check("Finance-filtered view (no status filter) visibly includes Ticket A (In Progress)", defaultView.ids.includes(ticketA.id));
+      check("Finance-filtered view visibly includes Ticket B (Open)", defaultView.ids.includes(ticketB.id));
+      check("Finance-filtered view does NOT include Ticket C (Closed) — preserved implicit default scope", !defaultView.ids.includes(ticketC.id));
     } else {
-      check("Finance default view did not unexpectedly redirect", false);
+      check("Finance-filtered view did not unexpectedly redirect", false);
     }
 
-    const financeInProgressResult = await callList({ statusId: financeInProgress.id });
+    const financeInProgressResult = await callList({ departmentId: finance.id, statusId: financeInProgress.id });
     if ("total" in financeInProgressResult) {
       check("Finance + In Progress returns EXACTLY Ticket A", financeInProgressResult.ids.join(",") === ticketA.id, financeInProgressResult.ids.join(","));
     } else {
@@ -246,7 +246,7 @@ async function main() {
 
     // ── 3. Finance + Open returns the correct Finance ticket ──
     console.log("\n3. Finance + Open returns Ticket B ===\n");
-    const financeOpenResult = await callList({ statusId: financeOpen.id });
+    const financeOpenResult = await callList({ departmentId: finance.id, statusId: financeOpen.id });
     if ("total" in financeOpenResult) {
       check("Finance + Open returns EXACTLY Ticket B", financeOpenResult.ids.join(",") === ticketB.id);
     } else {
@@ -257,7 +257,7 @@ async function main() {
     console.log("\n4. Repeating Finance + In Progress 8 times gives the IDENTICAL result every time ===\n");
     let allRepeatsMatched = true;
     for (let i = 0; i < 8; i++) {
-      const r = await callList({ statusId: financeInProgress.id });
+      const r = await callList({ departmentId: finance.id, statusId: financeInProgress.id });
       if (!("total" in r) || r.ids.join(",") !== ticketA.id) {
         allRepeatsMatched = false;
         console.error(`   [repeat ${i}] got: ${"total" in r ? r.ids.join(",") : r.redirectTo}`);
@@ -265,28 +265,24 @@ async function main() {
     }
     check("All 8 repeated Finance + In Progress calls returned exactly Ticket A — deterministic, not flaky", allRepeatsMatched);
 
-    // ── 5. All Workspaces -> Finance + In Progress works ──
-    console.log("\n5. All Workspaces -> Finance + In Progress ===\n");
-    currentCookieIsAllWorkspaces = true;
-    currentCookieDepartmentId = null;
-    await callList({}); // simulate landing on All Workspaces first
-    currentCookieIsAllWorkspaces = false;
-    currentCookieDepartmentId = finance.id;
-    const afterAllToFinance = await callList({ statusId: financeInProgress.id });
+    // ── 5. No filter (the union/"All Workspaces" default) -> explicit Finance + In Progress works ──
+    // "All Workspaces" is now simply the no-?departmentId= default, not a
+    // cookie state — see item 7's own note above.
+    console.log("\n5. No filter (union default) -> explicit Finance + In Progress ===\n");
+    await callList({}); // land on the union/default view first
+    const afterAllToFinance = await callList({ departmentId: finance.id, statusId: financeInProgress.id });
     if ("total" in afterAllToFinance) {
-      check("After All Workspaces -> Finance, Finance + In Progress still returns exactly Ticket A", afterAllToFinance.ids.join(",") === ticketA.id);
+      check("After the union default -> explicit Finance, Finance + In Progress still returns exactly Ticket A", afterAllToFinance.ids.join(",") === ticketA.id);
     } else {
-      check("After All Workspaces -> Finance did not unexpectedly redirect", false);
+      check("After the union default -> Finance did not unexpectedly redirect", false);
     }
 
-    // ── 6. Workspace A (Accounting) -> Finance + In Progress works ──
+    // ── 6. Explicit Accounting -> explicit Finance + In Progress works ──
     console.log("\n6. Accounting -> Finance + In Progress (repeated several times) ===\n");
     let allTransitionsMatched = true;
     for (let i = 0; i < 5; i++) {
-      currentCookieDepartmentId = accounting.id;
-      await callList({}); // land on Accounting first
-      currentCookieDepartmentId = finance.id;
-      const r = await callList({ statusId: financeInProgress.id });
+      await callList({ departmentId: accounting.id }); // land on Accounting first
+      const r = await callList({ departmentId: finance.id, statusId: financeInProgress.id });
       if (!("total" in r) || r.ids.join(",") !== ticketA.id) {
         allTransitionsMatched = false;
         console.error(`   [transition ${i}] got: ${"total" in r ? r.ids.join(",") : r.redirectTo}`);
@@ -296,14 +292,25 @@ async function main() {
     check("Ticket D (Accounting's own In Progress ticket) never leaked into any Finance-scoped result above", true); // implied by exact-match checks above never including ticketD.id
 
     // ── 7. Old workspace status ID is reconciled to Finance's equivalent ID ──
+    // NOTE: department scope is now driven ENTIRELY by the explicit
+    // ?departmentId= URL param, never by the active-workspace cookie (see
+    // app/(main)/tickets/page.tsx's own doc comment on effectiveDepartmentId
+    // — the cookie toggles above/below this point are deliberately left in
+    // place but are now inert for list scope; "switching to Finance" is
+    // expressed by passing departmentId: finance.id explicitly here,
+    // exactly matching what a real click on the Department filter dropdown
+    // sends). This models the real trip: a user filters to Finance via the
+    // dropdown, which sets departmentId but leaves a previously-selected
+    // statusId from Accounting untouched — the server-side reconciliation
+    // redirect is what corrects that.
     console.log("\n7. Accounting's In Progress id, switched to Finance -> reconciled to Finance's OWN In Progress id ===\n");
-    currentCookieDepartmentId = finance.id;
-    const reconcileResult = await callList({ statusId: acctInProgress.id, search: `${TAG}-searchterm`, sortBy: "priority", sortDir: "asc", page: "3" });
-    check("Selecting Accounting's stale In Progress id while on Finance triggers a redirect (never silently queries Finance AND statusId=Accounting's id)", "redirectTo" in reconcileResult);
+    const reconcileResult = await callList({ departmentId: finance.id, statusId: acctInProgress.id, search: `${TAG}-searchterm`, sortBy: "priority", sortDir: "asc", page: "3" });
+    check("Selecting Accounting's stale In Progress id while explicitly filtered to Finance triggers a redirect (never silently queries Finance AND statusId=Accounting's id)", "redirectTo" in reconcileResult);
     if ("redirectTo" in reconcileResult) {
       const redirectUrl = new URL(reconcileResult.redirectTo, "http://localhost");
       check("...redirects to a corrected statusId (Finance's OWN In Progress id, not Accounting's)", redirectUrl.searchParams.get("statusId") === financeInProgress.id);
       check("...never keeps departmentId=Finance AND statusId=Accounting's id together (which would deterministically return zero rows)", redirectUrl.searchParams.get("statusId") !== acctInProgress.id);
+      check("...preserves departmentId=Finance itself across the redirect", redirectUrl.searchParams.get("departmentId") === finance.id);
       // ── 16. Pagination resets correctly after reconciliation ──
       check("...resets page to 1 (item 16)", redirectUrl.searchParams.get("page") === "1");
       // ── 17. Unrelated URL params survive ──
@@ -315,7 +322,7 @@ async function main() {
       // survives the redirect — it doesn't match either fixture ticket's
       // title/description, so re-including it here would correctly return
       // zero results for an unrelated reason, not the thing under test).
-      const followed = await callList({ statusId: redirectUrl.searchParams.get("statusId")! });
+      const followed = await callList({ departmentId: finance.id, statusId: redirectUrl.searchParams.get("statusId")! });
       if ("total" in followed) {
         check("Following the corrected statusId for real returns exactly Ticket A", followed.ids.join(",") === ticketA.id);
       } else {
@@ -325,32 +332,28 @@ async function main() {
 
     // ── 8. A status absent from Finance entirely is cleared ──
     console.log("\n8. A status that doesn't exist in Finance at all (Accounting-only 'Waiting on Vendor') is cleared, not kept ===\n");
-    const clearedResult = await callList({ statusId: acctOnlyWaiting.id });
+    const clearedResult = await callList({ departmentId: finance.id, statusId: acctOnlyWaiting.id });
     check("Selecting a status with no Finance equivalent redirects (clears the param)", "redirectTo" in clearedResult);
     if ("redirectTo" in clearedResult) {
       const redirectUrl = new URL(clearedResult.redirectTo, "http://localhost");
       check("...the corrected URL has NO statusId param at all", !redirectUrl.searchParams.has("statusId"));
     }
 
-    // ── 9. Grouped All-Workspaces status correctly filters with `IN` ──
-    console.log("\n9. All Workspaces + a grouped (multi-id) 'Open' selection filters with statusId IN (...) ===\n");
-    currentCookieIsAllWorkspaces = true;
-    currentCookieDepartmentId = null;
+    // ── 9. Grouped All-Workspaces (union) status correctly filters with `IN` ──
+    console.log("\n9. Union default + a grouped (multi-id) 'Open' selection filters with statusId IN (...) ===\n");
     const groupedValue = `${financeOpen.id},${acctOpen.id}`;
     const groupedResult = await callList({ statusId: groupedValue });
     if ("total" in groupedResult) {
-      check("Grouped All-Workspaces 'Open' selection returns Finance's Open ticket (Ticket B)", groupedResult.ids.includes(ticketB.id));
-      check("Grouped All-Workspaces 'Open' selection does NOT include Ticket A (In Progress, not Open)", !groupedResult.ids.includes(ticketA.id));
-      check("Grouped All-Workspaces 'Open' selection does NOT include Ticket D (Accounting's In Progress, not Open)", !groupedResult.ids.includes(ticketD.id));
+      check("Grouped union 'Open' selection returns Finance's Open ticket (Ticket B)", groupedResult.ids.includes(ticketB.id));
+      check("Grouped union 'Open' selection does NOT include Ticket A (In Progress, not Open)", !groupedResult.ids.includes(ticketA.id));
+      check("Grouped union 'Open' selection does NOT include Ticket D (Accounting's In Progress, not Open)", !groupedResult.ids.includes(ticketD.id));
     } else {
-      check("Grouped All-Workspaces selection did not unexpectedly redirect", false);
+      check("Grouped union selection did not unexpectedly redirect", false);
     }
-    currentCookieIsAllWorkspaces = false;
-    currentCookieDepartmentId = finance.id;
 
     // ── 10. Priority has equivalent correct behaviour ──
     console.log("\n10. Finance + High priority returns exactly Ticket A ===\n");
-    const priorityResult = await callList({ priorityId: financeHigh.id });
+    const priorityResult = await callList({ departmentId: finance.id, priorityId: financeHigh.id });
     if ("total" in priorityResult) {
       check("Finance + High priority returns exactly Ticket A", priorityResult.ids.join(",") === ticketA.id);
     } else {
@@ -359,7 +362,7 @@ async function main() {
 
     // ── 11. Category has equivalent correct behaviour ──
     console.log("\n11. Finance + Invoices category returns exactly Ticket A ===\n");
-    const categoryResult = await callList({ categoryId: financeInvoices.id });
+    const categoryResult = await callList({ departmentId: finance.id, categoryId: financeInvoices.id });
     if ("total" in categoryResult) {
       check("Finance + Invoices category returns exactly Ticket A", categoryResult.ids.join(",") === ticketA.id);
     } else {
@@ -368,26 +371,26 @@ async function main() {
 
     // ── 12-14. Status + Priority + Category combinations ──
     console.log("\n12-14. Status + Priority + Category combinations ===\n");
-    const combo1 = await callList({ statusId: financeInProgress.id, priorityId: financeHigh.id });
+    const combo1 = await callList({ departmentId: finance.id, statusId: financeInProgress.id, priorityId: financeHigh.id });
     if ("total" in combo1) check("Status + Priority combination (In Progress + High) returns exactly Ticket A", combo1.ids.join(",") === ticketA.id);
     else check("Status+Priority combo did not unexpectedly redirect", false);
 
-    const combo2 = await callList({ statusId: financeInProgress.id, categoryId: financeInvoices.id });
+    const combo2 = await callList({ departmentId: finance.id, statusId: financeInProgress.id, categoryId: financeInvoices.id });
     if ("total" in combo2) check("Status + Category combination (In Progress + Invoices) returns exactly Ticket A", combo2.ids.join(",") === ticketA.id);
     else check("Status+Category combo did not unexpectedly redirect", false);
 
-    const combo3 = await callList({ statusId: financeInProgress.id, priorityId: financeHigh.id, categoryId: financeInvoices.id });
+    const combo3 = await callList({ departmentId: finance.id, statusId: financeInProgress.id, priorityId: financeHigh.id, categoryId: financeInvoices.id });
     if ("total" in combo3) check("Status + Priority + Category combination returns exactly Ticket A", combo3.ids.join(",") === ticketA.id);
     else check("Status+Priority+Category combo did not unexpectedly redirect", false);
 
     // A combination that should legitimately return NOTHING (In Progress + Low, no such ticket) — proves it's not just always-matching.
-    const comboNoMatch = await callList({ statusId: financeInProgress.id, priorityId: financeLow.id });
+    const comboNoMatch = await callList({ departmentId: finance.id, statusId: financeInProgress.id, priorityId: financeLow.id });
     if ("total" in comboNoMatch) check("A combination with no real match (In Progress + Low) correctly returns zero results", comboNoMatch.ids.length === 0);
     else check("No-match combo did not unexpectedly redirect", false);
 
     // ── 15. Assignee combination still works ──
     console.log("\n15. Status + Assignee combination works ===\n");
-    const assigneeCombo = await callList({ statusId: financeInProgress.id, assignedAgentId: agent.id });
+    const assigneeCombo = await callList({ departmentId: finance.id, statusId: financeInProgress.id, assignedAgentId: agent.id });
     if ("total" in assigneeCombo) check("Status + Assignee combination returns exactly Ticket A", assigneeCombo.ids.join(",") === ticketA.id);
     else check("Status+Assignee combo did not unexpectedly redirect", false);
 

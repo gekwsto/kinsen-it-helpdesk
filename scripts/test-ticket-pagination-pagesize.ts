@@ -144,8 +144,15 @@ async function main() {
     currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     currentCookieDepartmentId = dept.id;
 
+    // Explicit departmentId=dept.id (not the active-workspace cookie, which
+    // no longer influences list scope — see app/(main)/tickets/page.tsx's
+    // effectiveDepartmentId doc comment) scopes every call below to this
+    // fixture's own 25 tickets; without it, ADMIN + no filter now means the
+    // true company-wide union, which would also include unrelated tickets
+    // from other tests/fixtures in a shared dev DB and break these exact
+    // counts for a reason unrelated to pagination itself.
     console.log("\n1. Default pageSize is 20 ===\n");
-    const defaultView = await callTickets({});
+    const defaultView = await callTickets({ departmentId: dept.id });
     let page1Ids: string[] = [];
     if ("pagination" in defaultView) {
       page1Ids = defaultView.ids;
@@ -156,7 +163,7 @@ async function main() {
     } else check("Default view did not unexpectedly redirect", false);
 
     console.log("\n2. ?pageSize=50 returns all 25 on a single page ===\n");
-    const size50 = await callTickets({ pageSize: "50" });
+    const size50 = await callTickets({ departmentId: dept.id, pageSize: "50" });
     if ("pagination" in size50) {
       check("pageSize=50 honored", size50.pagination.pageSize === 50);
       check("All 25 tickets returned on one page", size50.ids.length === 25);
@@ -164,19 +171,19 @@ async function main() {
     } else check("pageSize=50 did not unexpectedly redirect", false);
 
     console.log("\n3. ?pageSize=100 honored ===\n");
-    const size100 = await callTickets({ pageSize: "100" });
+    const size100 = await callTickets({ departmentId: dept.id, pageSize: "100" });
     if ("pagination" in size100) check("pageSize=100 honored", size100.pagination.pageSize === 100);
     else check("pageSize=100 did not unexpectedly redirect", false);
 
     console.log("\n4. Invalid pageSize values safely fall back to the default (20) ===\n");
     for (const invalid of ["999999", "abc", "0", "-5", "33"]) {
-      const r = await callTickets({ pageSize: invalid });
+      const r = await callTickets({ departmentId: dept.id, pageSize: invalid });
       if ("pagination" in r) check(`?pageSize=${invalid} falls back to 20`, r.pagination.pageSize === 20);
       else check(`?pageSize=${invalid} did not unexpectedly redirect`, false);
     }
 
     console.log("\n5. Page 2 (default pageSize) returns the remaining 5, no overlap/duplication with page 1 ===\n");
-    const page2 = await callTickets({ page: "2" });
+    const page2 = await callTickets({ departmentId: dept.id, page: "2" });
     if ("pagination" in page2) {
       check("Page 2 returns exactly 5 rows (25 total, 20 per page)", page2.ids.length === 5);
       const overlap = page2.ids.filter((id: string) => page1Ids.includes(id));
@@ -184,7 +191,7 @@ async function main() {
     } else check("Page 2 did not unexpectedly redirect", false);
 
     console.log("\n6. Changing pageSize while on a high page canonicalizes rather than producing an empty/invalid page ===\n");
-    const highPageThenBiggerSize = await callTickets({ page: "2", pageSize: "50" });
+    const highPageThenBiggerSize = await callTickets({ departmentId: dept.id, page: "2", pageSize: "50" });
     check("page=2&pageSize=50 (only 1 page exists at size 50) redirects to a canonical page", "redirectTo" in highPageThenBiggerSize);
     if ("redirectTo" in highPageThenBiggerSize) {
       const url = new URL(highPageThenBiggerSize.redirectTo, "http://localhost");
@@ -193,7 +200,7 @@ async function main() {
     }
 
     console.log("\n7. A wildly out-of-range page canonicalizes to the real last page, preserving pageSize ===\n");
-    const outOfRange = await callTickets({ page: "999", pageSize: "50" });
+    const outOfRange = await callTickets({ departmentId: dept.id, page: "999", pageSize: "50" });
     check("page=999 redirects (never renders an empty out-of-range page)", "redirectTo" in outOfRange);
     if ("redirectTo" in outOfRange) {
       const url = new URL(outOfRange.redirectTo, "http://localhost");
@@ -202,7 +209,7 @@ async function main() {
     }
 
     console.log("\n8. Filters/sort survive a canonical redirect alongside pageSize ===\n");
-    const withFilters = await callTickets({ page: "999", pageSize: "50", sortBy: "priority", sortDir: "asc" });
+    const withFilters = await callTickets({ departmentId: dept.id, page: "999", pageSize: "50", sortBy: "priority", sortDir: "asc" });
     if ("redirectTo" in withFilters) {
       const url = new URL(withFilters.redirectTo, "http://localhost");
       check("...sortBy survives the redirect", url.searchParams.get("sortBy") === "priority");

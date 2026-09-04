@@ -39,6 +39,7 @@
     "mssql": "^12.6.0",
     "next": "15.5.19",
     "next-auth": "^5.0.0-beta.25",
+    "pg": "^8.23.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-hook-form": "^7.54.1",
@@ -53,6 +54,7 @@
   "devDependencies": {
     "@types/mssql": "^12.3.0",
     "@types/node": "^20",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/web-push": "^3.6.4",

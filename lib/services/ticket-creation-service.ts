@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { resolveDefaultStatusId, resolveDefaultPriorityId } from "@/lib/services/department-scope-service";
+import { publishTicketListInvalidationInTransaction } from "@/lib/realtime/ticket-list-invalidation";
 import type { ExternalIntegration, Prisma, TicketSource } from "@prisma/client";
 
 /**
@@ -106,6 +107,14 @@ export async function createTicketAtomic(data: CreateTicketData, history: Create
         direction: "INBOUND",
       },
     });
+
+    // The canonical WEB + integration/API ticket-creation boundary — every
+    // caller of this function reaches here only on a genuine new Ticket.
+    // Published from INSIDE this same transaction (see
+    // ticket-list-invalidation.ts's doc comment): PostgreSQL defers actual
+    // delivery until commit and drops it entirely on rollback, so this can
+    // never announce a ticket that didn't really get created.
+    await publishTicketListInvalidationInTransaction(tx);
 
     return ticket;
   });

@@ -5,6 +5,7 @@ import { canActOnEntity, resolveDefaultStatusId, findEquivalentDepartmentConfig 
 import { getMembership } from "@/lib/services/department-membership-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { changeTicketDepartmentSchema } from "@/lib/validations";
+import { publishTicketEvent } from "@/lib/realtime/publisher";
 
 /**
  * The one audited path for moving a Ticket's Department/SubDepartment —
@@ -199,6 +200,15 @@ export async function PATCH(
         newValue: newDescription,
         description: `Department changed from "${oldDescription}" to "${newDescription}"`,
       },
+    });
+
+    // A department (or sub-department) move is exactly the kind of change
+    // that can move a ticket into or out of a list's scope for every
+    // viewer, not just this ticket's own detail page — see publisher.ts's
+    // doc comment. This route previously published nothing at all.
+    publishTicketEvent("TICKET_UPDATED", id, session.user.id, {
+      departmentId: updatedTicket.departmentId,
+      subDepartmentId: updatedTicket.subDepartmentId,
     });
 
     return NextResponse.json(updatedTicket);

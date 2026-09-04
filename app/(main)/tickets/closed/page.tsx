@@ -2,9 +2,10 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { buildTicketListWhere, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
-import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
+import { NoWorkspaceState } from "@/components/workspace/workspace-gate";
 import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
+import { TicketListLiveRefresh } from "@/components/tickets/ticket-list-live-refresh";
 import { redirect } from "next/navigation";
 import { ArchiveX } from "lucide-react";
 import { Role } from "@prisma/client";
@@ -94,20 +95,17 @@ export default async function ClosedTicketsPage({
   // — see app/(main)/tickets/page.tsx's identical comment.
   const orderBy: any = [primarySort, { id: "asc" }];
 
-  // Admin's default is now their active workspace too (Phase 2B decision:
-  // keep department-specific selection rather than an unscoped "all
-  // departments" default — an explicit all-departments admin mode is
-  // deferred). An explicit ?departmentId= still overrides for this request.
+  // Same fix/rationale as app/(main)/tickets/page.tsx: the active workspace
+  // must never implicitly narrow this list — only an EXPLICIT
+  // ?departmentId= does. buildTicketListWhere/getTicketFilterOptions
+  // already resolve an absent departmentId to the full union of every
+  // department this user may view tickets in. activeWorkspace is still
+  // used below only to detect "zero accessible departments at all".
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  const effectiveDepartmentId =
-    params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
+  const effectiveDepartmentId = params.departmentId;
 
-  if (!effectiveDepartmentId && !activeWorkspace.isAllSelected) {
-    return activeWorkspace.departments.length === 0 ? (
-      <NoWorkspaceState />
-    ) : (
-      <ChooseWorkspaceState departments={activeWorkspace.departments} />
-    );
+  if (activeWorkspace.departments.length === 0) {
+    return <NoWorkspaceState />;
   }
 
   const scope = await buildTicketListWhere(session.user.id, session.user.role, effectiveDepartmentId);
@@ -194,6 +192,7 @@ export default async function ClosedTicketsPage({
 
   return (
     <div className="space-y-6">
+      <TicketListLiveRefresh />
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
           <ArchiveX className="h-5 w-5 text-muted-foreground" />

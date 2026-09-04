@@ -9,6 +9,7 @@ import { updateTicketSchema } from "@/lib/validations";
 import { notifyRequesterClosed, notifyTicketRequesterTerminalTransition } from "@/lib/ticket-notification-service";
 import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
+import { publishTicketListInvalidation } from "@/lib/realtime/ticket-list-invalidation";
 import path from "path";
 import fs from "fs/promises";
 
@@ -276,6 +277,18 @@ export async function PATCH(
       });
     }
 
+    // Unconditional, generic list-invalidation pulse — covers every OTHER
+    // field this same endpoint can change that also affects list membership
+    // (categoryId, shareWithDepartment/shareWithSubDepartment, project/
+    // activity link) but has no dedicated event above. A no-op/no-actual-
+    // change PATCH still fires this once; harmless, since every SSE
+    // subscriber coalesces/debounces bursts anyway (see
+    // ticket-list-change-hub.ts and use-ticket-list-realtime.ts) — cheaper
+    // and simpler than enumerating every remaining field individually.
+    // publishTicketEvent already calls this for the 3 branches above too;
+    // redundant calls collapse into the same coalescing window.
+    publishTicketListInvalidation();
+
     // This generic edit endpoint can also move a ticket into a closed
     // status (e.g. an admin "Edit Ticket" form), same as the dedicated
     // /status and /cancel routes — only a real open->closed transition
@@ -336,6 +349,12 @@ export async function DELETE(
 
     // Cascade in schema: TicketMessage, TicketAttachment, TicketHistory all have onDelete: Cascade
     await prisma.ticket.delete({ where: { id } });
+
+    // A deleted ticket must disappear from every list showing it too — a
+    // direct list-invalidation call (not publishTicketEvent, which is
+    // shaped around a still-existing ticketId for the per-ticket detail
+    // stream).
+    publishTicketListInvalidation();
 
     console.log(`[ticket-delete] #${ticket.ticketNumber} (${id}) deleted by ${session.user.email}`);
 

@@ -4,6 +4,7 @@ import { hasPermission } from "@/lib/permissions";
 import { buildAssignedToMeWhere, getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
 import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
+import { TicketListLiveRefresh } from "@/components/tickets/ticket-list-live-refresh";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
@@ -154,6 +155,7 @@ export default async function AssignedToMeTicketsPage({
 
   return (
     <div className="space-y-6">
+      <TicketListLiveRefresh />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Assigned to Me</h1>

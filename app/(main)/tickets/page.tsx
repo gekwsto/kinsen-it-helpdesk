@@ -7,9 +7,10 @@ import {
   getNavVisibilityFlags,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
-import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
+import { NoWorkspaceState } from "@/components/workspace/workspace-gate";
 import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
+import { TicketListLiveRefresh } from "@/components/tickets/ticket-list-live-refresh";
 import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
@@ -175,19 +176,27 @@ export default async function AllTicketsPage({
   // app/(main)/projects/page.tsx and app/(main)/activities/page.tsx.
   const orderBy: any = [primarySort, { id: "asc" }];
 
-  // Active workspace is the default scope now (Phase 2B) — an explicit
-  // ?departmentId= still wins as an "explicit scoped view," but omitting it
-  // no longer falls back to a union of every accessible department.
+  // The list's actual scope: an EXPLICIT ?departmentId= is the ONLY thing
+  // that ever narrows it. A prior "Phase 2B" version of this page
+  // substituted the user's active workspace department here whenever no
+  // explicit filter was present — meaning "All Tickets" silently meant
+  // "tickets in my current active workspace department" instead of "every
+  // department I'm authorized to see," and re-evaluating that substitution
+  // on every render (including a background live-refresh triggered by a
+  // ticket change in a COMPLETELY different department — see
+  // TicketListLiveRefresh below) made the list visibly collapse to one
+  // department at unpredictable moments, even though the user never chose
+  // to filter. buildTicketListWhere/getTicketFilterOptions already resolve
+  // an absent departmentId to the correct union of every department this
+  // user may view tickets in on their own (see their own doc comments) —
+  // the active workspace must never be substituted here. It's still used
+  // below ONLY to detect "this user has zero accessible departments at
+  // all" (a real onboarding-incomplete state, unrelated to filtering).
   const activeWorkspace = await getActiveWorkspace(session.user.id, role);
-  const effectiveDepartmentId =
-    params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
+  const effectiveDepartmentId = params.departmentId;
 
-  if (!effectiveDepartmentId && !activeWorkspace.isAllSelected) {
-    return activeWorkspace.departments.length === 0 ? (
-      <NoWorkspaceState />
-    ) : (
-      <ChooseWorkspaceState departments={activeWorkspace.departments} />
-    );
+  if (activeWorkspace.departments.length === 0) {
+    return <NoWorkspaceState />;
   }
 
   // Department-scoped visibility — validated against real membership, never
@@ -349,6 +358,7 @@ export default async function AllTicketsPage({
 
   return (
     <div className="space-y-6">
+      <TicketListLiveRefresh />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">All Tickets</h1>

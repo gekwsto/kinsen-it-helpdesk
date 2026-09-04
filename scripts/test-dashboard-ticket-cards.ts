@@ -189,7 +189,14 @@ async function main() {
       const dashboardCount = await prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition(group) } });
       check(`Dashboard count for "${group}" matches the expected fixture count (${expectedIds.length})`, dashboardCount === expectedIds.length);
 
-      const listResult = await callList(group === "open" ? {} : { status: group });
+      // Explicit departmentId=dept.id (not the active-workspace cookie, which
+      // no longer influences list scope — see app/(main)/tickets/page.tsx's
+      // effectiveDepartmentId doc comment) is what represents "viewing this
+      // dashboard's department" now; ADMIN with no departmentId at all means
+      // the true company-wide union, which would also see fixtures from
+      // other tests/departments in a shared dev DB and break this parity
+      // check for an unrelated reason.
+      const listResult = await callList(group === "open" ? { departmentId: dept.id } : { status: group, departmentId: dept.id });
       if (!("total" in listResult)) { check(`List result for "${group}" did not unexpectedly redirect`, false); continue; }
       check(`List result for "${group}" has the same total as the dashboard count`, listResult.total === dashboardCount);
       check(`List result for "${group}" contains exactly the expected tickets`, listResult.ids.slice().sort().join(",") === expectedIds.slice().sort().join(","));
@@ -198,7 +205,7 @@ async function main() {
     console.log("\nGroup \"closed\" — the list page no longer filters, it redirects to the dedicated Closed Tickets page...\n");
     const closedDashboardCount = await prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("closed") } });
     check("Dashboard count for \"closed\" matches the expected fixture count (1)", closedDashboardCount === 1);
-    const closedListResult = await callList({ status: "closed" });
+    const closedListResult = await callList({ status: "closed", departmentId: dept.id });
     check("?status=closed on All Tickets redirects (never silently returns an empty/wrong scope)", "redirectTo" in closedListResult);
     if ("redirectTo" in closedListResult) {
       check("...specifically to /tickets/closed (the actual canonical closed-tickets page)", closedListResult.redirectTo.startsWith("/tickets/closed"));
@@ -207,7 +214,7 @@ async function main() {
     console.log("\nGroup \"in_progress\" — Dashboard's own KPI count is unaffected; the List page's old name-heuristic AND-condition is retired...\n");
     const inProgressDashboardCount = await prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("in_progress") } });
     check("Dashboard count for \"in_progress\" still matches the expected fixture count (1) — its own KPI query is untouched", inProgressDashboardCount === 1);
-    const inProgressListResult = await callList({ status: "in_progress" });
+    const inProgressListResult = await callList({ status: "in_progress", departmentId: dept.id });
     if (!("total" in inProgressListResult)) {
       check("?status=in_progress on All Tickets does not redirect", false);
     } else {
@@ -225,7 +232,7 @@ async function main() {
     console.log("\nSource = EMAIL...\n");
     const dashboardEmailCount = await prisma.ticket.count({ where: { ...ticketWhere, source: "EMAIL" } });
     check("Dashboard email-source count matches the expected fixture count (1)", dashboardEmailCount === 1);
-    const emailListResult = await callList({ source: "EMAIL" });
+    const emailListResult = await callList({ source: "EMAIL", departmentId: dept.id });
     if (!("total" in emailListResult)) {
       check("List result for source=EMAIL did not unexpectedly redirect", false);
     } else {
