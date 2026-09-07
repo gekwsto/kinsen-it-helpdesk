@@ -305,7 +305,17 @@ export function NotificationDropdown() {
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon" className="relative">
-          <Bell className="h-4 w-4" />
+          {/* Same push-enabled state the header's own push toggle uses below
+              (pushSupported && pushEnabled) — this is the one canonical
+              "are notifications enabled" flag in this component; the navbar
+              trigger must never compute its own separate answer to that
+              question, or the two bells can silently disagree (see the
+              header toggle's title/icon logic a few lines down). */}
+          {pushSupported && !pushEnabled ? (
+            <BellOff className="h-4 w-4 text-muted-foreground" />
+          ) : (
+            <Bell className="h-4 w-4" />
+          )}
           {unreadCount > 0 && (
             <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center leading-none">
               {unreadCount > 9 ? "9+" : unreadCount}
