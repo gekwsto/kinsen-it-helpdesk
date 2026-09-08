@@ -12,6 +12,7 @@ import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { publishTicketListInvalidation } from "@/lib/realtime/ticket-list-invalidation";
 import path from "path";
 import fs from "fs/promises";
+import { UPLOAD_DIR } from "@/lib/attachment-policy";
 
 const TICKET_INCLUDE = {
   requester: { select: { id: true, name: true, email: true, image: true } },
@@ -339,8 +340,11 @@ export async function DELETE(
     }
 
     // Remove physical attachment files stored under UPLOAD_DIR/{ticketId}/
-    const uploadDir = process.env.UPLOAD_DIR || "./public/uploads";
-    const ticketDir = path.join(uploadDir, id);
+    // — must use the SAME UPLOAD_DIR constant every attachment write site
+    // uses (lib/attachment-policy.ts), not its own re-declared default, or
+    // a deployment where UPLOAD_DIR differs from that stale hardcoded
+    // fallback would silently fail to clean up files on ticket deletion.
+    const ticketDir = path.join(UPLOAD_DIR, id);
     try {
       await fs.rm(ticketDir, { recursive: true, force: true });
     } catch {

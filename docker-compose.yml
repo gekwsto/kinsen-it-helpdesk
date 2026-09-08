@@ -26,8 +26,17 @@ services:
       PORT: 3000
     ports:
       - "3009:3000"
+    # Host path (./uploads) is UNCHANGED on purpose — only the container-side
+    # mount point moved, from /app/public/uploads (Next.js-served, no
+    # authorization) to /app/storage/uploads (private — outside public/,
+    # matches UPLOAD_DIR="./storage/uploads" in .env; see
+    # lib/attachment-policy.ts). Since this is the exact same host directory,
+    # every attachment already persisted on the host is available at the new
+    # container path immediately on next `docker compose up` — no data was
+    # moved or copied to make this change, and nothing on the host needs any
+    # migration for this Docker deployment specifically.
     volumes:
-      - ./uploads:/app/public/uploads
+      - ./uploads:/app/storage/uploads
     networks:
       - kinsen-helpdesk-net
 

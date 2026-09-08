@@ -383,6 +383,7 @@ export function TicketDetailClient({
 
           <TabsContent value="thread" className="mt-4 space-y-4">
             <TicketThread
+              ticketId={ticketId}
               messages={messages}
               currentUserId={currentUserId}
               userRole={userRole}
@@ -529,7 +530,7 @@ export function TicketDetailClient({
               {ticketAttachments.map((att) => (
                 <a
                   key={att.id}
-                  href={att.path}
+                  href={`/api/tickets/${ticketId}/attachments/${att.id}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs hover:bg-muted transition-colors"

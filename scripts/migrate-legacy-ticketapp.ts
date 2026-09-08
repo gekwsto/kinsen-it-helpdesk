@@ -81,6 +81,7 @@ import {
   verifyPhysicalFilesExist,
 } from "@/lib/services/legacy-migration/attachment-import";
 import { resolveDefaultGlobalRoleAssignment } from "@/lib/services/default-role-service";
+import { UPLOAD_DIR as DEFAULT_UPLOAD_DIR } from "@/lib/attachment-policy";
 
 const prisma = new PrismaClient();
 
@@ -142,7 +143,12 @@ function loadMigrationConfig(): MigrationConfig {
   const targetDepartmentId = requiredEnv("LEGACY_MIGRATION_DEPARTMENT_ID");
 
   const legacyPhysicalDir = process.env.LEGACY_ATTACHMENT_PHYSICAL_DIR || "E:\\www\\TicketApp\\App_Data\\Uploads\\TicketFileUpload";
-  const uploadDir = process.env.UPLOAD_DIR || "./public/uploads";
+  // Same UPLOAD_DIR every other attachment write site now shares (see
+  // lib/attachment-policy.ts) — this used to re-declare its own
+  // "./public/uploads" fallback, which would have silently imported legacy
+  // attachments into the OLD, now-unused public/ location instead of
+  // wherever this deployment's real (private) attachment storage lives.
+  const uploadDir = process.env.UPLOAD_DIR || DEFAULT_UPLOAD_DIR;
   const batchSize = Number(process.env.LEGACY_MIGRATION_BATCH_SIZE || 25);
 
   return { execute, targetDepartmentId, legacyPhysicalDir, uploadDir, batchSize };

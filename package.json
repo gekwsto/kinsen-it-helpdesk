@@ -34,6 +34,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "html-to-text": "^10.0.1",
     "lucide-react": "^0.468.0",
     "motion": "^12.42.2",
     "mssql": "^12.6.0",

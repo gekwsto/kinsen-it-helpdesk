@@ -35,6 +35,15 @@ interface GraphAttachment {
   contentType: string;
   size: number;
   contentBytes?: string; // base64 encoded
+  // Graph's own Content-Disposition-derived signal for a `cid:`-referenced
+  // inline resource (signature logo, embedded image) as opposed to a real
+  // user-facing attachment — see lib/email-ticket-parser.ts's
+  // ParsedAttachment.isInline doc comment for how this is used. Both fields
+  // are already present on Graph's fileAttachment JSON payload today (this
+  // interface previously just didn't declare them) — no query/$select
+  // change is needed to start reading them.
+  isInline?: boolean;
+  contentId?: string | null;
 }
 
 interface SendMailPayload {

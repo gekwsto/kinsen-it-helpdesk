@@ -3,11 +3,11 @@ import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { PendingTicketStatus } from "@prisma/client";
 import type { ParsedEmail } from "@/lib/email-ticket-parser";
+import { normalizeStoredEmailBody } from "@/lib/email-ticket-parser";
 import { resolveDefaultStatusId, resolveDefaultPriorityId, isDepartmentAcceptingTickets } from "@/lib/services/department-scope-service";
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import { publishTicketListInvalidationInTransaction } from "@/lib/realtime/ticket-list-invalidation";
-
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
+import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, buildMigratedAttachmentFilename } from "@/lib/attachment-policy";
 
 export type AcceptPendingTicketResult =
   | { ok: true; ticket: { id: string; ticketNumber: number; title: string } }
@@ -70,7 +70,14 @@ export async function createPendingTicketFromEmail(
       fromEmail: parsed.fromEmail,
       fromName: parsed.fromName || null,
       subject: parsed.subject || "Email Support Request",
-      body: parsed.bodyHtml,
+      // The normalized, readable representation — never parsed.bodyHtml
+      // (raw markup). See ParsedEmail.bodyText's doc comment in
+      // lib/email-ticket-parser.ts (BUG 1 fix): this is what
+      // acceptPendingTicket later copies verbatim into Ticket.description
+      // and the initial TicketMessage.body, so normalizing it once, here,
+      // at the single point every pending ticket is created from, is
+      // enough — no downstream re-cleaning needed.
+      body: parsed.bodyText,
       receivedAt: parsed.receivedAt,
       departmentId: department?.id ?? null,
       requesterId: requester.id,
@@ -89,13 +96,35 @@ async function savePendingAttachments(
 ) {
   for (const att of attachments) {
     try {
+      // Same policy the WEB upload route has always enforced (type
+      // allowlist + size cap) — an inbound email is untrusted input exactly
+      // like a browser upload, so it gets no free pass on either check
+      // (BUG 2 / SECURITY fix — this path previously had no such check at
+      // all). MIME type is still whatever the sender's mail client claimed
+      // (Graph doesn't sniff it either) — that's a real, inherent
+      // difference from the web upload path, where the browser itself
+      // reports `file.type`; both are equally "client-claimed," so this is
+      // not a weaker guarantee, just the same one applied to a different
+      // client.
+      if (!isAllowedAttachmentMimeType(att.contentType)) {
+        console.warn(`[pending-ticket] Skipping attachment ${att.name} — disallowed MIME type ${att.contentType}`);
+        continue;
+      }
+
+      const bytes = Buffer.from(att.contentBytes, "base64");
+      // The actual decoded byte length, not the sender-reported `size`
+      // metadata field — never trust that a claimed size matches reality.
+      if (bytes.length > MAX_ATTACHMENT_SIZE_BYTES) {
+        console.warn(`[pending-ticket] Skipping attachment ${att.name} — ${bytes.length} bytes exceeds the ${MAX_ATTACHMENT_SIZE_BYTES}-byte cap`);
+        continue;
+      }
+
       const dir = path.join(UPLOAD_DIR, "pending", pendingTicketId);
       await fs.mkdir(dir, { recursive: true });
 
-      const safe = att.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filename = `${Date.now()}-${safe}`;
+      const filename = generateStoredFilename(att.name);
       const filePath = path.join(dir, filename);
-      await fs.writeFile(filePath, Buffer.from(att.contentBytes, "base64"));
+      await fs.writeFile(filePath, bytes);
 
       await prisma.pendingTicketAttachment.create({
         data: {
@@ -103,7 +132,7 @@ async function savePendingAttachments(
           filename,
           originalName: att.name,
           mimeType: att.contentType,
-          size: att.size,
+          size: bytes.length,
           path: `/uploads/pending/${pendingTicketId}/${filename}`,
         },
       });
@@ -176,6 +205,16 @@ export async function acceptPendingTicket(
 
   const requesterId = pendingTicket.requesterId ?? (await findOrCreateRequester(pendingTicket.fromEmail, pendingTicket.fromName ?? "")).id;
 
+  // GAP 1 / defense-in-depth: PendingTicket.body is normalized again HERE,
+  // right before it becomes canonical Ticket data — never trusted as
+  // already-clean just because createPendingTicketFromEmail normalizes at
+  // ingestion time. This is what makes accepting a PendingTicket row that
+  // was created BEFORE that ingestion-time fix (and so still holds raw
+  // Outlook/Word HTML in its body) safe: normalizeStoredEmailBody handles
+  // "already clean" and "still raw HTML" identically safely — see its own
+  // doc comment in lib/email-ticket-parser.ts.
+  const normalizedBody = normalizeStoredEmailBody(pendingTicket.body);
+
   // Ticket + its initial message + history + the PendingTicket's own
   // ACCEPTED transition all commit together or not at all — closes the gap
   // where a process crash/DB error between separate sequential writes could
@@ -190,7 +229,7 @@ export async function acceptPendingTicket(
       const newTicket = await tx.ticket.create({
         data: {
           title: pendingTicket.subject || "Email Support Request",
-          description: pendingTicket.body,
+          description: normalizedBody,
           source: "EMAIL",
           requesterId,
           departmentId,
@@ -206,7 +245,7 @@ export async function acceptPendingTicket(
         data: {
           ticketId: newTicket.id,
           authorId: requesterId,
-          body: pendingTicket.body,
+          body: normalizedBody,
           direction: "INBOUND",
           emailMessageId: pendingTicket.emailMessageId,
           fromEmail: pendingTicket.fromEmail,
@@ -281,25 +320,58 @@ export async function acceptPendingTicket(
   // before this change — each attachment is independently try/caught and
   // logged, never rolls back the Ticket that was just durably committed).
   const attachments = await prisma.pendingTicketAttachment.findMany({ where: { pendingTicketId: pendingTicket.id } });
-  const msg = await prisma.ticketMessage.findFirst({ where: { ticketId: ticket.id }, select: { id: true }, orderBy: { createdAt: "asc" } });
+  // Idempotency guard (BUG 2 fix, consistency requirement) — identity-based
+  // (GAP 3 fix), not filename-based. There is no known way to reach
+  // acceptPendingTicket a second time for an already-ACCEPTED record today
+  // (see the early `already_accepted` return above and the in-transaction
+  // race guard), but a future repair/retry path might, so this loop is kept
+  // safe to re-run on its own. The destination filename for a migrated
+  // attachment is ALWAYS buildMigratedAttachmentFilename(att.id, ...) below
+  // — deterministic and unique per source PendingTicketAttachment row — so
+  // checking for that exact filename is checking "has THIS pending
+  // attachment specifically already been migrated," not "does some
+  // TicketAttachment happen to share a name." Two PendingTicketAttachment
+  // rows with the same originalName (a real, legitimate case — one email,
+  // two identically-named MIME parts) get two different att.id values and
+  // therefore two different destination filenames, so neither is ever
+  // mistaken for the other, before or after a retry.
+  const existingFilenames = new Set(
+    (await prisma.ticketAttachment.findMany({ where: { ticketId: ticket.id }, select: { filename: true } })).map((a) => a.filename)
+  );
   for (const att of attachments) {
+    const destFilename = buildMigratedAttachmentFilename(att.id, att.originalName);
+    if (existingFilenames.has(destFilename)) continue;
     try {
       const sourcePath = path.join(UPLOAD_DIR, "pending", pendingTicket.id, att.filename);
       const destDir = path.join(UPLOAD_DIR, ticket.id);
       await fs.mkdir(destDir, { recursive: true });
-      const destPath = path.join(destDir, att.filename);
+      const destPath = path.join(destDir, destFilename);
       await fs.copyFile(sourcePath, destPath);
 
       await prisma.ticketAttachment.create({
         data: {
           ticketId: ticket.id,
-          messageId: msg?.id,
+          // Ticket-level (messageId: null), NOT tied to the initial email
+          // message — BUG 2's actual root cause. This is what makes a
+          // migrated attachment behave exactly like one uploaded through
+          // the normal web ticket-creation flow (app/api/tickets/[id]/
+          // attachments/route.ts also writes messageId: null for a fresh
+          // ticket's own attachments): the ticket detail page's
+          // "Attachments" panel only ever queries
+          // `attachments: { where: { messageId: null } }` (see
+          // app/(main)/tickets/[id]/page.tsx). Attaching it to the initial
+          // TicketMessage instead — the previous behavior — silently
+          // excluded it from that panel: the file and its TicketAttachment
+          // row both existed, but nothing in the normal Ticket UI ever
+          // surfaced them (confirmed via a direct reproduction — see this
+          // change's PR/commit description).
+          messageId: null,
           uploadedById: requesterId,
-          filename: att.filename,
+          filename: destFilename,
           originalName: att.originalName,
           mimeType: att.mimeType,
           size: att.size,
-          path: `/uploads/${ticket.id}/${att.filename}`,
+          path: `/uploads/${ticket.id}/${destFilename}`,
         },
       });
     } catch (err) {

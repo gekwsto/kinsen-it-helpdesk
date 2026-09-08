@@ -40,6 +40,11 @@ next-env.d.ts
 prisma/*.db
 prisma/*.db-journal
 
-# Uploads
+# Uploads — private storage (see lib/attachment-policy.ts: UPLOAD_DIR
+# defaults to ./storage/uploads, deliberately NOT under public/).
+storage/uploads/*
+!storage/uploads/.gitkeep
+# public/uploads/* kept ignored too — the old (pre-private-storage) default
+# location; harmless to still ignore even though nothing writes there anymore.
 public/uploads/*
 !public/uploads/.gitkeep

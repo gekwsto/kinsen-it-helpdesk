@@ -35,6 +35,7 @@ export interface ThreadMessage {
 }
 
 interface TicketThreadProps {
+  ticketId: string;
   messages: ThreadMessage[];
   currentUserId: string;
   userRole: Role;
@@ -49,6 +50,7 @@ const ROLE_LABEL: Record<Role, string> = {
 };
 
 export function TicketThread({
+  ticketId,
   messages,
   currentUserId,
 }: TicketThreadProps) {
@@ -110,6 +112,7 @@ export function TicketThread({
         {messages.map((message) => (
           <MessageBubble
             key={message.id}
+            ticketId={ticketId}
             message={message}
             currentUserId={currentUserId}
           />
@@ -132,24 +135,24 @@ export function TicketThread({
 }
 
 function MessageBubble({
+  ticketId,
   message,
   currentUserId,
 }: {
+  ticketId: string;
   message: ThreadMessage;
   currentUserId: string;
 }) {
   const isOwn = message.author?.id === currentUserId;
   const isInternal = message.isInternal;
-  // direction alone is NOT proof this body is genuine, already-HTML email
-  // content — a WEB or API-created ticket's initial message is ALSO
-  // direction: INBOUND (it's "inbound" in the sense of "from the
-  // requester," not "from a parsed email"). fromEmail is only ever set by
-  // the actual email pipeline (lib/services/pending-ticket-service.ts,
-  // lib/ticket-email-service.ts) — WEB and API-created messages never set
-  // it. Without this extra check, an API caller's plain-text `description`
-  // (or a WEB user's typed description) would be handed to
-  // dangerouslySetInnerHTML below as if it were trusted HTML — a real XSS
-  // vector, not a hypothetical one.
+  // Only ever used for the "Email" badge below now — NOT for choosing a
+  // render path (see the bubble body further down). direction alone is not
+  // proof this body came from a parsed email (a WEB/API ticket's initial
+  // message is also direction: INBOUND — "inbound" meaning "from the
+  // requester," not "from an email"); fromEmail is only ever set by the
+  // real email pipeline (lib/services/pending-ticket-service.ts,
+  // lib/ticket-email-service.ts), so this stays a reliable "was this
+  // genuinely emailed in" signal for the badge alone.
   const isEmailInbound = message.direction === "INBOUND" && !isInternal && !!message.fromEmail;
 
   const authorName =
@@ -222,15 +225,22 @@ function MessageBubble({
               : "rounded-tl-sm bg-muted text-foreground"
           )}
         >
-          {/* Use whitespace-pre-wrap for user-typed messages; dangerouslySetInnerHTML for email HTML */}
-          {isEmailInbound ? (
-            <div
-              className="prose prose-sm max-w-none"
-              dangerouslySetInnerHTML={{ __html: message.body }}
-            />
-          ) : (
-            <p className="whitespace-pre-wrap break-words">{message.body}</p>
-          )}
+          {/*
+            Always a plain text node (React auto-escapes {message.body} —
+            never dangerouslySetInnerHTML). message.body is guaranteed
+            HTML-tag-free for every NEW email-originated message — see
+            lib/email-ticket-parser.ts's htmlToReadableText (BUG 1 fix) — but
+            this component has no way to know that a specific row is "new":
+            an already-accepted Ticket / already-appended reply from BEFORE
+            this fix can still carry raw HTML in its body. Rendering that raw
+            markup as inert, visible text (exactly what CASE I of this fix
+            requires) is deliberately still correct and safe in that case —
+            it looks like literal markup rather than a formatted email, but
+            it can never execute, which is the actual security requirement.
+            See docs/... / the accompanying change's report for how a
+            historical row like that could be identified and re-normalized.
+          */}
+          <p className="whitespace-pre-wrap break-words">{message.body}</p>
         </div>
 
         {/* Attachments */}
@@ -239,7 +249,7 @@ function MessageBubble({
             {message.attachments.map((att) => (
               <a
                 key={att.id}
-                href={att.path}
+                href={`/api/tickets/${ticketId}/attachments/${att.id}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 rounded border bg-background px-2 py-1 text-xs hover:bg-muted transition-colors"

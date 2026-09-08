@@ -3,23 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, canViewAllTickets } from "@/lib/permissions";
 import path from "path";
 import fs from "fs/promises";
-
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-
-const ALLOWED_MIME_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "text/plain",
-  "application/zip",
-];
+import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
 
 export async function POST(
   req: NextRequest,
@@ -46,19 +30,18 @@ export async function POST(
       return NextResponse.json({ error: "No file provided" }, { status: 400 });
     }
 
-    if (file.size > MAX_FILE_SIZE) {
+    if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
       return NextResponse.json({ error: "File too large (max 10MB)" }, { status: 400 });
     }
 
-    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+    if (!isAllowedAttachmentMimeType(file.type)) {
       return NextResponse.json({ error: "File type not allowed" }, { status: 400 });
     }
 
     const dir = path.join(UPLOAD_DIR, id);
     await fs.mkdir(dir, { recursive: true });
 
-    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-    const filename = `${Date.now()}-${safeName}`;
+    const filename = generateStoredFilename(file.name);
     const filePath = path.join(dir, filename);
 
     const buffer = Buffer.from(await file.arrayBuffer());
@@ -73,6 +56,12 @@ export async function POST(
         originalName: file.name,
         mimeType: file.type,
         size: file.size,
+        // No longer a working static URL now that UPLOAD_DIR is private
+        // (see lib/attachment-policy.ts) — kept in this same shape purely
+        // for data-shape/audit continuity. The real, authenticated download
+        // path is GET /api/tickets/[id]/attachments/[attachmentId], which
+        // never reads this field (it reconstructs the file location from
+        // UPLOAD_DIR + ticketId + filename instead).
         path: `/uploads/${id}/${filename}`,
       },
       include: {

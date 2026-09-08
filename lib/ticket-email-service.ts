@@ -11,10 +11,10 @@ import { EmailLogAction, Prisma } from "@prisma/client";
 import { matchDepartmentForRecipients, createPendingTicketFromEmail } from "@/lib/services/pending-ticket-service";
 import { getMailboxesToPoll, type MailboxToPoll } from "@/lib/services/inbound-mailbox-service";
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
+import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
 import path from "path";
 import fs from "fs/promises";
 
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "./public/uploads";
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
 const SUPPORT_EMAIL = (process.env.SUPPORT_EMAIL || "kinsenitsupport@kinsen.gr").toLowerCase();
 
@@ -359,7 +359,12 @@ async function appendEmailReply(
     data: {
       ticketId: ticket.id,
       authorId: userId,
-      body: parsed.bodyHtml,
+      // Normalized readable text, never parsed.bodyHtml — same BUG 1 fix as
+      // acceptPendingTicket/createPendingTicketFromEmail: this is the reply
+      // path (a follow-up email to an ALREADY-accepted ticket), the other
+      // place a raw-HTML TicketMessage.body could previously be created.
+      // See lib/email-ticket-parser.ts's ParsedEmail.bodyText doc comment.
+      body: parsed.bodyText,
       direction: "INBOUND",
       emailMessageId: parsed.messageId,
       fromEmail: parsed.fromEmail,
@@ -407,14 +412,33 @@ async function saveEmailAttachments(
 ) {
   for (const att of attachments) {
     try {
+      // Same policy (allowlist + real byte-length cap) as
+      // savePendingAttachments in lib/services/pending-ticket-service.ts —
+      // see its own comment for why this previously had no check at all.
+      if (!isAllowedAttachmentMimeType(att.contentType)) {
+        console.warn(`[email] Skipping attachment ${att.name} — disallowed MIME type ${att.contentType}`);
+        continue;
+      }
+
+      const bytes = Buffer.from(att.contentBytes, "base64");
+      if (bytes.length > MAX_ATTACHMENT_SIZE_BYTES) {
+        console.warn(`[email] Skipping attachment ${att.name} — ${bytes.length} bytes exceeds the ${MAX_ATTACHMENT_SIZE_BYTES}-byte cap`);
+        continue;
+      }
+
       const dir = path.join(UPLOAD_DIR, ticketId);
       await fs.mkdir(dir, { recursive: true });
 
-      const safe = att.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-      const filename = `${Date.now()}-${safe}`;
+      const filename = generateStoredFilename(att.name);
       const filePath = path.join(dir, filename);
-      await fs.writeFile(filePath, Buffer.from(att.contentBytes, "base64"));
+      await fs.writeFile(filePath, bytes);
 
+      // Unlike the initial-message migration in acceptPendingTicket (fixed
+      // to messageId: null — see its own comment), a REPLY's attachments
+      // are correctly message-scoped here: they belong to this specific
+      // reply, appear under this specific message bubble in the thread, and
+      // there is no "ticket-level attachments" expectation for a reply the
+      // way there is for the ticket's own initial creation.
       await prisma.ticketAttachment.create({
         data: {
           ticketId,
@@ -423,7 +447,7 @@ async function saveEmailAttachments(
           filename,
           originalName: att.name,
           mimeType: att.contentType,
-          size: att.size,
+          size: bytes.length,
           path: `/uploads/${ticketId}/${filename}`,
         },
       });
