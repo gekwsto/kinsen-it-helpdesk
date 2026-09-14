@@ -23,7 +23,7 @@ import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft
 import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
 import { syncMicrosoftProfilePhoto } from "@/lib/services/microsoft-profile-photo-service";
-import { getOrganizationDirectoryEligibility, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
+import { getOrganizationDirectoryEligibility, isOrganizationPlacementTrustedForAuthenticatedLogin, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
 import { createOrganizationResolutionCache, resolveOrganizationPlacement } from "@/lib/services/organization-company-department-resolver";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
@@ -110,42 +110,39 @@ export async function syncMicrosoftUserDepartment(
   // Computed FIRST, before the opportunistic cache-fill below — this
   // user's own eligible domain (one of possibly several allowed
   // organization domains, see lib/allowed-email-domains.ts) is needed for
-  // BOTH the job-title cache fill and the organizational placement below,
-  // so it's derived exactly once and reused, never guessed or re-derived
-  // per call site.
+  // BOTH the job-title cache fill and the SECONDARY MicrosoftDepartmentMapping
+  // resolution below, so it's derived exactly once and reused, never
+  // guessed or re-derived per call site.
   //
-  // Organizational placement (PRIMARY department) — FIND-003
-  // (docs/roadmap-handoff-register.md): uses the exact same
-  // organization-directory-eligibility-service.ts rule AND the same
-  // organization-company-department-resolver.ts multi-company
-  // Company/Department resolution the full Directory Sync uses (never a
-  // second, independent department-resolution mechanism) — so a full sync
-  // and a first Microsoft login for the same Graph profile converge on the
-  // identical organizational placement. Gated on eligibility: a non-allowed-domain
-  // or Guest account (in practice, close to unreachable here at all — see
-  // lib/auth.ts's own `signIn` callback, which already blocks Microsoft SSO
-  // outside an allowed organization domain before this code ever runs —
-  // this check exists for its own correctness/defense-in-depth, not
-  // because it's the only gate) is skipped entirely: no company/department
-  // resolution, no primary membership change, existing data left exactly
-  // as-is.
+  // `result.profile.mail` first (this call's own GET /me fetch); falls back
+  // to `claims.email` (the email lib/auth.ts's signIn callback already
+  // gated to an allowed organization domain for this exact signed-in user,
+  // before this function ever ran) whenever Graph's own `mail` is EITHER
+  // absent OR an empty string — `||`, not `??`: a real, observed Graph
+  // response shape for some accounts is `mail: ""` (not null), which `??`
+  // does NOT treat as "absent," so the intended fallback silently never
+  // fired for those accounts, leaving a perfectly valid, already-verified
+  // session email unused. Same "mail can legitimately be unusable for a
+  // real account, fall back to another trustworthy identity" pattern
+  // already used elsewhere in this codebase (e.g. validateDirectoryUser's
+  // own mail-then-userPrincipalName fallback).
+  const effectiveMail = result.profile.mail || claims.email;
+
+  // getOrganizationDirectoryEligibility is used here ONLY for its
+  // userType-inclusive "is this a real tenant Member" signal, feeding the
+  // job-title cache fill / domain-scoped PROFILE_JOB_TITLE SECONDARY
+  // mapping below — NOT for the PRIMARY placement gate anymore (see
+  // isOrganizationPlacementTrustedForAuthenticatedLogin below and its own
+  // doc comment for the full root-cause reasoning: this function answers a
+  // genuinely different question than "should THIS authenticated login's
+  // real Graph company/department drive canonical placement").
   const eligibility = getOrganizationDirectoryEligibility({
     userType: claims.userType,
-    // `result.profile.mail` first (this call's own GET /me fetch); falls
-    // back to `claims.email` (the email lib/auth.ts's signIn callback
-    // already gated to an allowed organization domain for this exact
-    // signed-in user, before this function ever ran) only when Graph's own
-    // `mail` is null — the same "mail can legitimately be null for a real
-    // account, fall back to another trustworthy identity" pattern already
-    // used throughout this codebase (e.g. validateDirectoryUser's own
-    // mail-then-userPrincipalName fallback), not a special case invented
-    // just for this check.
-    mail: result.profile.mail ?? claims.email,
+    mail: effectiveMail,
     userPrincipalName: result.profile.userPrincipalName,
   });
-  // FIND-006: the SAME matched domain that gates organizational placement
-  // below now also flows into the job-title cache fill AND the
-  // (secondary-membership/global-role) MicrosoftDepartmentMapping
+  // FIND-006: the SAME matched domain that gates the job-title cache fill
+  // AND the (secondary-membership/global-role) MicrosoftDepartmentMapping
   // resolution further down — a domain-scoped PROFILE_JOB_TITLE mapping
   // can only ever match/cache under the exact domain eligibility already
   // confirmed, never re-derived or guessed separately. null when not
@@ -153,6 +150,24 @@ export async function syncMicrosoftUserDepartment(
   // simply never builds a PROFILE_JOB_TITLE candidate for this login,
   // exactly like "no eligible domain" should behave.
   const eligibleDomain = eligibility.eligible ? extractEmailDomain(eligibility.matchedEmail) : null;
+
+  // Organizational placement (PRIMARY department) — FIND-003
+  // (docs/roadmap-handoff-register.md), refined by the userType/eligibility
+  // decoupling fix above: uses the exact same organization-company-
+  // department-resolver.ts multi-company Company/Department resolution the
+  // full Directory Sync uses (never a second, independent department-
+  // resolution mechanism) — so a full sync and a first Microsoft login for
+  // the same Graph profile converge on the identical organizational
+  // placement. Gated on placementTrust (domain match ONLY — see that
+  // function's own doc comment for why userType is deliberately NOT
+  // reconsidered here, unlike `eligibility` above): a genuinely
+  // non-allowed-domain account is skipped entirely — no company/department
+  // resolution, no primary membership change, existing data left exactly
+  // as-is.
+  const placementTrust = isOrganizationPlacementTrustedForAuthenticatedLogin({
+    mail: effectiveMail,
+    userPrincipalName: result.profile.userPrincipalName,
+  });
 
   // Opportunistic cache fill (Operation A side-effect — see
   // microsoft-directory-service.ts header comment): zero extra Graph calls,
@@ -182,7 +197,7 @@ export async function syncMicrosoftUserDepartment(
   // comment) and already protects a MANUAL primary from being silently
   // replaced by an automated sync signal — no separate guard needed here.
   let primaryDepartmentSynced = false;
-  if (eligibility.eligible) {
+  if (placementTrust.trusted) {
     try {
       const placementCache = createOrganizationResolutionCache();
       const placement = await resolveOrganizationPlacement(placementCache, claims.companyName, claims.department);
@@ -238,7 +253,24 @@ export async function syncMicrosoftUserDepartment(
     }
   }
 
-  await syncDepartmentMemberships(userId, resolved);
+  // autoPromoteSoleActiveMembership: false — ROOT-CAUSE FIX. This function
+  // ALWAYS has its own explicit primary-placement mechanism (the
+  // resolveOrganizationPlacement + setPrimaryDepartmentMembership call
+  // above), whether or not it happened to run/succeed THIS login (skipped
+  // when !eligibility.eligible, or caught-and-logged on a genuine
+  // exception) — syncDepartmentMemberships's "promote the sole active
+  // membership to primary" fallback exists for callers with no such
+  // mechanism of their own, which this is not. Without this flag, a purely
+  // SECONDARY MicrosoftDepartmentMapping match (e.g. an org-wide Entra
+  // group grant, unrelated to the user's real Graph companyName/department)
+  // could get silently promoted to isPrimary whenever primary placement was
+  // skipped/failed — with NO corresponding User.departmentId write (only
+  // setPrimaryDepartmentMembership writes that column), leaving the user in
+  // a self-contradictory state that workspace-service.ts's
+  // resolveActiveWorkspace would then surface as their active department
+  // regardless — see department-membership-service.ts's own doc comment on
+  // syncDepartmentMemberships for the full mechanism this closes.
+  await syncDepartmentMemberships(userId, resolved, { autoPromoteSoleActiveMembership: false });
 
   // Global role sync: a SEPARATE, independent mapping-priority decision
   // (lib/services/microsoft-mapping-service.ts) — unrelated to the
@@ -314,7 +346,13 @@ export async function syncMicrosoftUserDepartment(
     userId,
     departmentPresent: claims.department !== null,
     resolvedCount: resolved.length,
-    organizationSyncEligible: eligibility.eligible,
+    // Two independent signals now, deliberately not one — see
+    // isOrganizationPlacementTrustedForAuthenticatedLogin's doc comment.
+    // organizationPlacementTrusted is what actually gated primary placement
+    // this run; directorySyncStyleEligible (userType-inclusive) is kept for
+    // visibility/diagnostics only and no longer gates anything here.
+    organizationPlacementTrusted: placementTrust.trusted,
+    directorySyncStyleEligible: eligibility.eligible,
     primaryDepartmentSynced,
     globalRoleSynced,
   });

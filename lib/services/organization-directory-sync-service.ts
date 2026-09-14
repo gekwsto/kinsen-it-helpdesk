@@ -606,7 +606,14 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
         jobTitle: synced.jobTitle,
       };
       const resolved = await resolveDepartmentMemberships(claims, synced.domain);
-      await syncDepartmentMemberships(synced.dbUserId, resolved);
+      // autoPromoteSoleActiveMembership: false — same root-cause fix as
+      // microsoft-department-sync-service.ts's identical call: this loop
+      // ALWAYS attempts setPrimaryDepartmentMembership above first (Step 1);
+      // if that attempt threw (caught, errorCount++, logged), a purely
+      // SECONDARY mapping match here must never be silently promoted to
+      // isPrimary as a result — see department-membership-service.ts's
+      // syncDepartmentMemberships doc comment for the full mechanism.
+      await syncDepartmentMemberships(synced.dbUserId, resolved, { autoPromoteSoleActiveMembership: false });
     } catch (err) {
       errorCount++;
       console.warn("[organization-directory-sync] Failed to resolve department membership", {

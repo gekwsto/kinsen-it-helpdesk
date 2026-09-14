@@ -120,15 +120,55 @@ export async function getMembership(userId: string, departmentId: string): Promi
  *   (isActive: false), never deleted — preserves history and anything
  *   referencing the user.
  * - If exactly one active membership exists afterward and none is flagged
- *   primary, it's promoted to primary — a fallback for callers with no
- *   separate primary-placement signal of their own; harmless for callers
- *   that also call setPrimaryDepartmentMembership, since that function
- *   corrects the final primary regardless of what this fallback did.
+ *   primary, it's promoted to primary (unless `autoPromoteSoleActiveMembership`
+ *   is explicitly false — see below) — a fallback for callers with NO
+ *   separate primary-placement signal of their own.
+ *
+ * ROOT-CAUSE FIX (Microsoft/Entra primary-placement integrity): this
+ * fallback is NOT harmless for a caller that also calls
+ * setPrimaryDepartmentMembership in the same sync run, contrary to what an
+ * earlier version of this comment claimed. Both real Microsoft-sync callers
+ * (microsoft-department-sync-service.ts's syncMicrosoftUserDepartment,
+ * organization-directory-sync-service.ts's directory sync) call
+ * setPrimaryDepartmentMembership FIRST, but that call is wrapped in a
+ * try/catch that logs and continues on failure (a deliberate, correct
+ * choice — a Graph/eligibility hiccup must never abort sign-in) — and
+ * `eligibility.eligible` can independently be false for a real, signed-in,
+ * domain-valid user (e.g. Entra `userType` reporting something other than
+ * "Member" for that specific account) even though a real `department` value
+ * came back from Graph. In EITHER case, setPrimaryDepartmentMembership
+ * simply never ran this login, leaving zero active primary rows. This
+ * function then runs its SECONDARY sync (an entirely independent
+ * MicrosoftDepartmentMapping match, e.g. an org-wide "all employees" Entra
+ * group mapped to some department for ticket-visibility purposes) and, if
+ * that resolves to exactly one active membership, the tail fallback below
+ * used to silently promote THAT unrelated secondary-access department to
+ * `isPrimary: true` — with NO corresponding User.departmentId write (only
+ * setPrimaryDepartmentMembership ever writes that column), so the user was
+ * left in a self-contradictory state: User.departmentId null/stale, but
+ * DepartmentMembership.isPrimary true on a department Graph's real
+ * organizational profile never named. workspace-service.ts's
+ * resolveActiveWorkspace resolves a regular user's active workspace from
+ * this exact isPrimary row (not from User.departmentId), so the wrong
+ * department was what the user actually saw, immediately, on first login —
+ * confirmed via reproduction (see scripts/test-microsoft-organization-
+ * placement-integrity.ts).
+ *
+ * Both real Microsoft-sync callers ALWAYS have their own explicit primary-
+ * placement mechanism, whether or not it happened to succeed this specific
+ * run — the "fallback for callers with no separate primary-placement signal
+ * of their own" rationale this tail was built for never actually applies to
+ * either of them. Both now pass `autoPromoteSoleActiveMembership: false`.
+ * Default stays `true` for any other/future caller that genuinely has no
+ * primary-placement mechanism of its own (none exists today — see this
+ * function's only two production call sites).
  */
 export async function syncDepartmentMemberships(
   userId: string,
-  resolved: ResolvedMembership[]
+  resolved: ResolvedMembership[],
+  options: { autoPromoteSoleActiveMembership?: boolean } = {}
 ): Promise<void> {
+  const { autoPromoteSoleActiveMembership = true } = options;
   await prisma.$transaction(async (tx) => {
     const existing = await tx.departmentMembership.findMany({ where: { userId } });
     const existingByDept = new Map(existing.map((m) => [m.departmentId, m]));
@@ -163,12 +203,14 @@ export async function syncDepartmentMemberships(
       }
     }
 
-    const active = await tx.departmentMembership.findMany({ where: { userId, isActive: true } });
-    if (active.length === 1 && !active[0].isPrimary) {
-      await tx.departmentMembership.update({
-        where: { id: active[0].id },
-        data: { isPrimary: true },
-      });
+    if (autoPromoteSoleActiveMembership) {
+      const active = await tx.departmentMembership.findMany({ where: { userId, isActive: true } });
+      if (active.length === 1 && !active[0].isPrimary) {
+        await tx.departmentMembership.update({
+          where: { id: active[0].id },
+          data: { isPrimary: true },
+        });
+      }
     }
   });
 }

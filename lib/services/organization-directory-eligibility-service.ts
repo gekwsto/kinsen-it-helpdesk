@@ -50,6 +50,17 @@ function normalizeEmailLike(value: string | null | undefined): string | null {
 }
 
 /**
+ * ⚠ REGRESSION GUARD (enforced by scripts/test-organization-placement-
+ * trust-boundary-guard.ts): do NOT use this function's `.eligible` to gate
+ * PRIMARY organizational placement in microsoft-department-sync-service.ts
+ * (or anywhere else driving setPrimaryDepartmentMembership for an
+ * already-authenticated login). That was the exact production bug this
+ * guard exists to prevent from recurring — see
+ * isOrganizationPlacementTrustedForAuthenticatedLogin below, which is the
+ * correct predicate for that decision. This function's userType check is
+ * scoped to bulk Directory Sync trust — it stays here, unchanged, for
+ * validateDirectoryUser only.
+ *
  * The full eligibility decision, with a machine-readable reason when
  * ineligible — callers that need distinct counters (e.g. "skipped: guest"
  * vs "skipped: wrong domain") should branch on `.reason`, never re-derive it.
@@ -108,4 +119,71 @@ export function extractEmailDomain(email: string): string | null {
 /** Convenience boolean-only wrapper for call sites that don't need the reason. */
 export function isEligibleOrganizationDirectoryUser(input: OrganizationDirectoryEligibilityInput): boolean {
   return getOrganizationDirectoryEligibility(input).eligible;
+}
+
+export type OrganizationPlacementTrustResult =
+  | { trusted: true; matchedEmail: string }
+  | { trusted: false; reason: "no_matching_domain" };
+
+/**
+ * ⚠ REGRESSION GUARD (enforced by scripts/test-organization-placement-
+ * trust-boundary-guard.ts): this is the ONLY function allowed to gate
+ * PRIMARY organizational placement (resolveOrganizationPlacement +
+ * setPrimaryDepartmentMembership) for an already-authenticated Microsoft
+ * login. Do not substitute getOrganizationDirectoryEligibility(...).eligible
+ * here — see that function's own guard comment above for why.
+ *
+ * A DELIBERATELY NARROWER trust question than getOrganizationDirectoryEligibility
+ * above — used ONLY by microsoft-department-sync-service.ts's per-login sync
+ * to decide whether THIS SPECIFIC LOGIN's Graph companyName/department are
+ * trustworthy enough to drive canonical organizational placement
+ * (resolveOrganizationPlacement + setPrimaryDepartmentMembership).
+ *
+ * Root-cause context: the two real callers of getOrganizationDirectoryEligibility
+ * are answering two DIFFERENT questions that happened to share one boolean:
+ *   - organization-directory-sync-service.ts (the full tenant scan) has NO
+ *     admission proof of its own for any of the (up to) thousands of Graph
+ *     user records it processes — userType!=="Member" (Guest) exclusion is a
+ *     genuinely necessary, irreplaceable defense there: an Entra B2B guest's
+ *     `mail` CAN legitimately be shaped like an allowed org domain (see
+ *     getOrganizationDirectoryEligibility's own header comment), so domain-
+ *     matching ALONE is not sufficient trust for a bulk, unauthenticated scan.
+ *   - microsoft-department-sync-service.ts's syncMicrosoftUserDepartment only
+ *     ever runs for a user who has ALREADY: (1) successfully completed real
+ *     Microsoft OAuth (proving control of Entra credentials for this exact
+ *     identity), AND (2) had that identity's email independently checked
+ *     against the SAME allowed-domain list at lib/auth.ts's `signIn`
+ *     callback, before this code path is ever reached at all. Reusing the
+ *     FULL eligibility check (including userType) here meant a real,
+ *     already-admitted, domain-valid employee could be denied their
+ *     canonical Graph-derived organizational placement — landing with NO
+ *     primary department at all — purely because Entra's `userType` for
+ *     that specific account happened to read something other than "Member"
+ *     (a real, observed condition for some accounts, independent of actual
+ *     employment status), even though Graph supplied perfectly usable
+ *     `companyName`/`department` values.
+ *
+ * The fix is NOT to drop the Guest/userType protection — that stays exactly
+ * as strict for the Directory Sync, which has no other trust anchor. It is
+ * to recognize that for an ALREADY-AUTHENTICATED login, domain-matching
+ * (mail-then-userPrincipalName, the exact same precedence and the exact
+ * same lib/allowed-email-domains.ts policy) is an INDEPENDENTLY sufficient
+ * placement-trust signal on its own — it is the same check `signIn` already
+ * enforced to let this user in in the first place. userType is deliberately
+ * NOT consulted here.
+ *
+ * Domain mismatch (a real, hard-fail case — the account's mail/UPN genuinely
+ * doesn't belong to an allowed organization domain) still fails closed: no
+ * organizational placement, exactly as before.
+ */
+export function isOrganizationPlacementTrustedForAuthenticatedLogin(
+  input: { mail?: string | null; userPrincipalName?: string | null }
+): OrganizationPlacementTrustResult {
+  const mail = normalizeEmailLike(input.mail);
+  if (mail && isAllowedOrganizationEmail(mail)) return { trusted: true, matchedEmail: mail };
+
+  const upn = normalizeEmailLike(input.userPrincipalName);
+  if (upn && isAllowedOrganizationEmail(upn)) return { trusted: true, matchedEmail: upn };
+
+  return { trusted: false, reason: "no_matching_domain" };
 }
