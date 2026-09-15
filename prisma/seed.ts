@@ -74,6 +74,19 @@ const PERMISSIONS = [
   { key: "ticket.department.change", description: "Change a ticket's department/sub-department", module: "tickets" },
   { key: "ticket.share.department", description: "Share a ticket with the whole department", module: "tickets" },
   { key: "ticket.share.subdepartment", description: "Share a ticket with the whole sub-department", module: "tickets" },
+  // Previously a hardcoded `role === Role.ADMIN` check in both
+  // app/api/tickets/route.ts (create) and app/api/tickets/[id]/route.ts
+  // (PATCH) — never routed through hasPermission/RolePermission at all, so
+  // no role (built-in or custom) could ever be granted it except by being
+  // global System Admin. Now a real, independently-grantable permission,
+  // checked the same way ticket.reply/ticket.internalNote/ticket.share.*
+  // already are (global hasPermission, not department-scoped — matching
+  // this exact route's own established mix for these "admin-adjacent"
+  // ticket actions). Seeded ADMIN-only by default (see ROLE_PERMISSIONS/
+  // NEW_PERMISSION_DEFAULT_GRANTS below) so introducing this key is a
+  // behavior-preserving no-op today; an administrator can grant it to any
+  // other role via /admin/roles going forward.
+  { key: "ticket.linkProjectActivity", description: "Link a ticket to a Project or Activity", module: "tickets" },
   // Distinct from ticket.view: ticket.view alone only ever grants a user
   // their OWN tickets (requested/assigned/shared-with) — this key is what
   // additionally grants the full department ticket list ("All Tickets").
@@ -560,6 +573,7 @@ async function main() {
       "businessUnit.update",
       "businessUnit.delete",
       "gantt.view",
+      "ticket.linkProjectActivity",
     ],
     DIRECTOR: ["organization.tree.view", "gantt.view"],
     // gantt.view backfill for every OTHER role that already had implicit

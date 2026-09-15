@@ -54,7 +54,7 @@
 import { mock } from "node:test";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { Role, AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
+import { Role, AuthProvider, DepartmentRole, MembershipSource, RoleScope } from "@prisma/client";
 import { createDepartment } from "@/lib/services/department-service";
 
 let passed = 0;
@@ -99,6 +99,14 @@ async function main() {
 
   const realNextServer = await import("next/server");
   mock.module("next/server", { namedExports: { ...realNextServer, after: (_cb: () => unknown) => {} } });
+  // PATCH /api/tickets/[id] transitively imports lib/web-push.ts (via
+  // lib/ticket-notification-service.ts), which imports the `server-only`
+  // sentinel package — a webpack-only build-time guard that always throws
+  // when the real file is loaded outside Next's own bundler. Mocking the
+  // real, resolvable lib/web-push.ts file short-circuits that import; same
+  // fix already applied in scripts/test-ticket-notes-regression-boundary.ts
+  // for the same reason.
+  mock.module("@/lib/web-push", { namedExports: { sendPushNotificationsToUser: async () => ({ subscriptionCount: 0, sentCount: 0 }) } });
 
   // Dynamic imports after both mocks are registered — see the established
   // rationale in test-inactive-department-policy.ts's header comment.
@@ -116,6 +124,7 @@ async function main() {
   const membershipIds: string[] = [];
   const projectIds: string[] = [];
   const activityIds: string[] = [];
+  const customRoleKeys: string[] = [];
   const ticketIds: string[] = [];
 
   try {
@@ -207,12 +216,13 @@ async function main() {
     check("A REQUESTER-role member without activity.create -> denied (not 201)", deniedActivityRes.status !== 201, `got ${deniedActivityRes.status}`);
 
     // ── 14. Even a user who COULD create Projects/Activities still cannot LINK a ticket to one ──
-    console.log("\n14. Creating a Project/Activity never grants ticket-link access (that stays System-Admin-only) ===\n");
+    console.log("\n14. Creating a Project/Activity never grants ticket-link access (that's ticket.linkProjectActivity, a SEPARATE permission — ADMIN-only by default) ===\n");
     // grantedUser: department MANAGER role (typically holds project.create/
     // activity.create by default department-role permissions) — proves that
     // even a genuinely permitted creator is still blocked from linking,
-    // since linking is gated by role === ADMIN, not by any department
-    // permission at all.
+    // since linking is gated by the SEPARATE ticket.linkProjectActivity
+    // permission (global, via hasPermission), which this user does not
+    // hold by default — never implied by project.create/activity.create.
     const grantedUser = await prisma.user.create({
       data: { email: `${TAG}-manager@example.com`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, passwordHash: "x" },
       select: { id: true },
@@ -227,6 +237,45 @@ async function main() {
       params: Promise.resolve({ id: ticket.id }),
     });
     check("A non-admin (even a DEPARTMENT_MANAGER who could create projects) still cannot link a ticket to one -> 403", managerLinkAttempt.status === 403);
+
+    // ── 15. But ticket.linkProjectActivity IS a real, grantable permission now (not hardcoded to ADMIN) — proves the REAL PATCH route, not just hasPermission() in isolation, actually consults it. Uses a FRESH DEPARTMENT_ADMIN user (holds ticket.changeStatus, the route's own separate top-level edit gate) so this check isolates the link permission specifically, rather than reusing grantedUser's DEPARTMENT_MANAGER standing, which lacks ticket.changeStatus and would 403 at that unrelated gate regardless of the link grant. ──
+    console.log("\n15. Explicitly granting ticket.linkProjectActivity to a non-admin user makes the real PATCH route allow the link ===\n");
+    // The ticket is still linked to `project` from step 8 — clear it first
+    // so the upcoming PATCH is a genuine projectId CHANGE (projectChanging
+    // must be true for either the old or new gate to even be consulted;
+    // re-submitting the SAME value the ticket already has is a no-op that
+    // would trivially "succeed" regardless of permission and prove nothing).
+    currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    await ticketPATCH(jsonReq("http://localhost/api/tickets/x", { projectId: null, activityId: null }, "PATCH"), {
+      params: Promise.resolve({ id: ticket.id }),
+    });
+    const linkGrantedUser = await prisma.user.create({
+      data: { email: `${TAG}-link-granted-user@example.com`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, passwordHash: "x" },
+      select: { id: true },
+    });
+    userIds.push(linkGrantedUser.id);
+    const linkGrantedMembership = await prisma.departmentMembership.create({
+      data: { userId: linkGrantedUser.id, departmentId: deptA.id, role: DepartmentRole.DEPARTMENT_ADMIN, source: MembershipSource.MANUAL },
+    });
+    membershipIds.push(linkGrantedMembership.id);
+    const linkRole = await prisma.customRole.create({
+      data: { key: `${TAG}-link-granted`, name: `${TAG} link granted`, isBuiltIn: false, scope: RoleScope.GLOBAL, isActive: true },
+    });
+    customRoleKeys.push(linkRole.key);
+    const linkPerm = await prisma.permission.findUniqueOrThrow({ where: { key: "ticket.linkProjectActivity" } });
+    await prisma.rolePermission.create({ data: { roleKey: linkRole.key, permissionId: linkPerm.id } });
+    currentSession = { user: { id: linkGrantedUser.id, role: Role.USER, customRoleId: linkRole.id } };
+    const grantedLinkAttempt = await ticketPATCH(jsonReq("http://localhost/api/tickets/x", { projectId: project.id }, "PATCH"), {
+      params: Promise.resolve({ id: ticket.id }),
+    });
+    check("A non-admin with ticket.linkProjectActivity granted via a custom role CAN link -> 200 (real route, not just the isolated permission check)", grantedLinkAttempt.status === 200);
+    // Restore the ticket's link state to what the rest of this test expects
+    // (unlinked) before continuing — this check's own side effect must not
+    // leak into later scenarios.
+    currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    await ticketPATCH(jsonReq("http://localhost/api/tickets/x", { projectId: null, activityId: null }, "PATCH"), {
+      params: Promise.resolve({ id: ticket.id }),
+    });
 
     // ── 16/17/19. Inline creation + link on an EXISTING ticket, and mismatch rejection ──
     console.log("\n16/17/19. Existing-ticket flow: inline-created entities link successfully; a Project/Activity mismatch is rejected ===\n");
@@ -284,6 +333,8 @@ async function main() {
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.departmentMembership.deleteMany({ where: { id: { in: membershipIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+      await prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } });
+      await prisma.customRole.deleteMany({ where: { key: { in: customRoleKeys } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: departmentIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: departmentIds } } });
       await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: departmentIds } } });

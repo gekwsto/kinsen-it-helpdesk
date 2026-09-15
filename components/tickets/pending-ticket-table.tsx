@@ -29,7 +29,7 @@ import {
 } from "@/components/ui/select";
 import { PaginationControls } from "@/components/ui/pagination";
 import type { PaginationMeta } from "@/lib/pagination";
-import { formatDateTime, stripHtmlToText, htmlToReadableText } from "@/lib/utils";
+import { formatDateTime, toSingleLineSnippet } from "@/lib/utils";
 import { CheckCircle2, XCircle, Loader2, Inbox, Eye } from "lucide-react";
 
 interface PendingTicket {
@@ -209,7 +209,7 @@ export function PendingTicketTable({
                       >
                         {pt.subject}
                       </button>
-                      <p className="text-xs text-muted-foreground truncate">{stripHtmlToText(pt.body).slice(0, 120)}</p>
+                      <p className="text-xs text-muted-foreground truncate">{toSingleLineSnippet(pt.body).slice(0, 120)}</p>
                     </TableCell>
                     <TableCell>
                       <p className="text-sm truncate max-w-[160px]">{pt.fromName || pt.fromEmail}</p>
@@ -340,13 +340,16 @@ export function PendingTicketTable({
       </Dialog>
 
       {/* Preview dialog — read-only, works for PENDING/ACCEPTED/REJECTED
-          alike. The body is inbound external content (an email), so it is
-          NEVER rendered as HTML (no dangerouslySetInnerHTML) — htmlToReadableText
-          (lib/utils.ts) converts it to a plain-text string with paragraph/
-          line-break structure preserved, which React renders as an inert
-          text node inside a whitespace-pre-wrap container. Any literal
-          markup/script in the original email shows up as visible, inert
-          text if at all — it can never execute. */}
+          alike. `body` arrives here as already-canonical plain text (the
+          server page normalizes every row via normalizeStoredEmailBody
+          before passing it down — see lib/email-ticket-parser.ts — so even
+          a legacy pre-fix row with raw HTML still in the database is clean
+          by the time it reaches this component). It is rendered verbatim,
+          NEVER as HTML (no dangerouslySetInnerHTML): React renders it as an
+          inert text node inside a whitespace-pre-wrap container, so any
+          literal markup/script in the original email would show up as
+          visible, inert text if it ever reached here at all — it can never
+          execute. */}
       <Dialog open={!!previewTarget} onOpenChange={(o) => !o && setPreviewTarget(null)}>
         <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
           <DialogHeader>
@@ -377,7 +380,7 @@ export function PendingTicketTable({
               </div>
               <div className="flex-1 min-h-0 overflow-y-auto rounded-md border p-4">
                 <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">
-                  {htmlToReadableText(previewTarget.body) || <span className="text-muted-foreground italic">(empty message)</span>}
+                  {previewTarget.body || <span className="text-muted-foreground italic">(empty message)</span>}
                 </p>
               </div>
             </div>

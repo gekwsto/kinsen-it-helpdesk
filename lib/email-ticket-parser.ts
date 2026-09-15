@@ -1,4 +1,4 @@
-import { convert as convertHtmlToText } from "html-to-text";
+import { convert as convertHtmlToText, type HtmlToTextFormatCallback } from "html-to-text";
 import { type GraphMailMessage, type GraphAttachment } from "@/lib/microsoft-graph";
 import { extractTicketNumberFromSubject, formatTicketNumber } from "@/lib/utils";
 
@@ -107,40 +107,153 @@ function cleanSubject(subject: string): string {
  * a hostile/malformed input (CASE I: script tags, event-handler attributes,
  * javascript: URIs never survive conversion — see
  * scripts/test-pending-ticket-email-ingestion.ts).
+ *
+ * `tr`/`td`/`th` (KIN-595 fix): html-to-text's built-in `table` formatter
+ * only produces readable, column-aligned rows for what it considers a
+ * "data table" (a heuristic this project has never opted into — see the
+ * `tables` option, deliberately left unset below). Every OTHER table —
+ * which in a real Outlook/Exchange email is exactly the layout mechanism
+ * used for a reply/forward header block (From/Sent/To/Cc/Subject) and for
+ * a signature block — falls back to being rendered as a single block with
+ * NO separation between rows or cells at all, so an entire header/signature
+ * table's text gets concatenated onto one unreadable line. The selectors
+ * below are generic HTML-tag rules (never keyed to any wording, sender, or
+ * table purpose): every `tr` becomes its own line, and adjacent `td`/`th`
+ * cells on that line are guaranteed at least one space of separation. This
+ * applies uniformly to ANY table anywhere in the DOM — header, signature,
+ * or a nested table inside quoted history — without treating any of them
+ * as a "data table" (no padded/column-aligned output, which would be
+ * unstable for stored/searchable ticket text).
+ *
+ * Cell separation (collision-safe, no fixed marker character of any kind):
+ * a real Outlook/Word HTML body is pretty-printed with a newline between
+ * adjacent `</td>` and `<td>` tags, so it already contributes one natural
+ * space of separation; some other senders’ HTML is minified with none at
+ * all. An earlier version of this fix used a suffix STRING (first a plain
+ * `" "`, then a "sentinel" private-use-area character meant to be
+ * collapsed back to a space afterward) — both approaches embed the
+ * separator as literal TEXT alongside the sender’s own content, so both
+ * are fundamentally unsafe: a sender can legally include ANY Unicode
+ * character in an email, including a private-use-area code point, either
+ * literally or via an HTML numeric entity (`&#xE000;` decodes to the exact
+ * same character before this code ever sees it) — and a text-based marker
+ * can never be told apart from identical sender-authored content once
+ * both are just characters in the same string (proven by
+ * scripts/test-pending-ticket-email-ingestion.ts’s CASE U, added specifically
+ * to catch this class of bug: it failed against the sentinel-character
+ * version, which silently swallowed a sender’s own U+E000 character).
+ *
+ * The fix below never encodes separation as any character at all. `tr`/
+ * `td`/`th` are handled by CUSTOM FORMATTER FUNCTIONS (not a named
+ * generic formatter + a suffix/prefix string) that call html-to-text’s own
+ * BlockTextBuilder API directly: `builder.addInline(" ")` between cells
+ * doesn’t append literal text — it sets an internal "a space is pending"
+ * flag on the builder’s word list (the exact same mechanism the library
+ * itself uses for ordinary inline whitespace). Because words are stored in
+ * an array and joined with exactly one space when the block is finalized,
+ * calling this any number of times — whether or not the source HTML also
+ * has real whitespace between the cells — can only ever produce exactly
+ * one space, never a duplicate, and it happens entirely at the structural/
+ * builder level: it is not text, so it cannot collide with, be confused
+ * for, or accidentally consume any character the sender actually wrote,
+ * including U+E000 itself, literal or entity-decoded (see CASE U).
  */
+const formatTableRow: HtmlToTextFormatCallback = (elem, walk, builder, formatOptions) => {
+  // Deliberately `1`, not the block formatter’s own default of `2`, so
+  // adjacent header/signature rows don’t end up double-spaced from
+  // each other.
+  builder.openBlock({ leadingLineBreaks: (formatOptions.leadingLineBreaks as number | undefined) ?? 1 });
+  walk(elem.children, builder);
+  builder.closeBlock({ trailingLineBreaks: (formatOptions.trailingLineBreaks as number | undefined) ?? 1 });
+};
+
+const formatTableCell: HtmlToTextFormatCallback = (elem, walk, builder) => {
+  walk(elem.children, builder);
+  // A structural "one space follows" marker on the builder’s own word
+  // list — not literal text — so it can never collide with, or be
+  // mistaken for, anything the sender wrote (see this function’s own
+  // doc comment above). A trailing call after the LAST cell in a row is
+  // harmless: with no further word to attach it to, it contributes
+  // nothing to the output.
+  builder.addInline(" ");
+};
+
 export function htmlToReadableText(html: string): string {
   const raw = convertHtmlToText(html, {
     wordwrap: false,
+    formatters: {
+      tableRow: formatTableRow,
+      tableCell: formatTableCell,
+    },
     selectors: [
       // Keep link TEXT (useful, human-written content) but never the href —
       // a converted `javascript:`/`data:` URI has no business surviving
-      // into a plain-text field that's never treated as a link anyway.
+      // into a plain-text field that’s never treated as a link anyway.
       { selector: "a", options: { ignoreHref: true } },
       // Images carry no readable text of their own; a `[Image]`-style
       // placeholder for every embedded logo/signature image would just be
-      // noise ahead of the sender's actual message.
+      // noise ahead of the sender’s actual message.
       { selector: "img", format: "skip" },
+      { selector: "tr", format: "tableRow" },
+      { selector: "td", format: "tableCell" },
+      { selector: "th", format: "tableCell" },
     ],
   });
   return normalizePlainText(raw);
 }
 
-/** Shared cleanup for BOTH branches above: collapse whitespace-only lines (e.g. a `&nbsp;`-only Word paragraph) and runs of 3+ blank lines down to one, trim the ends. Never touches genuine sender-written text. */
+/**
+ * Shared cleanup for genuine text/plain Graph messages, already-normalized
+ * stored bodies, AND html-to-text's converted output alike — deliberately
+ * conservative, since a real Graph `body.contentType: "text"` message
+ * reaches this function completely unmodified otherwise (see
+ * parseIncomingEmail above) and must never have its own meaningful
+ * whitespace altered: normalize line endings (CRLF/CR -> LF), trim
+ * trailing horizontal whitespace per line (this alone empties a line that
+ * was whitespace-only to begin with — e.g. a `&nbsp;`-only Word paragraph;
+ * note the character in the class below is a real non-breaking space,
+ * U+00A0, not a regular space), collapse runs of 3+ blank lines down to
+ * one, trim the document's start/end. Never collapses INTERIOR spaces —
+ * meaningful leading indentation ("    nested step"), column-aligned
+ * spacing ("Name        Value"), or any other interior run of spaces a
+ * sender actually typed (or pasted, e.g. a log/code snippet) survives
+ * completely unchanged. (Any spacing artifact specific to HTML table-cell
+ * conversion is resolved separately, narrowly, inside htmlToReadableText
+ * itself — see CELL_SEPARATOR_SENTINEL_RE above — before this function
+ * ever sees the text, so it never needs a general interior-space collapse
+ * to compensate.)
+ */
 function normalizePlainText(text: string): string {
   return text
-    .replace(/^[ \t ]+$/gm, "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t ]+$/, ""))
+    .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-// A plausible-HTML-tag detector — deliberately loose (any `<letter-or-!-or-/
-// ...>`-shaped run), NOT a validator. Only used to decide which branch of
-// normalizeStoredEmailBody below to take; being loose here is the safe
-// direction; a false positive just runs already-clean text through
-// htmlToReadableText (still safe/idempotent — see that function's own doc
-// comment), while a false negative would let real markup through unclean,
+// A plausible-HTML-tag detector — deliberately loose (matches a real tag
+// shape: `<`, optional `/`, a tag name, then either `>`/`/>` or whitespace-
+// led attributes and `>` — or a `<!...>` doctype/comment), NOT a validator.
+// Only used to decide which branch of normalizeStoredEmailBody below to
+// take. The tag-name requirement (letters/digits/colon/hyphen only,
+// immediately followed by `>`, `/>`, or whitespace — never `.`/`@`) is
+// deliberate, not incidental: an earlier, even looser version of this
+// pattern (any `<letter...>`-shaped run) misfired on a perfectly ordinary
+// plain-text email header like `Alice Example <alice@example.com>` —
+// extremely common in a forwarded/quoted Outlook message (see KIN-595's
+// fixture in scripts/test-pending-ticket-email-ingestion.ts, CASE R) —
+// mistaking it for a stray HTML tag, running it through htmlToReadableText,
+// and losing the bracketed email address entirely (html-to-text's real
+// parser treats `<alice@example.com>` as an unknown/malformed tag and
+// drops it). Still matches every real tag this app needs to catch,
+// including Outlook's namespaced `<o:p>`/`<w:...>` markup. A false positive
+// just runs already-clean text through htmlToReadableText (still
+// safe/idempotent for genuine HTML-shaped input — see that function's own
+// doc comment); a false negative would let real markup through unclean,
 // which this pattern is broad enough to avoid in practice.
-const LOOKS_LIKE_HTML = /<[a-zA-Z!/][^>\n]{0,300}>/;
+const LOOKS_LIKE_HTML = /<!(?:[^>\n]{0,300})>|<\/?[a-zA-Z][a-zA-Z0-9:-]*(?:\s[^<>\n]{0,300})?\/?>/;
 
 /**
  * The defense-in-depth normalization boundary (GAP 1 fix) — called from

@@ -14,6 +14,7 @@ import { redirect } from "next/navigation";
 import { Archive } from "lucide-react";
 import { PendingTicketStatus } from "@prisma/client";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { normalizeStoredEmailBody } from "@/lib/email-ticket-parser";
 
 interface SearchParams {
   page?: string;
@@ -112,6 +113,11 @@ export default async function RejectedTicketsPage({
     redirect(buildCanonicalUrl(params, pagination.page));
   }
 
+  // Same canonical server-side boundary as /tickets/pending's page — see
+  // its own comment. Reused here (not reimplemented) so both list pages
+  // pass the client the exact same guarantee: always clean plain text.
+  const normalizedRejectedTickets = rejectedTickets.map((pt) => ({ ...pt, body: normalizeStoredEmailBody(pt.body) }));
+
   // UI-only hint for whether to render "Create Ticket" at all — the API
   // route is the real, per-record-department gate (requireDepartmentPermission/
   // hasPermission), so a wrong guess here only ever costs an extra click +
@@ -135,7 +141,7 @@ export default async function RejectedTicketsPage({
       <PendingTicketFilters departments={departments} showStatusFilter={false} />
 
       <PendingTicketTable
-        pendingTickets={rejectedTickets as any}
+        pendingTickets={normalizedRejectedTickets as any}
         pagination={pagination}
         canAccept={canAccept}
         canReject={false}

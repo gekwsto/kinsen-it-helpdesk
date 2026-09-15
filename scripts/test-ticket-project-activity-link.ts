@@ -23,9 +23,14 @@
  *     department — same leniency already used for category/priority/
  *     cancelReason in the department-change route.
  *  8. Unknown project/activity ids -> project_not_found / activity_not_found.
- *  9. The admin-only gate is the same hard rule already used consistently
- *     by both POST /api/tickets and PATCH /api/tickets/[id] (pure logic
- *     check, mirrors the exact predicate in both routes).
+ *  9. The link gate is `ticket.linkProjectActivity` — a real, independently
+ *     -grantable permission (see prisma/seed.ts; ADMIN holds it by default,
+ *     previously a hardcoded role===ADMIN check with no way to grant it to
+ *     any other role) — consulted via the exact same hasPermission()
+ *     resolver both POST /api/tickets and PATCH /api/tickets/[id] use, not
+ *     a re-implemented comparison. Includes a positive check that a custom
+ *     role explicitly granted this permission is genuinely allowed, and
+ *     that a plain USER/IT_AGENT without it is still rejected.
  * 10. Department-change cascade: a project/activity scoped to the OLD
  *     department are cleared when the ticket moves to an unrelated
  *     department (mirrors the exact "stillValid" predicate in
@@ -35,8 +40,9 @@
  * Requires a reachable DATABASE_URL — reports clearly and exits if unreachable.
  */
 import { prisma } from "@/lib/prisma";
-import { AuthProvider, ProjectStatus, ActivityStatus, ActivityPriority, Role } from "@prisma/client";
+import { AuthProvider, ProjectStatus, ActivityStatus, ActivityPriority, Role, RoleScope } from "@prisma/client";
 import { validateTicketProjectActivityLink } from "@/lib/services/department-scope-service";
+import { hasPermission } from "@/lib/permissions";
 
 let passed = 0;
 let failed = 0;
@@ -51,10 +57,10 @@ function check(label: string, condition: boolean) {
   }
 }
 
-/** Mirrors the exact admin-only guard in app/api/tickets/route.ts POST and app/api/tickets/[id]/route.ts PATCH. */
-function isLinkChangeAllowed(role: Role, projectIdGiven: boolean, activityIdGiven: boolean): boolean {
+/** Mirrors the exact guard in app/api/tickets/route.ts POST and app/api/tickets/[id]/route.ts PATCH — ticket.linkProjectActivity via the real hasPermission() resolver, not a re-implemented role comparison. */
+async function isLinkChangeAllowed(role: Role, customRoleId: string | null, projectIdGiven: boolean, activityIdGiven: boolean): Promise<boolean> {
   if (!projectIdGiven && !activityIdGiven) return true;
-  return role === Role.ADMIN;
+  return hasPermission(role, "ticket.linkProjectActivity", customRoleId);
 }
 
 /** Mirrors the exact "stillValid" predicate in app/api/tickets/[id]/department/route.ts. */
@@ -73,11 +79,11 @@ async function main() {
     process.exit(0);
   }
 
-  console.log("Admin-only gate (pure, no DB)\n");
-  check("No project/activity fields touched -> allowed for anyone", isLinkChangeAllowed(Role.USER, false, false));
-  check("Setting a project as ADMIN -> allowed", isLinkChangeAllowed(Role.ADMIN, true, false));
-  check("Setting an activity as a plain USER -> rejected", !isLinkChangeAllowed(Role.USER, false, true));
-  check("Setting a project as IT_AGENT -> rejected (still admin-only)", !isLinkChangeAllowed(Role.IT_AGENT, true, false));
+  console.log("ticket.linkProjectActivity gate (real hasPermission() resolver)\n");
+  check("No project/activity fields touched -> allowed for anyone", await isLinkChangeAllowed(Role.USER, null, false, false));
+  check("Setting a project as ADMIN -> allowed (ADMIN holds ticket.linkProjectActivity by default)", await isLinkChangeAllowed(Role.ADMIN, null, true, false));
+  check("Setting an activity as a plain USER -> rejected (no grant)", !(await isLinkChangeAllowed(Role.USER, null, false, true)));
+  check("Setting a project as IT_AGENT -> rejected (no grant by default)", !(await isLinkChangeAllowed(Role.IT_AGENT, null, true, false)));
 
   let deptA: Awaited<ReturnType<typeof prisma.department.create>> | undefined;
   let deptB: Awaited<ReturnType<typeof prisma.department.create>> | undefined;
@@ -85,8 +91,29 @@ async function main() {
   let owner: Awaited<ReturnType<typeof prisma.user.create>> | undefined;
   const projectIds: string[] = [];
   const activityIds: string[] = [];
+  const customRoleIds: string[] = [];
+  const customRoleKeys: string[] = [];
 
   try {
+    // Proves the permission is genuinely grantable beyond ADMIN — the whole
+    // point of moving this off a hardcoded role===ADMIN check and into the
+    // permission catalogue (see this file's own item 9).
+    console.log("\nCustom role granted ticket.linkProjectActivity (proves it's genuinely grantable now, not hardcoded)\n");
+    const grantedRole = await prisma.customRole.create({
+      data: { key: `TEST_LINK_GRANTED_${RUN_ID}`, name: `Link Granted ${RUN_ID}`, isBuiltIn: false, scope: RoleScope.GLOBAL, isActive: true },
+    });
+    customRoleIds.push(grantedRole.id);
+    customRoleKeys.push(grantedRole.key);
+    const linkPerm = await prisma.permission.findUniqueOrThrow({ where: { key: "ticket.linkProjectActivity" } });
+    await prisma.rolePermission.create({ data: { roleKey: grantedRole.key, permissionId: linkPerm.id } });
+    check("A plain USER with a custom role explicitly granted ticket.linkProjectActivity -> allowed", await isLinkChangeAllowed(Role.USER, grantedRole.id, true, false));
+
+    const ungrantedRole = await prisma.customRole.create({
+      data: { key: `TEST_LINK_UNGRANTED_${RUN_ID}`, name: `Link Ungranted ${RUN_ID}`, isBuiltIn: false, scope: RoleScope.GLOBAL, isActive: true },
+    });
+    customRoleIds.push(ungrantedRole.id);
+    customRoleKeys.push(ungrantedRole.key);
+    check("A custom role WITHOUT the grant is still rejected (not a blanket custom-role bypass)", !(await isLinkChangeAllowed(Role.USER, ungrantedRole.id, true, false)));
     deptA = await prisma.department.create({ data: { name: `Test Link Dept A ${RUN_ID}`, slug: `test-link-dept-a-${RUN_ID}` } });
     deptB = await prisma.department.create({ data: { name: `Test Link Dept B ${RUN_ID}`, slug: `test-link-dept-b-${RUN_ID}` } });
     deptC = await prisma.department.create({ data: { name: `Test Link Dept C ${RUN_ID}`, slug: `test-link-dept-c-${RUN_ID}` } });
@@ -160,6 +187,8 @@ async function main() {
       ["projects", () => (projectIds.length > 0 ? prisma.project.deleteMany({ where: { id: { in: projectIds } } }) : Promise.resolve())],
       ["user", () => (owner ? prisma.user.deleteMany({ where: { id: owner.id } }) : Promise.resolve())],
       ["departments", () => prisma.department.deleteMany({ where: { id: { in: [deptA?.id, deptB?.id, deptC?.id].filter((id): id is string => !!id) } } })],
+      ["rolePermissions (custom roles)", () => (customRoleKeys.length > 0 ? prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } }) : Promise.resolve())],
+      ["customRoles", () => (customRoleIds.length > 0 ? prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } }) : Promise.resolve())],
     ];
     for (const [label, step] of cleanupSteps) {
       try {

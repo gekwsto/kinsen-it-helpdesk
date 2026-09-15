@@ -47,6 +47,27 @@ const RUN_ID = Date.now();
 const CENTRAL = "central-support@kinsen.gr";
 const originalFetch = global.fetch;
 
+/**
+ * A trimmed, table-laid-out Outlook/Exchange reply header — same shape as
+ * the full KIN-595 fixture in scripts/test-pending-ticket-email-ingestion.ts
+ * (CASE R), used here just to prove write path C (a reply to an already-
+ * accepted ticket, via appendEmailReply) shares the SAME canonical
+ * htmlToReadableText rule as paths A/B, not a separate formatting rule.
+ * Every name/email/phone below is a synthetic placeholder.
+ */
+function replyTableLayoutHtml(runId: number): string {
+  return `<div class="WordSection1">
+<p class="MsoNormal">Still happening, please see below.</p>
+<table border="0" cellspacing="0" cellpadding="0" style="width:100%;">
+<tr><td><b>From:</b></td><td><span>Grace Example &lt;grace-${runId}@example.com&gt;</span></td></tr>
+<tr><td><b>Sent:</b></td><td><span>Tuesday, January 6, 2026 8:00 AM</span></td></tr>
+<tr><td><b>To:</b></td><td><span>IT Support &lt;support@example-corp.test&gt;</span></td></tr>
+<tr><td><b>Subject:</b></td><td><span>Re: To Be Accepted ${runId}</span></td></tr>
+</table>
+<p class="MsoNormal">Thanks,<br>Grace</p>
+</div>`;
+}
+
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
@@ -336,12 +357,37 @@ async function main() {
           const kinRef = `[KIN-${acceptResult.ticket.ticketNumber}]`;
           const replyMsgId = `run5-reply-${RUN_ID}`;
           installMailboxRouterMock({
-            [deptAEmail]: [makeMessage({ id: replyMsgId, subject: `Re: ${kinRef} To Be Accepted ${RUN_ID}`, from: { emailAddress: { name: "Grace", address: `grace-${RUN_ID}@example.com` } } })],
+            [deptAEmail]: [
+              makeMessage({
+                id: replyMsgId,
+                subject: `Re: ${kinRef} To Be Accepted ${RUN_ID}`,
+                from: { emailAddress: { name: "Grace", address: `grace-${RUN_ID}@example.com` } },
+                body: { contentType: "html", content: replyTableLayoutHtml(RUN_ID) },
+              }),
+            ],
           });
           const replyResult = await processInboundEmails();
           check("8. A [KIN-N] reply appends to the accepted ticket (appended=1, not created)", replyResult.appended === 1 && replyResult.created === 0);
           const messageCount = await prisma.ticketMessage.count({ where: { ticketId: acceptResult.ticket.id } });
           check("   Exactly 2 ticket messages exist (original + reply), no duplicate append", messageCount === 2);
+
+          // Write path C (appendEmailReply): the reply's table-based From/Sent/To/Subject
+          // header must keep the SAME readable, one-row-per-line formatting as paths A/B —
+          // proving all three email write paths share one canonical rule, not separate ones.
+          const replyMessage = await prisma.ticketMessage.findFirst({
+            where: { ticketId: acceptResult.ticket.id, emailMessageId: `<${replyMsgId}@test.local>` },
+            select: { body: true },
+          });
+          const replyBody = replyMessage?.body ?? "";
+          check(
+            "8b. Write path C: reply's table-based From/Sent/To/Subject rows land on separate lines, not concatenated",
+            /^From:.*$/m.test(replyBody) &&
+              /^Sent:.*$/m.test(replyBody) &&
+              /^To:.*$/m.test(replyBody) &&
+              /^Subject:.*$/m.test(replyBody) &&
+              !replyBody.includes("Sent: Tuesday, January 6, 2026 8:00 AM To:")
+          );
+          check("8c. Write path C: the reply's own message text is present", replyBody.includes("Still happening, please see below."));
           restoreFetch();
         }
       } else {

@@ -49,16 +49,33 @@ export function DepartmentSettingsForm({ department, canToggleActive, canChangeB
   const [slug, setSlug] = useState(department.slug);
   const [description, setDescription] = useState(department.description ?? "");
   const [isActive, setIsActive] = useState(department.isActive);
-  const [businessUnitId, setBusinessUnitId] = useState(department.businessUnitId ?? "");
+  // department.businessUnitId is `null` for a department placed directly
+  // under a Company (no meaningful Business Unit to nest under — always
+  // true for a Microsoft/Entra-sourced department; see the schema comment
+  // on Department.companyId). Normalized to "" once, here, as the single
+  // source of truth for "no Business Unit selected" — every comparison
+  // below diffs against THIS, never against the raw `department.businessUnitId`
+  // (which would make `"" !== null` look like a change on every render for
+  // a perfectly valid, untouched direct-Company department).
+  const initialBusinessUnitId = department.businessUnitId ?? "";
+  const [businessUnitId, setBusinessUnitId] = useState(initialBusinessUnitId);
   const [saving, setSaving] = useState(false);
   const [togglingActive, setTogglingActive] = useState(false);
   const [confirmCrossCompanyOpen, setConfirmCrossCompanyOpen] = useState(false);
+
+  const businessUnitChanged = businessUnitId !== initialBusinessUnitId;
+  // The one genuinely invalid Business Unit state this form can produce:
+  // clearing an EXISTING Business Unit back to empty (a department must
+  // belong to exactly one Business Unit once it has one — see
+  // updateDepartmentSchema). A direct-Company department that simply stays
+  // unselected (initialBusinessUnitId already "") is not this case at all.
+  const clearingExistingBusinessUnit = canChangeBusinessUnit && initialBusinessUnitId !== "" && businessUnitId === "";
 
   const currentBusinessUnit = businessUnits.find((bu) => bu.id === department.businessUnitId) ?? null;
   const selectedBusinessUnit = businessUnits.find((bu) => bu.id === businessUnitId) ?? null;
   const isCrossCompanyMove =
     canChangeBusinessUnit &&
-    businessUnitId !== department.businessUnitId &&
+    businessUnitChanged &&
     !!selectedBusinessUnit &&
     !!currentBusinessUnit &&
     selectedBusinessUnit.company.id !== currentBusinessUnit.company.id;
@@ -71,7 +88,12 @@ export function DepartmentSettingsForm({ department, canToggleActive, canChangeB
         slug,
         description: description.trim() || null,
       };
-      if (canChangeBusinessUnit && businessUnitId !== department.businessUnitId) {
+      // Only ever included when the Business Unit genuinely changed — a
+      // simple name/slug/description edit must never submit businessUnitId
+      // at all (never even `""`, which the backend's own schema rejects
+      // outright — see updateDepartmentSchema), so an untouched
+      // direct-Company department stays direct-Company.
+      if (canChangeBusinessUnit && businessUnitChanged) {
         body.businessUnitId = businessUnitId;
       }
       const res = await fetch(`/api/admin/departments/${department.id}`, {
@@ -152,7 +174,7 @@ export function DepartmentSettingsForm({ department, canToggleActive, canChangeB
           <div className="space-y-2">
             <Label>Business Unit</Label>
             <BusinessUnitCombobox businessUnits={businessUnits} value={businessUnitId} onChange={setBusinessUnitId} disabled={saving} />
-            {!businessUnitId && (
+            {clearingExistingBusinessUnit && (
               <p className="text-xs text-destructive">A department must belong to a business unit.</p>
             )}
             {isCrossCompanyMove && (
@@ -181,7 +203,7 @@ export function DepartmentSettingsForm({ department, canToggleActive, canChangeB
         <div className="flex justify-end">
           <Button
             onClick={handleSave}
-            disabled={saving || !name.trim() || !slug.trim() || (canChangeBusinessUnit && !businessUnitId)}
+            disabled={saving || !name.trim() || !slug.trim() || clearingExistingBusinessUnit}
           >
             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
             Save Changes

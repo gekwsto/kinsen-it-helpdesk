@@ -113,18 +113,21 @@ export default async function TicketDetailPage({
   const canShareDepartment = isRequester || canShareDepartmentPerm;
   const canShareSubDepartment = isRequester || canShareSubDepartmentPerm;
 
-  // Same hard rule as Create Ticket and the generic PATCH route (see
-  // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) — only System
-  // Admin may link a ticket to a Project/Activity. Project/Activity OPTIONS
-  // themselves are no longer loaded here — TicketActions fetches them
-  // client-side, scoped to `effectiveDeptId` via the same GET /api/projects
-  // / GET /api/activities the standalone list pages use, never an unbounded
-  // "every project/activity in the system" query (see ticket-actions.tsx).
-  // Only the two booleans below (can the user ALSO create a Project/Activity
-  // in this specific department — reusing canActOnEntity, the same
-  // department-permission primitive used throughout this file) are resolved
-  // here.
-  const canLinkProjectActivity = isAdminUser;
+  // Same permission as Create Ticket and the generic PATCH route (see
+  // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) —
+  // ticket.linkProjectActivity, a plain global hasPermission check (ADMIN
+  // has it by default, but any role can now be granted it via
+  // /admin/roles — this used to be a hardcoded role===ADMIN check). This
+  // is only ever a UI hint; both routes independently re-check the same
+  // permission server-side. Project/Activity OPTIONS themselves are no
+  // longer loaded here — TicketActions fetches them client-side, scoped to
+  // `effectiveDeptId` via the same GET /api/projects / GET /api/activities
+  // the standalone list pages use, never an unbounded "every project/
+  // activity in the system" query (see ticket-actions.tsx). Only the two
+  // booleans below (can the user ALSO create a Project/Activity in this
+  // specific department — reusing canActOnEntity, the same department-
+  // permission primitive used throughout this file) are resolved here.
+  const canLinkProjectActivity = await hasPermission(role, "ticket.linkProjectActivity", customRoleId);
   const [canCreateProjectInDept, canCreateActivityInDept] = await Promise.all([
     canLinkProjectActivity && effectiveDeptId
       ? canActOnEntity(session.user.id, role, effectiveDeptId, "project.create")

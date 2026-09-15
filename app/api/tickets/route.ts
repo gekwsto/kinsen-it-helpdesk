@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth } from "@/lib/permissions";
+import { requireAuth, hasPermission } from "@/lib/permissions";
 import {
   buildTicketListWhere,
   resolveTicketDestinationDepartment,
@@ -17,7 +17,6 @@ import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department
 import { createTicketAtomic } from "@/lib/services/ticket-creation-service";
 import { createTicketSchema } from "@/lib/validations";
 import { notifyRequesterCreated } from "@/lib/ticket-notification-service";
-import { Role } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
   try {
@@ -151,12 +150,18 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const data = createTicketSchema.parse(body);
 
-    // Only administrators can link a ticket to a project or activity
-    if ((data.projectId || data.activityId) && session.user.role !== Role.ADMIN) {
-      return NextResponse.json(
-        { error: "Only administrators can link tickets to projects or activities" },
-        { status: 403 }
-      );
+    // Linking a ticket to a Project/Activity at creation time is the same
+    // independently-grantable permission as the PATCH route (see
+    // app/api/tickets/[id]/route.ts) — a plain global hasPermission check,
+    // never department-scoped and never a raw role===ADMIN comparison.
+    if (data.projectId || data.activityId) {
+      const canLinkProjectActivity = await hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId);
+      if (!canLinkProjectActivity) {
+        return NextResponse.json(
+          { error: "You don't have permission to link tickets to projects or activities.", code: "missing_permission" },
+          { status: 403 }
+        );
+      }
     }
 
     // A ticket attached to a project must live in that project's department

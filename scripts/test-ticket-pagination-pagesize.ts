@@ -89,7 +89,6 @@ async function main() {
   const { default: PendingTicketsPage } = await import("@/app/(main)/tickets/pending/page");
   const { TicketTable } = await import("@/components/tickets/ticket-table");
   const { PendingTicketTable } = await import("@/components/tickets/pending-ticket-table");
-  const { htmlToReadableText } = await import("@/lib/utils");
 
   const callTickets = async (params: Record<string, string>): Promise<{ pagination: any; ids: string[] } | { redirectTo: string }> => {
     try {
@@ -246,31 +245,6 @@ async function main() {
     if ("pagination" in pendingInvalid) check("Pending invalid pageSize falls back to 20", pendingInvalid.pagination.pageSize === 20);
     else check("Pending invalid pageSize did not unexpectedly redirect", false);
 
-    console.log("\n=== htmlToReadableText (Pending Ticket Preview's safe full-text rendering) ===\n");
-    const withParagraphs = htmlToReadableText("<p>First paragraph.</p><p>Second paragraph.</p>");
-    check("Block tags become real line breaks", withParagraphs === "First paragraph.\n\nSecond paragraph.");
-
-    const withBr = htmlToReadableText("Line one<br>Line two<br/>Line three");
-    check("<br> becomes a newline", withBr === "Line one\nLine two\nLine three");
-
-    const withEntities = htmlToReadableText("<p>Tom &amp; Jerry &lt;script&gt; &quot;quoted&quot;</p>");
-    check("HTML entities are decoded to real characters", withEntities === 'Tom & Jerry <script> "quoted"');
-
-    const withScript = htmlToReadableText('<p>Safe text</p><script>alert("xss")</script><p>More safe text</p>');
-    check("<script> tag and its content are removed entirely, never appear in the output", !withScript.includes("alert") && !withScript.includes("<script>"));
-
-    const withStyle = htmlToReadableText("<style>.evil{color:red}</style><p>Visible text</p>");
-    check("<style> tag and its content are removed entirely", !withStyle.includes(".evil") && !withStyle.includes("<style>"));
-
-    const veryLong = htmlToReadableText(`<p>${"Lorem ipsum dolor sit amet. ".repeat(500)}</p>`);
-    check("Very long body is preserved in full, not truncated", veryLong.length > 10000);
-
-    const noMarkupSurvives = htmlToReadableText("<div><span>nested <b>bold</b> text</span></div>");
-    check("No literal HTML tag characters ('<', '>') survive in the output for ordinary tags", !/[<>]/.test(noMarkupSurvives));
-    check("Nested tag text content is preserved", noMarkupSurvives.includes("nested") && noMarkupSurvives.includes("bold") && noMarkupSurvives.includes("text"));
-
-    const collapsesExcessBlankLines = htmlToReadableText("<p>A</p><div></div><div></div><div></div><p>B</p>");
-    check("3+ consecutive blank lines collapse to at most one blank line", !/\n{3,}/.test(collapsesExcessBlankLines));
   } finally {
     console.log("\nCleaning up test data...\n");
     try {

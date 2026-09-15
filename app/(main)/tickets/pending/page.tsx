@@ -14,6 +14,7 @@ import { redirect } from "next/navigation";
 import { Inbox } from "lucide-react";
 import { PendingTicketStatus } from "@prisma/client";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { normalizeStoredEmailBody } from "@/lib/email-ticket-parser";
 
 interface SearchParams {
   page?: string;
@@ -105,6 +106,15 @@ export default async function PendingTicketsPage({
     redirect(buildCanonicalUrl(params, pagination.page));
   }
 
+  // Single canonical server-side boundary before any PendingTicket.body
+  // reaches the client. Every row created after the ingestion-time fix is
+  // already clean plain text (a no-op here), but a row created BEFORE it
+  // may still hold raw Outlook/Word HTML — normalizeStoredEmailBody (the
+  // same rule accept-time uses, see lib/email-ticket-parser.ts) is reused
+  // here rather than duplicated, so the client never needs its own HTML
+  // handling at all.
+  const normalizedPendingTickets = pendingTickets.map((pt) => ({ ...pt, body: normalizeStoredEmailBody(pt.body) }));
+
   // UI-only hint for whether to render the Accept/Reject buttons at all —
   // the API routes are the real, per-pending-ticket-department gate
   // (requireDepartmentPermission/hasPermission), so a wrong guess here only
@@ -132,7 +142,7 @@ export default async function PendingTicketsPage({
       <PendingTicketFilters departments={departments} />
 
       <PendingTicketTable
-        pendingTickets={pendingTickets as any}
+        pendingTickets={normalizedPendingTickets as any}
         pagination={pagination}
         canAccept={canAccept}
         canReject={canReject}

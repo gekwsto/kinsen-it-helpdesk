@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { isAdmin } from "@/lib/permissions";
+import { hasPermission } from "@/lib/permissions";
 import { getAccessibleDepartmentSummaries, getTicketDestinationDepartments, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
@@ -40,7 +40,12 @@ export default async function NewTicketPage() {
     );
   }
 
-  const userIsAdmin = isAdmin(session.user.role);
+  // Same permission as the detail page and both backend routes (see
+  // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) —
+  // ticket.linkProjectActivity, a plain global hasPermission check (used to
+  // be a hardcoded role===ADMIN check). Only a UI hint; the create route
+  // independently re-checks it server-side.
+  const canLinkProjectActivity = await hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId);
 
   // Active workspace decides the default department (Phase 2B) — a plain
   // member with exactly one accessible department never sees a picker at
@@ -109,11 +114,11 @@ export default async function NewTicketPage() {
         select: { id: true, name: true, image: true },
         take: 6,
       }),
-      // Only System Admin can ever link a ticket to a Project/Activity (see
-      // canLinkProjectActivity below) — no need to resolve these for anyone
-      // else.
-      userIsAdmin ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create") : Promise.resolve([]),
-      userIsAdmin ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.create") : Promise.resolve([]),
+      // Only a user with ticket.linkProjectActivity can ever link a ticket
+      // to a Project/Activity (see canLinkProjectActivity above) — no need
+      // to resolve these for anyone else.
+      canLinkProjectActivity ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create") : Promise.resolve([]),
+      canLinkProjectActivity ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.create") : Promise.resolve([]),
     ]);
 
   return (
@@ -146,7 +151,7 @@ export default async function NewTicketPage() {
         departments={destinationDepartments}
         defaultDepartmentId={activeWorkspace.departmentId}
         itAgents={itAgents}
-        canLinkProjectActivity={userIsAdmin}
+        canLinkProjectActivity={canLinkProjectActivity}
         projectCreateDepartmentIds={projectCreateDepartments.map((d) => d.id)}
         activityCreateDepartmentIds={activityCreateDepartments.map((d) => d.id)}
       />

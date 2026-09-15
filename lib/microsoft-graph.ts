@@ -402,6 +402,37 @@ export const microsoftGraph = {
   },
 
   /**
+   * Looks up ONE message in a specific mailbox by its RFC 5322
+   * internetMessageId (the same value stored as PendingTicket.emailMessageId
+   * / Ticket.emailMessageId / TicketMessage.emailMessageId) — read-only,
+   * never marks it read or moves it. Searches the whole mailbox (Graph's
+   * `internetMessageId` filter isn't folder-scoped), so it finds a message
+   * regardless of which folder it currently sits in (e.g. "Processed").
+   * Built for narrowly-scoped historical-body recovery (see
+   * scripts/repair-flattened-table-layout-bodies.ts) — NOT used by the
+   * normal inbound-polling path above, which only ever reads unread Inbox
+   * messages. Returns null (not a thrown error) when no message with this
+   * ID exists in this mailbox — a genuinely unexceptional "not found," e.g.
+   * the message was permanently deleted or purged by mailbox retention.
+   */
+  async getMessageByInternetMessageId(mailbox: string, internetMessageId: string): Promise<GraphMailMessage | null> {
+    const select = [
+      "id", "subject", "bodyPreview", "body", "from", "toRecipients",
+      "internetMessageId", "conversationId", "receivedDateTime",
+      "hasAttachments", "isRead", "internetMessageHeaders",
+    ].join(",");
+    // internetMessageId values are angle-bracket-wrapped and can contain
+    // characters ($filter's own single-quote escaping is the only concern
+    // here — Graph's OData filter, not a URL) — a literal `'` inside the ID
+    // is escaped by doubling it, the standard OData string-literal rule.
+    const escaped = internetMessageId.replace(/'/g, "''");
+    const data = await graphRequest<{ value: GraphMailMessage[] }>(
+      `/users/${encodeURIComponent(mailbox)}/messages?$filter=${encodeURIComponent(`internetMessageId eq '${escaped}'`)}&$top=1&$select=${select}&$expand=attachments`
+    );
+    return data.value[0] ?? null;
+  },
+
+  /**
    * Send an email from the central support mailbox. Deliberately NOT
    * mailbox-parameterized — outbound replies/notifications always come from
    * getCentralMailbox() regardless of which mailbox a thread's inbound messages

@@ -7,7 +7,6 @@ import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service"
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
 import { notifyRequesterClosed, notifyTicketRequesterTerminalTransition } from "@/lib/ticket-notification-service";
-import { Role } from "@prisma/client";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { publishTicketListInvalidation } from "@/lib/realtime/ticket-list-invalidation";
 import path from "path";
@@ -112,14 +111,24 @@ export async function PATCH(
     const body = await req.json();
     const data = updateTicketSchema.parse(body);
 
-    // Only administrators can change a ticket's project or activity link
+    // Linking a ticket to a Project/Activity is its own, independently-
+    // grantable permission (ticket.linkProjectActivity) — a plain global
+    // check via hasPermission, matching this route's own existing treatment
+    // of ticket.reply/ticket.internalNote/ticket.share.* above, never
+    // department-scoped and never a raw role===ADMIN comparison. ADMIN
+    // still has it by default (see prisma/seed.ts), so this is
+    // behavior-preserving until an administrator grants it elsewhere via
+    // /admin/roles.
     const projectChanging = data.projectId !== undefined && data.projectId !== ticket.projectId;
     const activityChanging = data.activityId !== undefined && data.activityId !== ticket.activityId;
-    if ((projectChanging || activityChanging) && session.user.role !== Role.ADMIN) {
-      return NextResponse.json(
-        { error: "Only administrators can link tickets to projects or activities" },
-        { status: 403 }
-      );
+    if (projectChanging || activityChanging) {
+      const canLinkProjectActivity = await hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId);
+      if (!canLinkProjectActivity) {
+        return NextResponse.json(
+          { error: "You don't have permission to link tickets to projects or activities.", code: "missing_permission" },
+          { status: 403 }
+        );
+      }
     }
 
     // Legacy tickets with no department fall back to the same default

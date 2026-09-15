@@ -70,7 +70,7 @@ import fs from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { Role, AuthProvider, DepartmentRole } from "@prisma/client";
-import { parseIncomingEmail, htmlToReadableText, type ParsedEmail } from "@/lib/email-ticket-parser";
+import { parseIncomingEmail, htmlToReadableText, normalizeStoredEmailBody, looksLikeHtml, type ParsedEmail } from "@/lib/email-ticket-parser";
 import { createPendingTicketFromEmail, acceptPendingTicket } from "@/lib/services/pending-ticket-service";
 import { canViewTicket } from "@/lib/services/department-scope-service";
 import { grantManualMembership } from "@/lib/services/department-membership-service";
@@ -78,6 +78,111 @@ import { UPLOAD_DIR, LEGACY_PUBLIC_UPLOAD_DIR, generateStoredFilename, isSafeSto
 import { runMigration } from "@/scripts/migrate-attachments-to-private-storage";
 import { ensureStatusForDepartment, ensurePriorityForDepartment, STARTER_STATUSES, STARTER_PRIORITIES } from "@/lib/services/config-starter-data";
 import type { GraphMailMessage, GraphAttachment } from "@/lib/microsoft-graph";
+
+/**
+ * CASE R fixture (KIN-595 regression) — structure-faithful to a real failing
+ * Outlook/Exchange message: a table-based reply/forward header block with
+ * separate From/Sent/To/Cc/Subject rows, an external-email warning block, a
+ * multi-paragraph message, a quoted earlier message (its own header, this
+ * time as a <p> with <br> — the OTHER shape Outlook produces, unaffected by
+ * this bug and used here to prove the fix doesn't regress it), and a
+ * table-based signature block (image cell + text cell, with nested
+ * spans/divs — the exact shape Outlook/Word generates) containing name,
+ * role, email, phone, address and website. Every person name, email
+ * address, phone number, postal address and URL below is a synthetic
+ * placeholder — none of this is real sender content.
+ */
+const OUTLOOK_TABLE_LAYOUT_FIXTURE_HTML = `<div style="font-family:Calibri,Arial,sans-serif;font-size:11pt;">
+<div class="WordSection1">
+<p class="MsoNormal">Hi Test Team,</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">Please see the forwarded message below regarding the printer outage reported this morning. Let me know if you need anything else from our side.</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">Thanks,<br>
+Test Forwarder</p>
+<p class="MsoNormal">&nbsp;</p>
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<table border="0" cellspacing="0" cellpadding="0" style="width:100%;">
+<tr>
+<td style="width:80px;vertical-align:top;"><b>From:</b></td>
+<td><span>Alice Example &lt;alice.example@example-corp.test&gt;</span></td>
+</tr>
+<tr>
+<td style="vertical-align:top;"><b>Sent:</b></td>
+<td><span>Monday, January 5, 2026 9:14 AM</span></td>
+</tr>
+<tr>
+<td style="vertical-align:top;"><b>To:</b></td>
+<td><span>IT Support &lt;support@example-corp.test&gt;</span></td>
+</tr>
+<tr>
+<td style="vertical-align:top;"><b>Cc:</b></td>
+<td><span>Bob Example &lt;bob.example@example-corp.test&gt;</span></td>
+</tr>
+<tr>
+<td style="vertical-align:top;"><b>Subject:</b></td>
+<td><span>Printer on 3rd floor not working</span></td>
+</tr>
+</table>
+</div>
+<p class="MsoNormal">&nbsp;</p>
+<table border="0" cellpadding="0" cellspacing="0" width="100%" style="background-color:#FFF3CD;">
+<tr>
+<td style="padding:8px;">
+<span style="font-weight:bold;color:#7a5b00;">EXTERNAL EMAIL:</span>
+<span style="color:#7a5b00;"> This message originated from outside the organization. Do not click links or open attachments unless you recognize the sender and know the content is safe.</span>
+</td>
+</tr>
+</table>
+<p class="MsoNormal">&nbsp;</p>
+<div>
+<p class="MsoNormal">Hello,</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">The printer on the 3rd floor (near the east stairwell) is showing a paper jam error, but there is no visible jam after checking the trays. We have already tried restarting it twice.</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">Could someone take a look today? Several people are waiting to print quarterly reports.</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">Thank you,<br>
+Alice Example</p>
+</div>
+<p class="MsoNormal">&nbsp;</p>
+<div style="border:none;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<p class="MsoNormal"><b>From:</b> IT Support &lt;support@example-corp.test&gt;<br>
+<b>Sent:</b> Friday, January 2, 2026 4:02 PM<br>
+<b>To:</b> Alice Example &lt;alice.example@example-corp.test&gt;<br>
+<b>Subject:</b> RE: Printer maintenance schedule</p>
+</div>
+<p class="MsoNormal">&nbsp;</p>
+<div>
+<p class="MsoNormal">Hi Alice,</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">Just a heads up that the 3rd floor printer is due for scheduled maintenance next week. Please let us know if it acts up before then.</p>
+<p class="MsoNormal">&nbsp;</p>
+<p class="MsoNormal">Regards,<br>
+IT Support</p>
+</div>
+<p class="MsoNormal">&nbsp;</p>
+<div style="mso-element:para-border-div;border-top:solid #E1E1E1 1.0pt;padding:3.0pt 0in 0in 0in">
+<table border="0" cellpadding="0" cellspacing="0" style="width:400px;">
+<tr>
+<td style="vertical-align:top;padding-right:12px;">
+<img src="cid:signature-logo-001" alt="Example Corp" width="64" height="64">
+</td>
+<td style="vertical-align:top;">
+<div><span style="font-weight:bold;font-size:12pt;">Alice Example</span></div>
+<div><span style="color:#666666;">Facilities Coordinator</span></div>
+<div>&nbsp;</div>
+<div><span>E: <a href="mailto:alice.example@example-corp.test">alice.example@example-corp.test</a></span></div>
+<div><span>T: +1 (555) 010-1234</span></div>
+<div><span>A: 500 Example Way, Suite 200, Testville, TS 00000</span></div>
+<div><span>W: <a href="https://www.example-corp.test">www.example-corp.test</a></span></div>
+</div>
+</td>
+</tr>
+</table>
+</div>
+</div>
+</div>`;
 
 let passed = 0;
 let failed = 0;
@@ -679,6 +784,270 @@ Please help, my account was locked.
 
       const rerunStats = await runMigration(prisma, { apply: true });
       check("CASE Q: re-running apply is idempotent — reports already-private, copies nothing new for this row", rerunStats.alreadyPrivate >= 1 && rerunStats.copied === 0);
+    }
+
+    // ── CASE R — KIN-595: a table-laid-out Outlook/Exchange reply/forward
+    // email (table-based From/Sent/To/Cc/Subject header, external-email
+    // warning, multiple paragraphs, quoted earlier message, table-based
+    // signature, nested spans/divs) keeps its row/paragraph structure
+    // readable end to end, instead of collapsing into one flattened line.
+    // Structure-faithful to the real failing message; every name, email,
+    // phone number, address and URL below is a synthetic placeholder — see
+    // OUTLOOK_TABLE_LAYOUT_FIXTURE_HTML's own comment. ─────────────────────
+    console.log("\nCASE R — KIN-595: Outlook/Exchange table-layout header + signature keep readable row/paragraph boundaries...\n");
+    {
+      const msg = makeMessage({ id: nextId("case-r"), body: { contentType: "html", content: OUTLOOK_TABLE_LAYOUT_FIXTURE_HTML } });
+      const parsed = parseIncomingEmail(msg);
+      const d0 = parsed.bodyText;
+
+      // Path A: parseIncomingEmail -> createPendingTicketFromEmail -> PendingTicket.body
+      const pending = await createPendingTicketFromEmail(parsed, dept);
+      pendingTicketIds.push(pending.id);
+      const pendingRow = await prisma.pendingTicket.findUnique({ where: { id: pending.id }, select: { body: true } });
+      const dPending = pendingRow?.body ?? "";
+
+      check("CASE R (path A): PendingTicket.body matches parseIncomingEmail's own bodyText (single canonical rule)", dPending === d0);
+
+      // 9. The Pending preview boundary (app/(main)/tickets/pending/page.tsx normalizes every row's
+      // .body via normalizeStoredEmailBody before it ever reaches the client component) performs no
+      // SECOND, divergent conversion — running it here is a true no-op on an already-canonical body.
+      check("CASE R.9: the server-side Pending-preview normalization boundary is a no-op on freshly-ingested canonical text (no second/divergent conversion)", normalizeStoredEmailBody(dPending) === dPending);
+
+      // 1. Table-based From/Sent/To/Cc/Subject rows appear on separate readable lines
+      check(
+        "CASE R.1: From/Sent/To/Cc/Subject each appear on their OWN line, not concatenated together",
+        /^From:.*$/m.test(dPending) &&
+          /^Sent:.*$/m.test(dPending) &&
+          /^To:.*$/m.test(dPending) &&
+          /^Cc:.*$/m.test(dPending) &&
+          /^Subject:.*$/m.test(dPending) &&
+          !dPending.includes("Sent: Monday, January 5, 2026 9:14 AM To:") // the exact flattened join the unfixed converter produced
+      );
+      check("CASE R.1b: the From row carries the sender's name/email, not the next row's content", /^From:.*alice\.example@example-corp\.test.*$/m.test(dPending) && !/^From:.*Sent:/m.test(dPending));
+
+      // 2. External-email warning remains present and separate (its own line/paragraph, not merged into the header or the message)
+      check("CASE R.2: EXTERNAL EMAIL warning text is present", dPending.includes("EXTERNAL EMAIL"));
+      check(
+        "CASE R.2b: EXTERNAL EMAIL warning is on its own line, separate from the Subject row above it and the greeting below it",
+        /^Subject:.*$\n+^.*EXTERNAL EMAIL.*$\n+^Hello,$/m.test(dPending)
+      );
+
+      // 3. Main body paragraphs retain paragraph boundaries
+      check(
+        "CASE R.3: the two main-message paragraphs remain distinct (blank line between them), not run together",
+        dPending.includes("The printer on the 3rd floor (near the east stairwell) is showing a paper jam error") &&
+          dPending.includes("Could someone take a look today?") &&
+          /paper jam error, but there is no visible jam after checking the trays\. We have already tried restarting it twice\.\n\nCould someone take a look today\?/.test(dPending)
+      );
+
+      // 4. Quoted conversation boundaries remain readable (its own header + body, not merged into the first message)
+      check(
+        "CASE R.4: the quoted earlier message's own From/Sent/To/Subject header (a <p> with <br>, not a table) is still readable on separate lines",
+        /^From: IT Support <support@example-corp\.test>$\n^Sent: Friday, January 2, 2026 4:02 PM$\n^To: Alice Example <alice\.example@example-corp\.test>$\n^Subject: RE: Printer maintenance schedule$/m.test(dPending)
+      );
+      check("CASE R.4b: the quoted message's own body text is present and distinguishable", dPending.includes("Just a heads up that the 3rd floor printer is due for scheduled maintenance"));
+
+      // 5. Signature information remains present and not flattened into unrelated text
+      check(
+        "CASE R.5: signature name/role/email/phone/address/website are all present",
+        dPending.includes("Alice Example") &&
+          dPending.includes("Facilities Coordinator") &&
+          dPending.includes("alice.example@example-corp.test") &&
+          dPending.includes("+1 (555) 010-1234") &&
+          dPending.includes("500 Example Way, Suite 200, Testville, TS 00000") &&
+          dPending.includes("www.example-corp.test")
+      );
+      check(
+        "CASE R.5b: the signature's role line is not glued onto the name (each td/tr stays a separate line)",
+        /^Alice Example$\n^Facilities Coordinator$/m.test(dPending)
+      );
+
+      // 13. No HTML tags/script/style/unsafe href/event-handler text survives.
+      // Uses the SAME tag-shape detector production code relies on
+      // (looksLikeHtml) rather than a second ad-hoc regex — deliberately
+      // NOT a naive `<[a-zA-Z][^>]*>` check, which would false-positive on
+      // this fixture's own legitimate "Alice Example <alice.example@...>"
+      // header text (see LOOKS_LIKE_HTML's own doc comment).
+      check("CASE R.13: no real HTML tags survive at all", !looksLikeHtml(dPending));
+      check("CASE R.13b: no script/style/event-handler/javascript: leakage", !/<script|<style|on(error|click|load)\s*=|javascript:/i.test(dPending));
+      check("CASE R.13c: the bracketed email addresses themselves are preserved verbatim, not stripped as if they were tags", dPending.includes("<alice.example@example-corp.test>") && dPending.includes("<support@example-corp.test>"));
+
+      // 15. No sender/header/security-banner wording hardcoded in production logic — proven structurally: the SAME
+      // generic tr/td/th rule below also correctly separates a differently-worded table with no recognizable header
+      // labels at all (a foreign-language / non-standard-wording layout table), showing the fix isn't keyed to "From:"/"EXTERNAL EMAIL" text.
+      const genericTableHtml = `<table><tr><td>Ενημέρωση:</td><td>Κάποιο μήνυμα σε άλλη γλώσσα</td></tr><tr><td>Δεύτερη γραμμή:</td><td>Ακόμα κείμενο</td></tr></table>`;
+      const genericOut = htmlToReadableText(genericTableHtml);
+      check(
+        "CASE R.15: a table with entirely different (non-English, non-recognized) row labels is STILL split onto separate readable lines — the fix is structural, not wording-specific",
+        /^Ενημέρωση:.*$/m.test(genericOut) && /^Δεύτερη γραμμή:.*$/m.test(genericOut) && !genericOut.includes("Ενημέρωση: Κάποιο μήνυμα σε άλλη γλώσσα Δεύτερη")
+      );
+
+      // Path B: accepting copies the SAME canonical text into Ticket.description and the initial TicketMessage.body
+      const result = await acceptPendingTicket(pending.id, acceptingUser.id);
+      check("CASE R (path B): accept succeeds", result.ok === true);
+      if (result.ok) {
+        ticketIds.push(result.ticket.id);
+        const ticket = await prisma.ticket.findUnique({ where: { id: result.ticket.id }, select: { description: true } });
+        const message = await prisma.ticketMessage.findFirst({ where: { ticketId: result.ticket.id }, select: { body: true } });
+
+        check("CASE R (path B): Ticket.description matches the PendingTicket.body exactly (same canonical formatting, no second conversion)", ticket?.description === dPending);
+        check("CASE R (path B): initial TicketMessage.body matches too", message?.body === dPending);
+
+        // 11. normalizeStoredEmailBody is idempotent on already-normalized output
+        const renormalized = normalizeStoredEmailBody(ticket?.description ?? "");
+        check("CASE R.11: re-running normalizeStoredEmailBody on already-normalized text is a true no-op", renormalized === ticket?.description);
+      }
+    }
+
+    // ── CASE S — genuine text/plain content is NEVER globally
+    // whitespace-collapsed (closure-pass fix: the shared normalizePlainText
+    // no longer runs a blanket interior-space collapse — only the narrow,
+    // HTML-conversion-path-only sentinel resolution touches table-cell
+    // spacing artifacts). A/B/C/D/E/F below. ──────────────────────────────
+    console.log("\nCASE S — genuine text/plain indentation, column spacing, bracketed emails and math comparisons all survive untouched...\n");
+    {
+      // A. Plain-text indentation survives (a real Graph body.contentType: "text" message).
+      const indented = "Steps:\n    first nested step\n    second nested step";
+      const msgA = makeMessage({ id: nextId("case-s-a"), body: { contentType: "text", content: indented } });
+      const parsedA = parseIncomingEmail(msgA);
+      check("CASE S.A: leading indentation on nested plain-text steps is preserved exactly", parsedA.bodyText === indented);
+      const pendingA = await createPendingTicketFromEmail(parsedA, dept);
+      pendingTicketIds.push(pendingA.id);
+      const rowA = await prisma.pendingTicket.findUnique({ where: { id: pendingA.id }, select: { body: true } });
+      check("CASE S.A2: indentation survives all the way through to the stored PendingTicket.body", rowA?.body === indented);
+
+      // B. Interior column-alignment spaces survive.
+      const columns = "Name        Value\nPrinter     Offline";
+      const parsedB = parseIncomingEmail(makeMessage({ id: nextId("case-s-b"), body: { contentType: "text", content: columns } }));
+      check("CASE S.B: column-alignment interior spacing (multiple consecutive spaces) is preserved exactly", parsedB.bodyText === columns);
+
+      // C. "Alice Example <alice@example.com>" survives byte-for-byte except permitted newline normalization.
+      const withEmailHeader = "Contact: Alice Example <alice@example.com>\r\nPhone: +1 555 0100";
+      const parsedC = parseIncomingEmail(makeMessage({ id: nextId("case-s-c"), body: { contentType: "text", content: withEmailHeader } }));
+      check(
+        "CASE S.C: a bracketed email address in plain text survives byte-for-byte except CRLF -> LF",
+        parsedC.bodyText === "Contact: Alice Example <alice@example.com>\nPhone: +1 555 0100"
+      );
+
+      // D. "1 < 2 and 3 > 1" is not mistaken for HTML.
+      const mathText = "The condition is 1 < 2 and 3 > 1, which is always true.";
+      check("CASE S.D: a mathematical comparison is not detected as HTML by looksLikeHtml", !looksLikeHtml(mathText));
+      const parsedD = parseIncomingEmail(makeMessage({ id: nextId("case-s-d"), body: { contentType: "text", content: mathText } }));
+      check("CASE S.D2: the comparison text survives completely unchanged through the plain-text path", parsedD.bodyText === mathText);
+      check("CASE S.D3: normalizeStoredEmailBody also leaves it completely unchanged (no HTML-branch misfire)", normalizeStoredEmailBody(mathText) === mathText);
+
+      // E. CRLF becomes LF.
+      const crlfText = "line one\r\nline two\r\nline three";
+      const parsedE = parseIncomingEmail(makeMessage({ id: nextId("case-s-e"), body: { contentType: "text", content: crlfText } }));
+      check("CASE S.E: CRLF line endings normalize to LF", parsedE.bodyText === "line one\nline two\nline three");
+
+      // F. The Outlook table fixture still produces readable header/signature
+      // spacing WITHOUT the (now-removed) global interior multi-space collapse —
+      // proves the narrow sentinel-based cell-separator fix alone is sufficient.
+      const parsedF = parseIncomingEmail(makeMessage({ id: nextId("case-s-f"), body: { contentType: "html", content: OUTLOOK_TABLE_LAYOUT_FIXTURE_HTML } }));
+      check(
+        "CASE S.F: the header row reads as exactly ONE space between label and value (no leftover double-space artifact)",
+        /^From: Alice Example <alice\.example@example-corp\.test>$/m.test(parsedF.bodyText)
+      );
+      check("CASE S.F2: no double-space artifact anywhere in the converted table-layout output", !/[^\S\n]{2,}/.test(parsedF.bodyText));
+      check(
+        "CASE S.F3: the signature block is still readable (role on its own line, not glued to the name)",
+        /^Alice Example$\n^Facilities Coordinator$/m.test(parsedF.bodyText)
+      );
+    }
+
+    // ── CASE T — independent, non-circular proof of normalizeStoredEmailBody's
+    // HTML-handling behavior. CASE R/S already prove looksLikeHtml correctly
+    // avoids false-positiving on a bracketed email address; this case proves
+    // the OTHER direction directly — that normalizeStoredEmailBody actually
+    // neutralizes a representative set of real markup, asserted against the
+    // exact safe output or the literal absence of the dangerous/tag
+    // substrings, never by re-asserting !looksLikeHtml() on its own output
+    // (which would be circular). ────────────────────────────────────────────
+    console.log("\nCASE T — normalizeStoredEmailBody: direct, non-circular assertions against representative real markup...\n");
+    {
+      check("CASE T.1: <p> paragraph unwraps to its plain text", normalizeStoredEmailBody("<p>Hello there</p>") === "Hello there");
+
+      check("CASE T.2: <br> becomes a newline between two lines", normalizeStoredEmailBody("Line one<br>Line two") === "Line one\nLine two");
+
+      check(
+        "CASE T.3: <table><tr><td> becomes readable text (row boundary + cell text), never leaves the tags behind",
+        (() => {
+          const out = normalizeStoredEmailBody("<table><tr><td>Name</td><td>Alice</td></tr></table>");
+          return out.includes("Name") && out.includes("Alice") && !/<[a-zA-Z!/][a-zA-Z0-9:-]*[\s>]/.test(out);
+        })()
+      );
+
+      check("CASE T.4: Outlook's namespaced <o:p></o:p> is stripped, not left as literal text", normalizeStoredEmailBody("<p>Hello<o:p></o:p></p>") === "Hello");
+
+      check("CASE T.5: uppercase tags (<P>/<BR>) are handled exactly like lowercase ones", normalizeStoredEmailBody("<P>HELLO</P>") === "HELLO");
+
+      check(
+        "CASE T.6: a tag with attributes (class/style) unwraps to its text, attributes never leak",
+        normalizeStoredEmailBody('<div class="x" style="color:red">Attributed text</div>') === "Attributed text"
+      );
+
+      const scriptOut = normalizeStoredEmailBody('<p>Safe</p><script>alert(document.cookie)</script><p>Also safe</p>');
+      check("CASE T.7: <script> and its content are removed entirely", !scriptOut.includes("alert") && !scriptOut.toLowerCase().includes("<script"));
+      check("CASE T.7b: the surrounding safe text survives", scriptOut.includes("Safe") && scriptOut.includes("Also safe"));
+
+      const styleOut = normalizeStoredEmailBody("<style>.evil{color:red}</style><p>Visible</p>");
+      check("CASE T.8: <style> and its content are removed entirely", !styleOut.includes(".evil") && !styleOut.toLowerCase().includes("<style"));
+      check("CASE T.8b: the surrounding visible text survives", styleOut.includes("Visible"));
+
+      check("CASE T.9: <img> contributes no placeholder/src leakage", normalizeStoredEmailBody('<p>Before</p><img src="https://evil.example/track.png"><p>After</p>') === "Before\n\nAfter");
+
+      const linkOut = normalizeStoredEmailBody('<a href="javascript:alert(1)">click me</a>');
+      check("CASE T.10: an <a href=\"javascript:...\"> keeps only the link TEXT", linkOut === "click me");
+      check("CASE T.10b: the javascript: URI itself never survives", !linkOut.toLowerCase().includes("javascript:"));
+
+      // Malformed-but-recognizable legacy HTML still ENTERS the converter (the HTML branch), not the plain-text branch.
+      const malformed = '<div><p class=MsoNormal>Unclosed paragraph<br>Still HTML<o:p>';
+      check("CASE T.11: malformed-but-recognizable legacy HTML is detected as HTML by looksLikeHtml", looksLikeHtml(malformed));
+      const malformedNormalized = normalizeStoredEmailBody(malformed);
+      check("CASE T.11b: normalizeStoredEmailBody actually took the HTML branch — output matches htmlToReadableText's own conversion", malformedNormalized === htmlToReadableText(malformed));
+      check("CASE T.11c: no tag fragments survive even from unclosed/malformed markup", !/<[a-zA-Z!/]/.test(malformedNormalized));
+
+      // Direct, independent (non-circular) proof that these stay on the plain-text branch.
+      check("CASE T.12: a bracketed email address is NOT detected as HTML", !looksLikeHtml("Alice Example <alice@example.com>"));
+      check("CASE T.12b: ...and normalizeStoredEmailBody leaves it byte-for-byte unchanged (plain-text branch, not the HTML branch)", normalizeStoredEmailBody("Alice Example <alice@example.com>") === "Alice Example <alice@example.com>");
+      check("CASE T.13: a mathematical comparison is NOT detected as HTML", !looksLikeHtml("1 < 2 and 3 > 1"));
+      check("CASE T.13b: ...and normalizeStoredEmailBody leaves it byte-for-byte unchanged", normalizeStoredEmailBody("1 < 2 and 3 > 1") === "1 < 2 and 3 > 1");
+    }
+
+    // ── CASE U — a sender-provided U+E000 (Private Use Area) character —
+    // literal, entity-encoded, or sitting inside a table cell — must never
+    // be mistaken for an internally-created structural separator and must
+    // never be silently dropped/converted into a space. (Closure-pass
+    // integrity check: the cell-separation mechanism must be collision-safe
+    // against ANY legal Unicode input, including whatever character it
+    // might itself use internally.) ────────────────────────────────────────
+    console.log("\nCASE U — sender-provided U+E000 (or any Private-Use-Area character) survives untouched, never mistaken for a structural separator...\n");
+    {
+      // 1. Literal PUA content.
+      const literalOut = htmlToReadableText("<p>Before  After</p>");
+      check("CASE U.1: a literal sender-provided U+E000 character survives in the output", literalOut.includes(""));
+      check("CASE U.1b: the exact surrounding text is preserved with normal single-space separation", literalOut === "Before  After");
+
+      // 2. Entity-encoded PUA content — html-to-text decodes &#xE000; to the same literal character before this code ever sees it, so this must behave identically to the literal case.
+      const entityOut = htmlToReadableText("<p>Before &#xE000; After</p>");
+      check("CASE U.2: an entity-encoded sender-provided PUA character survives (decoded, then preserved, never stripped)", entityOut.includes(""));
+      check("CASE U.2b: entity-encoded and literal PUA input produce IDENTICAL output", entityOut === literalOut);
+
+      // 3. PUA content inside a table cell — the exact scenario a naive fixed-character separator would collide with.
+      const tableOut = htmlToReadableText(`<table>
+  <tr>
+    <td>Value  One</td>
+    <td>Value Two</td>
+  </tr>
+</table>`);
+      check("CASE U.3: the sender's U+E000 character inside a table cell survives in the output", tableOut.includes(""));
+      check("CASE U.3b: the first cell's exact text (including the sender's PUA character) is preserved intact, not silently collapsed to a plain space", tableOut.includes("Value  One"));
+      check("CASE U.3c: the row still reads as two distinct, correctly space-separated cells", tableOut === "Value  One Value Two");
+      check(
+        "CASE U.3d: the sender's PUA character was not mistaken for the real inter-cell separator — exactly one genuine cell boundary exists (\"One Value\", not \"One  Value\" or a merged/garbled boundary)",
+        /One Value/.test(tableOut) && !/One {2,}Value/.test(tableOut)
+      );
     }
   } finally {
     console.log("\nCleaning up test data...\n");
