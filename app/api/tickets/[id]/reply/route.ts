@@ -4,8 +4,21 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth, canManageTickets, hasPermission } from "@/lib/permissions";
 import { replyTicketSchema } from "@/lib/validations";
 import { notifyRequesterReply, notifyTicketRequesterPublicReply } from "@/lib/ticket-notification-service";
+import { resolveEligibleMentionUsers } from "@/lib/services/mention-service";
+import { notifyNewMentions } from "@/lib/services/mention-notification-service";
+import { formatTicketNumber } from "@/lib/utils";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { Role } from "@prisma/client";
+
+const messageInclude = {
+  author: { select: { id: true, name: true, email: true, image: true, role: true } },
+  attachments: true,
+  mentions: { include: { user: { select: { id: true, name: true, email: true } } } },
+} as const;
+
+function toMessageMentions(message: { mentions: { user: { id: string; name: string | null; email: string } }[] }) {
+  return message.mentions.map((m) => ({ userId: m.user.id, name: m.user.name, email: m.user.email }));
+}
 
 export async function POST(
   req: NextRequest,
@@ -40,18 +53,34 @@ export async function POST(
       if (!canInternalNote) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    const message = await prisma.ticketMessage.create({
-      data: {
-        ticketId: id,
-        authorId: session.user.id,
-        body: data.body,
-        direction: data.direction,
-        isInternal: data.isInternal,
-      },
-      include: {
-        author: { select: { id: true, name: true, email: true, image: true, role: true } },
-        attachments: true,
-      },
+    // Mentions are a "Ticket Notes" concept — internal notes only, never a
+    // public/requester-facing reply (see lib/services/mention-service.ts).
+    // Layer 2 of the mention security model: every client-submitted
+    // mentionUserId is re-validated here against the exact same canonical
+    // ticket-view eligibility check the picker itself used (canViewTicket),
+    // independent of whatever the client claims. Anything that fails is
+    // silently dropped — never persisted as a mention, never notified.
+    const eligibleMentions = data.isInternal
+      ? await resolveEligibleMentionUsers({ entityType: "ticket", entityId: id, requestedUserIds: data.mentionUserIds })
+      : [];
+
+    const message = await prisma.$transaction(async (tx) => {
+      const created = await tx.ticketMessage.create({
+        data: {
+          ticketId: id,
+          authorId: session.user.id,
+          body: data.body,
+          direction: data.direction,
+          isInternal: data.isInternal,
+        },
+      });
+      if (eligibleMentions.length > 0) {
+        await tx.ticketMessageMention.createMany({
+          data: eligibleMentions.map((m) => ({ messageId: created.id, userId: m.id })),
+          skipDuplicates: true,
+        });
+      }
+      return tx.ticketMessage.findUniqueOrThrow({ where: { id: created.id }, include: messageInclude });
     });
 
     await prisma.ticketHistory.create({
@@ -101,15 +130,40 @@ export async function POST(
       );
     }
 
+    // Mention notifications only fire after the message + its mentions are
+    // fully committed — never before, and never for a mention that failed
+    // eligibility. Self-mentions are silently skipped inside
+    // notifyNewMentions; Ticket messages are never edited (only ever
+    // appended), so every mention here is by construction "newly added."
+    // Awaited (not fire-and-forget) so a mentioned user is guaranteed to
+    // already have their notification by the time this response reaches
+    // the client — a failure here is logged, never allowed to fail message
+    // creation itself (the message is already committed above).
+    if (eligibleMentions.length > 0) {
+      try {
+        await notifyNewMentions({
+          authorId: session.user.id,
+          authorName: session.user.name ?? "Someone",
+          mentionedUserIds: eligibleMentions.map((m) => m.id),
+          link: `/tickets/${id}`,
+          entityLabel: `ticket ${formatTicketNumber(ticket.ticketNumber)}`,
+        });
+      } catch (err) {
+        console.error("[mentions] Failed to notify ticket note mentions:", err);
+      }
+    }
+
+    const messageWithMentions = { ...message, mentions: toMessageMentions(message) };
+
     // Publish real-time event
     publishTicketEvent(
       data.isInternal ? "TICKET_INTERNAL_NOTE_CREATED" : "TICKET_MESSAGE_CREATED",
       id,
       session.user.id,
-      message
+      messageWithMentions
     );
 
-    return NextResponse.json(message, { status: 201 });
+    return NextResponse.json(messageWithMentions, { status: 201 });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

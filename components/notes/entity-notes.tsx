@@ -8,6 +8,7 @@ import { StickyNote } from "lucide-react";
 import { NoteItem } from "./note-item";
 import { NoteComposer } from "./note-composer";
 import type { Note } from "./types";
+import type { MentionEntityType } from "@/lib/services/mention-service";
 
 interface EntityNotesProps {
   /** e.g. `/api/projects/${id}` or `/api/activities/${id}` — notes live at `${apiBasePath}/notes`. */
@@ -20,6 +21,9 @@ interface EntityNotesProps {
    * this permission who somehow posts anyway gets rejected there, not here.
    */
   canAddNote: boolean;
+  /** "project" or "activity" — which eligible-viewer pool the @mention picker searches (see app/api/mentions/search/route.ts). */
+  entityType: MentionEntityType;
+  entityId: string;
 }
 
 /**
@@ -34,14 +38,14 @@ interface EntityNotesProps {
  * app/api/{projects,activities}/[id]/notes/route.ts for the server-side
  * invariants this UI relies on.
  */
-export function EntityNotes({ apiBasePath, initialNotes, canAddNote }: EntityNotesProps) {
+export function EntityNotes({ apiBasePath, initialNotes, canAddNote, entityType, entityId }: EntityNotesProps) {
   const [notes, setNotes] = useState<Note[]>(initialNotes);
 
-  const handleAddNote = async (body: string) => {
+  const handleAddNote = async (body: string, mentionUserIds: string[]) => {
     const res = await fetch(`${apiBasePath}/notes`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body }),
+      body: JSON.stringify({ body, mentionUserIds }),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
@@ -76,7 +80,12 @@ export function EntityNotes({ apiBasePath, initialNotes, canAddNote }: EntityNot
         {canAddNote && (
           <>
             <Separator />
-            <NoteComposer onSubmit={handleAddNote} placeholder="Write a note…" />
+            <NoteComposer
+              onSubmit={handleAddNote}
+              placeholder="Write a note…"
+              entityType={entityType}
+              entityId={entityId}
+            />
           </>
         )}
       </CardContent>

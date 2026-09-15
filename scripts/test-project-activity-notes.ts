@@ -87,6 +87,15 @@ async function main() {
 
   const realNextServer = await import("next/server");
   mock.module("next/server", { namedExports: { ...realNextServer, after: (_cb: () => unknown) => {} } });
+  // Project/Activity Notes routes now transitively import lib/web-push.ts
+  // (Note @mentions -> lib/services/mention-notification-service.ts ->
+  // lib/notifications/create-notification.ts -> lib/web-push.ts), which
+  // imports the `server-only` sentinel package — a webpack-only build-time
+  // guard that always throws when the real file is loaded outside Next's
+  // own bundler. Mocking the real, resolvable lib/web-push.ts file
+  // short-circuits that import; same fix already applied in
+  // scripts/test-ticket-notes-regression-boundary.ts for the same reason.
+  mock.module("@/lib/web-push", { namedExports: { sendPushNotificationsToUser: async () => ({ subscriptionCount: 0, sentCount: 0 }) } });
 
   const { POST: createProjectPOST } = await import("@/app/api/projects/route");
   const { POST: createActivityPOST } = await import("@/app/api/activities/route");

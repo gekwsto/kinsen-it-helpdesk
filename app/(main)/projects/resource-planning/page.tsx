@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
-import { getAccessibleDepartmentSummaries, canActOnEntity } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, canActOnEntity, hasEffectiveModulePermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getResourcePlanningData } from "@/lib/services/resource-planning-service";
 import { DEPARTMENT_ROLE_LABELS, GLOBAL_ROLE_LABELS } from "@/lib/services/department-role-translation";
@@ -44,7 +43,16 @@ export default async function ResourcePlanningPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const canView = await hasPermission(session.user.role, "resourcePlanning.view", session.user.customRoleId);
+  // Module/page visibility — same GLOBAL-grant-OR-qualifying-active-
+  // department-grant union used elsewhere (getNavVisibilityFlags/
+  // hasEffectiveModulePermission); a plain global-only hasPermission check
+  // here previously redirected a department-only grantee (e.g. a
+  // DEPARTMENT_ADMIN with resourcePlanning.view via their membership, no
+  // global grant) straight to the dashboard before ever reaching the
+  // accessibleDepartments check below, which already correctly resolves
+  // department-scoped access on its own — this fix only removes that
+  // redundant, wrongly-restrictive earlier gate.
+  const canView = await hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "resourcePlanning.view");
   if (!canView) redirect("/dashboard");
 
   const params = await searchParams;

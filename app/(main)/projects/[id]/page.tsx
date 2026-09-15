@@ -9,7 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target, Ticket } from "lucide-react";
-import { GoalStatus, Role } from "@prisma/client";
+import { GoalStatus } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ActivityCompleteCheckbox } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
@@ -56,13 +56,22 @@ export default async function ProjectDetailPage({
   // /api/projects/[id]/notes and PATCH /api/projects/[id] independently
   // re-check this same permission and are the actual authority.
   const canEditProject = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.edit");
+  // Deliberately its OWN canActOnEntity call (never derived from
+  // canEditProject above) — project.delete is a separate, independently-
+  // grantable permission (see prisma/seed.ts — DEPARTMENT_ADMIN has both,
+  // but they are not implied by each other), so edit access must never be
+  // treated as delete access. DELETE /api/projects/[id] independently
+  // re-checks this and is the actual authority; this is only a UI hint.
+  const canDeleteProject = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.delete");
   const notes = await prisma.projectNote.findMany({
     where: { projectId: id },
-    include: { author: { select: { id: true, name: true, email: true, image: true } } },
+    include: {
+      author: { select: { id: true, name: true, email: true, image: true } },
+      mentions: { include: { user: { select: { id: true, name: true, email: true } } } },
+    },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
 
-  const isAdmin = session.user.role === Role.ADMIN;
   const activityIds = project.activities.map((a) => a.id);
 
   const relatedTickets = await prisma.ticket.findMany({
@@ -107,7 +116,7 @@ export default async function ProjectDetailPage({
         initialStatus={project.status}
         isGoal={project.isGoal}
         canEditProject={canEditProject}
-        isAdmin={isAdmin}
+        canDeleteProject={canDeleteProject}
       />
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -191,8 +200,14 @@ export default async function ProjectDetailPage({
 
           <EntityNotes
             apiBasePath={`/api/projects/${project.id}`}
-            initialNotes={notes.map((n) => ({ ...n, createdAt: n.createdAt.toISOString() }))}
+            initialNotes={notes.map((n) => ({
+              ...n,
+              createdAt: n.createdAt.toISOString(),
+              mentions: n.mentions.map((m) => ({ userId: m.user.id, name: m.user.name, email: m.user.email })),
+            }))}
             canAddNote={canEditProject}
+            entityType="project"
+            entityId={project.id}
           />
         </div>
 

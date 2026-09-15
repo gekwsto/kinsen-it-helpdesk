@@ -711,6 +711,10 @@ model User {
   createdDependencies      ActivityDependency[]  @relation("ActivityDependenciesCreatedBy")
   projectNotes             ProjectNote[]         @relation("ProjectNoteAuthor")
   activityNotes            ActivityNote[]        @relation("ActivityNoteAuthor")
+  activityAttachments      ActivityAttachment[]
+  projectNoteMentions      ProjectNoteMention[]
+  activityNoteMentions     ActivityNoteMention[]
+  ticketMessageMentions    TicketMessageMention[]
   ownedGoals               YearlyGoal[]          @relation("GoalOwner")
   notifications            Notification[]
   pushSubscriptions        PushSubscription[]
@@ -1127,11 +1131,36 @@ model TicketMessage {
   fromName       String?
 
   attachments TicketAttachment[]
+  mentions    TicketMessageMention[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([ticketId])
+}
+
+// A structured @mention of a User inside an internal TicketMessage note
+// (isInternal: true — see that field's own doc comment; this is never
+// created for a public/requester-facing reply). Mirrors ProjectNoteMention/
+// ActivityNoteMention below — three small, entity-appropriate join tables
+// instead of one polymorphic "NoteMention" table, because ProjectNote/
+// ActivityNote/TicketMessage are three distinct models with no unified
+// "Note" table to hang a single FK off of; forcing that unification just for
+// this feature was explicitly out of scope. The shared mention SERVICE/API/
+// UI (lib/services/mention-service.ts, components/notes/mention-textarea.tsx)
+// is what stays single-implementation, not the storage table. onDelete:
+// Cascade on both FKs — deleting the message or the mentioned user removes
+// the mention row; a mention is never meaningful on its own.
+model TicketMessageMention {
+  id        String        @id @default(cuid())
+  message   TicketMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  messageId String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  createdAt DateTime      @default(now())
+
+  @@unique([messageId, userId])
+  @@index([userId])
 }
 
 model TicketAttachment {
@@ -1241,6 +1270,7 @@ model ProjectActivity {
   predecessorDeps ActivityDependency[] @relation("ActivityDependencyPredecessor")
   successorDeps   ActivityDependency[] @relation("ActivityDependencySuccessor")
   notes           ActivityNote[]
+  attachments     ActivityAttachment[]
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt
 
@@ -1272,10 +1302,26 @@ model ProjectNote {
   author    User?    @relation("ProjectNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   authorId  String?
   body      String   @db.Text
+  mentions  ProjectNoteMention[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@index([projectId, createdAt])
+}
+
+// A structured @mention of a User inside a ProjectNote — see
+// TicketMessageMention's doc comment for the shared design rationale (three
+// small entity-appropriate join tables, one shared mention service/UI).
+model ProjectNoteMention {
+  id        String      @id @default(cuid())
+  note      ProjectNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  noteId    String
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  createdAt DateTime    @default(now())
+
+  @@unique([noteId, userId])
+  @@index([userId])
 }
 
 // Same concept as ProjectNote, for a ProjectActivity — see that model's own
@@ -1287,10 +1333,52 @@ model ActivityNote {
   author     User?           @relation("ActivityNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   authorId   String?
   body       String          @db.Text
+  mentions   ActivityNoteMention[]
   createdAt  DateTime        @default(now())
   updatedAt  DateTime        @updatedAt
 
   @@index([activityId, createdAt])
+}
+
+// A structured @mention of a User inside an ActivityNote — see
+// TicketMessageMention's doc comment for the shared design rationale.
+model ActivityNoteMention {
+  id        String       @id @default(cuid())
+  note      ActivityNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  noteId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  createdAt DateTime     @default(now())
+
+  @@unique([noteId, userId])
+  @@index([userId])
+}
+
+// Reuses the exact private-storage architecture already built for
+// TicketAttachment (see lib/attachment-policy.ts: private UPLOAD_DIR,
+// MIME/size allowlist, path-traversal guards) — deliberately NOT under
+// public/, so a file is only ever readable through the authenticated GET
+// /api/activities/[id]/attachments/[attachmentId] route (which reconstructs
+// the on-disk location from UPLOAD_DIR + activityId + filename, never from
+// a stored path column). No `messageId`/`message` field: unlike a
+// TicketAttachment, an ActivityAttachment is never tied to a specific
+// conversation message — Activities have no message/reply concept (same as
+// ActivityNote above). Upload/delete require activity.edit; view/download
+// require activity.view — both resolved per-activity via canActOnEntity,
+// exactly like every other Activity sub-resource (notes, dependencies).
+model ActivityAttachment {
+  id           String          @id @default(cuid())
+  activity     ProjectActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  activityId   String
+  uploadedBy   User?           @relation(fields: [uploadedById], references: [id])
+  uploadedById String?
+  filename     String
+  originalName String
+  mimeType     String
+  size         Int
+  createdAt    DateTime        @default(now())
+
+  @@index([activityId])
 }
 
 // Per-department, editable status->progress% mapping — Activity progress is

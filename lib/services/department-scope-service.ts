@@ -89,6 +89,41 @@ async function getDepartmentIdsWithPermission(userId: string, permissionKey: str
 }
 
 /**
+ * The canonical MODULE/PAGE-VISIBILITY union rule — the same one
+ * getNavVisibilityFlags below already applies to its own four *.view/
+ * *.create keys (there, inlined as a private `moduleGrant` closure).
+ * Extracted here, exported, so any OTHER "can this user use this feature
+ * at all" page-level gate can reuse the identical rule for an arbitrary
+ * permission key, instead of a page re-implementing it ad hoc — or, worse,
+ * approximating it with a raw `role === Role.ADMIN`/`isAdmin(role)` check,
+ * which silently excludes a user whose ONLY grant is department-scoped.
+ *
+ * Global-role/custom-role permissions (hasPermission) and DepartmentMembership
+ * permissions (getDepartmentIdsWithPermission, i.e. at least one qualifying
+ * ACTIVE membership) are independent sources — neither overrides the other,
+ * this is a plain OR. hasPermission already resolves Role.ADMIN to "every
+ * permission" on its own (see lib/permissions.ts), so no separate
+ * canViewAllDepartments bypass is needed or added here: adding one would
+ * over-grant a role like DIRECTOR (full cross-department VIEW visibility,
+ * per canViewAllDepartments) permissions it was never actually seeded with
+ * (e.g. project.edit/activity.edit/project.delete/activity.delete — see
+ * prisma/seed.ts's DIRECTOR list), which is exactly the "global role
+ * overrides department role" anti-pattern this rule must never introduce.
+ */
+export async function hasEffectiveModulePermission(
+  userId: string,
+  role: Role,
+  customRoleId: string | null | undefined,
+  permissionKey: string
+): Promise<boolean> {
+  const [deptIds, global] = await Promise.all([
+    getDepartmentIdsWithPermission(userId, permissionKey),
+    hasPermission(role, permissionKey, customRoleId),
+  ]);
+  return deptIds.length > 0 || global;
+}
+
+/**
  * Department rows (not just ids) for a filter dropdown or creation-form
  * picker — ADMIN sees every active department, everyone else only the ones
  * where their DepartmentRole grants the given permission. Shared by any
@@ -454,6 +489,25 @@ export interface NavVisibilityFlags {
   canViewActivities: boolean;
   canViewGoals: boolean;
   /**
+   * Gates the "Project Gantt"/"Activity Gantt" sidebar entries specifically
+   * — Project Gantt access = effective gantt.view AND effective
+   * project.view; Activity Gantt access = effective gantt.view AND
+   * effective activity.view (see app/(main)/projects/gantt/page.tsx and
+   * app/(main)/activities/gantt/page.tsx, which independently re-check the
+   * exact same pair — this is only a UI hint). gantt.view is a genuinely
+   * independent, revocable permission (unlike, say, organization.tree.view
+   * above, which is cosmetic-only for canViewAllDepartments roles because
+   * the code-level bypass grants it unconditionally regardless of the
+   * RolePermission row) — so, deliberately UNLIKE every other flag in the
+   * canViewAllDepartments early-return branch below, this one is still
+   * computed from a real permission check even for ADMIN/DIRECTOR: ADMIN
+   * unconditionally bypasses hasPermission() anyway (see lib/permissions.ts),
+   * but DIRECTOR does not, so an admin revoking gantt.view from DIRECTOR via
+   * /admin/roles must actually take effect.
+   */
+  canViewProjectGantt: boolean;
+  canViewActivityGantt: boolean;
+  /**
    * CREATE capability, computed the exact same union way as the canView*
    * flags above but from the module's OWN *.create permission key — never
    * inferred from the matching canView* flag. VIEW and CREATE are
@@ -500,6 +554,12 @@ export const getNavVisibilityFlags = cache(async (
   customRoleId?: string | null
 ): Promise<NavVisibilityFlags> => {
   if (canViewAllDepartments(role)) {
+    // gantt.view is a real, independently-revocable permission (see its
+    // own doc comment above) — computed via the genuine hasPermission
+    // check even here, unlike every other flag in this branch, which is
+    // safely hardcoded true because the canViewAllDepartments bypass
+    // itself already grants those unconditionally at the code level.
+    const canViewGantt = await hasPermission(role, "gantt.view", customRoleId);
     return {
       canViewAdminSubDepartments: true,
       canViewMyDepartments: true,
@@ -510,6 +570,8 @@ export const getNavVisibilityFlags = cache(async (
       canViewProjects: true,
       canViewActivities: true,
       canViewGoals: true,
+      canViewProjectGantt: canViewGantt,
+      canViewActivityGantt: canViewGantt,
       canCreateTickets: true,
       canCreateProjects: true,
       canCreateActivities: true,
@@ -524,13 +586,10 @@ export const getNavVisibilityFlags = cache(async (
   // union logic exists exactly once, not re-implemented per key. Used for
   // both the four *.view keys and the four *.create keys; each call is
   // independent (a *.create key is never derived from its *.view sibling).
-  const moduleGrant = async (key: string) => {
-    const [deptIds, global] = await Promise.all([
-      getDepartmentIdsWithPermission(userId, key),
-      hasPermission(role, key, customRoleId),
-    ]);
-    return deptIds.length > 0 || global;
-  };
+  // Same rule as hasEffectiveModulePermission above, just bound to this
+  // call's (userId, role, customRoleId) once instead of re-passing them for
+  // every one of the keys below.
+  const moduleGrant = (key: string) => hasEffectiveModulePermission(userId, role, customRoleId, key);
 
   const [
     accessibleSubDeptDepartments,
@@ -543,6 +602,7 @@ export const getNavVisibilityFlags = cache(async (
     canViewProjects,
     canViewActivities,
     canViewGoals,
+    canViewGantt,
     canCreateTickets,
     canCreateProjects,
     canCreateActivities,
@@ -563,6 +623,7 @@ export const getNavVisibilityFlags = cache(async (
     moduleGrant("project.view"),
     moduleGrant("activity.view"),
     moduleGrant("goal.view"),
+    moduleGrant("gantt.view"),
     moduleGrant("ticket.create"),
     moduleGrant("project.create"),
     moduleGrant("activity.create"),
@@ -581,6 +642,8 @@ export const getNavVisibilityFlags = cache(async (
     canViewProjects,
     canViewActivities,
     canViewGoals,
+    canViewProjectGantt: canViewGantt && canViewProjects,
+    canViewActivityGantt: canViewGantt && canViewActivities,
     canCreateTickets,
     canCreateProjects,
     canCreateActivities,

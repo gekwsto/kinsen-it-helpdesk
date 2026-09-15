@@ -50,6 +50,7 @@ export default async function TicketDetailPage({
         include: {
           author: { select: { id: true, name: true, email: true, image: true, role: true } },
           attachments: true,
+          mentions: { include: { user: { select: { id: true, name: true, email: true } } } },
         },
       },
       attachments: {
@@ -277,6 +278,7 @@ export default async function TicketDetailPage({
         size: a.size,
         path: a.path,
       })),
+      mentions: m.mentions.map((mm) => ({ userId: mm.user.id, name: mm.user.name, email: mm.user.email })),
     })),
     ticketAttachments: ticket.attachments.map((a) => ({
       id: a.id,

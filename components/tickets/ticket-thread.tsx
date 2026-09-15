@@ -6,6 +6,7 @@ import { getInitials, formatDateTime, formatBytes } from "@/lib/utils";
 import { Role, MessageDirection } from "@prisma/client";
 import { Paperclip, Lock, Mail, ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { renderNoteBodyWithMentions } from "@/components/notes/mention-render";
 
 export interface MessageAttachment {
   id: string;
@@ -14,6 +15,12 @@ export interface MessageAttachment {
   mimeType: string;
   size: number;
   path: string;
+}
+
+export interface MessageMention {
+  userId: string;
+  name: string | null;
+  email: string;
 }
 
 export interface ThreadMessage {
@@ -32,6 +39,8 @@ export interface ThreadMessage {
     role: Role;
   } | null;
   attachments: MessageAttachment[];
+  /** Structured @mentions on this message — only ever set for an internal note (isInternal: true); see lib/services/mention-service.ts. Always present (possibly empty) on a message fetched after this feature shipped; absent/undefined on nothing real — the field is required. */
+  mentions: MessageMention[];
 }
 
 interface TicketThreadProps {
@@ -240,7 +249,7 @@ function MessageBubble({
             See docs/... / the accompanying change's report for how a
             historical row like that could be identified and re-normalized.
           */}
-          <p className="whitespace-pre-wrap break-words">{message.body}</p>
+          <p className="whitespace-pre-wrap break-words">{renderNoteBodyWithMentions(message.body, message.mentions ?? [])}</p>
         </div>
 
         {/* Attachments */}

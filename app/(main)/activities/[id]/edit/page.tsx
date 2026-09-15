@@ -1,6 +1,5 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { Role } from "@prisma/client";
 import { ActivityEditClient } from "./activity-edit-client";
 
 export default async function EditActivityPage({
@@ -12,6 +11,5 @@ export default async function EditActivityPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const isAdmin = session.user.role === Role.ADMIN;
-  return <ActivityEditClient id={id} isAdmin={isAdmin} />;
+  return <ActivityEditClient id={id} />;
 }

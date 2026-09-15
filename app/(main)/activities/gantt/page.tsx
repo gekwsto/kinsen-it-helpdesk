@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, isAdmin } from "@/lib/permissions";
-import { buildActivityListWhere, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
+import { buildActivityListWhere, getNavVisibilityFlags, hasEffectiveModulePermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
@@ -29,14 +28,24 @@ export default async function ActivityGanttPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  // Same union canFlags.canViewActivities computes for the sidebar and for
-  // app/(main)/activities/page.tsx — see that page's comment for why the
-  // previous canManageProjects(role) pre-gate here was wrong (global-enum-
-  // only, blind to custom roles and department-scoped grants).
-  const canView = (
-    await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId)
-  ).canViewActivities;
-  if (!canView) redirect("/dashboard");
+  // Activity Gantt access = effective gantt.view AND effective
+  // activity.view. gantt.view is a capability gate for the Gantt UI
+  // itself, never a replacement for the underlying entity-view
+  // authorization — an admin can revoke it to hide Gantt for a role while
+  // that role keeps normal activity.view (list/detail) access. Department
+  // DATA scoping (buildActivityListWhere below) is completely unaffected
+  // by either check.
+  //
+  // canViewActivities is the same union canFlags.canViewActivities
+  // computes for the sidebar and for app/(main)/activities/page.tsx — see
+  // that page's comment for why the previous canManageProjects(role)
+  // pre-gate here was wrong (global-enum-only, blind to custom roles and
+  // department-scoped grants).
+  const [canViewGantt, canViewActivities] = await Promise.all([
+    hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "gantt.view"),
+    getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId).then((f) => f.canViewActivities),
+  ]);
+  if (!canViewGantt || !canViewActivities) redirect("/dashboard");
 
   const params = await searchParams;
 
@@ -189,6 +198,17 @@ export default async function ActivityGanttPage({
 
   const totalActivities = activities.length;
 
+  // Drag-to-reschedule capability hint — same union rule `canView` above
+  // uses, checked against activity.edit rather than a raw isAdmin(role)/
+  // role===ADMIN check (the exact anti-pattern this fix removes): a
+  // DEPARTMENT_ADMIN (or anyone else holding activity.edit only via a
+  // DepartmentMembership) can now see the drag affordance too, not just a
+  // global System Admin. This is a UI hint only — PATCH
+  // /api/activities/[id] (what an actual drag ultimately calls)
+  // independently re-checks activity.edit per-activity via canActOnEntity
+  // and remains the real authority.
+  const canEditActivities = await hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "activity.edit");
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-4">
@@ -213,7 +233,7 @@ export default async function ActivityGanttPage({
 
       <GanttChart
         groups={groups}
-        canEdit={isAdmin(session.user.role)}
+        canEdit={canEditActivities}
         dependencies={dependencies}
         activityStatusLegendEntries={
           effectiveDepartmentId

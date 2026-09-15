@@ -3,12 +3,16 @@
 import { useRef, useState } from "react";
 import { Loader2, NotebookPen } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { MentionTextarea } from "./mention-textarea";
+import { extractMentionedUserIdsFromBody } from "@/lib/mentions/mention-tokens";
+import type { MentionEntityType } from "@/lib/services/mention-service";
 
 interface NoteComposerProps {
-  onSubmit: (body: string) => Promise<void>;
+  onSubmit: (body: string, mentionUserIds: string[]) => Promise<void>;
   disabled?: boolean;
   placeholder?: string;
+  entityType: MentionEntityType;
+  entityId: string;
 }
 
 /**
@@ -21,11 +25,19 @@ interface NoteComposerProps {
  * exactly as it does today. This component only ever says "Add Note" /
  * "Write a note…" — there is no Reply/Internal toggle here or anywhere in
  * Project/Activity Notes.
+ *
+ * The textarea is MentionTextarea (typing `@` opens a searchable user
+ * picker — see that component's own doc comment); the deduped list of
+ * userIds actually mentioned in the text is derived straight from the
+ * body's own structured tokens via extractMentionedUserIdsFromBody, so a
+ * user mentioned twice in one note still yields exactly one id here.
  */
 export function NoteComposer({
   onSubmit,
   disabled = false,
   placeholder = "Write a note…",
+  entityType,
+  entityId,
 }: NoteComposerProps) {
   const [text, setText] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -36,7 +48,7 @@ export function NoteComposer({
     if (!trimmed || isSubmitting) return;
     setIsSubmitting(true);
     try {
-      await onSubmit(trimmed);
+      await onSubmit(trimmed, extractMentionedUserIdsFromBody(trimmed));
       setText("");
       textareaRef.current?.focus();
     } catch {
@@ -50,10 +62,12 @@ export function NoteComposer({
 
   return (
     <div className="space-y-2">
-      <Textarea
-        ref={textareaRef}
+      <MentionTextarea
+        textareaRef={textareaRef}
         value={text}
-        onChange={(e) => setText(e.target.value)}
+        onChange={setText}
+        entityType={entityType}
+        entityId={entityId}
         placeholder={placeholder}
         disabled={disabled || isSubmitting}
         className="min-h-[80px] resize-y text-sm"
@@ -64,7 +78,7 @@ export function NoteComposer({
       <div className="flex items-center justify-between">
         <p className="text-xs text-muted-foreground">
           <kbd className="rounded border bg-muted px-1 py-0.5 text-[10px] font-mono">Ctrl+Enter</kbd>
-          {" "}to post
+          {" "}to post · <kbd className="rounded border bg-muted px-1 py-0.5 text-[10px] font-mono">@</kbd> to mention someone
         </p>
         <Button
           type="button"

@@ -26,6 +26,7 @@ import type { QuickStatusOption } from "@/components/status/quick-status-select"
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { EntityNotes } from "@/components/notes/entity-notes";
 import type { Note } from "@/components/notes/types";
+import { ActivityAttachments } from "@/components/activities/activity-attachments";
 
 const PRIORITY_COLORS: Record<ActivityPriority, string> = {
   LOW: "bg-green-50 text-green-700",
@@ -57,6 +58,8 @@ interface Activity {
   department?: { id: string; name: string } | null;
   /** Whether the current user holds activity.edit here — governs the Notes composer AND the quick-status dropdown. POST /api/activities/[id]/notes and PATCH /api/activities/[id] independently re-check this; this is only a UI hint. */
   canEditActivity?: boolean;
+  /** Whether the current user holds activity.delete here — a SEPARATE, independently-grantable permission from activity.edit (see prisma/seed.ts). Governs the Delete control. DELETE /api/activities/[id] independently re-checks this; this is only a UI hint. */
+  canDeleteActivity?: boolean;
   /**
    * The department actually used to resolve this Activity's status/progress
    * config — `departmentId` when set, otherwise the app's configured legacy
@@ -67,6 +70,15 @@ interface Activity {
    * dropdown for such Activities.
    */
   effectiveDepartmentId?: string | null;
+}
+
+interface Attachment {
+  id: string;
+  originalName: string;
+  mimeType: string;
+  size: number;
+  createdAt: string;
+  uploadedBy?: { id: string; name?: string | null; email: string } | null;
 }
 
 interface RelatedTicket {
@@ -113,6 +125,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
   const [activity, setActivity] = useState<Activity | null>(null);
   const [relatedTickets, setRelatedTickets] = useState<RelatedTicket[]>([]);
   const [notes, setNotes] = useState<Note[]>([]);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [statusOptions, setStatusOptions] = useState<QuickStatusOption[]>([]);
   /**
    * Distinct from `statusOptions.length === 0` — an EMPTY array can mean
@@ -145,6 +158,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
     setActivity(null);
     setStatusOptions([]);
     setStatusOptionsState("loading");
+    setAttachments([]);
     const fetches: Promise<any>[] = [
       fetch(`/api/activities/${id}`).then((r) => (r.ok ? r.json() : null)),
       fetch(`/api/tickets?activityId=${id}&limit=10`)
@@ -152,16 +166,18 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
         .then((d) => d.tickets ?? []),
       fetch(`/api/dependencies?activityId=${id}`).then((r) => (r.ok ? r.json() : [])),
       fetch(`/api/activities/${id}/notes`).then((r) => (r.ok ? r.json() : [])),
+      fetch(`/api/activities/${id}/attachments`).then((r) => (r.ok ? r.json() : [])),
     ];
     if (isAdmin) {
       fetches.push(fetch("/api/activities?limit=200").then((r) => (r.ok ? r.json() : [])));
     }
     Promise.all(fetches)
-      .then(([act, tickets, deps, fetchedNotes, acts]) => {
+      .then(([act, tickets, deps, fetchedNotes, fetchedAttachments, acts]) => {
         setActivity(act);
         setRelatedTickets(tickets);
         setDependencies(Array.isArray(deps) ? deps : []);
         setNotes(Array.isArray(fetchedNotes) ? fetchedNotes : []);
+        setAttachments(Array.isArray(fetchedAttachments) ? fetchedAttachments : []);
         if (acts) {
           const list = (Array.isArray(acts) ? acts : []) as ActivityOption[];
           setAllActivities(list.filter((a: ActivityOption) => a.id !== id));
@@ -356,7 +372,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
                 canEdit={activity.canEditActivity ?? false}
                 onChanged={handleStatusChanged}
               />
-              {isAdmin && (
+              {activity.canDeleteActivity && (
                 <ActivityDeleteButton
                   activityId={id}
                   activityTitle={activity.title}
@@ -585,10 +601,18 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
         </CardContent>
       </Card>
 
+      <ActivityAttachments
+        activityId={id}
+        initialAttachments={attachments}
+        canManage={activity.canEditActivity ?? false}
+      />
+
       <EntityNotes
         apiBasePath={`/api/activities/${id}`}
         initialNotes={notes}
         canAddNote={activity.canEditActivity ?? false}
+        entityType="activity"
+        entityId={id}
       />
     </div>
   );

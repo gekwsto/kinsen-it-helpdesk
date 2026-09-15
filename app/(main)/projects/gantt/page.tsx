@@ -1,7 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission, isAdmin } from "@/lib/permissions";
-import { buildProjectListWhere } from "@/lib/services/department-scope-service";
+import { buildProjectListWhere, hasEffectiveModulePermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { redirect } from "next/navigation";
@@ -32,8 +31,22 @@ export default async function ProjectGanttPage({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/login");
-  const canView = await hasPermission(session.user.role, "project.view", session.user.customRoleId);
-  if (!canView) redirect("/dashboard");
+  // Project Gantt access = effective gantt.view AND effective project.view.
+  // gantt.view is a capability gate for the Gantt UI itself, never a
+  // replacement for the underlying entity-view authorization — an admin
+  // can revoke it to hide Gantt for a role while that role keeps normal
+  // project.view (list/detail) access. Both checks use the same GLOBAL-
+  // grant-OR-qualifying-active-department-grant union
+  // getNavVisibilityFlags already applies to the sidebar's own "Project
+  // Gantt" link; a plain global-only hasPermission check here previously
+  // blocked a user whose project.view grant is department-scoped only.
+  // Department DATA scoping (buildProjectListWhere below) is completely
+  // unaffected by either check.
+  const [canViewGantt, canViewProjects] = await Promise.all([
+    hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "gantt.view"),
+    hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "project.view"),
+  ]);
+  if (!canViewGantt || !canViewProjects) redirect("/dashboard");
 
   const params = await searchParams;
 
@@ -159,6 +172,18 @@ export default async function ProjectGanttPage({
       )
     : undefined;
 
+  // Drag-to-reschedule capability hint — same union rule as `canView` above,
+  // checked against project.edit rather than a raw isAdmin(role)/role===ADMIN
+  // check (the exact anti-pattern this fix removes): a DEPARTMENT_ADMIN (or
+  // anyone else holding project.edit only via a DepartmentMembership) can
+  // now see the drag affordance too, not just a global System Admin. This
+  // is a UI hint only — PATCH /api/projects/[id] (what an actual drag
+  // ultimately calls) independently re-checks project.edit per-project via
+  // canActOnEntity and remains the real authority, so a user who can edit
+  // in SOME but not all of the departments shown here is still correctly
+  // rejected per-row by the backend if they drag one they don't hold it in.
+  const canEditProjects = await hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "project.edit");
+
   const groups: GanttGroup[] = projects.map((p) => ({
     id: p.id,
     title: p.title,
@@ -216,7 +241,7 @@ export default async function ProjectGanttPage({
 
       <GanttChart
         groups={groups}
-        canEdit={isAdmin(session.user.role)}
+        canEdit={canEditProjects}
         dependencies={dependencies}
         priorityOptions={priorityOptions}
         activityStatusLegendEntries={

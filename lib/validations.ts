@@ -135,6 +135,12 @@ export const replyTicketSchema = z.object({
   body: z.string().min(1, "Reply cannot be empty"),
   direction: z.nativeEnum(MessageDirection).default(MessageDirection.OUTBOUND),
   isInternal: z.boolean().default(false),
+  // Candidate @mention user ids from the composer — NEVER trusted as-is;
+  // only meaningful for an internal note (isInternal: true — see
+  // app/api/tickets/[id]/reply/route.ts) and re-validated there against
+  // lib/services/mention-service.ts's canonical ticket-view eligibility
+  // check before anything is persisted or notified.
+  mentionUserIds: z.array(z.string()).max(50).default([]),
 });
 
 export const assignTicketSchema = z.object({
@@ -203,6 +209,12 @@ export const updateActivitySchema = createActivitySchema.partial();
 
 export const createNoteSchema = z.object({
   body: z.string().trim().min(1, "Note cannot be empty").max(10000, "Note must not exceed 10,000 characters"),
+  // Candidate @mention user ids from the composer — NEVER trusted as-is;
+  // re-validated in the route handler against
+  // lib/services/mention-service.ts's canonical view-eligibility check
+  // before anything is persisted or notified. See that module's doc
+  // comment for the full security model.
+  mentionUserIds: z.array(z.string()).max(50).default([]),
 });
 
 export type CreateNoteInput = z.infer<typeof createNoteSchema>;

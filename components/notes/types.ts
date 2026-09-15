@@ -9,9 +9,17 @@ export interface NoteAuthor {
   image: string | null;
 }
 
+/** One resolved @mention on a Note — the persisted ProjectNoteMention/ActivityNoteMention relation, never derived from the body text alone. See components/notes/mention-render.tsx. */
+export interface NoteMention {
+  userId: string;
+  name: string | null;
+  email: string;
+}
+
 export interface Note {
   id: string;
   body: string;
   createdAt: string;
   author: NoteAuthor | null;
+  mentions: NoteMention[];
 }

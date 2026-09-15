@@ -125,7 +125,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
         { label: "All Projects", href: "/projects", visible: navFlags.canViewProjects },
         { label: "My Projects", href: "/my-projects", visible: navFlags.canViewProjects },
         { label: "New Project", href: "/projects/new", visible: navFlags.canCreateProjects },
-        { label: "Project Gantt", href: "/projects/gantt", visible: navFlags.canViewProjects },
+        { label: "Project Gantt", href: "/projects/gantt", visible: navFlags.canViewProjectGantt },
         { label: "Resource Planning", href: "/projects/resource-planning", visible: navFlags.canViewProjects },
       ],
     },
@@ -138,7 +138,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
       children: [
         { label: "All Activities", href: "/activities", visible: navFlags.canViewActivities },
         { label: "My Activities", href: "/my-activities", visible: navFlags.canViewActivities },
-        { label: "Activity Gantt", href: "/activities/gantt", visible: navFlags.canViewActivities },
+        { label: "Activity Gantt", href: "/activities/gantt", visible: navFlags.canViewActivityGantt },
         { label: "New Activity", href: "/activities/new", visible: navFlags.canCreateActivities },
       ],
     },

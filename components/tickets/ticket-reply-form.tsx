@@ -4,6 +4,8 @@ import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { MentionTextarea } from "@/components/notes/mention-textarea";
+import { extractMentionedUserIdsFromBody } from "@/lib/mentions/mention-tokens";
 import { Loader2, Send, Lock, Paperclip, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ThreadMessage } from "./ticket-thread";
@@ -42,6 +44,10 @@ export function TicketReplyForm({
           body,
           isInternal,
           direction: isInternal ? "INTERNAL_NOTE" : "OUTBOUND",
+          // Only meaningful for an internal note — see
+          // app/api/tickets/[id]/reply/route.ts, which ignores this
+          // entirely for a public reply.
+          mentionUserIds: isInternal ? extractMentionedUserIdsFromBody(body) : [],
         }),
       });
 
@@ -124,20 +130,32 @@ export function TicketReplyForm({
           isInternal ? "border-amber-300 bg-amber-50" : "bg-background"
         )}
       >
-        <Textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={
-            isInternal
-              ? "Internal note — only visible to IT staff... (Ctrl+Enter to send)"
-              : "Write a reply... (Ctrl+Enter to send)"
-          }
-          className={cn(
-            "min-h-[100px] resize-none border-0 focus-visible:ring-0 rounded-b-none text-sm",
-            isInternal ? "bg-amber-50 placeholder:text-amber-700/50" : ""
-          )}
-        />
+        {isInternal ? (
+          // Internal notes are the "Ticket Notes" surface — @mention
+          // support is only ever offered here, never on a public reply
+          // (see app/api/tickets/[id]/reply/route.ts and
+          // components/notes/mention-textarea.tsx).
+          <MentionTextarea
+            value={body}
+            onChange={setBody}
+            entityType="ticket"
+            entityId={ticketId}
+            onKeyDown={handleKeyDown}
+            placeholder="Internal note — only visible to IT staff... (Ctrl+Enter to send, @ to mention someone)"
+            className={cn(
+              "min-h-[100px] resize-none border-0 focus-visible:ring-0 rounded-b-none text-sm",
+              "bg-amber-50 placeholder:text-amber-700/50"
+            )}
+          />
+        ) : (
+          <Textarea
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Write a reply... (Ctrl+Enter to send)"
+            className="min-h-[100px] resize-none border-0 focus-visible:ring-0 rounded-b-none text-sm"
+          />
+        )}
 
         {/* Staged attachments */}
         {attachments.length > 0 && (

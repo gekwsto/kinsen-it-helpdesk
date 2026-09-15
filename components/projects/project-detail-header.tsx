@@ -46,7 +46,8 @@ interface ProjectDetailHeaderProps {
   isGoal: boolean;
   /** Whether the current user holds project.edit in this Project's department. */
   canEditProject: boolean;
-  isAdmin: boolean;
+  /** Whether the current user holds project.delete in this Project's department — a SEPARATE, independently-grantable permission from project.edit (see prisma/seed.ts). */
+  canDeleteProject: boolean;
 }
 
 /**
@@ -66,7 +67,7 @@ export function ProjectDetailHeader({
   initialStatus,
   isGoal,
   canEditProject,
-  isAdmin,
+  canDeleteProject,
 }: ProjectDetailHeaderProps) {
   const [status, setStatus] = useState<ProjectStatus>(initialStatus);
 
@@ -107,7 +108,7 @@ export function ProjectDetailHeader({
             Add Activity
           </Link>
         </Button>
-        {isAdmin && <ProjectDeleteButton projectId={projectId} projectTitle={title} />}
+        {canDeleteProject && <ProjectDeleteButton projectId={projectId} projectTitle={title} />}
       </div>
     </div>
   );

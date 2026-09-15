@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { hasPermission } from "@/lib/permissions";
+import { getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -23,10 +23,18 @@ export default async function MyActivitiesPage({
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const canView = await hasPermission(session.user.role, "activity.view", session.user.customRoleId);
-  if (!canView) redirect("/dashboard");
+  // Module/page visibility — same GLOBAL-grant-OR-qualifying-active-
+  // department-grant union sidebar.tsx's own "Activities" link already
+  // uses (getNavVisibilityFlags). This page's own data query below is
+  // entirely assignedUsers-based (never department-scoped), so a user with
+  // ONLY a department-level activity.view grant (no global one) can
+  // legitimately be assigned an activity and must not be redirected away
+  // from seeing it — a plain global-only hasPermission check here
+  // previously did exactly that.
+  const navFlags = await getNavVisibilityFlags(session.user.id, session.user.role, session.user.customRoleId);
+  if (!navFlags.canViewActivities) redirect("/dashboard");
 
-  const canCreate = await hasPermission(session.user.role, "activity.create", session.user.customRoleId);
+  const canCreate = navFlags.canCreateActivities;
 
   const params = await searchParams;
   const where: any = {

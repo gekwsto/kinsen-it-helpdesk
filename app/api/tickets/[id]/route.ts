@@ -27,6 +27,7 @@ const TICKET_INCLUDE = {
     include: {
       author: { select: { id: true, name: true, email: true, image: true, role: true } },
       attachments: true,
+      mentions: { include: { user: { select: { id: true, name: true, email: true } } } },
     },
   },
   attachments: {
@@ -71,7 +72,16 @@ export async function GET(
       ticket.messages = ticket.messages.filter((m) => !m.isInternal) as any;
     }
 
-    return NextResponse.json(ticket);
+    // Reshape each message's raw TicketMessageMention join rows into the
+    // flat {userId,name,email}[] shape components/tickets/ticket-thread.tsx
+    // (renderNoteBodyWithMentions) expects — same shape the Project/Activity
+    // Notes routes already return.
+    const messages = ticket.messages.map((m: any) => ({
+      ...m,
+      mentions: (m.mentions ?? []).map((mm: any) => ({ userId: mm.user.id, name: mm.user.name, email: mm.user.email })),
+    }));
+
+    return NextResponse.json({ ...ticket, messages });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

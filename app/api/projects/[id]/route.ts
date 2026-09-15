@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permissions";
+import { requireAuth, hasDepartmentPermission } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
@@ -139,14 +139,25 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    await requireAdmin();
+    const session = await requireAuth();
 
     const project = await prisma.project.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, departmentId: true },
     });
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+
+    // Department-scoped, same resolver as GET/PATCH above — project.delete
+    // is its own permission (DEPARTMENT_ADMIN has it granted independently
+    // of project.edit; see prisma/seed.ts), never inferred from
+    // project.edit and never requiring global Role.ADMIN. canActOnEntity's
+    // own canViewAllDepartments(role) bypass keeps a real System Admin's
+    // behavior exactly as it was.
+    const canDelete = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.delete");
+    if (!canDelete) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     // Safe cascade behaviour (no migration needed):

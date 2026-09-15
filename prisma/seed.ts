@@ -36,6 +36,18 @@ const PERMISSIONS = [
   { key: "project.edit", description: "Edit projects", module: "projects" },
   { key: "project.delete", description: "Delete projects", module: "projects" },
   { key: "project.assignable", description: "Can be assigned to projects", module: "projects" },
+  // A capability gate for the Gantt UI itself (Project Gantt / Activity
+  // Gantt) — NOT a replacement for the underlying project.view/
+  // activity.view checks those pages still independently require, and NOT
+  // a data-scoping mechanism of its own (buildProjectListWhere/
+  // buildActivityListWhere are completely unaffected — see
+  // app/(main)/projects/gantt/page.tsx and app/(main)/activities/gantt/
+  // page.tsx). Seeded onto every role that already had implicit Gantt
+  // reachability via project.view/activity.view (see
+  // NEW_PERMISSION_DEFAULT_GRANTS below) so introducing this key is a
+  // behavior-preserving no-op today, while making "can see the Gantt view"
+  // an independently revocable admin toggle going forward.
+  { key: "gantt.view", description: "View Gantt timelines", module: "projects" },
   // Read-only aggregation of project/activity assignment data by agent — see
   // app/(main)/projects/resource-planning/page.tsx. Granted alongside
   // project.view + activity.view since it's a view over exactly that data,
@@ -200,7 +212,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   ADMIN: PERMISSIONS.map((p) => p.key),
   IT_AGENT: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "resourcePlanning.view",
+    "project.view", "project.create", "project.edit", "resourcePlanning.view", "gantt.view",
     "goal.view",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
@@ -213,7 +225,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // lib/permissions.ts) — they mean the same thing, one set is enough.
   DEPARTMENT_MANAGER: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view",
+    "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view", "gantt.view",
     "goal.view", "goal.create", "goal.edit",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply", "ticket.assignable",
     "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
@@ -224,7 +236,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     ...TICKET_CONFIG_PERMISSION_KEYS,
   ],
   USER: [
-    "activity.view",
+    "activity.view", "gantt.view",
     "ticket.view", "ticket.create", "ticket.reply",
   ],
   // Cross-department oversight: sees and can start work in every department,
@@ -232,7 +244,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // stay Administrator-only. See canViewAllDepartments() in lib/permissions.ts.
   DIRECTOR: [
     "ticket.view", "ticket.view.all",
-    "project.view", "project.create", "resourcePlanning.view",
+    "project.view", "project.create", "resourcePlanning.view", "gantt.view",
     "activity.view", "activity.create",
     "goal.view",
     "department.view", "subdepartment.view",
@@ -247,7 +259,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // Full control of one department's projects/tickets/activities/goals.
   DEPARTMENT_ADMIN: [
     "activity.view", "activity.create", "activity.edit", "activity.delete", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "project.delete", "project.assignable", "resourcePlanning.view",
+    "project.view", "project.create", "project.edit", "project.delete", "project.assignable", "resourcePlanning.view", "gantt.view",
     "goal.view", "goal.create", "goal.edit", "goal.delete",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
@@ -264,7 +276,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // by default (enable per-role from Roles & Permissions if a business needs it).
   PROJECT_MANAGER: [
     "activity.view", "activity.create", "activity.edit", "activity.assign", "activity.assignable",
-    "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view",
+    "project.view", "project.create", "project.edit", "project.assignable", "resourcePlanning.view", "gantt.view",
     "goal.view",
   ],
   // Works assigned tickets/activities — the department-scoped analog of the
@@ -274,7 +286,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // project owner/member by default.
   AGENT_ASSIGNEE: [
     "activity.view", "activity.edit", "activity.assignable",
-    "project.view", "resourcePlanning.view",
+    "project.view", "resourcePlanning.view", "gantt.view",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
     "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
     "ticket.share.department", "ticket.share.subdepartment",
@@ -286,12 +298,12 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
   // splitTicketViewScope in department-scope-service.ts, the sole
   // consumer of ticket.view.all).
   REQUESTER: [
-    "activity.view",
+    "activity.view", "gantt.view",
     "ticket.view", "ticket.create", "ticket.reply",
   ],
   // Read-only.
   VIEWER: [
-    "activity.view", "project.view", "goal.view", "ticket.view", "ticket.view.all",
+    "activity.view", "project.view", "goal.view", "ticket.view", "ticket.view.all", "gantt.view",
   ],
 };
 
@@ -530,8 +542,8 @@ async function main() {
   // database this is a no-op (the bootstrap-once loop above already created
   // these same pairs via ROLE_PERMISSIONS).
   const NEW_PERMISSION_DEFAULT_GRANTS: Record<string, string[]> = {
-    DEPARTMENT_ADMIN: TICKET_CONFIG_PERMISSION_KEYS,
-    DEPARTMENT_MANAGER: TICKET_CONFIG_PERMISSION_KEYS,
+    DEPARTMENT_ADMIN: [...TICKET_CONFIG_PERMISSION_KEYS, "gantt.view"],
+    DEPARTMENT_MANAGER: [...TICKET_CONFIG_PERMISSION_KEYS, "gantt.view"],
     // ADMIN already bypasses hasPermission() unconditionally (see
     // lib/permissions.ts), so this grant is cosmetic-only — it just keeps the
     // /admin/roles Administrator matrix showing "integration.manage" as
@@ -547,8 +559,20 @@ async function main() {
       "businessUnit.create",
       "businessUnit.update",
       "businessUnit.delete",
+      "gantt.view",
     ],
-    DIRECTOR: ["organization.tree.view"],
+    DIRECTOR: ["organization.tree.view", "gantt.view"],
+    // gantt.view backfill for every OTHER role that already had implicit
+    // Gantt reachability via project.view/activity.view (see this key's own
+    // doc comment in the PERMISSIONS array above) — behavior-preserving on
+    // an already-seeded database, exactly like every other entry in this
+    // map.
+    IT_AGENT: ["gantt.view"],
+    USER: ["gantt.view"],
+    PROJECT_MANAGER: ["gantt.view"],
+    AGENT_ASSIGNEE: ["gantt.view"],
+    REQUESTER: ["gantt.view"],
+    VIEWER: ["gantt.view"],
   };
   for (const [roleKey, permKeys] of Object.entries(NEW_PERMISSION_DEFAULT_GRANTS)) {
     for (const permKey of permKeys) {

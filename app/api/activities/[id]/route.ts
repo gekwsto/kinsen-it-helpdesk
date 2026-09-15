@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, requireAdmin, hasDepartmentPermission } from "@/lib/permissions";
+import { requireAuth, hasDepartmentPermission } from "@/lib/permissions";
 import { canActOnEntity } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
@@ -61,6 +61,16 @@ export async function GET(
     // the exact same permission.
     const canEditActivity = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.edit");
 
+    // Lets the Activity detail client know whether to render the Delete
+    // control without a second round-trip — DELETE /api/activities/[id]
+    // independently re-checks activity.delete and is the actual authority;
+    // this is only ever a UI hint. Deliberately its OWN canActOnEntity call
+    // (never derived from canEditActivity above): activity.delete is a
+    // separate, independently-grantable permission (see prisma/seed.ts —
+    // DEPARTMENT_ADMIN has both, but they are not implied by each other),
+    // so edit access must never be treated as delete access.
+    const canDeleteActivity = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.delete");
+
     // The SAME fallback tryGetActivityProgressFromStatus/getActivityStatusDisplay
     // already applied internally, exposed explicitly — a legacy Activity
     // with departmentId: null still resolves its status/progress config
@@ -77,7 +87,7 @@ export async function GET(
     // themselves.
     const effectiveDepartmentId = activity.departmentId ?? (await getDefaultLegacyDepartmentId());
 
-    return NextResponse.json({ ...activity, progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, canCreateProjectInDept, canEditActivity, effectiveDepartmentId });
+    return NextResponse.json({ ...activity, progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, canCreateProjectInDept, canEditActivity, canDeleteActivity, effectiveDepartmentId });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -280,14 +290,25 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    await requireAdmin();
+    const session = await requireAuth();
 
     const activity = await prisma.projectActivity.findUnique({
       where: { id },
-      select: { id: true },
+      select: { id: true, departmentId: true },
     });
     if (!activity) {
       return NextResponse.json({ error: "Activity not found" }, { status: 404 });
+    }
+
+    // Department-scoped, same resolver as GET/PATCH above — activity.delete
+    // is its own permission (DEPARTMENT_ADMIN has it granted independently
+    // of activity.edit; see prisma/seed.ts), never inferred from
+    // activity.edit and never requiring global Role.ADMIN. canActOnEntity's
+    // own canViewAllDepartments(role) bypass keeps a real System Admin's
+    // behavior exactly as it was.
+    const canDelete = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.delete");
+    if (!canDelete) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
     // Safe cascade behaviour (no migration needed):

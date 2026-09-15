@@ -54,14 +54,15 @@ interface ActivityDetailResponse {
   /** Whether the current user holds project.create in this activity's department — see app/api/activities/[id]/route.ts. A UI hint only; POST /api/projects independently re-checks it. */
   canCreateProjectInDept?: boolean;
   canEditActivity?: boolean;
+  /** Whether the current user holds activity.delete here — a SEPARATE, independently-grantable permission from activity.edit (see prisma/seed.ts). Governs the Danger Zone's Delete control. DELETE /api/activities/[id] independently re-checks this; this is only a UI hint. */
+  canDeleteActivity?: boolean;
 }
 
 interface Props {
   id: string;
-  isAdmin: boolean;
 }
 
-export function ActivityEditClient({ id, isAdmin }: Props) {
+export function ActivityEditClient({ id }: Props) {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -83,6 +84,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
   const [statusOptions, setStatusOptions] = useState<StatusOption[]>([]);
   const [activityDepartmentId, setActivityDepartmentId] = useState<string | null>(null);
   const [canCreateProjectInDept, setCanCreateProjectInDept] = useState(false);
+  const [canDeleteActivity, setCanDeleteActivity] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   // Same deferred/pending-selection pattern reused verbatim from the Ticket
   // inline creation flow (components/tickets/ticket-form.tsx) and from
@@ -109,6 +111,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
           setSubDepartmentId(activity.subDepartmentId ?? "");
           setActivityDepartmentId(activity.departmentId ?? null);
           setCanCreateProjectInDept(activity.canCreateProjectInDept ?? false);
+          setCanDeleteActivity(activity.canDeleteActivity ?? false);
 
           // Eligible assignees/sub-departments/projects all depend on the
           // activity's own department — fetched once we know it, not in
@@ -485,7 +488,7 @@ export function ActivityEditClient({ id, isAdmin }: Props) {
         />
       )}
 
-      {isAdmin && (
+      {canDeleteActivity && (
         <Card className="border-destructive/30">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm text-destructive">Danger Zone</CardTitle>
