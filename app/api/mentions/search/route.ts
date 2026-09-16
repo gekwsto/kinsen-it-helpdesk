@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
-import { canActOnEntity, canViewTicket } from "@/lib/services/department-scope-service";
+import { canViewTicket, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { searchMentionCandidates, type MentionEntityType } from "@/lib/services/mention-service";
 
 const ENTITY_TYPES: MentionEntityType[] = ["ticket", "project", "activity"];
@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "entityType and entityId are required" }, { status: 400 });
     }
 
-    const canCallerView = await callerCanViewEntity(entityType as MentionEntityType, entityId, session.user.id, session.user.role);
+    const canCallerView = await callerCanViewEntity(entityType as MentionEntityType, entityId, session.user.id, session.user.role, session.user.customRoleId);
     if (!canCallerView) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
@@ -52,7 +52,13 @@ export async function GET(req: NextRequest) {
   }
 }
 
-async function callerCanViewEntity(entityType: MentionEntityType, entityId: string, userId: string, role: Parameters<typeof canViewTicket>[1]): Promise<boolean> {
+async function callerCanViewEntity(
+  entityType: MentionEntityType,
+  entityId: string,
+  userId: string,
+  role: Parameters<typeof canViewTicket>[1],
+  customRoleId: string | null | undefined
+): Promise<boolean> {
   if (entityType === "ticket") {
     const ticket = await prisma.ticket.findUnique({
       where: { id: entityId },
@@ -69,13 +75,22 @@ async function callerCanViewEntity(entityType: MentionEntityType, entityId: stri
     return canViewTicket(userId, role, ticket);
   }
 
+  // hasEffectiveEntityPermission (the union of a global grant and a
+  // DepartmentMembership/custom Department role grant for the entity's OWN
+  // department), never a bare canActOnEntity call — the CALLER's own
+  // standing to even use this search endpoint at all must recognize the
+  // exact same grants resolveEligibleMentionUsers/searchMentionCandidates
+  // (lib/services/mention-service.ts) already do for candidates, or a note
+  // author whose project.view/activity.view comes solely from a global
+  // role/custom role would be wrongly 403'd here before ever reaching the
+  // candidate search.
   if (entityType === "project") {
     const project = await prisma.project.findUnique({ where: { id: entityId }, select: { departmentId: true } });
     if (!project) return false;
-    return canActOnEntity(userId, role, project.departmentId, "project.view");
+    return hasEffectiveEntityPermission(userId, role, customRoleId, project.departmentId, "project.view");
   }
 
   const activity = await prisma.projectActivity.findUnique({ where: { id: entityId }, select: { departmentId: true } });
   if (!activity) return false;
-  return canActOnEntity(userId, role, activity.departmentId, "activity.view");
+  return hasEffectiveEntityPermission(userId, role, customRoleId, activity.departmentId, "activity.view");
 }

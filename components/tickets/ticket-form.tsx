@@ -26,6 +26,76 @@ import { SimpleCommentBox } from "@/components/tickets/simple-comment-box";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
 
+/**
+ * Pure decision logic (exported so it's the SAME function both the
+ * component below and scripts/test-new-ticket-department-scoped-link-permission.ts
+ * exercise — never a reimplementation for testing purposes) for whether
+ * ticket.linkProjectActivity is available for the CURRENTLY SELECTED
+ * destination department: a global grant covers every selection; a
+ * department-scoped grant only covers its own department(s); with no
+ * department selected yet, linking is never presented as authorized for an
+ * arbitrary/unknown destination. See CreateTicketFormProps.hasGlobalLinkPermission's
+ * own doc comment for why this can't be a single server-resolved boolean.
+ */
+export function computeCanLinkProjectActivityHere(params: {
+  selectedDepartmentId: string | undefined;
+  hasGlobalLinkPermission: boolean;
+  linkPermissionDepartmentIds: string[];
+}): boolean {
+  return !!params.selectedDepartmentId && (params.hasGlobalLinkPermission || params.linkPermissionDepartmentIds.includes(params.selectedDepartmentId));
+}
+
+/**
+ * Pure, minimal client-side compatibility check: is an entity whose OWN
+ * department is `entityDepartmentId` still usable once the ticket's
+ * destination department is `selectedDepartmentId`? Mirrors, in the
+ * smallest form appropriate for DRAFT (not-yet-submitted) client state,
+ * the same department-compatibility leniency validateTicketProjectActivityLink
+ * (lib/services/department-scope-service.ts) enforces server-side — a
+ * null/legacy departmentId is compatible with any destination — WITHOUT
+ * reimplementing that function's full rule (Project<->Activity pair
+ * consistency, existence, etc.), which stays server-side-only and
+ * authoritative. This only ever decides whether the CLIENT proactively
+ * clears a draft; it is never used to accept/reject an actual submission.
+ */
+export function isDraftEntityCompatibleWithDepartment(
+  entityDepartmentId: string | null | undefined,
+  selectedDepartmentId: string | undefined
+): boolean {
+  if (!entityDepartmentId) return true;
+  return entityDepartmentId === selectedDepartmentId;
+}
+
+/**
+ * Pure decision logic for whether a staged Project/Activity draft link must
+ * be cleared because the just-selected department no longer supports it —
+ * deterministic, and exported for the same direct-testing reason as
+ * computeCanLinkProjectActivityHere above. Two independent reasons, either
+ * one sufficient:
+ *   1. Linking itself is no longer authorized for the selected department
+ *      at all (canLinkProjectActivityHere is false).
+ *   2. Linking IS still authorized (e.g. a global grant covers every
+ *      department), but the SPECIFIC staged Project/Activity belongs to a
+ *      different department than the one now selected — see
+ *      isDraftEntityCompatibleWithDepartment above.
+ * Only ever true when there's actually something to clear (never fires a
+ * needless clear/toast on a department that already had no draft link).
+ */
+export function shouldClearDraftProjectActivityLink(params: {
+  canLinkProjectActivityHere: boolean;
+  hasDraftProjectId: boolean;
+  hasDraftActivityId: boolean;
+  draftProjectDepartmentId?: string | null;
+  draftActivityDepartmentId?: string | null;
+  selectedDepartmentId: string | undefined;
+}): boolean {
+  if (!params.hasDraftProjectId && !params.hasDraftActivityId) return false;
+  if (!params.canLinkProjectActivityHere) return true;
+  if (params.hasDraftProjectId && !isDraftEntityCompatibleWithDepartment(params.draftProjectDepartmentId, params.selectedDepartmentId)) return true;
+  if (params.hasDraftActivityId && !isDraftEntityCompatibleWithDepartment(params.draftActivityDepartmentId, params.selectedDepartmentId)) return true;
+  return false;
+}
+
 // Client-form-only tightening of the shared createTicketSchema: departmentId
 // is required HERE (this form always has a real department to submit —
 // either the sole accessible one, pre-filled via defaultDepartmentId, or an
@@ -53,11 +123,15 @@ interface Agent {
 interface TicketFormProject {
   id: string;
   title: string;
+  /** The project's OWN department — used only to decide whether a staged draft must be cleared on a department change (isDraftEntityCompatibleWithDepartment above); never re-sent to the server as an override. */
+  departmentId: string | null;
 }
 interface TicketFormActivity {
   id: string;
   title: string;
   projectId: string | null;
+  /** Same as TicketFormProject.departmentId above. */
+  departmentId: string | null;
 }
 
 interface CreateTicketFormProps {
@@ -68,8 +142,24 @@ interface CreateTicketFormProps {
   /** Active workspace's department — pre-selected as the default destination, but always changeable via the always-rendered Department field above. */
   defaultDepartmentId?: string | null;
   itAgents: Agent[];
-  /** Same hard rule as the Ticket detail page and the generic PATCH route — only System Admin may link a ticket to a Project/Activity (and therefore may inline-create one from here). */
-  canLinkProjectActivity: boolean;
+  /**
+   * Same underlying permission (ticket.linkProjectActivity) as the Ticket
+   * detail page and the generic PATCH route, resolved the same
+   * department-aware way (hasEffectiveEntityPermission's own two halves,
+   * computed server-side in app/(main)/tickets/new/page.tsx) — but THIS
+   * form has no fixed ticket yet, so the department to check against is
+   * whichever one is currently SELECTED, not a single server-resolved
+   * value. `hasGlobalLinkPermission` (true = every destination is
+   * eligible) and `linkPermissionDepartmentIds` (department-scoped grants)
+   * are combined against `selectedDepartmentId` below into the actual
+   * per-render decision — see `canLinkProjectActivityHere`. Never trust the
+   * active workspace for this: POST /api/tickets is still the real
+   * authority, re-deriving and re-checking against the actual resolved
+   * destination department server-side regardless of what this evaluates to.
+   */
+  hasGlobalLinkPermission: boolean;
+  /** Destination departments (a subset of `departments` above) where the user's own DepartmentMembership/custom Department role grants ticket.linkProjectActivity — see hasGlobalLinkPermission's own doc comment. */
+  linkPermissionDepartmentIds: string[];
   /** Departments (within `departments`) the current user also holds project.create in — bounds which departments show "+ New Project", reusing the same getAccessibleDepartmentSummaries the rest of the app uses for this permission, never a second/parallel check. */
   projectCreateDepartmentIds: string[];
   /** Same, for activity.create. */
@@ -82,7 +172,8 @@ export function CreateTicketForm({
   departments,
   defaultDepartmentId,
   itAgents,
-  canLinkProjectActivity,
+  hasGlobalLinkPermission,
+  linkPermissionDepartmentIds,
   projectCreateDepartmentIds,
   activityCreateDepartmentIds,
 }: CreateTicketFormProps) {
@@ -108,6 +199,14 @@ export function CreateTicketForm({
   });
 
   const selectedDepartmentId = watch("departmentId") ?? defaultDepartmentId ?? undefined;
+  // The actual per-render linking decision — a global grant covers every
+  // selection, a department-scoped one only covers its own department(s);
+  // with NO department selected yet, linking is never presented as
+  // authorized for an arbitrary/unknown destination (see
+  // hasGlobalLinkPermission's own doc comment above for why this can't
+  // just be a single server-resolved boolean the way the Ticket detail
+  // page's canLinkProjectActivity is).
+  const canLinkProjectActivityHere = computeCanLinkProjectActivityHere({ selectedDepartmentId, hasGlobalLinkPermission, linkPermissionDepartmentIds });
   const [subDepartments, setSubDepartments] = useState<Array<{ id: string; name: string }>>([]);
 
   // Sub-departments are scoped to whichever department is currently
@@ -152,7 +251,40 @@ export function CreateTicketForm({
   // selected) id as "not in the list" and wipe the selection.
   const prevDepartmentIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (!canLinkProjectActivity || !selectedDepartmentId) {
+    // Deterministic draft-link clearing — runs IMMEDIATELY on every
+    // department change, synchronously, using only already-known local
+    // state (never waits on the network fetch below, which is the
+    // "candidate list" concern, not the authorization/compatibility
+    // concern). Two independent reasons a staged Project/Activity can no
+    // longer stand: (1) linking itself isn't authorized for the newly
+    // selected department at all, or (2) linking IS still authorized (e.g.
+    // a global grant covers every department) but the SPECIFIC staged
+    // entity belongs to a different department than the one now selected —
+    // see shouldClearDraftProjectActivityLink's own doc comment. Without
+    // this immediate check, a global-grant user switching departments with
+    // a staged cross-department entity relied entirely on the async fetch
+    // below resolving before any submit — a real race window a fast submit
+    // could beat, silently posting a stale projectId/activityId. Never
+    // moves or alters the Project/Activity itself — only the ticket's DRAFT
+    // selection, which doesn't exist as a real link until submission.
+    const currentProjectId = watch("projectId");
+    const currentActivityId = watch("activityId");
+    const shouldClear = shouldClearDraftProjectActivityLink({
+      canLinkProjectActivityHere,
+      hasDraftProjectId: !!currentProjectId,
+      hasDraftActivityId: !!currentActivityId,
+      draftProjectDepartmentId: currentProjectId ? projects.find((p) => p.id === currentProjectId)?.departmentId ?? null : null,
+      draftActivityDepartmentId: currentActivityId ? activities.find((a) => a.id === currentActivityId)?.departmentId ?? null : null,
+      selectedDepartmentId,
+    });
+    if (shouldClear) {
+      setValue("projectId", undefined);
+      setValue("activityId", undefined);
+      setSelectedProjectId("");
+      toast.info("Linked project/activity was cleared — it isn't available for the selected department.");
+    }
+
+    if (!canLinkProjectActivityHere || !selectedDepartmentId) {
       prevDepartmentIdRef.current = selectedDepartmentId;
       setProjects([]);
       setActivities([]);
@@ -167,10 +299,10 @@ export function CreateTicketForm({
       .then(([projectsRes, activitiesRes]) => {
         if (cancelled) return;
         const fetchedProjects: TicketFormProject[] = Array.isArray(projectsRes?.projects)
-          ? projectsRes.projects.map((p: any) => ({ id: p.id, title: p.title }))
+          ? projectsRes.projects.map((p: any) => ({ id: p.id, title: p.title, departmentId: p.departmentId ?? null }))
           : [];
         const fetchedActivities: TicketFormActivity[] = Array.isArray(activitiesRes)
-          ? activitiesRes.filter((a: any) => !a.isCompleted).map((a: any) => ({ id: a.id, title: a.title, projectId: a.projectId ?? null }))
+          ? activitiesRes.filter((a: any) => !a.isCompleted).map((a: any) => ({ id: a.id, title: a.title, projectId: a.projectId ?? null, departmentId: a.departmentId ?? null }))
           : [];
         setProjects((prev) => [...fetchedProjects, ...prev.filter((p) => !fetchedProjects.some((fp) => fp.id === p.id))]);
         setActivities((prev) => [...fetchedActivities, ...prev.filter((a) => !fetchedActivities.some((fa) => fa.id === a.id))]);
@@ -200,10 +332,10 @@ export function CreateTicketForm({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDepartmentId, canLinkProjectActivity]);
+  }, [selectedDepartmentId, canLinkProjectActivityHere]);
 
-  const canCreateProjectHere = canLinkProjectActivity && !!selectedDepartmentId && projectCreateDepartmentIds.includes(selectedDepartmentId);
-  const canCreateActivityHere = canLinkProjectActivity && !!selectedDepartmentId && activityCreateDepartmentIds.includes(selectedDepartmentId);
+  const canCreateProjectHere = canLinkProjectActivityHere && !!selectedDepartmentId && projectCreateDepartmentIds.includes(selectedDepartmentId);
+  const canCreateActivityHere = canLinkProjectActivityHere && !!selectedDepartmentId && activityCreateDepartmentIds.includes(selectedDepartmentId);
 
   const selectProject = (projectId: string | null) => {
     setValue("projectId", projectId ?? undefined);
@@ -260,11 +392,17 @@ export function CreateTicketForm({
   };
 
   const handleActivityCreated = (activity: { id: string; title: string; projectId: string | null; project: { id: string; title: string } | null }) => {
-    setActivities((prev) => (prev.some((a) => a.id === activity.id) ? prev : [...prev, { id: activity.id, title: activity.title, projectId: activity.projectId }]));
+    // Neither the Activity Create API response nor its Project reference
+    // carries departmentId directly — but ActivityCreateDialog below is
+    // only ever rendered with departmentId={selectedDepartmentId}, so the
+    // just-created activity (and its project, if any — a project an
+    // activity is created under must already share its department) is
+    // guaranteed to belong to whichever department is currently selected.
+    setActivities((prev) => (prev.some((a) => a.id === activity.id) ? prev : [...prev, { id: activity.id, title: activity.title, projectId: activity.projectId, departmentId: selectedDepartmentId ?? null }]));
     if (activity.project) {
-      setProjects((prev) => (prev.some((p) => p.id === activity.project!.id) ? prev : [...prev, activity.project!]));
+      setProjects((prev) => (prev.some((p) => p.id === activity.project!.id) ? prev : [...prev, { ...activity.project!, departmentId: selectedDepartmentId ?? null }]));
     }
-    setPendingActivitySelection({ id: activity.id, title: activity.title, projectId: activity.projectId });
+    setPendingActivitySelection({ id: activity.id, title: activity.title, projectId: activity.projectId, departmentId: selectedDepartmentId ?? null });
   };
 
   // Category/Priority are fetched once (server-side) scoped to the union of
@@ -569,7 +707,7 @@ export function CreateTicketForm({
                 )}
               </div>
 
-              {canLinkProjectActivity && (
+              {canLinkProjectActivityHere && (
                 <>
                   <div className="space-y-1.5">
                     <Label>Project</Label>

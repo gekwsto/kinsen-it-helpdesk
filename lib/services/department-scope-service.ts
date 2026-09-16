@@ -756,6 +756,40 @@ export async function canActOnEntity(
 }
 
 /**
+ * Entity-scoped counterpart to hasEffectiveModulePermission above: the
+ * union of (a) the user's GLOBAL role/custom-role permission (hasPermission
+ * — this is what already covers Role.ADMIN, and any built-in Role or
+ * global CustomRole a permission has been granted to directly) and (b)
+ * canActOnEntity's own department-scoped resolution (its ADMIN/DIRECTOR-
+ * style canViewAllDepartments bypass, or the caller's actual active
+ * DepartmentMembership/custom Department role) for ONE SPECIFIC entity's
+ * department.
+ *
+ * Deliberately NOT hasEffectiveModulePermission (which unions across EVERY
+ * department the user happens to have the permission in) — that would let a
+ * grant scoped to Department A leak into authorizing an action on a
+ * Department B entity, which is exactly the cross-department escalation
+ * this helper must prevent. `entityDepartmentId` must always come from the
+ * entity itself (e.g. `ticket.departmentId`), never a client-supplied value
+ * or the caller's active workspace — canActOnEntity already enforces that
+ * discipline; this just adds the missing global-permission side of the
+ * union on top of it, without re-implementing either resolver.
+ */
+export async function hasEffectiveEntityPermission(
+  userId: string,
+  role: Role,
+  customRoleId: string | null | undefined,
+  entityDepartmentId: string | null,
+  permissionKey: string
+): Promise<boolean> {
+  const [global, departmental] = await Promise.all([
+    hasPermission(role, permissionKey, customRoleId),
+    canActOnEntity(userId, role, entityDepartmentId, permissionKey),
+  ]);
+  return global || departmental;
+}
+
+/**
  * Resolves the single department a new Ticket/Project/Activity should be
  * created in. An explicit requestedDepartmentId is validated against real
  * membership + the given permission key (ADMIN bypasses). Omitted -> falls

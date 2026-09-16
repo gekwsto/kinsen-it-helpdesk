@@ -26,11 +26,21 @@
  *  9. The link gate is `ticket.linkProjectActivity` — a real, independently
  *     -grantable permission (see prisma/seed.ts; ADMIN holds it by default,
  *     previously a hardcoded role===ADMIN check with no way to grant it to
- *     any other role) — consulted via the exact same hasPermission()
- *     resolver both POST /api/tickets and PATCH /api/tickets/[id] use, not
- *     a re-implemented comparison. Includes a positive check that a custom
- *     role explicitly granted this permission is genuinely allowed, and
- *     that a plain USER/IT_AGENT without it is still rejected.
+ *     any other role). Consulted via hasEffectiveEntityPermission (department-
+ *     scope-service.ts) — the union of a GLOBAL grant (hasPermission, the
+ *     ORIGINAL and still-supported path: ADMIN's own bypass, or a global
+ *     CustomRole) and a DEPARTMENT-scoped grant (canActOnEntity: an active
+ *     DepartmentMembership/custom Department role for the TICKET'S OWN
+ *     department specifically) — both POST /api/tickets and
+ *     PATCH /api/tickets/[id] use this same composed resolver, not a
+ *     re-implemented comparison and never a plain global-only
+ *     hasPermission() call (that was the bug: a department-role-only grant
+ *     was silently ignored). Covers: a plain USER/IT_AGENT without any
+ *     grant is rejected; a custom role explicitly granted the permission
+ *     GLOBALLY is allowed; a Department A custom role granting it is
+ *     allowed for a Department A ticket; the SAME Department A grant does
+ *     NOT carry over to a Department B ticket; an inactive/removed
+ *     membership grants nothing.
  * 10. Department-change cascade: a project/activity scoped to the OLD
  *     department are cleared when the ticket moves to an unrelated
  *     department (mirrors the exact "stillValid" predicate in
@@ -40,8 +50,8 @@
  * Requires a reachable DATABASE_URL — reports clearly and exits if unreachable.
  */
 import { prisma } from "@/lib/prisma";
-import { AuthProvider, ProjectStatus, ActivityStatus, ActivityPriority, Role, RoleScope } from "@prisma/client";
-import { validateTicketProjectActivityLink } from "@/lib/services/department-scope-service";
+import { AuthProvider, ProjectStatus, ActivityStatus, ActivityPriority, Role, RoleScope, DepartmentRole, MembershipSource } from "@prisma/client";
+import { validateTicketProjectActivityLink, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { hasPermission } from "@/lib/permissions";
 
 let passed = 0;
@@ -57,10 +67,23 @@ function check(label: string, condition: boolean) {
   }
 }
 
-/** Mirrors the exact guard in app/api/tickets/route.ts POST and app/api/tickets/[id]/route.ts PATCH — ticket.linkProjectActivity via the real hasPermission() resolver, not a re-implemented role comparison. */
+/** Exercises ONLY the GLOBAL half of the real gate directly (hasPermission — no entity/department in play) — the ADMIN-bypass / global-CustomRole path that predates department-scoped grants and must keep working unchanged. */
 async function isLinkChangeAllowed(role: Role, customRoleId: string | null, projectIdGiven: boolean, activityIdGiven: boolean): Promise<boolean> {
   if (!projectIdGiven && !activityIdGiven) return true;
   return hasPermission(role, "ticket.linkProjectActivity", customRoleId);
+}
+
+/** Mirrors the exact guard POST /api/tickets and PATCH /api/tickets/[id] now both use — hasEffectiveEntityPermission (the union of the global check above and the entity's OWN department membership/custom-role grant), not a re-implemented comparison. */
+async function isLinkChangeAllowedForEntity(
+  userId: string,
+  role: Role,
+  customRoleId: string | null,
+  entityDepartmentId: string | null,
+  projectIdGiven: boolean,
+  activityIdGiven: boolean
+): Promise<boolean> {
+  if (!projectIdGiven && !activityIdGiven) return true;
+  return hasEffectiveEntityPermission(userId, role, customRoleId, entityDepartmentId, "ticket.linkProjectActivity");
 }
 
 /** Mirrors the exact "stillValid" predicate in app/api/tickets/[id]/department/route.ts. */
@@ -118,6 +141,81 @@ async function main() {
     deptB = await prisma.department.create({ data: { name: `Test Link Dept B ${RUN_ID}`, slug: `test-link-dept-b-${RUN_ID}` } });
     deptC = await prisma.department.create({ data: { name: `Test Link Dept C ${RUN_ID}`, slug: `test-link-dept-c-${RUN_ID}` } });
     owner = await prisma.user.create({ data: { email: `test-link-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.CREDENTIALS, role: Role.USER } });
+
+    // ── DEPARTMENT-SCOPED grant — the actual bug fix ────────────────────────
+    console.log("\nDepartment-scoped ticket.linkProjectActivity grant (the actual RBAC bug fix)\n");
+    {
+      const deptRole = await prisma.customRole.create({
+        data: { key: `TEST_LINK_DEPT_ADMIN_${RUN_ID}`, name: `Department Admin ${RUN_ID}`, isBuiltIn: false, scope: RoleScope.DEPARTMENT, isActive: true },
+      });
+      customRoleIds.push(deptRole.id);
+      customRoleKeys.push(deptRole.key);
+      await prisma.rolePermission.create({ data: { roleKey: deptRole.key, permissionId: linkPerm.id } });
+
+      const simpleUser = await prisma.user.create({
+        data: { email: `test-link-simpleuser-${RUN_ID}@kinsen.gr`, authProvider: AuthProvider.CREDENTIALS, role: Role.USER },
+      });
+      const membershipA = await prisma.departmentMembership.create({
+        data: { userId: simpleUser.id, departmentId: deptA.id, role: DepartmentRole.DEPARTMENT_ADMIN, customRoleId: deptRole.id, source: MembershipSource.MANUAL, isActive: true },
+      });
+
+      check(
+        "Global Simple User role (no global grant) alone -> rejected (isolates that the department grant, not the global role, is what allows it below)",
+        !(await isLinkChangeAllowed(Role.USER, null, true, false))
+      );
+      check(
+        "Same user, WITH their active Department A custom role grant, for a Department A entity -> allowed",
+        await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptA.id, true, false)
+      );
+      check(
+        "The SAME Department A grant does NOT carry over to a Department B entity -> rejected",
+        !(await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptB.id, true, false))
+      );
+      check(
+        "...nor a null/legacy-department entity when no default legacy department resolves it to deptA",
+        // deptC has no relationship to this membership either — same negative shape as deptB, using a third department to rule out any accidental id coincidence.
+        !(await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptC.id, true, false))
+      );
+
+      // Deactivating the membership must remove the grant — an inactive
+      // DepartmentMembership is not an effective one.
+      await prisma.departmentMembership.update({ where: { id: membershipA.id }, data: { isActive: false } });
+      check(
+        "An INACTIVE Department A membership no longer grants the permission",
+        !(await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptA.id, true, false))
+      );
+      await prisma.departmentMembership.update({ where: { id: membershipA.id }, data: { isActive: true } });
+      check(
+        "Reactivating the membership restores the grant",
+        await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptA.id, true, false)
+      );
+
+      // Deactivating the CUSTOM ROLE ITSELF (not the membership) must also
+      // remove the grant — hasDepartmentPermission's own documented fallback
+      // rule (an inactive custom role falls through to the membership's
+      // built-in DepartmentRole enum, which for DEPARTMENT_ADMIN does NOT
+      // include ticket.linkProjectActivity by default — see prisma/seed.ts).
+      await prisma.customRole.update({ where: { id: deptRole.id }, data: { isActive: false } });
+      check(
+        "An INACTIVE Department custom role no longer grants the permission (falls back to the built-in DepartmentRole, which lacks it)",
+        !(await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptA.id, true, false))
+      );
+      await prisma.customRole.update({ where: { id: deptRole.id }, data: { isActive: true } });
+
+      // A crafted/forged departmentId cannot be used to smuggle Department
+      // A's grant onto a Department B entity — hasEffectiveEntityPermission
+      // always resolves against the DEPARTMENT ID PASSED IN (which callers
+      // must derive from the real entity, never trust from the client), so
+      // this is really the same deptB check above restated as the explicit
+      // "crafted payload" scenario the task calls out.
+      check(
+        "A crafted departmentId (Department B) cannot borrow Department A's grant",
+        !(await isLinkChangeAllowedForEntity(simpleUser.id, Role.USER, null, deptB.id, true, false))
+      );
+
+      await prisma.departmentMembership.deleteMany({ where: { userId: simpleUser.id } });
+      await prisma.user.delete({ where: { id: simpleUser.id } });
+    }
 
     const projectA = await prisma.project.create({ data: { title: `Test Link Project A ${RUN_ID}`, status: ProjectStatus.IN_PROGRESS, departmentId: deptA.id, ownerId: owner.id } });
     projectIds.push(projectA.id);

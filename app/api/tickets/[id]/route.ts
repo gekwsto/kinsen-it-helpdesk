@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, requireAdmin, hasPermission } from "@/lib/permissions";
-import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink, validateTicketConfigOwnership } from "@/lib/services/department-scope-service";
+import { canActOnEntity, canViewTicket, validateTicketProjectActivityLink, validateTicketConfigOwnership, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { updateTicketSchema } from "@/lib/validations";
@@ -112,17 +112,26 @@ export async function PATCH(
     const data = updateTicketSchema.parse(body);
 
     // Linking a ticket to a Project/Activity is its own, independently-
-    // grantable permission (ticket.linkProjectActivity) — a plain global
-    // check via hasPermission, matching this route's own existing treatment
-    // of ticket.reply/ticket.internalNote/ticket.share.* above, never
-    // department-scoped and never a raw role===ADMIN comparison. ADMIN
-    // still has it by default (see prisma/seed.ts), so this is
-    // behavior-preserving until an administrator grants it elsewhere via
-    // /admin/roles.
+    // grantable permission (ticket.linkProjectActivity) — DEPARTMENT-SCOPED
+    // to THIS ticket's own department (hasEffectiveEntityPermission: the
+    // union of a global grant and an active DepartmentMembership/custom
+    // Department role grant FOR ticket.departmentId specifically), never a
+    // raw role===ADMIN comparison and never a plain global-only
+    // hasPermission() check (that wrongly rejected a user whose ONLY grant
+    // came from a department custom role scoped to this exact ticket's
+    // department). ADMIN still has it unconditionally (hasPermission's own
+    // Role.ADMIN bypass), so this is behavior-preserving for every existing
+    // global grant, on top of the newly-honored department-scoped one.
     const projectChanging = data.projectId !== undefined && data.projectId !== ticket.projectId;
     const activityChanging = data.activityId !== undefined && data.activityId !== ticket.activityId;
     if (projectChanging || activityChanging) {
-      const canLinkProjectActivity = await hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId);
+      const canLinkProjectActivity = await hasEffectiveEntityPermission(
+        session.user.id,
+        session.user.role,
+        session.user.customRoleId,
+        ticket.departmentId,
+        "ticket.linkProjectActivity"
+      );
       if (!canLinkProjectActivity) {
         return NextResponse.json(
           { error: "You don't have permission to link tickets to projects or activities.", code: "missing_permission" },

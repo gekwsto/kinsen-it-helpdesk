@@ -18,9 +18,12 @@
  *   - Eligibility ("can user X be mentioned in a note about entity Y") is
  *     always "can user X currently VIEW entity Y", answered by the exact
  *     canonical resolvers every other read path in this app already uses —
- *     canViewTicket for tickets, canActOnEntity(..., "project.view"/
- *     "activity.view") for projects/activities. Never approximated by a raw
- *     role-name check.
+ *     canViewTicket for tickets, hasEffectiveEntityPermission(...,
+ *     "project.view"/"activity.view") for projects/activities (the union of
+ *     a global role/custom-role grant and an active DepartmentMembership/
+ *     custom Department role grant FOR THAT ENTITY'S OWN department — never
+ *     a bare canActOnEntity call, which alone silently ignores a candidate's
+ *     global grant). Never approximated by a raw role-name check.
  *   - Two layers, both real, neither trusted alone:
  *       1. searchMentionCandidates — UX convenience for the picker. Uses a
  *          broad, cheap SQL prefilter (same "never misses anyone" idiom
@@ -42,7 +45,7 @@
  */
 import { prisma } from "@/lib/prisma";
 import { Role, DepartmentRole } from "@prisma/client";
-import { canActOnEntity, canViewTicket } from "@/lib/services/department-scope-service";
+import { canViewTicket, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { DEPARTMENT_ROLE_OPTIONS } from "@/lib/services/department-role-translation";
 
@@ -143,7 +146,7 @@ async function loadActivityDepartmentId(activityId: string): Promise<string | nu
   return activity?.departmentId;
 }
 
-/** Broad, cheap candidate pool for a project/activity — a superset of who canActOnEntity(..., viewKey) could possibly say yes to. */
+/** Broad, cheap candidate pool for a project/activity — a superset of who hasEffectiveEntityPermission(..., viewKey) could possibly say yes to (built-in/global-custom-role grants AND department-scoped grants for this entity's own department alike). */
 async function buildProjectOrActivityOrConditions(viewKey: string, departmentId: string | null): Promise<Record<string, unknown>[]> {
   const { departmentRoles, globalRoles, allRoleKeys } = await getRoleKeysWithPermission(viewKey);
   const effectiveDeptId = departmentId ?? (await getDefaultLegacyDepartmentId());
@@ -187,8 +190,26 @@ async function candidateCanView(entityType: MentionEntityType, candidate: Candid
   if (entityType === "ticket") {
     return canViewTicket(candidate.id, candidate.role, ctx.ticket!);
   }
+  // hasEffectiveEntityPermission, NOT bare canActOnEntity: canActOnEntity
+  // alone only resolves canViewAllDepartments(role) (ADMIN/DIRECTOR) or an
+  // active DepartmentMembership in the entity's own department — it never
+  // consults the candidate's GLOBAL role/custom-role permission at all
+  // (see hasEffectiveEntityPermission's own doc comment in
+  // department-scope-service.ts). A candidate whose ONLY project.view/
+  // activity.view grant comes from a built-in global Role or a global
+  // CustomRole — no DepartmentMembership in this entity's department —
+  // was therefore wrongly excluded from every Project/Activity mention
+  // picker and from resolveEligibleMentionUsers, even though the exact
+  // same candidate is correctly treated as an eligible VIEWER everywhere
+  // else in the app (GET /api/projects/[id], GET /api/activities/[id],
+  // etc., which already use this same composed resolver). Deliberately
+  // NOT hasEffectiveModulePermission — that unions across ANY department
+  // the candidate happens to hold the permission in, which would leak a
+  // Department A grant into eligibility for a Department B entity; this
+  // must stay scoped to THIS entity's own department, exactly like the
+  // ticket.linkProjectActivity fix.
   const permKey = entityType === "project" ? "project.view" : "activity.view";
-  return canActOnEntity(candidate.id, candidate.role, ctx.departmentId ?? null, permKey);
+  return hasEffectiveEntityPermission(candidate.id, candidate.role, candidate.customRoleId, ctx.departmentId ?? null, permKey);
 }
 
 export interface SearchMentionCandidatesParams {

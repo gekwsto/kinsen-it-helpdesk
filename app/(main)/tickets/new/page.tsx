@@ -42,10 +42,34 @@ export default async function NewTicketPage() {
 
   // Same permission as the detail page and both backend routes (see
   // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) —
-  // ticket.linkProjectActivity, a plain global hasPermission check (used to
-  // be a hardcoded role===ADMIN check). Only a UI hint; the create route
-  // independently re-checks it server-side.
-  const canLinkProjectActivity = await hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId);
+  // ticket.linkProjectActivity. No Ticket exists yet at this point, and the
+  // destination department is picked IN the form (client-side, changeable
+  // to any of destinationDepartments below) — so, unlike the ticket detail
+  // page (one fixed ticket.departmentId), the correct authorization here is
+  // DEPARTMENT-AWARE per the currently-selected destination, not a single
+  // "usable somewhere" boolean (hasEffectiveModulePermission would wrongly
+  // show the link UI for a department the user has no grant in, just
+  // because they have one in some OTHER department — backend-safe since
+  // POST re-checks the real resolved department, but a misleading UI).
+  // Two pieces are resolved here, both reused from the existing canonical
+  // permission architecture (no new endpoint, no role-name check), and the
+  // actual per-selection decision is made CLIENT-SIDE in ticket-form.tsx
+  // against whichever department is currently selected:
+  //   - hasGlobalLinkPermission: the plain global grant (hasPermission) —
+  //     if true, linking is available for EVERY valid destination.
+  //   - linkPermissionDepartmentIds: exactly which destination departments
+  //     the user's OWN DepartmentMembership/custom Department role grants
+  //     it in (getAccessibleDepartmentSummaries — the same department-
+  //     permission primitive canActOnEntity itself resolves through, and
+  //     the same one projectCreateDepartmentIds/activityCreateDepartmentIds
+  //     below already use for the analogous project.create/activity.create
+  //     per-department decision).
+  const [hasGlobalLinkPermission, linkPermissionDepartments] = await Promise.all([
+    hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId),
+    getAccessibleDepartmentSummaries(session.user.id, session.user.role, "ticket.linkProjectActivity"),
+  ]);
+  const linkPermissionDepartmentIds = linkPermissionDepartments.map((d) => d.id);
+  const canLinkProjectActivityAnywhere = hasGlobalLinkPermission || linkPermissionDepartmentIds.length > 0;
 
   // Active workspace decides the default department (Phase 2B) — a plain
   // member with exactly one accessible department never sees a picker at
@@ -114,11 +138,13 @@ export default async function NewTicketPage() {
         select: { id: true, name: true, image: true },
         take: 6,
       }),
-      // Only a user with ticket.linkProjectActivity can ever link a ticket
-      // to a Project/Activity (see canLinkProjectActivity above) — no need
-      // to resolve these for anyone else.
-      canLinkProjectActivity ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create") : Promise.resolve([]),
-      canLinkProjectActivity ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.create") : Promise.resolve([]),
+      // Only a user with ticket.linkProjectActivity SOMEWHERE can ever link
+      // a ticket to a Project/Activity at all (see canLinkProjectActivityAnywhere
+      // above) — no need to resolve these for anyone else. The per-selected-
+      // department decision (does THIS grant even cover the department the
+      // user has currently picked) is made client-side.
+      canLinkProjectActivityAnywhere ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create") : Promise.resolve([]),
+      canLinkProjectActivityAnywhere ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.create") : Promise.resolve([]),
     ]);
 
   return (
@@ -151,7 +177,8 @@ export default async function NewTicketPage() {
         departments={destinationDepartments}
         defaultDepartmentId={activeWorkspace.departmentId}
         itAgents={itAgents}
-        canLinkProjectActivity={canLinkProjectActivity}
+        hasGlobalLinkPermission={hasGlobalLinkPermission}
+        linkPermissionDepartmentIds={linkPermissionDepartmentIds}
         projectCreateDepartmentIds={projectCreateDepartments.map((d) => d.id)}
         activityCreateDepartmentIds={activityCreateDepartments.map((d) => d.id)}
       />

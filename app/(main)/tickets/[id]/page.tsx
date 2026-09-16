@@ -9,6 +9,7 @@ import {
   buildStatusWhere,
   buildCancelReasonWhere,
   getAccessibleDepartmentSummaries,
+  hasEffectiveEntityPermission,
 } from "@/lib/services/department-scope-service";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { getAssignableUsersForTicket } from "@/lib/services/assignment-eligibility-service";
@@ -115,19 +116,32 @@ export default async function TicketDetailPage({
 
   // Same permission as Create Ticket and the generic PATCH route (see
   // app/api/tickets/route.ts / app/api/tickets/[id]/route.ts) —
-  // ticket.linkProjectActivity, a plain global hasPermission check (ADMIN
-  // has it by default, but any role can now be granted it via
-  // /admin/roles — this used to be a hardcoded role===ADMIN check). This
-  // is only ever a UI hint; both routes independently re-check the same
-  // permission server-side. Project/Activity OPTIONS themselves are no
-  // longer loaded here — TicketActions fetches them client-side, scoped to
-  // `effectiveDeptId` via the same GET /api/projects / GET /api/activities
-  // the standalone list pages use, never an unbounded "every project/
-  // activity in the system" query (see ticket-actions.tsx). Only the two
-  // booleans below (can the user ALSO create a Project/Activity in this
-  // specific department — reusing canActOnEntity, the same department-
-  // permission primitive used throughout this file) are resolved here.
-  const canLinkProjectActivity = await hasPermission(role, "ticket.linkProjectActivity", customRoleId);
+  // ticket.linkProjectActivity, DEPARTMENT-SCOPED to THIS ticket's own
+  // department (via hasEffectiveEntityPermission — the union of a global
+  // grant and an active DepartmentMembership/custom Department role grant
+  // FOR ticket.departmentId specifically). A plain global hasPermission()
+  // check used to be the only path (and before that, a hardcoded
+  // role===ADMIN check) — that wrongly hid/rejected the link action for a
+  // user whose ONLY grant came from a department-scoped custom role
+  // assigned via their DepartmentMembership in this ticket's own
+  // department, even though the PATCH route independently re-checks the
+  // identical union
+  // server-side. This is only ever a UI hint. Project/Activity OPTIONS
+  // themselves are no longer loaded here — TicketActions fetches them
+  // client-side, scoped to `effectiveDeptId` via the same GET /api/projects
+  // / GET /api/activities the standalone list pages use, never an unbounded
+  // "every project/activity in the system" query (see ticket-actions.tsx).
+  // Only the two booleans below (can the user ALSO create a Project/
+  // Activity in this specific department — reusing canActOnEntity, the
+  // same department-permission primitive used throughout this file) are
+  // resolved here.
+  const canLinkProjectActivity = await hasEffectiveEntityPermission(
+    session.user.id,
+    role,
+    customRoleId,
+    ticket.departmentId,
+    "ticket.linkProjectActivity"
+  );
   const [canCreateProjectInDept, canCreateActivityInDept] = await Promise.all([
     canLinkProjectActivity && effectiveDeptId
       ? canActOnEntity(session.user.id, role, effectiveDeptId, "project.create")

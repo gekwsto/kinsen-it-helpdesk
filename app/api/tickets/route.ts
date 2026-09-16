@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { after } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasPermission } from "@/lib/permissions";
+import { requireAuth } from "@/lib/permissions";
 import {
   buildTicketListWhere,
   resolveTicketDestinationDepartment,
@@ -11,6 +11,7 @@ import {
   validateTicketProjectActivityLink,
   validateTicketConfigOwnership,
   getNavVisibilityFlags,
+  hasEffectiveEntityPermission,
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -150,20 +151,6 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const data = createTicketSchema.parse(body);
 
-    // Linking a ticket to a Project/Activity at creation time is the same
-    // independently-grantable permission as the PATCH route (see
-    // app/api/tickets/[id]/route.ts) — a plain global hasPermission check,
-    // never department-scoped and never a raw role===ADMIN comparison.
-    if (data.projectId || data.activityId) {
-      const canLinkProjectActivity = await hasPermission(session.user.role, "ticket.linkProjectActivity", session.user.customRoleId);
-      if (!canLinkProjectActivity) {
-        return NextResponse.json(
-          { error: "You don't have permission to link tickets to projects or activities.", code: "missing_permission" },
-          { status: 403 }
-        );
-      }
-    }
-
     // A ticket attached to a project must live in that project's department
     // — inherit it if the caller didn't specify one. The actual scope/pair
     // validation (project exists, belongs to this department, activity
@@ -222,6 +209,33 @@ export async function POST(req: NextRequest) {
     }
 
     if (data.projectId || data.activityId) {
+      // Linking a ticket to a Project/Activity at creation time is the same
+      // independently-grantable permission as the PATCH route (see
+      // app/api/tickets/[id]/route.ts) — DEPARTMENT-SCOPED to the ticket's
+      // actual resolved destination department (hasEffectiveEntityPermission:
+      // the union of a global grant and an active DepartmentMembership/
+      // custom Department role grant FOR deptResolution.departmentId
+      // specifically), never a raw role===ADMIN comparison. Checked here,
+      // AFTER deptResolution above — not earlier — because the destination
+      // department (never a client-supplied departmentId taken at face
+      // value; resolveTicketDestinationDepartment already validated it,
+      // inheriting the linked project's own department when relevant) is
+      // the only authoritative department this permission can be evaluated
+      // against.
+      const canLinkProjectActivity = await hasEffectiveEntityPermission(
+        session.user.id,
+        session.user.role,
+        session.user.customRoleId,
+        deptResolution.departmentId,
+        "ticket.linkProjectActivity"
+      );
+      if (!canLinkProjectActivity) {
+        return NextResponse.json(
+          { error: "You don't have permission to link tickets to projects or activities.", code: "missing_permission" },
+          { status: 403 }
+        );
+      }
+
       const linkValidation = await validateTicketProjectActivityLink(
         deptResolution.departmentId,
         data.projectId ?? null,
