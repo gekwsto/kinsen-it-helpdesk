@@ -77,6 +77,36 @@ services:
     networks:
       - kinsen-helpdesk-net
 
+  # Mention Reminder worker — same sidecar pattern as the email poller above.
+  # Triggers /api/internal/mention-reminders/process every 60s over the
+  # internal Docker network. Authenticated with CRON_SECRET from .env (the
+  # endpoint fails closed in production without it). Running more than one
+  # copy is safe: reminders are claimed atomically in the database.
+  kinsen-helpdesk-mention-reminder-worker:
+    image: curlimages/curl:8.11.0
+    container_name: kinsen-helpdesk-mention-reminder-worker
+    restart: unless-stopped
+    depends_on:
+      - kinsen-helpdesk
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          if [ -z "$$CRON_SECRET" ]; then
+            echo "[mention-reminder-worker] CRON_SECRET is not set in .env — skipping this run (the endpoint rejects unauthenticated requests in production)."
+          else
+            curl -fsS -m 55 -X POST "http://kinsen-helpdesk:3000/api/internal/mention-reminders/process" \
+              -H "Authorization: Bearer $$CRON_SECRET" \
+              -o /dev/null -w "[mention-reminder-worker] run finished, HTTP %{http_code}\n" \
+              || echo "[mention-reminder-worker] run failed (network error or non-2xx response)"
+          fi
+          sleep 60
+        done
+    networks:
+      - kinsen-helpdesk-net
+
 volumes:
   kinsen_helpdesk_db_data:
 

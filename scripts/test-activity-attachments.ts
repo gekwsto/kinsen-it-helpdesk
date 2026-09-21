@@ -79,16 +79,16 @@ async function main() {
   const listRoutePath = path.join(process.cwd(), "app/api/activities/[id]/attachments/route.ts");
   const listRouteSrc = await fs.readFile(listRoutePath, "utf8");
   check("A1. List (GET) requires authentication via requireAuth()", /requireAuth\s*\(/.test(listRouteSrc));
-  check("A2. List (GET) checks canActOnEntity(...) with 'activity.view'", /canActOnEntity\([^)]*"activity\.view"/.test(listRouteSrc));
-  check("A3. Upload (POST) checks canActOnEntity(...) with 'activity.edit' (a stricter gate than list)", /canActOnEntity\([^)]*"activity\.edit"/.test(listRouteSrc));
+  check("A2. List (GET) checks hasEffectiveEntityPermission(...) with 'activity.view' (global grant OR the activity's own department grant — no longer a bare canActOnEntity)", /hasEffectiveEntityPermission\([^)]*"activity\.view"/.test(listRouteSrc));
+  check("A3. Upload (POST) checks hasEffectiveEntityPermission(...) with 'activity.edit' (a stricter gate than list)", /hasEffectiveEntityPermission\([^)]*"activity\.edit"/.test(listRouteSrc));
   check("A4. Upload reuses the shared attachment policy (UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename) rather than inventing new constants", /from "@\/lib\/attachment-policy"/.test(listRouteSrc));
   check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("fs.writeFile"));
   check("A6. Upload rejects an oversized file before ever writing to disk", /MAX_ATTACHMENT_SIZE_BYTES/.test(listRouteSrc) && listRouteSrc.indexOf("MAX_ATTACHMENT_SIZE_BYTES") < listRouteSrc.indexOf("fs.writeFile"));
 
   const itemRoutePath = path.join(process.cwd(), "app/api/activities/[id]/attachments/[attachmentId]/route.ts");
   const itemRouteSrc = await fs.readFile(itemRoutePath, "utf8");
-  check("A7. Download (GET) checks canActOnEntity(...) with 'activity.view'", /canActOnEntity\([^)]*"activity\.view"/.test(itemRouteSrc));
-  check("A8. Delete (DELETE) checks canActOnEntity(...) with 'activity.edit' (not activity.view — write, not read)", /export async function DELETE/.test(itemRouteSrc) && /canActOnEntity\([^)]*"activity\.edit"/.test(itemRouteSrc.slice(itemRouteSrc.indexOf("export async function DELETE"))));
+  check("A7. Download (GET) checks hasEffectiveEntityPermission(...) with 'activity.view' (same union as A2)", /hasEffectiveEntityPermission\([^)]*"activity\.view"/.test(itemRouteSrc));
+  check("A8. Delete (DELETE) checks hasEffectiveEntityPermission(...) with 'activity.edit' (not activity.view — write, not read)", /export async function DELETE/.test(itemRouteSrc) && /hasEffectiveEntityPermission\([^)]*"activity\.edit"/.test(itemRouteSrc.slice(itemRouteSrc.indexOf("export async function DELETE"))));
   check("A9. Download applies the SAME path-traversal guards as the Ticket attachment download route (isSafeStoredFilename + resolvesInsideDir)", /isSafeStoredFilename/.test(itemRouteSrc) && /resolvesInsideDir/.test(itemRouteSrc));
   check("A10. Download validates the attachment row belongs to THIS activityId before serving (cross-activity isolation)", /attachment\.activityId !== activityId/.test(itemRouteSrc));
   check("A11. Delete validates the attachment row belongs to THIS activityId too", /attachment\.activityId !== activityId/.test(itemRouteSrc.slice(itemRouteSrc.indexOf("export async function DELETE"))));

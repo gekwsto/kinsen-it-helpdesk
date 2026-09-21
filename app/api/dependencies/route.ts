@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { isAdmin } from "@/lib/permissions";
-import { buildActivityListWhere, canActOnEntity } from "@/lib/services/department-scope-service";
+import { buildActivityListWhere, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { createDependencySchema } from "@/lib/validations";
 
 // GET /api/dependencies?activityId=xxx
@@ -20,7 +20,10 @@ export async function GET(req: NextRequest) {
       select: { departmentId: true },
     });
     if (!activity) return NextResponse.json({ error: "Activity not found" }, { status: 404 });
-    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    // hasEffectiveEntityPermission (global grant OR this entity's own department
+    // grant) — bare canActOnEntity ignored a global role/custom-role activity.view.
+    // Department is the real row's, never the workspace or the client.
+    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.view");
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     where = { OR: [{ predecessorId: activityId }, { successorId: activityId }] };
   } else {

@@ -25,6 +25,7 @@ import { ActivityQuickStatus, type ActivityStatusUpdate } from "@/components/act
 import type { QuickStatusOption } from "@/components/status/quick-status-select";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { EntityNotes } from "@/components/notes/entity-notes";
+import { EntityRelatedLinks } from "@/components/related-links/entity-related-links";
 import type { Note } from "@/components/notes/types";
 import { ActivityAttachments } from "@/components/activities/activity-attachments";
 
@@ -614,6 +615,8 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
         entityType="activity"
         entityId={id}
       />
+
+      <EntityRelatedLinks entityType="activity" entityId={id} />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { getAccessibleDepartmentSummaries, canActOnEntity, hasEffectiveModulePermission } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, hasEffectiveEntityPermission, hasEffectiveModulePermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getResourcePlanningData } from "@/lib/services/resource-planning-service";
 import { DEPARTMENT_ROLE_LABELS, GLOBAL_ROLE_LABELS } from "@/lib/services/department-role-translation";
@@ -111,10 +111,10 @@ export default async function ResourcePlanningPage({
     ),
     prisma.project.findMany({ where: { departmentId }, select: { id: true, title: true }, orderBy: { title: "asc" } }),
     // resourcePlanning.view never implies edit — this is the same
-    // canActOnEntity(..., "activity.edit") check PATCH /api/activities/[id]
+    // hasEffectiveEntityPermission(..., "activity.edit") check PATCH /api/activities/[id]
     // itself re-validates, computed once for the single resolved department
     // this page always operates on.
-    canActOnEntity(session.user.id, session.user.role, departmentId, "activity.edit"),
+    hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, departmentId, "activity.edit"),
     // Same scoped priority source (ActivityPriorityConfig) Project Gantt's
     // own Priority filter reads (lib/priority-config.ts) — no separate
     // hardcoded canonical-order constant here anymore.

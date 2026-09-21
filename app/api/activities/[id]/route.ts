@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasDepartmentPermission } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { canActOnEntity, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -31,7 +31,10 @@ export async function GET(
 
     if (!activity) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    // hasEffectiveEntityPermission (global grant OR this entity's own department
+    // grant) — bare canActOnEntity ignored a global role/custom-role activity.view.
+    // Department is the real row's, never the workspace or the client.
+    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.view");
     if (!canView) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
@@ -59,17 +62,17 @@ export async function GET(
     // independently re-check activity.edit and are the actual authority;
     // this is only ever a UI hint, shared by both controls since they need
     // the exact same permission.
-    const canEditActivity = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.edit");
+    const canEditActivity = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.edit");
 
     // Lets the Activity detail client know whether to render the Delete
     // control without a second round-trip — DELETE /api/activities/[id]
     // independently re-checks activity.delete and is the actual authority;
-    // this is only ever a UI hint. Deliberately its OWN canActOnEntity call
+    // this is only ever a UI hint. Deliberately its OWN hasEffectiveEntityPermission call
     // (never derived from canEditActivity above): activity.delete is a
     // separate, independently-grantable permission (see prisma/seed.ts —
     // DEPARTMENT_ADMIN has both, but they are not implied by each other),
     // so edit access must never be treated as delete access.
-    const canDeleteActivity = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.delete");
+    const canDeleteActivity = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.delete");
 
     // The SAME fallback tryGetActivityProgressFromStatus/getActivityStatusDisplay
     // already applied internally, exposed explicitly — a legacy Activity
@@ -107,7 +110,7 @@ export async function PATCH(
     });
     if (!existing) return NextResponse.json({ error: "Not found", code: "activity_not_found" }, { status: 404 });
 
-    const canEdit = await canActOnEntity(session.user.id, session.user.role, existing.departmentId, "activity.edit");
+    const canEdit = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, existing.departmentId, "activity.edit");
     if (!canEdit) {
       return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
     }
@@ -306,7 +309,7 @@ export async function DELETE(
     // activity.edit and never requiring global Role.ADMIN. canActOnEntity's
     // own canViewAllDepartments(role) bypass keeps a real System Admin's
     // behavior exactly as it was.
-    const canDelete = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.delete");
+    const canDelete = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.delete");
     if (!canDelete) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }

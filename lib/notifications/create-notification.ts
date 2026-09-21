@@ -28,7 +28,7 @@ export async function createInAppNotification(params: {
   body: string;
   link?: string | null;
 }): Promise<void> {
-  let created: { id: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date };
+  let created: { id: string; userId: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date };
   try {
     created = await prisma.notification.create({
       data: { userId: params.userId, title: params.title, body: params.body, link: params.link ?? null },
@@ -38,8 +38,28 @@ export async function createInAppNotification(params: {
     return;
   }
 
+  await dispatchCreatedNotification(created);
+}
+
+/**
+ * The realtime-publish + Web Push half of createInAppNotification, exposed so
+ * a caller that must create the Notification row ITSELF inside its own
+ * transaction (lib/services/mention-reminder-service.ts — exactly-once
+ * delivery needs the row and its own state transition to commit atomically)
+ * still reuses the exact same realtime event and push delivery. Best-effort:
+ * never throws.
+ */
+export async function dispatchCreatedNotification(created: {
+  id: string;
+  userId: string;
+  title: string;
+  body: string;
+  link: string | null;
+  isRead: boolean;
+  createdAt: Date;
+}): Promise<void> {
   try {
-    publishNotificationCreated(params.userId, {
+    publishNotificationCreated(created.userId, {
       id: created.id,
       title: created.title,
       body: created.body,
@@ -54,10 +74,10 @@ export async function createInAppNotification(params: {
   }
 
   try {
-    await sendPushNotificationsToUser(params.userId, {
-      title: params.title,
-      body: params.body,
-      link: params.link ?? undefined,
+    await sendPushNotificationsToUser(created.userId, {
+      title: created.title,
+      body: created.body,
+      link: created.link ?? undefined,
     });
   } catch (err) {
     console.error("[notification] Failed to send web push:", err);

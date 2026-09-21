@@ -8,6 +8,9 @@ const PUBLIC_PATHS = [
   "/unauthorized",
   "/api/auth",
   "/api/email/inbound",
+  // Mention Reminder worker: skips the browser-session redirect only; the
+  // route itself requires the CRON_SECRET bearer token (fails closed in production).
+  "/api/internal/mention-reminders/process",
 ];
 
 // Exact-pathname bypass, checked separately from PUBLIC_PATHS's

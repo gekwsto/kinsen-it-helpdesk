@@ -66,7 +66,7 @@ async function main() {
   const activityRouteSrc = await fs.readFile(activityRoutePath, "utf8");
   const activityDeleteSrc = activityRouteSrc.slice(activityRouteSrc.indexOf("export async function DELETE"));
 
-  check("A1. Activity DELETE calls canActOnEntity(...) with 'activity.delete'", /canActOnEntity\([^)]*"activity\.delete"/.test(activityDeleteSrc));
+  check("A1. Activity DELETE calls hasEffectiveEntityPermission(...) (global grant OR the entity's department grant) with 'activity.delete'", /hasEffectiveEntityPermission\([^)]*"activity\.delete"/.test(activityDeleteSrc));
   check("A2. Activity DELETE does NOT call requireAdmin()", !/requireAdmin\s*\(/.test(activityDeleteSrc));
   check("A3. Activity DELETE returns 403 when the permission check fails", /status:\s*403/.test(activityDeleteSrc));
 
@@ -74,14 +74,14 @@ async function main() {
   const projectRouteSrc = await fs.readFile(projectRoutePath, "utf8");
   const projectDeleteSrc = projectRouteSrc.slice(projectRouteSrc.indexOf("export async function DELETE"));
 
-  check("A4. Project DELETE calls canActOnEntity(...) with 'project.delete'", /canActOnEntity\([^)]*"project\.delete"/.test(projectDeleteSrc));
+  check("A4. Project DELETE calls hasEffectiveEntityPermission(...) (global grant OR the entity's department grant) with 'project.delete'", /hasEffectiveEntityPermission\([^)]*"project\.delete"/.test(projectDeleteSrc));
   check("A5. Project DELETE does NOT call requireAdmin()", !/requireAdmin\s*\(/.test(projectDeleteSrc));
   check("A6. Project DELETE returns 403 when the permission check fails", /status:\s*403/.test(projectDeleteSrc));
 
   // delete must not be derivable from edit — the two permission checks must
   // be textually distinct call sites, never the same variable reused.
-  check("A7. Activity route resolves activity.delete and activity.edit as SEPARATE canActOnEntity calls (delete never implied by edit)", (activityRouteSrc.match(/canActOnEntity\([^)]*"activity\.edit"/g) ?? []).length >= 1 && (activityRouteSrc.match(/canActOnEntity\([^)]*"activity\.delete"/g) ?? []).length >= 1);
-  check("A8. Project route resolves project.delete and project.edit as SEPARATE canActOnEntity calls (delete never implied by edit)", (projectRouteSrc.match(/canActOnEntity\([^)]*"project\.edit"/g) ?? []).length >= 1 && (projectRouteSrc.match(/canActOnEntity\([^)]*"project\.delete"/g) ?? []).length >= 1);
+  check("A7. Activity route resolves activity.delete and activity.edit as SEPARATE hasEffectiveEntityPermission calls (delete never implied by edit)", (activityRouteSrc.match(/hasEffectiveEntityPermission\([^)]*"activity\.edit"/g) ?? []).length >= 1 && (activityRouteSrc.match(/hasEffectiveEntityPermission\([^)]*"activity\.delete"/g) ?? []).length >= 1);
+  check("A8. Project route resolves project.delete and project.edit as SEPARATE hasEffectiveEntityPermission calls (delete never implied by edit)", (projectRouteSrc.match(/hasEffectiveEntityPermission\([^)]*"project\.edit"/g) ?? []).length >= 1 && (projectRouteSrc.match(/hasEffectiveEntityPermission\([^)]*"project\.delete"/g) ?? []).length >= 1);
 
   // ══════════════════════ SECTION B — behavioral (real DB) ══════════════════════
   console.log("\n=== SECTION B — canActOnEntity('activity.delete'/'project.delete') behavioral coverage ===\n");

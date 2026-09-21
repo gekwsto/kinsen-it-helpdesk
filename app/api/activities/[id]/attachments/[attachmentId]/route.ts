@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { UPLOAD_DIR, isSafeStoredFilename, resolvesInsideDir } from "@/lib/attachment-policy";
 
 function activityUploadDir(activityId: string): string {
@@ -33,7 +33,10 @@ export async function GET(
     });
     if (!activity) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    // hasEffectiveEntityPermission (global grant OR this entity's own department
+    // grant) — bare canActOnEntity ignored a global role/custom-role activity.view.
+    // Department is the real row's, never the workspace or the client.
+    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.view");
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const attachment = await prisma.activityAttachment.findUnique({ where: { id: attachmentId } });
@@ -114,7 +117,7 @@ export async function DELETE(
     });
     if (!activity) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canDelete = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.edit");
+    const canDelete = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.edit");
     if (!canDelete) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const attachment = await prisma.activityAttachment.findUnique({ where: { id: attachmentId } });

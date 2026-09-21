@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +15,8 @@ import { ActivityCompleteCheckbox } from "@/components/activities/activity-compl
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { EntityNotes } from "@/components/notes/entity-notes";
+import { EntityRelatedLinks } from "@/components/related-links/entity-related-links";
+import { getRelatedLinksAccess, listRelatedLinksForPage } from "@/lib/services/related-links-service";
 import { ProjectDetailHeader } from "@/components/projects/project-detail-header";
 
 export default async function ProjectDetailPage({
@@ -47,7 +49,10 @@ export default async function ProjectDetailPage({
 
   // Department-scoped, not just "can this role ever view projects" — this
   // page previously had no per-project check at all beyond that global gate.
-  const canView = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.view");
+  // hasEffectiveEntityPermission (global grant OR this entity's own department
+  // grant) — bare canActOnEntity ignored a global role/custom-role project.view.
+  // Department is the real row's, never the workspace or the client.
+  const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
   if (!canView) redirect("/dashboard");
 
   // project.edit — computed server-side and passed down as a boolean, used
@@ -55,14 +60,14 @@ export default async function ProjectDetailPage({
   // interactivity. In both cases this is only a UI convenience; POST
   // /api/projects/[id]/notes and PATCH /api/projects/[id] independently
   // re-check this same permission and are the actual authority.
-  const canEditProject = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.edit");
-  // Deliberately its OWN canActOnEntity call (never derived from
+  const canEditProject = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.edit");
+  // Deliberately its OWN hasEffectiveEntityPermission call (never derived from
   // canEditProject above) — project.delete is a separate, independently-
   // grantable permission (see prisma/seed.ts — DEPARTMENT_ADMIN has both,
   // but they are not implied by each other), so edit access must never be
   // treated as delete access. DELETE /api/projects/[id] independently
   // re-checks this and is the actual authority; this is only a UI hint.
-  const canDeleteProject = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.delete");
+  const canDeleteProject = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.delete");
   const notes = await prisma.projectNote.findMany({
     where: { projectId: id },
     include: {
@@ -71,6 +76,17 @@ export default async function ProjectDetailPage({
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
+
+  // Related Links: viewing follows the page's own project.view gate above;
+  // Add/Edit/Delete visibility comes from the SAME effective project.edit
+  // check (global grant OR this project's own department grant) the
+  // /api/projects/[id]/related-links routes independently re-enforce.
+  const relatedLinksAccess = await getRelatedLinksAccess(
+    { id: session.user.id, role: session.user.role, customRoleId: session.user.customRoleId },
+    "project",
+    id
+  );
+  const relatedLinks = await listRelatedLinksForPage("project", id);
 
   const activityIds = project.activities.map((a) => a.id);
 
@@ -208,6 +224,13 @@ export default async function ProjectDetailPage({
             canAddNote={canEditProject}
             entityType="project"
             entityId={project.id}
+          />
+
+          <EntityRelatedLinks
+            entityType="project"
+            entityId={project.id}
+            initialLinks={relatedLinks}
+            initialCanManage={relatedLinksAccess?.canManage ?? false}
           />
         </div>
 

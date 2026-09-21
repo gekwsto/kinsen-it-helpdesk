@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import path from "path";
 import fs from "fs/promises";
 import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
@@ -29,7 +29,10 @@ export async function GET(
     });
     if (!activity) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    // hasEffectiveEntityPermission (global grant OR this entity's own department
+    // grant) — bare canActOnEntity ignored a global role/custom-role activity.view.
+    // Department is the real row's, never the workspace or the client.
+    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.view");
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const attachments = await prisma.activityAttachment.findMany({
@@ -65,7 +68,7 @@ export async function POST(
     });
     if (!activity) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canUpload = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.edit");
+    const canUpload = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.edit");
     if (!canUpload) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const formData = await req.formData();

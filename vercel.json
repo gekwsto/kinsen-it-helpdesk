@@ -3,6 +3,10 @@
     {
       "path": "/api/email/inbound",
       "schedule": "*/2 * * * *"
+    },
+    {
+      "path": "/api/internal/mention-reminders/process",
+      "schedule": "* * * * *"
     }
   ]
 }

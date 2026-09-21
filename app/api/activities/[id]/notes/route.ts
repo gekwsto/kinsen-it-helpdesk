@@ -1,9 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { createNoteSchema } from "@/lib/validations";
 import { resolveEligibleMentionUsers } from "@/lib/services/mention-service";
+import {
+  filterReminderEligibleUserIds,
+  resolveRespondedRemindersInTx,
+  scheduleMentionRemindersInTx,
+} from "@/lib/services/mention-reminder-service";
 import { notifyNewMentions } from "@/lib/services/mention-notification-service";
 
 const noteInclude = {
@@ -32,7 +37,10 @@ export async function GET(
     // Same department-aware visibility rule the Activity detail page itself
     // uses — read access to Notes follows activity.view, no separate
     // `activity.note` permission is introduced.
-    const canView = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.view");
+    // hasEffectiveEntityPermission (global grant OR this entity's own department
+    // grant) — bare canActOnEntity ignored a global role/custom-role activity.view.
+    // Department is the real row's, never the workspace or the client.
+    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.view");
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const notes = await prisma.activityNote.findMany({
@@ -64,7 +72,7 @@ export async function POST(
     // Write access follows activity.edit — deliberately a stricter gate
     // than read (activity.view). Never Admin-only, never inferred from the
     // UI.
-    const canAddNote = await canActOnEntity(session.user.id, session.user.role, activity.departmentId, "activity.edit");
+    const canAddNote = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, activity.departmentId, "activity.edit");
     if (!canAddNote) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const body = await req.json();
@@ -86,6 +94,16 @@ export async function POST(
       requestedUserIds: data.mentionUserIds,
     });
 
+    // Mention Reminders: eligibility (active, opted in, view + note-create
+    // permission against the REAL entity department) is resolved before the
+    // transaction; the reminder rows themselves are written inside it.
+    const reminderUserIds = await filterReminderEligibleUserIds({
+      entityType: "activity",
+      entityDepartmentId: activity.departmentId,
+      authorId: session.user.id,
+      mentionedUserIds: eligibleMentions.map((m) => m.id),
+    });
+
     const note = await prisma.$transaction(async (tx) => {
       const created = await tx.activityNote.create({
         data: {
@@ -101,7 +119,10 @@ export async function POST(
           data: eligibleMentions.map((m) => ({ noteId: created.id, userId: m.id })),
           skipDuplicates: true,
         });
+        await scheduleMentionRemindersInTx(tx, { entityType: "activity", noteId: created.id, eligibleUserIds: reminderUserIds });
       }
+      // The author just responded here: resolve their earlier pending reminders on THIS entity.
+      await resolveRespondedRemindersInTx(tx, { entityType: "activity", entityId: id, authorId: session.user.id, noteCreatedAt: created.createdAt });
       return tx.activityNote.findUniqueOrThrow({ where: { id: created.id }, include: noteInclude });
     });
 

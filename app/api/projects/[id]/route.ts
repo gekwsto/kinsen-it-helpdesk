@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasDepartmentPermission } from "@/lib/permissions";
-import { canActOnEntity } from "@/lib/services/department-scope-service";
+import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -37,7 +37,10 @@ export async function GET(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    const canView = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.view");
+    // hasEffectiveEntityPermission (global grant OR this entity's own department
+    // grant) — bare canActOnEntity ignored a global role/custom-role project.view.
+    // Department is the real row's, never the workspace or the client.
+    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
     if (!canView) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
@@ -59,7 +62,7 @@ export async function PATCH(
     const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true } });
     if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const canEdit = await canActOnEntity(session.user.id, session.user.role, existing.departmentId, "project.edit");
+    const canEdit = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, existing.departmentId, "project.edit");
     if (!canEdit) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
@@ -155,7 +158,7 @@ export async function DELETE(
     // project.edit and never requiring global Role.ADMIN. canActOnEntity's
     // own canViewAllDepartments(role) bypass keeps a real System Admin's
     // behavior exactly as it was.
-    const canDelete = await canActOnEntity(session.user.id, session.user.role, project.departmentId, "project.delete");
+    const canDelete = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.delete");
     if (!canDelete) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }

@@ -9,6 +9,9 @@ import { Role, AuthProvider } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { KeyRound } from "lucide-react";
+import { MentionReminderSettingsCard } from "@/components/admin/mention-reminder-settings-card";
+import { getMentionReminderDelayMinutes } from "@/lib/services/mention-reminder-service";
+import { describeMentionReminderDelay } from "@/lib/mention-reminders/config";
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
@@ -51,6 +54,8 @@ export default async function SettingsPage() {
 
   const isCredentialsAdmin =
     user.role === Role.ADMIN && user.authProvider === AuthProvider.CREDENTIALS;
+
+  const mentionDelay = user.role === Role.ADMIN ? describeMentionReminderDelay(await getMentionReminderDelayMinutes()) : null;
 
   return (
     <div className="space-y-6 max-w-2xl">
@@ -167,6 +172,8 @@ export default async function SettingsPage() {
           </CardContent>
         </Card>
       )}
+
+      {mentionDelay && <MentionReminderSettingsCard initialValue={mentionDelay.value} initialUnit={mentionDelay.unit} />}
 
       {/* Support Info */}
       <Card>

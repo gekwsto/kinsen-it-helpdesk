@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { Bell, BellOff, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,6 +45,39 @@ export function NotificationDropdown() {
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushLoading, setPushLoading] = useState(false);
+
+  // Per-USER (server-persisted, follows the user across browsers) "Mention
+  // reminders" preference — independent of the per-browser push toggle above.
+  const [remindersEnabled, setRemindersEnabled] = useState<boolean | null>(null);
+  const [remindersSaving, setRemindersSaving] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/users/me/mention-reminders")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setRemindersEnabled(!!d.enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const toggleReminders = async (next: boolean) => {
+    setRemindersSaving(true);
+    try {
+      const res = await fetch("/api/users/me/mention-reminders", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) throw new Error();
+      setRemindersEnabled(next);
+    } catch {
+      toast.error("Could not update your mention reminder preference.");
+    } finally {
+      setRemindersSaving(false);
+    }
+  };
   // The VAPID public key, resolved at RUNTIME from the authenticated
   // /api/notifications/push/config endpoint — never read from
   // process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY directly. That value
@@ -372,6 +406,23 @@ export function NotificationDropdown() {
             )}
           </div>
         </div>
+
+        {remindersEnabled !== null && (
+          <div className="flex items-start justify-between gap-3 border-b px-4 py-2.5">
+            <div className="min-w-0">
+              <p className="text-sm font-medium leading-tight">Mention reminders</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Remind me when I have not responded to a Project or Activity mention.
+              </p>
+            </div>
+            <Switch
+              checked={remindersEnabled}
+              onCheckedChange={toggleReminders}
+              disabled={remindersSaving}
+              aria-label="Mention reminders"
+            />
+          </div>
+        )}
 
         {/* List */}
         <div className="max-h-[360px] overflow-y-auto">
