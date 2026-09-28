@@ -81,20 +81,32 @@ async function main() {
   check("Relative path with hash -> preserved", sanitizeInternalDestination("/tickets#section") === "/tickets#section");
   check("Root path -> allowed", sanitizeInternalDestination("/") === "/");
 
-  check("Absolute external URL (http) -> rejected, falls back", sanitizeInternalDestination("http://evil.com") === DEFAULT_SAFE_DESTINATION);
-  check("Absolute external URL (https, with path) -> rejected, falls back", sanitizeInternalDestination("https://evil.com/phish") === DEFAULT_SAFE_DESTINATION);
-  check("Protocol-relative URL (//evil.com) -> rejected, falls back", sanitizeInternalDestination("//evil.com") === DEFAULT_SAFE_DESTINATION);
-  check("Triple-slash (///evil.com) -> rejected, falls back", sanitizeInternalDestination("///evil.com") === DEFAULT_SAFE_DESTINATION);
-  check("Backslash host-confusion (/\\\\evil.com) -> rejected, falls back", sanitizeInternalDestination("/\\\\evil.com") === DEFAULT_SAFE_DESTINATION);
-  check("Backslash host-confusion (\\\\evil.com, no leading slash) -> rejected, falls back", sanitizeInternalDestination("\\\\evil.com") === DEFAULT_SAFE_DESTINATION);
-  check("javascript: URI -> rejected, falls back", sanitizeInternalDestination("javascript:alert(1)") === DEFAULT_SAFE_DESTINATION);
+  // These all resolve to a HARMLESS same-origin path — never the external
+  // host itself — because only pathname+search+hash is ever kept, no
+  // matter what origin the input claimed. This is deliberately MORE
+  // permissive than outright rejecting every absolute-looking input: it's
+  // what makes a genuinely same-origin absolute callbackUrl (exactly what
+  // the company suite sends — see the dedicated section below) resolve to
+  // its real destination instead of being discarded.
+  check("Absolute external URL (http, no path) -> reduced to the harmless root path, never evil.com", sanitizeInternalDestination("http://evil.com") === "/");
+  check("Absolute external URL (https, with path) -> reduced to just that path, never evil.com", sanitizeInternalDestination("https://evil.com/phish") === "/phish");
+  check("Protocol-relative URL (//evil.com) -> reduced to the harmless root path", sanitizeInternalDestination("//evil.com") === "/");
+  check("Triple-slash (///evil.com) -> reduced to the harmless root path", sanitizeInternalDestination("///evil.com") === "/");
+  check("Backslash host-confusion (/\\\\evil.com) -> reduced to the harmless root path", sanitizeInternalDestination("/\\\\evil.com") === "/");
+  check("Backslash host-confusion (\\\\evil.com, no leading slash) -> reduced to the harmless root path", sanitizeInternalDestination("\\\\evil.com") === "/");
+  check("javascript: URI -> rejected, falls back (opaque path, never starts with '/')", sanitizeInternalDestination("javascript:alert(1)") === DEFAULT_SAFE_DESTINATION);
   check("Percent-encoded double-slash (/%2F%2Fevil.com) stays a literal SAME-ORIGIN path — never decoded into a host escape", sanitizeInternalDestination("/%2F%2Fevil.com").startsWith("/"));
   check("...and is not itself in the disallowed-prefix list, so it's accepted as an (inert, same-origin) path", sanitizeInternalDestination("/%2F%2Fevil.com") === "/%2F%2Fevil.com");
-  check("Bare host with no leading slash (evil.com) -> rejected, falls back", sanitizeInternalDestination("evil.com") === DEFAULT_SAFE_DESTINATION);
+  check("Bare host with no leading slash (evil.com) -> treated as a relative same-origin path, never a redirect to evil.com", sanitizeInternalDestination("evil.com") === "/evil.com");
   check("Whitespace-only -> rejected, falls back", sanitizeInternalDestination("   ") === DEFAULT_SAFE_DESTINATION);
   check("Empty string -> rejected, falls back", sanitizeInternalDestination("") === DEFAULT_SAFE_DESTINATION);
   check("null -> rejected, falls back", sanitizeInternalDestination(null) === DEFAULT_SAFE_DESTINATION);
   check("undefined -> rejected, falls back", sanitizeInternalDestination(undefined) === DEFAULT_SAFE_DESTINATION);
+
+  console.log("\n=== Real-world case: the company suite's actual callbackUrl format (SAME-ORIGIN absolute URL) ===\n");
+  check("A same-origin absolute URL (what the suite actually sends) resolves to its real path, not the fallback — 'https://ithelpdesk.kinsen.gr/' -> '/'", sanitizeInternalDestination("https://ithelpdesk.kinsen.gr/") === "/");
+  check("...with a deeper path preserved too — 'https://ithelpdesk.kinsen.gr/tickets/123' -> '/tickets/123'", sanitizeInternalDestination("https://ithelpdesk.kinsen.gr/tickets/123") === "/tickets/123");
+  check("...even with no trailing slash at all", sanitizeInternalDestination("https://ithelpdesk.kinsen.gr") === "/");
   check("Path traversal normalizes to a same-origin path, never an escape (/a/../../evil.com -> /evil.com, still ours)", sanitizeInternalDestination("/a/../../evil.com") === "/evil.com");
 
   console.log("\n=== Loop prevention: auth-machinery paths rejected even though same-origin ===\n");
@@ -104,7 +116,8 @@ async function main() {
   check("/api/auth/* rejected (NextAuth's own routes, never a real page)", sanitizeInternalDestination("/api/auth/callback/microsoft-entra-id") === DEFAULT_SAFE_DESTINATION);
   check("/unauthorized rejected (the error page itself)", sanitizeInternalDestination("/unauthorized") === DEFAULT_SAFE_DESTINATION);
   check("A legitimate deep link survives unchanged (/tickets/abc123/edit)", sanitizeInternalDestination("/tickets/abc123/edit") === "/tickets/abc123/edit");
-  check("A custom fallback is honored when provided", sanitizeInternalDestination("http://evil.com", "/custom-fallback") === "/custom-fallback");
+  check("A custom fallback is honored when provided (empty input -> genuinely falls back, no path to extract)", sanitizeInternalDestination("", "/custom-fallback") === "/custom-fallback");
+  check("...and for an opaque-scheme input too (javascript: never resolves to a usable path)", sanitizeInternalDestination("javascript:alert(1)", "/custom-fallback") === "/custom-fallback");
 
   // ══════════════════════ SECTION A — mocked signIn/signOut/auth, exact call verification ══════════════════════
   console.log("\n=== SECTION A — app/auth/sso-entry/route.ts: exact branch/argument verification (mocked auth boundary) ===\n");
@@ -181,10 +194,15 @@ async function main() {
   const missingReturnToRes = (await GET(req("http://localhost:3000/auth/sso-entry")))!;
   check("No returnTo -> redirects to the safe default", missingReturnToRes.headers.get("location") === `http://localhost:3000${DEFAULT_SAFE_DESTINATION}`);
 
-  console.log("\n-- 11. External returnTo with a valid session -> safe default, never the external host --\n");
+  console.log("\n-- 11. External returnTo with a valid session -> its harmless same-origin path, never the external host --\n");
   resetCalls();
   const externalReturnToRes = (await GET(req("http://localhost:3000/auth/sso-entry?returnTo=https://evil.com/phish")))!;
-  check("Malicious returnTo -> redirects to the safe default, not evil.com", externalReturnToRes.headers.get("location") === `http://localhost:3000${DEFAULT_SAFE_DESTINATION}`);
+  check("Malicious returnTo -> redirects to OUR OWN /phish path, never evil.com", externalReturnToRes.headers.get("location") === "http://localhost:3000/phish");
+
+  console.log("\n-- Real-world case: the company suite's actual same-origin absolute callbackUrl format survives correctly --\n");
+  resetCalls();
+  const suiteStyleRes = (await GET(req("http://localhost:3000/auth/sso-entry?returnTo=" + encodeURIComponent("https://ithelpdesk.kinsen.gr/tickets"))))!;
+  check("A same-origin absolute returnTo (exactly what the suite sends) resolves to the real destination, not the dashboard fallback", suiteStyleRes.headers.get("location") === "http://localhost:3000/tickets");
 
   console.log("\n-- 5. No prior session (absent) -> normal Entra authorization, NO prompt=login, no signOut --\n");
   authResult = null;
@@ -246,9 +264,9 @@ async function main() {
 
   const { default: LoginPage } = await import("@/app/(auth)/login/page");
 
-  async function getLoginFormAction(cookieHeader: string | undefined, message?: string) {
+  async function getLoginFormAction(cookieHeader: string | undefined, message?: string, callbackUrl?: string) {
     currentHeaders = new Headers(cookieHeader ? { cookie: cookieHeader } : {});
-    const el = await LoginPage({ searchParams: Promise.resolve({ message: message as any, callbackUrl: undefined }) });
+    const el = await LoginPage({ searchParams: Promise.resolve({ message: message as any, callbackUrl }) });
     const [formEl] = findElementsByType(el, "form");
     return formEl?.props?.action as (() => Promise<void>) | undefined;
   }
@@ -260,6 +278,27 @@ async function main() {
   await normalAction?.();
   check("signIn() called once, no forced prompt=login", signInCalls.length === 1 && signInCalls[0]?.[2] === undefined);
   check("signOut() never called for a normal, non-expired direct login", signOutCalls.length === 0);
+
+  console.log("\n-- Real-world fix: /login?callbackUrl=... (no session, no message — exactly what the company suite's redirect currently produces) forwards to /auth/sso-entry for a genuinely silent flow, no click required --\n");
+  resetCalls();
+  {
+    let redirectTarget: string | null = null;
+    try {
+      currentHeaders = new Headers();
+      await LoginPage({ searchParams: Promise.resolve({ message: undefined, callbackUrl: "https://ithelpdesk.kinsen.gr/" }) });
+    } catch (err: any) {
+      // next/navigation's redirect() throws a special error carrying the target in its digest (format: "NEXT_REDIRECT;<type>;<url>;<status>").
+      redirectTarget = typeof err?.digest === "string" ? err.digest : null;
+    }
+    check("LoginPage threw a redirect (not a render) for a plain external arrival with callbackUrl set", !!redirectTarget);
+    check("...targeting /auth/sso-entry with the sanitized destination carried through as returnTo", !!redirectTarget && redirectTarget.includes("/auth/sso-entry?returnTo=") && redirectTarget.includes(encodeURIComponent("/")));
+    check("signIn()/signOut() were NOT called directly by the login page itself for this case — it forwards to sso-entry, which owns that decision", signInCalls.length === 0 && signOutCalls.length === 0);
+  }
+
+  console.log("\n-- A BARE /login visit (no callbackUrl at all) still renders the page normally — the admin credentials escape hatch stays reachable --\n");
+  resetCalls();
+  const bareAction = await getLoginFormAction(undefined, undefined, undefined);
+  check("A bare /login visit (no callbackUrl) renders the form instead of auto-redirecting", typeof bareAction === "function");
 
   console.log("\n-- 7c. Forged ?message=session_expired ALONE (no real expired cookie) never forces prompt=login — the query string is cosmetic only --\n");
   resetCalls();

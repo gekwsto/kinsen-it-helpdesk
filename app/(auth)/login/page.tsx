@@ -29,6 +29,23 @@ export default async function LoginPage({
   const forceReauth = rawState.hasToken && rawState.isExpired;
   const destination = sanitizeInternalDestination(callbackUrl, "/dashboard");
 
+  // Plain external arrival (no session, nothing that needs explaining to
+  // the user) — forward straight to the canonical SSO entry point
+  // (app/auth/sso-entry/route.ts) for a genuinely silent flow: no button
+  // click, no intermediate page. This is what makes a redirect from the
+  // company suite — which today still lands here as
+  // /login?callbackUrl=... rather than on /auth/sso-entry directly, and
+  // Auth.js's own default unauthorized-redirect (middleware bouncing an
+  // unauthenticated hit on a protected page) does the exact same thing —
+  // behave as silent SSO instead of requiring an explicit click. Gated on
+  // `callbackUrl` being present, not just "no session": a bare,
+  // intentional visit to /login (no query string at all) still renders
+  // the page normally, so the admin-only credentials form below stays
+  // reachable.
+  if (!forceReauth && !message && callbackUrl) {
+    redirect(`/auth/sso-entry?returnTo=${encodeURIComponent(destination)}`);
+  }
+
   return (
     <div className="w-full max-w-md px-4">
       {/* Logo/Brand */}
