@@ -257,11 +257,47 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         // needed anywhere in this calculation.
         stampAbsoluteSessionExpiryIfAbsent(token);
       }
+
+      // Inactive users must never receive a valid session — checked here
+      // (not only in the session callback below) because of a real gap:
+      // next-auth's own zero-argument `auth()` helper (used by every Server
+      // Component/Route Handler `await auth()` call in this app, including
+      // app/auth/sso-entry/route.ts) wraps the session callback as
+      // `(await callbacks.session(...)) ?? <fallback built from the raw
+      // token>` (next-auth/lib/index.js's `getSession()`) — the `??`
+      // treats an intentional `null` return from OUR session callback as
+      // "no override" and silently falls back to a session built straight
+      // from the token instead, completely bypassing the rejection. This
+      // was confirmed directly: a crafted `isActive: false` token still
+      // produced a fully-populated session through that path. `jwt()`'s own
+      // `null` return has no such gap — Auth.js's session action never
+      // invokes `callbacks.session` at all once `callbacks.jwt` returns
+      // null (the exact mechanism the absolute-expiry check above already
+      // relies on) — so this is the one place this check is reliably
+      // enforced for every caller, including `/api/auth/session` itself
+      // (its own action code also calls `callbacks.jwt` first and only
+      // proceeds to `callbacks.session` `if (token !== null)` — see
+      // @auth/core's lib/actions/session.js). The session callback below
+      // keeps its own copy of this check purely as defense-in-depth, same
+      // as its existing isAbsoluteSessionExpired mirror.
+      if (token.isActive === false) {
+        return null;
+      }
+
       return token;
     },
 
     async session({ session, token }) {
       if (session.user) {
+        // Defense-in-depth mirror of the jwt callback's own check — in the
+        // normal path jwt() already returned null before this callback
+        // would even run for an inactive user's token (see the jwt
+        // callback's own comment for why this check was MOVED there: a
+        // next-auth library quirk in the zero-argument auth() helper's
+        // getSession() wrapper silently discarded a null returned from
+        // ONLY this callback, for that one call path). Kept here anyway,
+        // exactly like the isAbsoluteSessionExpired mirror right below it,
+        // as a second, independent layer that costs nothing.
         if (token.isActive === false) return null as any;
         // Defense-in-depth mirror of the jwt callback's own check — in the
         // normal path jwt() already returned `null` before this callback

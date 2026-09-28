@@ -6,7 +6,7 @@ import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateActivitySchema } from "@/lib/validations";
-import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
+import { recalculateProjectRollup, type ProjectRollupResult } from "@/lib/projects/progress-rollup";
 import { tryGetActivityProgressFromStatus, getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { getActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
@@ -265,20 +265,48 @@ export async function PATCH(
     // Roll the (now always in-sync) progress up into any affected project's
     // average — the old project (if the activity just moved out of it) and/or
     // the new/current one (status changed, or it moved into a project).
+    //
+    // AWAITED (not fire-and-forget): a previous fire-and-forget version of
+    // this raced the client's own router.refresh(), which regularly won and
+    // rendered stale Project progress. Awaiting means the rollup's own
+    // prisma.project.update() has always committed before this route's
+    // response is sent — and, now, its RESULT (not just the fact that it
+    // ran) is returned in the response body below, so a caller never needs
+    // a second round-trip (a refetch/refresh) just to learn what the rollup
+    // produced. Still never allowed to fail the activity update itself — a
+    // rollup error is caught and logged, not thrown; a settled-but-failed
+    // rollup is simply omitted from `projectRollups` rather than silently
+    // treated as if it had produced a value.
+    //
+    // An Activity belongs to at most one Project (`projectId` is a single
+    // optional FK, not a many-to-many relation) — so at most the OLD and
+    // NEW project (when this same request also reassigns projectId) are
+    // ever affected by one call, never more. Both are collected into a
+    // single array so the response shape stays correct regardless of how
+    // many projects end up affected.
     const statusChanged = data.status !== undefined && data.status !== existing.status;
+    const rollups: Promise<ProjectRollupResult | null>[] = [];
     if (projectChanged && existing.projectId) {
-      recalculateProjectRollup(existing.projectId).catch((err) => {
-        console.error("[progress-rollup] old project recalculation failed:", err);
-      });
+      rollups.push(
+        recalculateProjectRollup(existing.projectId).catch((err) => {
+          console.error("[progress-rollup] old project recalculation failed:", err);
+          return null;
+        })
+      );
     }
     if ((statusChanged || projectChanged) && activity.project?.id) {
-      recalculateProjectRollup(activity.project.id).catch((err) => {
-        console.error("[progress-rollup] activity change recalculation failed:", err);
-      });
+      rollups.push(
+        recalculateProjectRollup(activity.project.id).catch((err) => {
+          console.error("[progress-rollup] activity change recalculation failed:", err);
+          return null;
+        })
+      );
     }
+    const settledRollups = rollups.length > 0 ? await Promise.all(rollups) : [];
+    const projectRollups: ProjectRollupResult[] = settledRollups.filter((r): r is ProjectRollupResult => r !== null);
 
     const statusDisplay = await getActivityStatusDisplay(effectiveDepartmentId, effectiveStatus);
-    return NextResponse.json({ ...activity, statusLabel: statusDisplay.label, statusColor: statusDisplay.color });
+    return NextResponse.json({ ...activity, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, projectRollups });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

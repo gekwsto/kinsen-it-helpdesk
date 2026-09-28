@@ -52,7 +52,20 @@ export interface FilterOptions {
 
 interface TicketFiltersProps {
   options: FilterOptions;
+  /** All-Tickets-only controls that make sense NOWHERE else: the "Created by me" quick-toggle. Never broadened to gate the assignee filter — see showAssigneeFilter below. */
   isAllTickets?: boolean;
+  /**
+   * Shows the `Assigned to` dropdown + its "Only unassigned" toggle —
+   * independent of `isAllTickets`, so a page can offer the assignee filter
+   * without also getting the All-Tickets-only controls (or vice versa).
+   * Every page that passes this must also supply `options.agents` (the
+   * scoped assignee list — see getScopedTicketAgents in
+   * lib/services/ticket-filter-options-service.ts) and handle
+   * `assignedAgentId`/`unassigned` in its own server-side where clause;
+   * this component only ever renders the control and writes the URL param,
+   * never decides visibility itself.
+   */
+  showAssigneeFilter?: boolean;
   currentUserId?: string;
 }
 
@@ -66,6 +79,7 @@ const SORT_OPTIONS = [
 export function TicketFilters({
   options,
   isAllTickets = false,
+  showAssigneeFilter = false,
   currentUserId,
 }: TicketFiltersProps) {
   const router = useRouter();
@@ -373,19 +387,27 @@ export function TicketFilters({
               </div>
             )}
 
-            {/* Assigned agent (all-tickets only) */}
-            {isAllTickets && (
+            {/* Assigned to — the user a Ticket's assignedAgentId points to.
+                Options come from getVisibleTicketAssignees (see its own doc
+                comment): the ACTUAL assignees of Tickets this page's own
+                scope+filters can see, never a global role-based user list —
+                never a raw name/email match either (the URL/where-clause
+                condition is always the stable user id). "Only unassigned"
+                below is the equivalent special option this page's filter
+                conventions already support, so no separate "Unassigned"
+                entry is added to this dropdown. */}
+            {showAssigneeFilter && (
               <div className="space-y-1">
-                <Label className="text-xs text-muted-foreground">Agent</Label>
+                <Label className="text-xs text-muted-foreground">Assigned to</Label>
                 <Select
                   value={get("assignedAgentId") || "all"}
                   onValueChange={(v) => handleSelect("assignedAgentId", v)}
                 >
                   <SelectTrigger className="h-8 text-xs">
-                    <SelectValue placeholder="Any agent" />
+                    <SelectValue placeholder="All assignees" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="all">Any agent</SelectItem>
+                    <SelectItem value="all">All assignees</SelectItem>
                     {options.agents.map((a) => (
                       <SelectItem key={a.id} value={a.id}>{a.name ?? a.id}</SelectItem>
                     ))}
@@ -437,9 +459,9 @@ export function TicketFilters({
           </div>
 
           {/* Toggles */}
-          {isAllTickets && (
+          {(isAllTickets || showAssigneeFilter) && (
             <div className="flex flex-wrap gap-2 pt-1">
-              {currentUserId && (
+              {isAllTickets && currentUserId && (
                 <Button
                   size="sm"
                   variant={get("myOnly") === "true" ? "default" : "outline"}
@@ -449,14 +471,16 @@ export function TicketFilters({
                   Created by me
                 </Button>
               )}
-              <Button
-                size="sm"
-                variant={get("unassigned") === "true" ? "default" : "outline"}
-                className="h-7 text-xs"
-                onClick={() => handleToggle("unassigned", get("unassigned") !== "true")}
-              >
-                Only unassigned
-              </Button>
+              {showAssigneeFilter && (
+                <Button
+                  size="sm"
+                  variant={get("unassigned") === "true" ? "default" : "outline"}
+                  className="h-7 text-xs"
+                  onClick={() => handleToggle("unassigned", get("unassigned") !== "true")}
+                >
+                  Only unassigned
+                </Button>
+              )}
             </div>
           )}
         </>

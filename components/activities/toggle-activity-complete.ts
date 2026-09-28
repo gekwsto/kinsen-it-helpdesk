@@ -1,5 +1,7 @@
 "use client";
 
+import type { ProjectRollupResult } from "@/lib/projects/progress-rollup";
+
 /**
  * Single implementation of the completion toggle, shared by the activity
  * detail page, the activity list/card checkbox, and the project detail
@@ -9,7 +11,7 @@
  * drift apart (PATCH /api/activities/[id] also rejects a mismatched pair —
  * see the consistency guard there).
  */
-export async function toggleActivityComplete(activityId: string, currentlyCompleted: boolean): Promise<{ isCompleted: boolean; status: string; progress: number; statusLabel: string; statusColor: string }> {
+export async function toggleActivityComplete(activityId: string, currentlyCompleted: boolean): Promise<{ isCompleted: boolean; status: string; progress: number; statusLabel: string; statusColor: string; projectRollups: ProjectRollupResult[] }> {
   const res = await fetch(`/api/activities/${activityId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -28,5 +30,10 @@ export async function toggleActivityComplete(activityId: string, currentlyComple
   // lib/activities/activity-progress.ts, lib/services/activity-status-config.ts)
   // — returned here so callers that track them locally (e.g. activity-list.tsx's
   // table view) don't go stale or fall back to a hardcoded label/color.
-  return { isCompleted: updated.isCompleted, status: updated.status, progress: updated.progress, statusLabel: updated.statusLabel, statusColor: updated.statusColor };
+  // `projectRollups` is the AWAITED rollup's own result for whichever
+  // project(s) this toggle affected (never more than the activity's own
+  // current/previous project — see the route's own doc comment) — callers
+  // that render a parent Project's progress/counters (the Project detail
+  // page) apply this directly instead of re-fetching anything.
+  return { isCompleted: updated.isCompleted, status: updated.status, progress: updated.progress, statusLabel: updated.statusLabel, statusColor: updated.statusColor, projectRollups: updated.projectRollups ?? [] };
 }

@@ -27,7 +27,7 @@ import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { EntityNotes } from "@/components/notes/entity-notes";
 import { EntityRelatedLinks } from "@/components/related-links/entity-related-links";
 import type { Note } from "@/components/notes/types";
-import { ActivityAttachments } from "@/components/activities/activity-attachments";
+import { EntityAttachments } from "@/components/attachments/entity-attachments";
 
 const PRIORITY_COLORS: Record<ActivityPriority, string> = {
   LOW: "bg-green-50 text-green-700",
@@ -602,8 +602,8 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
         </CardContent>
       </Card>
 
-      <ActivityAttachments
-        activityId={id}
+      <EntityAttachments
+        apiBasePath={`/api/activities/${id}`}
         initialAttachments={attachments}
         canManage={activity.canEditActivity ?? false}
       />

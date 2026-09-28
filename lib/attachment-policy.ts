@@ -1,5 +1,6 @@
 import { randomUUID } from "crypto";
 import path from "path";
+import { MAX_ATTACHMENT_SIZE_BYTES, ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAttachmentMimeType } from "@/lib/attachment-constants";
 
 /**
  * Shared attachment policy — the single source of truth for what counts as
@@ -13,7 +14,16 @@ import path from "path";
  * module lets every attachment-ingestion path — web upload and both email
  * paths — apply the exact same rule, rather than the two email paths each
  * re-declaring (and risking drifting from) their own copy of the list.
+ *
+ * The pure validation constants (MAX_ATTACHMENT_SIZE_BYTES,
+ * ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAttachmentMimeType) now live in
+ * lib/attachment-constants.ts and are re-exported below unchanged — that
+ * module has no Node built-in imports, so client components (the creation
+ * forms' attachment pickers) can import the SAME values directly instead of
+ * duplicating them, while every existing server import of these three names
+ * from "@/lib/attachment-policy" keeps working exactly as before.
  */
+export { MAX_ATTACHMENT_SIZE_BYTES, ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAttachmentMimeType };
 
 // PRIVATE storage — deliberately NOT under public/. Next.js only ever
 // serves files that live under the project's public/ directory; anything
@@ -33,26 +43,6 @@ export const UPLOAD_DIR = process.env.UPLOAD_DIR || "./storage/uploads";
 // migration script and any diagnostics have one canonical place to look for
 // pre-existing files, instead of a magic string re-typed at each call site.
 export const LEGACY_PUBLIC_UPLOAD_DIR = "./public/uploads";
-
-export const MAX_ATTACHMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10MB — same cap the web upload route has always enforced.
-
-export const ALLOWED_ATTACHMENT_MIME_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "text/plain",
-  "application/zip",
-];
-
-export function isAllowedAttachmentMimeType(mimeType: string): boolean {
-  return ALLOWED_ATTACHMENT_MIME_TYPES.includes(mimeType);
-}
 
 /**
  * Turns an arbitrary, sender-controlled filename into one safe to use as a
@@ -133,4 +123,15 @@ export function resolvesInsideDir(filePath: string, expectedDir: string): boolea
   const resolvedFile = path.resolve(filePath);
   const resolvedDir = path.resolve(expectedDir);
   return resolvedFile === resolvedDir || resolvedFile.startsWith(resolvedDir + path.sep);
+}
+
+/**
+ * The per-entity attachment directory shared by every entity attachment
+ * route (Activity, Project, ...): `UPLOAD_DIR/<subdir>/<entityId>`. One
+ * canonical builder rather than each route re-typing `path.join(UPLOAD_DIR,
+ * "activities", id)` / `path.join(UPLOAD_DIR, "projects", id)` itself, so
+ * the on-disk layout can never drift between entity types by a typo.
+ */
+export function entityAttachmentDir(subdir: "activities" | "projects", entityId: string): string {
+  return path.join(UPLOAD_DIR, subdir, entityId);
 }

@@ -10,15 +10,18 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { Calendar, Users } from "lucide-react";
 import { formatDate } from "@/lib/utils";
 import { ProjectStatus } from "@prisma/client";
-import type { ViewMode } from "@/components/ui/view-toggle";
+import { resolveViewMode, type ViewMode } from "@/components/ui/view-toggle";
 import { PROJECT_PRIORITY_LABEL as PRIORITY_LABELS } from "@/lib/project-priority";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
+import { MemberPreview } from "@/components/shared/member-preview";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -45,24 +48,27 @@ export interface ProjectListItem {
 
 interface ProjectListProps {
   projects: ProjectListItem[];
+  /** Matches the ViewToggle's own `defaultView` on the SAME page (see components/ui/view-toggle.tsx's resolveViewMode) — these are two independent Client Components reading the same `?view=` param, not prop-linked, so both must agree. Defaults to "grid" (this component's historical behavior) for any other caller. */
+  defaultView?: ViewMode;
 }
 
-/** Grid (cards) / List (table) — same data and scope either way, just a different render, toggled via ?view= (see components/ui/view-toggle.tsx). */
-export function ProjectList({ projects }: ProjectListProps) {
+/** Grid (cards) / List (table) — same data and scope either way, just a different render, toggled via ?view= (see components/ui/view-toggle.tsx). List view's column headers are individually sortable — see components/ui/sortable-table-head.tsx and the server page's PROJECT_SORT_KEYS whitelist. */
+export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps) {
   const searchParams = useSearchParams();
-  const view = (searchParams.get("view") as ViewMode | null) ?? "grid";
+  const view = resolveViewMode(searchParams.get("view"), defaultView);
 
   if (view === "list") {
     return (
       <div className="rounded-lg border overflow-hidden">
+        <TooltipProvider delayDuration={200}>
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/50">
-              <TableHead>Name</TableHead>
-              <TableHead>Department</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Priority</TableHead>
-              <TableHead>Date range</TableHead>
+              <SortableTableHead sortKey="title">Name</SortableTableHead>
+              <SortableTableHead sortKey="department">Department</SortableTableHead>
+              <SortableTableHead sortKey="status">Status</SortableTableHead>
+              <SortableTableHead sortKey="priority">Priority</SortableTableHead>
+              <SortableTableHead sortKey="startDate">Date range</SortableTableHead>
               <TableHead>Members</TableHead>
               <TableHead>Activities</TableHead>
               <TableHead className="w-16"></TableHead>
@@ -105,10 +111,12 @@ export function ProjectList({ projects }: ProjectListProps) {
                   )}
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">
-                  <span className="flex items-center gap-1.5">
-                    <Users className="h-3.5 w-3.5" />
-                    {project.members.length}
-                  </span>
+                  <MemberPreview members={project.members} label="Members">
+                    <span className="flex items-center gap-1.5">
+                      <Users className="h-3.5 w-3.5" />
+                      {project.members.length}
+                    </span>
+                  </MemberPreview>
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{project._count.activities}</TableCell>
                 <TableCell>
@@ -120,6 +128,7 @@ export function ProjectList({ projects }: ProjectListProps) {
             ))}
           </TableBody>
         </Table>
+        </TooltipProvider>
       </div>
     );
   }

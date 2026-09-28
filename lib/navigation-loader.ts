@@ -30,6 +30,41 @@ export function isSameRouteNavigation(targetUrl: string | null, currentUrl: stri
 }
 
 /**
+ * The attribute a same-page control nested inside a <Link> (e.g. a
+ * completion checkbox on a row that otherwise links to the item's detail
+ * page) marks itself with to opt OUT of being treated as a navigation
+ * "start" signal at all.
+ *
+ * Why this can't just be the control's own stopPropagation()/preventDefault():
+ * the loader's own listener is a document-level CAPTURE-phase listener (see
+ * the module doc comment on components/layout/navigation-loader.tsx for
+ * why), which always runs BEFORE any bubble-phase handler anywhere in the
+ * tree — including the control's own onClick. By the time a nested
+ * checkbox's onClick calls stopPropagation() to stop the outer <Link> from
+ * actually navigating, this capture listener has already inspected the
+ * click, found the ancestor <Link>, and armed the loader as if navigating
+ * to it. Since the real navigation is then correctly suppressed,
+ * pathname/searchParams never change, so the loader's own "navigation
+ * resolved" signal never fires either — the overlay shows after
+ * SHOW_DELAY_MS and then hangs until SAFETY_TIMEOUT_MS, a ~15s fully
+ * spurious full-page block for what was only ever a same-route mutation.
+ * Marking the control with this attribute lets the capture listener skip
+ * arming the loader for it in the first place — the only point in the
+ * pipeline early enough to actually prevent this.
+ */
+export const NAV_LOADER_IGNORE_ATTR = "data-nav-loader-ignore";
+
+/**
+ * True when the click's real target (or an ancestor between it and the
+ * matched <Link>) opts out via NAV_LOADER_IGNORE_ATTR — see that constant's
+ * own doc comment for why this exists and why stopPropagation() alone can't
+ * substitute for it.
+ */
+export function isNavLoaderIgnored(target: { closest?: (selector: string) => unknown } | null): boolean {
+  return !!target?.closest?.(`[${NAV_LOADER_IGNORE_ATTR}]`);
+}
+
+/**
  * Whether a click on an anchor element should be treated as an in-app,
  * same-tab navigation "start" signal. Mirrors next/link's own
  * isModifiedEvent check (node_modules/next/dist/client/link.js) exactly —

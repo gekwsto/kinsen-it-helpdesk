@@ -150,6 +150,21 @@ export default async function TicketDetailPage({
       ? canActOnEntity(session.user.id, role, effectiveDeptId, "activity.create")
       : Promise.resolve(false),
   ]);
+  // project.create/activity.create never imply project.edit/activity.edit
+  // (independently grantable — see app/(main)/projects/new/page.tsx's
+  // identical comment). This gates whether the inline Project/Activity
+  // create dialogs launched from THIS ticket offer attachment selection at
+  // all — hasEffectiveEntityPermission (global grant OR effectiveDeptId's
+  // own grant), the same union every other entity-edit gate in this app
+  // uses, never active workspace, never assumed from create.
+  const [canEditProjectInDept, canEditActivityInDept] = await Promise.all([
+    canCreateProjectInDept && effectiveDeptId
+      ? hasEffectiveEntityPermission(session.user.id, role, customRoleId, effectiveDeptId, "project.edit")
+      : Promise.resolve(false),
+    canCreateActivityInDept && effectiveDeptId
+      ? hasEffectiveEntityPermission(session.user.id, role, customRoleId, effectiveDeptId, "activity.edit")
+      : Promise.resolve(false),
+  ]);
 
   // Requesters can always reply to their own ticket (even without ticket.reply perm)
   const canReply = canReplyPerm || isRequester;
@@ -240,6 +255,8 @@ export default async function TicketDetailPage({
     effectiveDepartmentId: effectiveDeptId ?? null,
     canCreateProjectInDept,
     canCreateActivityInDept,
+    canEditProjectInDept,
+    canEditActivityInDept,
     initialStatus: {
       id: ticket.status.id,
       name: ticket.status.name,

@@ -19,6 +19,9 @@ import {
 import { ChevronRight, Loader2, Plus } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
+import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
+import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
+import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 
 interface Project { id: string; title: string }
 interface AssignableUser { id: string; name: string | null; email: string }
@@ -59,14 +62,59 @@ interface ActivityNewFormProps {
    * on the "+ New Project" button below for why inline doesn't get one).
    */
   canCreateProject?: boolean;
+  /**
+   * Standalone mode only — whether the current user holds effective
+   * project.edit (global grant OR `departmentId`'s own grant, via
+   * hasEffectiveEntityPermission — see app/(main)/activities/new/page.tsx)
+   * for the SAME department the nested "+ New Project" dialog creates into.
+   * project.create never implies project.edit; this governs whether THAT
+   * dialog's own Attachments section is offered — completely independent
+   * of `canUploadAttachments` below, which is this Activity's own. Unused
+   * in inline mode (the nested dialog is never rendered there at all).
+   */
+  canUploadProjectAttachments?: boolean | null;
+  /**
+   * Whether the current user holds effective activity.edit (global grant OR
+   * `departmentId`'s own grant — the hasEffectiveEntityPermission union,
+   * computed server-side by the caller: app/(main)/activities/new/page.tsx
+   * for standalone, ticket-form.tsx/ticket-actions.tsx for inline) for this
+   * form's fixed department. activity.create never implies activity.edit —
+   * they're independently grantable, same as project.create/project.edit.
+   * Governs whether the Attachments section is offered at all, in BOTH
+   * modes (Activity's department is always fixed, never a Select, so one
+   * capability value covers standalone and inline alike). POST
+   * /api/activities/[id]/attachments still independently re-checks this
+   * regardless of what the client renders.
+   */
+  canUploadAttachments?: boolean | null;
+  /**
+   * Inline mode only — called whenever it becomes unsafe (or safe again) to
+   * silently dismiss the enclosing dialog via Escape/backdrop-click/close-
+   * button: true from the moment the Activity has been created with
+   * attachments still pending/failed, until the upload phase is fully
+   * resolved. The dialog shell (ActivityCreateDialog) is what actually
+   * blocks the close; this form only ever reports the state.
+   */
+  onLockChange?: (locked: boolean) => void;
   onCreated?: (activity: CreatedActivity) => void;
   onCancel?: () => void;
 }
 
-export function ActivityNewForm({ departmentId, mode = "standalone", preselectedProjectId, canCreateProject = false, onCreated, onCancel }: ActivityNewFormProps) {
+export function ActivityNewForm({ departmentId, mode = "standalone", preselectedProjectId, canCreateProject = false, canUploadProjectAttachments = null, canUploadAttachments = null, onLockChange, onCreated, onCancel }: ActivityNewFormProps) {
   const router = useRouter();
   const inline = mode === "inline";
   const [saving, setSaving] = useState(false);
+  const attachments = useCreateWithAttachments<CreatedActivity>((id) => `/api/activities/${id}`);
+
+  // Reports "safe to silently dismiss the dialog right now" to the inline
+  // dialog shell — locked from the moment creation succeeded WITH
+  // attachments to upload, until either every upload succeeded or the user
+  // explicitly continued. Never fires in standalone mode (no dialog to guard).
+  useEffect(() => {
+    if (!inline) return;
+    onLockChange?.(attachments.createdEntity !== null && attachments.entries.length > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inline, attachments.createdEntity, attachments.entries.length]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
 
@@ -172,38 +220,54 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
     }
     setSaving(true);
     try {
-      const res = await fetch("/api/activities", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          title,
-          description: description || undefined,
-          projectId: projectId || undefined,
-          status,
-          priority,
-          assignedUserIds: selectedUserIds,
-          startDate: startDate || undefined,
-          dueDate: dueDate || undefined,
-          subDepartmentId: subDepartmentId || undefined,
-          // Explicit in BOTH modes — resolves to the identical department
-          // standalone /activities/new already got via the active-workspace
-          // fallback (this `departmentId` prop IS that same value there),
-          // so this changes nothing observable for standalone; inline mode
-          // requires it (never relies on the fallback, which is scoped to
-          // the CALLER's active workspace, not necessarily the ticket's own).
-          departmentId: departmentId || undefined,
-        }),
+      // Two-step architecture: create the Activity first (unchanged
+      // request/route), THEN — only once it has a real, server-issued id —
+      // upload any selected attachments through the existing protected
+      // POST /api/activities/[id]/attachments route. Never the reverse,
+      // never a client-generated id, never a multipart create request.
+      const { entity: activity, allUploaded } = await attachments.submit(async () => {
+        const res = await fetch("/api/activities", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            title,
+            description: description || undefined,
+            projectId: projectId || undefined,
+            status,
+            priority,
+            assignedUserIds: selectedUserIds,
+            startDate: startDate || undefined,
+            dueDate: dueDate || undefined,
+            subDepartmentId: subDepartmentId || undefined,
+            // Explicit in BOTH modes — resolves to the identical department
+            // standalone /activities/new already got via the active-workspace
+            // fallback (this `departmentId` prop IS that same value there),
+            // so this changes nothing observable for standalone; inline mode
+            // requires it (never relies on the fallback, which is scoped to
+            // the CALLER's active workspace, not necessarily the ticket's own).
+            departmentId: departmentId || undefined,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error ?? "Failed to create activity");
+        }
+        return res.json();
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error ?? "Failed to create activity");
-      }
-      const activity = await res.json();
       toast.success("Activity created");
-      if (inline) {
-        onCreated?.({ id: activity.id, title: activity.title, projectId: activity.projectId ?? null, project: activity.project ?? null });
-      } else {
-        router.push(`/activities/${activity.id}`);
+      if (allUploaded) {
+        // No attachments selected, or every upload succeeded. Inline: call
+        // onCreated (the Ticket-linking callback) exactly once, now — never
+        // before uploads finished. Standalone: navigate immediately, exactly
+        // like this form always has. A partial/total upload failure instead
+        // falls through to the PostCreateUploadPanel rendered below; inline
+        // waits there for Retry/Continue before ever calling onCreated,
+        // standalone waits for Continue before navigating.
+        if (inline) {
+          onCreated?.({ id: activity.id, title: activity.title, projectId: activity.projectId ?? null, project: activity.project ?? null });
+        } else {
+          router.push(`/activities/${activity.id}`);
+        }
       }
     } catch (error: any) {
       toast.error(error.message ?? "Failed to create activity");
@@ -211,6 +275,40 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
       setSaving(false);
     }
   };
+
+  // The Activity already exists (create succeeded) and had attachments to
+  // upload — the ORIGINAL form is never shown again from this point on
+  // (nothing left to resubmit against), only upload progress + Retry/
+  // Continue. On a fully successful upload this branch is never reached at
+  // all: handleSubmit above navigates away directly.
+  if (attachments.createdEntity && attachments.entries.length > 0) {
+    const finish = () => {
+      if (inline) {
+        // Exactly once — this is the ONLY place inline's onCreated fires
+        // from the panel (Continue, or a fully-successful Retry below).
+        onCreated?.(attachments.createdEntity!);
+      } else {
+        router.push(`/activities/${attachments.createdEntity!.id}`);
+      }
+    };
+    return (
+      <PostCreateUploadPanel
+        entityLabel="Activity"
+        entries={attachments.entries}
+        uploading={attachments.phase === "uploading"}
+        onRetryFailed={async () => {
+          const { allUploaded } = await attachments.retryFailed();
+          // Canonical rule, identical in both modes: a Retry that clears
+          // every remaining failure finishes automatically (same as the
+          // initial upload's own "all succeeded" path in handleSubmit) —
+          // the panel (and its Continue button) exists only to let the
+          // user proceed EARLY while a failure still remains.
+          if (allUploaded) finish();
+        }}
+        onContinue={finish}
+      />
+    );
+  }
 
   return (
     <div className={inline ? "" : "space-y-6 max-w-2xl"}>
@@ -403,6 +501,14 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
               </div>
             </div>
 
+            <PendingAttachmentsField
+              files={attachments.files}
+              onFilesChange={attachments.setFiles}
+              disabled={saving}
+              canUpload={canUploadAttachments}
+              unavailableMessage="You don't have permission to attach files to an Activity in this department."
+            />
+
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>
                 {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
@@ -421,6 +527,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
           open={projectDialogOpen}
           onOpenChange={setProjectDialogOpen}
           departmentId={departmentId}
+          canUploadAttachments={!!canUploadProjectAttachments}
           onCreated={handleProjectCreated}
         />
       )}

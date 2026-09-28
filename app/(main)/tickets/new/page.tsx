@@ -1,7 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
-import { getAccessibleDepartmentSummaries, getTicketDestinationDepartments, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, getTicketDestinationDepartments, getNavVisibilityFlags, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { Role } from "@prisma/client";
@@ -147,6 +147,28 @@ export default async function NewTicketPage() {
       canLinkProjectActivityAnywhere ? getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.create") : Promise.resolve([]),
     ]);
 
+  // project.create/activity.create never imply project.edit/activity.edit
+  // (independently grantable — see app/(main)/projects/new/page.tsx's
+  // identical comment). Computed only over the (small, bounded) departments
+  // already offered for creation above — the department the inline dialogs'
+  // Attachments section is ever relevant for is always one of these. Same
+  // hasEffectiveEntityPermission union (global grant OR that department's
+  // own grant) every other entity-edit gate in this app uses; the form only
+  // ever checks membership in this pre-computed set, never decides the
+  // permission itself.
+  const [projectEditDepartmentIds, activityEditDepartmentIds] = await Promise.all([
+    Promise.all(
+      projectCreateDepartments.map(async (d) =>
+        (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, d.id, "project.edit")) ? d.id : null
+      )
+    ).then((ids) => ids.filter((id): id is string => id !== null)),
+    Promise.all(
+      activityCreateDepartments.map(async (d) =>
+        (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, d.id, "activity.edit")) ? d.id : null
+      )
+    ).then((ids) => ids.filter((id): id is string => id !== null)),
+  ]);
+
   return (
     <div className="space-y-6 max-w-6xl">
       {/* Breadcrumb */}
@@ -181,6 +203,8 @@ export default async function NewTicketPage() {
         linkPermissionDepartmentIds={linkPermissionDepartmentIds}
         projectCreateDepartmentIds={projectCreateDepartments.map((d) => d.id)}
         activityCreateDepartmentIds={activityCreateDepartments.map((d) => d.id)}
+        projectEditDepartmentIds={projectEditDepartmentIds}
+        activityEditDepartmentIds={activityEditDepartmentIds}
       />
     </div>
   );

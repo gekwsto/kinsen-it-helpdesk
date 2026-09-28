@@ -46,6 +46,13 @@ function buildCanonicalUrl(params: SearchParams, page: number): string {
  * gating: seeing your own assignments needs no permission beyond
  * ticket.view (see buildAssignedToMeWhere in
  * lib/services/department-scope-service.ts).
+ *
+ * Deliberately does NOT offer the `Assigned to` filter (TicketFilters'
+ * showAssigneeFilter) unlike /tickets, /tickets/closed and
+ * /tickets/created-by-me: this page's own base scope already fixes
+ * assignedAgentId to the viewer, so filtering by a DIFFERENT assignee would
+ * always return zero rows — a contradictory, confusing control, not a
+ * useful one. `agents: []` below is intentional, not an oversight.
  */
 export default async function AssignedToMeTicketsPage({
   searchParams,

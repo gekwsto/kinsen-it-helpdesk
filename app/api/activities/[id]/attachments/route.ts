@@ -4,7 +4,7 @@ import { requireAuth } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import path from "path";
 import fs from "fs/promises";
-import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
+import { MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, entityAttachmentDir } from "@/lib/attachment-policy";
 
 const attachmentInclude = {
   uploadedBy: { select: { id: true, name: true, email: true } },
@@ -86,7 +86,7 @@ export async function POST(
       return NextResponse.json({ error: "File type not allowed" }, { status: 400 });
     }
 
-    const dir = path.join(UPLOAD_DIR, "activities", id);
+    const dir = entityAttachmentDir("activities", id);
     await fs.mkdir(dir, { recursive: true });
 
     const filename = generateStoredFilename(file.name);

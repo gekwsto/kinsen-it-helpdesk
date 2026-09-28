@@ -1,5 +1,8 @@
 import { redirect } from "next/navigation";
-import { auth, signIn } from "@/lib/auth";
+import { headers } from "next/headers";
+import { auth, signIn, signOut } from "@/lib/auth";
+import { readRawSessionExpiryState } from "@/lib/session-expiry";
+import { sanitizeInternalDestination } from "@/lib/safe-redirect";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -8,12 +11,23 @@ import { CredentialsLoginForm } from "@/components/auth/credentials-login-form";
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ message?: string }>;
+  searchParams: Promise<{ message?: string; callbackUrl?: string }>;
 }) {
   const session = await auth();
   if (session) redirect("/dashboard");
 
-  const { message } = await searchParams;
+  const { message, callbackUrl } = await searchParams;
+
+  // Server-confirmed, independent of `message` — the query string is only
+  // ever used below for the cosmetic banner text. Whether the Microsoft
+  // sign-in button forces `prompt=login` is decided ONLY from this direct
+  // read of the actual session cookie (the same classification
+  // app/auth/sso-entry/route.ts uses), so a forged `?message=session_expired`
+  // can never force reauthentication, and a forged absence of it can never
+  // suppress it for a session that genuinely is expired.
+  const rawState = await readRawSessionExpiryState({ headers: await headers() });
+  const forceReauth = rawState.hasToken && rawState.isExpired;
+  const destination = sanitizeInternalDestination(callbackUrl, "/dashboard");
 
   return (
     <div className="w-full max-w-md px-4">
@@ -65,7 +79,20 @@ export default async function LoginPage({
           <form
             action={async () => {
               "use server";
-              await signIn("microsoft-entra-id", { redirectTo: "/dashboard" });
+              // `forceReauth`/`destination` are plain primitives captured
+              // from this Server Component's own render — both computed
+              // server-side above, never from a client-controlled flag.
+              if (forceReauth) {
+                // Same reasoning as app/auth/sso-entry/route.ts: clear the
+                // stale, already-expired cookie before requesting a fresh
+                // one, so the reauthenticated session gets its own
+                // independent 8h window instead of risking inheriting the
+                // already-past absoluteSessionExpiresAt from the old token.
+                await signOut({ redirect: false });
+                await signIn("microsoft-entra-id", { redirectTo: destination }, { prompt: "login" });
+              } else {
+                await signIn("microsoft-entra-id", { redirectTo: destination });
+              }
             }}
           >
             <Button type="submit" className="w-full h-11 gap-3" size="lg">

@@ -22,11 +22,40 @@ import {
   resolveActivityOverdueWhere,
 } from "@/lib/services/activity-query-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { resolveListSort, type SortKeyDef } from "@/lib/list-sort";
+
+// Whitelist for the List view's clickable column headers (Title, Project,
+// Department, Status, Priority, Start, Due, Progress) — see
+// app/(main)/projects/page.tsx's own PROJECT_SORT_KEYS for the full
+// rationale (never a dynamic `{ [sortBy]: order }`, status/priority reuse
+// ActivityStatus/ActivityPriority's own Postgres-enum declaration order —
+// already this app's canonical order elsewhere, e.g. ACTIVITY_STATUS_VALUES
+// above and the Activity status/priority config admin screens both walk
+// Object.values() in this same order). Nullable date/progress columns get
+// `nulls: "last"` for a deterministic order in either direction.
+const ACTIVITY_SORT_KEYS: Record<string, SortKeyDef> = {
+  title: (order) => ({ title: order }),
+  // See PROJECT_SORT_KEYS's department entry in app/(main)/projects/page.tsx
+  // for why relation fields never take a `nulls` modifier here — project
+  // and department below both rely on Postgres's own deterministic
+  // per-direction default instead.
+  project: (order) => ({ project: { title: order } }),
+  department: (order) => ({ department: { name: order } }),
+  status: (order) => ({ status: order }),
+  priority: (order) => ({ priority: order }),
+  startDate: (order) => ({ startDate: { sort: order, nulls: "last" } }),
+  dueDate: (order) => ({ dueDate: { sort: order, nulls: "last" } }),
+  progress: (order) => ({ progress: order }),
+};
+const ACTIVITY_DEFAULT_ORDER_BY = [{ createdAt: "desc" as const }, { id: "asc" as const }];
 
 interface SearchParams {
   page?: string;
   pageSize?: string;
   view?: string;
+  /** Whitelisted against ACTIVITY_SORT_KEYS below — see lib/list-sort.ts. Only meaningful in List view; clicking a column header sets both. */
+  sortBy?: string;
+  sortOrder?: string;
   search?: string;
   /** Exact ActivityStatus enum value — distinct from statusGroup below. */
   status?: string;
@@ -166,14 +195,19 @@ export default async function ActivitiesPage({
 
   const requestedPage = parsePageParam(params.page);
   const pageSize = parsePageSizeParam(params.pageSize);
+  const sort = resolveListSort(ACTIVITY_SORT_KEYS, ACTIVITY_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder);
 
   const [[activities, totalCount], projectOptions, departmentOptions, userOptions] = await Promise.all([
     prisma.$transaction([
       prisma.projectActivity.findMany({
         where,
         // id as a secondary sort key guarantees fully deterministic
-        // pagination even when two activities share the exact same createdAt.
-        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        // pagination even when two activities share the exact same primary
+        // sort value. sort.orderBy is either this exact canonical default
+        // (no/invalid ?sortBy=) or one whitelisted column from
+        // ACTIVITY_SORT_KEYS above, always with the same id tie-breaker —
+        // see lib/list-sort.ts.
+        orderBy: sort.orderBy,
         skip: (requestedPage - 1) * pageSize,
         take: pageSize,
         include: {
@@ -241,7 +275,7 @@ export default async function ActivitiesPage({
           <p className="text-muted-foreground mt-1">All activities and tasks</p>
         </div>
         <div className="flex items-center gap-2">
-          <ViewToggle />
+          <ViewToggle defaultView="list" />
           {canCreate && (
             <Button asChild>
               <Link href="/activities/new">
@@ -269,7 +303,7 @@ export default async function ActivitiesPage({
         </div>
       ) : (
         <>
-          <ActivityList activities={serializedActivities} />
+          <ActivityList activities={serializedActivities} defaultView="list" />
           <ActivityPaginationBar pagination={pagination} />
         </>
       )}

@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
-import { getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, getNavVisibilityFlags, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { Button } from "@/components/ui/button";
 import { ProjectForm } from "@/components/projects/project-form";
@@ -33,6 +33,27 @@ export default async function NewProjectPage() {
     getActiveWorkspace(session.user.id, session.user.role),
   ]);
 
+  // project.create never implies project.edit — they're independently
+  // grantable (see prisma/seed.ts; a role can hold one without the other,
+  // same as project.edit/project.delete elsewhere in this app). Computed
+  // per offered department via the SAME hasEffectiveEntityPermission union
+  // (global grant OR that department's own grant) every other entity-edit
+  // gate in this app uses — getAccessibleDepartmentSummaries alone isn't
+  // enough here because its ADMIN/"canViewAllDepartments" fast path aside,
+  // it only ever walks real DepartmentMemberships, so it would wrongly omit
+  // a department for a user whose project.edit comes from a GLOBAL custom
+  // role with no membership anywhere. This is the "canonical server-
+  // computed capability" the Attachments section's visibility is gated on —
+  // ProjectForm only ever checks membership in this pre-computed set, it
+  // never decides the permission itself.
+  const editableDepartmentIds = (
+    await Promise.all(
+      departments.map(async (d) =>
+        (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, d.id, "project.edit")) ? d.id : null
+      )
+    )
+  ).filter((id): id is string => id !== null);
+
   // Preselect the active workspace if it's actually allowed; if there's
   // exactly one allowed department, that's the obvious choice regardless of
   // workspace state. Otherwise (multiple choices, or "All Workspaces"
@@ -59,7 +80,7 @@ export default async function NewProjectPage() {
         </div>
       </div>
 
-      <ProjectForm departments={departments} defaultDepartmentId={defaultDepartmentId} />
+      <ProjectForm departments={departments} editableDepartmentIds={editableDepartmentIds} defaultDepartmentId={defaultDepartmentId} />
     </div>
   );
 }

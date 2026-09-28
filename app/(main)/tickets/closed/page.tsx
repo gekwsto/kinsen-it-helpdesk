@@ -8,11 +8,11 @@ import { TicketFilters } from "@/components/tickets/ticket-filters";
 import { TicketListLiveRefresh } from "@/components/tickets/ticket-list-live-refresh";
 import { redirect } from "next/navigation";
 import { ArchiveX } from "lucide-react";
-import { Role } from "@prisma/client";
 import {
   getTicketFilterOptions,
   splitFilterParam,
   reconcileTicketFilterParam,
+  getVisibleTicketAssignees,
 } from "@/lib/services/ticket-filter-options-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 
@@ -55,6 +55,8 @@ interface SearchParams {
   departmentId?: string;
   subDepartmentId?: string;
   assignedAgentId?: string;
+  /** Same "Only unassigned" special option app/(main)/tickets/page.tsx already supports — see the `assignedAgentId`/`unassigned` condition below. */
+  unassigned?: string;
   sortBy?: string;
   sortDir?: string;
 }
@@ -152,7 +154,22 @@ export default async function ClosedTicketsPage({
   if (params.statusId) andConditions.push({ statusId: { in: splitFilterParam(params.statusId) } });
   if (params.priorityId) andConditions.push({ priorityId: { in: splitFilterParam(params.priorityId) } });
   if (params.categoryId) andConditions.push({ categoryId: { in: splitFilterParam(params.categoryId) } });
-  if (params.assignedAgentId) andConditions.push({ assignedAgentId: params.assignedAgentId });
+
+  // Snapshot BEFORE assignedAgentId/unassigned — see getVisibleTicketAssignees's
+  // own doc comment for why the option list must never be derived from a
+  // where-clause that already narrows to the currently selected assignee.
+  const assigneeOptionsWhere = { AND: [...andConditions] };
+
+  // Same "Only unassigned" precedence as app/(main)/tickets/page.tsx: the
+  // toggle and the dropdown are mutually exclusive in the UI (selecting one
+  // clears the other's param), but if both were somehow present in the URL,
+  // "unassigned" wins rather than silently ANDing into an impossible
+  // (assignedAgentId = both null and some id) condition.
+  if (params.unassigned === "true") {
+    andConditions.push({ assignedAgentId: null });
+  } else if (params.assignedAgentId) {
+    andConditions.push({ assignedAgentId: params.assignedAgentId });
+  }
 
   const where: any = { AND: andConditions };
 
@@ -178,11 +195,7 @@ export default async function ClosedTicketsPage({
       orderBy: { name: "asc" },
       select: { id: true, name: true },
     }),
-    prisma.user.findMany({
-      where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
-      select: { id: true, name: true, email: true, image: true },
-      orderBy: { name: "asc" },
-    }),
+    getVisibleTicketAssignees(assigneeOptionsWhere),
   ]);
 
   const pagination = computePagination(total, requestedPage, pageSize);
@@ -207,6 +220,7 @@ export default async function ClosedTicketsPage({
 
       <TicketFilters
         options={{ ...filterOptions, departments, agents }}
+        showAssigneeFilter
       />
 
       <TicketTable

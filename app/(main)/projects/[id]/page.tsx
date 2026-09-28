@@ -11,10 +11,10 @@ import { formatDate, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target, Ticket } from "lucide-react";
 import { GoalStatus } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
-import { ActivityCompleteCheckbox } from "@/components/activities/activity-complete-checkbox";
-import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { ProjectActivitiesCard } from "@/components/projects/project-activities-card";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { EntityNotes } from "@/components/notes/entity-notes";
+import { EntityAttachments } from "@/components/attachments/entity-attachments";
 import { EntityRelatedLinks } from "@/components/related-links/entity-related-links";
 import { getRelatedLinksAccess, listRelatedLinksForPage } from "@/lib/services/related-links-service";
 import { ProjectDetailHeader } from "@/components/projects/project-detail-header";
@@ -77,6 +77,17 @@ export default async function ProjectDetailPage({
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
 
+  // Attachments: view/download follows the page's own project.view gate
+  // above; upload/delete visibility comes from the SAME canEditProject
+  // (project.edit) computed above — POST/DELETE
+  // /api/projects/[id]/attachments[/...] independently re-check this and
+  // are the actual authority. Same shape as ActivityAttachments' own query.
+  const attachments = await prisma.projectAttachment.findMany({
+    where: { projectId: id },
+    include: { uploadedBy: { select: { id: true, name: true, email: true } } },
+    orderBy: { createdAt: "desc" },
+  });
+
   // Related Links: viewing follows the page's own project.view gate above;
   // Add/Edit/Delete visibility comes from the SAME effective project.edit
   // check (global grant OR this project's own department grant) the
@@ -108,10 +119,23 @@ export default async function ProjectDetailPage({
   const activityStatusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(
     project.activities.map((a) => a.departmentId).filter((d): d is string => !!d)
   );
-  const completedActivities = project.activities.filter((a) => a.isCompleted).length;
-  const totalActivities = project.activities.length;
-  const progress = project.progress;
   const progressIsCalculated = relatedTickets.length > 0;
+
+  // Pre-resolved server-side (statusLabel/statusColor) so the client card
+  // below never needs to ship/re-implement the department-scoped status
+  // resolution logic — same values the old server-rendered row used.
+  const activityRows = project.activities.map((activity) => {
+    const statusDisplay = resolveActivityStatusDisplay(activityStatusDisplayConfigs, activity.departmentId, activity.status);
+    return {
+      id: activity.id,
+      title: activity.title,
+      dueDate: activity.dueDate ? activity.dueDate.toISOString() : null,
+      isCompleted: activity.isCompleted,
+      statusLabel: statusDisplay.label,
+      statusColor: statusDisplay.color,
+      assignedUsers: activity.assignedUsers,
+    };
+  });
 
   return (
     <div className="space-y-6 max-w-5xl">
@@ -138,81 +162,18 @@ export default async function ProjectDetailPage({
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Activities */}
         <div className="lg:col-span-2 space-y-4">
-          <Card>
-            <CardHeader className="flex flex-row items-center justify-between pb-3">
-              <CardTitle className="text-base">
-                Activities ({totalActivities})
-              </CardTitle>
-              {totalActivities > 0 && (
-                <div className="text-right">
-                  <span className="text-sm text-muted-foreground">{progress}%</span>
-                  <p className="text-[10px] text-muted-foreground">
-                    {progressIsCalculated ? "Calculated from linked tickets" : "Manual progress"}
-                  </p>
-                </div>
-              )}
-            </CardHeader>
-            <CardContent>
-              {totalActivities > 0 && (
-                <div className="h-2 bg-muted rounded-full mb-4">
-                  <div
-                    className="h-2 bg-primary rounded-full transition-all"
-                    style={{ width: `${progress}%` }}
-                  />
-                </div>
-              )}
+          <ProjectActivitiesCard
+            projectId={project.id}
+            initialActivities={activityRows}
+            initialProgress={project.progress}
+            progressIsCalculated={progressIsCalculated}
+          />
 
-              {project.activities.length === 0 ? (
-                <p className="text-center text-muted-foreground py-8 text-sm">
-                  No activities yet.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {project.activities.map((activity) => (
-                    <Link
-                      key={activity.id}
-                      href={`/activities/${activity.id}`}
-                      className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/50 transition-colors"
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <ActivityCompleteCheckbox activityId={activity.id} initialIsCompleted={activity.isCompleted} />
-                        <div className="min-w-0">
-                          <p
-                            className={`text-sm font-medium ${
-                              activity.isCompleted
-                                ? "line-through text-muted-foreground"
-                                : ""
-                            }`}
-                          >
-                            {activity.title}
-                          </p>
-                          {activity.dueDate && (
-                            <p className="text-xs text-muted-foreground">
-                              Due: {formatDate(activity.dueDate)}
-                            </p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {activity.assignedUsers.slice(0, 2).map((u) => (
-                          <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-                            <AvatarImage src={u.image ?? undefined} />
-                            <AvatarFallback className="text-[9px]">
-                              {getInitials(u.name)}
-                            </AvatarFallback>
-                          </Avatar>
-                        ))}
-                        <StatusBadge
-                          label={resolveActivityStatusDisplay(activityStatusDisplayConfigs, activity.departmentId, activity.status).label}
-                          color={resolveActivityStatusDisplay(activityStatusDisplayConfigs, activity.departmentId, activity.status).color}
-                        />
-                      </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <EntityAttachments
+            apiBasePath={`/api/projects/${project.id}`}
+            initialAttachments={attachments.map((a) => ({ ...a, createdAt: a.createdAt.toISOString() }))}
+            canManage={canEditProject}
+          />
 
           <EntityNotes
             apiBasePath={`/api/projects/${project.id}`}

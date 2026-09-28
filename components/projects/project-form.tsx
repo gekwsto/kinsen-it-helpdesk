@@ -21,6 +21,9 @@ import {
 import { Loader2, ChevronLeft, ShieldOff } from "lucide-react";
 import Link from "next/link";
 import { ProjectStatus } from "@prisma/client";
+import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
+import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
+import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 
 interface AssignableUser {
   id: string;
@@ -46,6 +49,18 @@ export interface CreatedProject {
 
 interface ProjectFormProps {
   departments: DepartmentOption[];
+  /**
+   * Server-computed set of department ids where this user holds effective
+   * project.edit (global grant OR that department's own grant — the exact
+   * union hasEffectiveEntityPermission resolves, computed once per
+   * `departments` entry by the page). `create` never implies `edit`: a role
+   * can independently grant project.create without project.edit, so a
+   * create-only user's Attachments section stays hidden for a department
+   * where they couldn't actually upload once the Project exists. The
+   * client only ever checks membership in this server-truth set — it never
+   * decides the permission itself.
+   */
+  editableDepartmentIds: string[];
   /** Preselected department — the active workspace's department if it's in `departments`, or the sole option if there's exactly one. Undefined forces an explicit choice. */
   defaultDepartmentId?: string;
   /**
@@ -63,16 +78,47 @@ interface ProjectFormProps {
   /** Required when mode="inline" — the department this project MUST belong to. */
   fixedDepartmentId?: string;
   fixedDepartmentName?: string;
+  /**
+   * Inline mode only — whether the current user holds effective
+   * project.edit (global grant OR `fixedDepartmentId`'s own grant,
+   * computed server-side by the caller via hasEffectiveEntityPermission —
+   * see components/tickets/ticket-form.tsx / ticket-actions.tsx) in the
+   * fixed department. Same "create never implies edit" rule as standalone;
+   * governs whether the Attachments section is offered at all in the
+   * dialog. Unused/defaults false outside inline mode.
+   */
+  inlineCanUploadAttachments?: boolean;
+  /**
+   * Inline mode only — called whenever it becomes unsafe (or safe again) to
+   * silently dismiss the enclosing dialog via Escape/backdrop-click/close-
+   * button: true from the moment the Project has been created with
+   * attachments still pending/failed, until the upload phase is fully
+   * resolved (either every file succeeded, or the user explicitly clicked
+   * Continue). The dialog shell (ProjectCreateDialog) is what actually
+   * blocks the close; this form only ever reports the state.
+   */
+  onLockChange?: (locked: boolean) => void;
   onCreated?: (project: CreatedProject) => void;
   onCancel?: () => void;
 }
 
-export function ProjectForm({ departments, defaultDepartmentId, mode = "standalone", fixedDepartmentId, fixedDepartmentName, onCreated, onCancel }: ProjectFormProps) {
+export function ProjectForm({ departments, editableDepartmentIds, defaultDepartmentId, mode = "standalone", fixedDepartmentId, fixedDepartmentName, inlineCanUploadAttachments = false, onLockChange, onCreated, onCancel }: ProjectFormProps) {
   const router = useRouter();
   const inline = mode === "inline";
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
+  const attachments = useCreateWithAttachments<CreatedProject>((id) => `/api/projects/${id}`);
+
+  // Reports "safe to silently dismiss the dialog right now" to the inline
+  // dialog shell — locked from the moment creation succeeded WITH
+  // attachments to upload, until either every upload succeeded or the user
+  // explicitly continued. Never fires in standalone mode (no dialog to guard).
+  useEffect(() => {
+    if (!inline) return;
+    onLockChange?.(attachments.createdEntity !== null && attachments.entries.length > 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inline, attachments.createdEntity, attachments.entries.length]);
 
   const {
     register,
@@ -93,6 +139,14 @@ export function ProjectForm({ departments, defaultDepartmentId, mode = "standalo
 
   const departmentId = inline ? fixedDepartmentId : watch("departmentId");
   const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
+
+  // Recomputed purely from the already-server-resolved `editableDepartmentIds`
+  // set whenever the Workspace Select changes — never a fresh permission
+  // decision made client-side, just a membership check against server
+  // truth. null (no department chosen yet) hides the section entirely,
+  // same as false; only a confirmed `true` shows it. Inline mode never
+  // offers attachments at all (see the `attachments` hook's own comment).
+  const canUploadAttachments: boolean | null = inline ? inlineCanUploadAttachments : departmentId ? editableDepartmentIds.includes(departmentId) : null;
 
   // Eligible members depend on the selected workspace — re-fetched whenever
   // it changes, not loaded once and filtered in the browser.
@@ -140,25 +194,40 @@ export function ProjectForm({ departments, defaultDepartmentId, mode = "standalo
     }
     setIsSubmitting(true);
     try {
-      const res = await fetch("/api/projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // POST /api/projects is the authoritative scope validator (resolveDepartmentForCreate)
-        // regardless of what's sent here — this only ever narrows what the
-        // UI OFFERS, never widens what the backend accepts.
-        body: JSON.stringify({ ...data, departmentId: effectiveDepartmentId, memberIds: Array.from(selectedMemberIds) }),
+      // Two-step architecture: create the Project first (unchanged request/
+      // route), THEN — only once it has a real, server-issued id — upload
+      // any selected attachments through the existing protected
+      // POST /api/projects/[id]/attachments route. Never the reverse, never
+      // a client-generated id, never a multipart create request.
+      const { entity: project, allUploaded } = await attachments.submit(async () => {
+        const res = await fetch("/api/projects", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // POST /api/projects is the authoritative scope validator (resolveDepartmentForCreate)
+          // regardless of what's sent here — this only ever narrows what the
+          // UI OFFERS, never widens what the backend accepts.
+          body: JSON.stringify({ ...data, departmentId: effectiveDepartmentId, memberIds: Array.from(selectedMemberIds) }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.error ?? "Failed to create project");
+        }
+        return res.json();
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error ?? "Failed to create project");
-      }
-      const project = await res.json();
       toast.success("Project created!");
-      if (inline) {
-        onCreated?.({ id: project.id, title: project.title, departmentId: project.departmentId ?? null });
-      } else {
-        router.push(`/projects/${project.id}`);
+      if (allUploaded) {
+        // No attachments selected, or every upload succeeded. Inline: call
+        // onCreated (the Ticket-linking callback) exactly once, now — never
+        // before uploads finished. Standalone: navigate immediately, exactly
+        // like this form always has. A partial/total upload failure instead
+        // falls through to the PostCreateUploadPanel rendered below; inline
+        // waits there for Retry/Continue before ever calling onCreated,
+        // standalone waits for Continue before navigating.
+        if (inline) {
+          onCreated?.({ id: project.id, title: project.title, departmentId: project.departmentId ?? null });
+        } else {
+          router.push(`/projects/${project.id}`);
+        }
       }
     } catch (error: any) {
       toast.error(error.message ?? "Failed to create project");
@@ -176,6 +245,43 @@ export function ProjectForm({ departments, defaultDepartmentId, mode = "standalo
           You don&apos;t have permission to create a project in any workspace. Contact your administrator to request access.
         </p>
       </div>
+    );
+  }
+
+  // The Project already exists (create succeeded) and had attachments to
+  // upload — the ORIGINAL form is never shown again from this point on
+  // (nothing left to resubmit against — the create request is never fired
+  // again, whether the user retries or continues), only upload progress +
+  // Retry/Continue. On a fully successful upload this branch is never
+  // reached at all: onSubmit above already called onCreated/navigated
+  // directly.
+  if (attachments.createdEntity && attachments.entries.length > 0) {
+    const finish = () => {
+      if (inline) {
+        // Exactly once — this is the ONLY place inline's onCreated fires
+        // from the panel (Continue, or a fully-successful Retry below).
+        onCreated?.(attachments.createdEntity!);
+      } else {
+        router.push(`/projects/${attachments.createdEntity!.id}`);
+      }
+    };
+    return (
+      <PostCreateUploadPanel
+        entityLabel="Project"
+        entries={attachments.entries}
+        uploading={attachments.phase === "uploading"}
+        onRetryFailed={async () => {
+          const { allUploaded } = await attachments.retryFailed();
+          // Canonical rule, identical in both modes: a Retry that clears
+          // every remaining failure finishes automatically (same as the
+          // initial upload's own "all succeeded" path in onSubmit) — the
+          // panel (and its Continue button) exists only to let the user
+          // proceed EARLY while a failure still remains, not as an extra
+          // confirmation step once there's nothing left to review.
+          if (allUploaded) finish();
+        }}
+        onContinue={finish}
+      />
     );
   }
 
@@ -366,6 +472,18 @@ export function ProjectForm({ departments, defaultDepartmentId, mode = "standalo
               </p>
             )}
           </div>
+
+          <PendingAttachmentsField
+            files={attachments.files}
+            onFilesChange={attachments.setFiles}
+            disabled={isSubmitting}
+            canUpload={canUploadAttachments}
+            unavailableMessage={
+              inline
+                ? "You don't have permission to attach files to a Project in this department."
+                : "You don't have permission to attach files to a Project in the selected workspace."
+            }
+          />
 
           <div className="flex justify-end gap-3 pt-2">
             {inline ? (

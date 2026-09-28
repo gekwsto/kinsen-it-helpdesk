@@ -4,7 +4,7 @@ import { Suspense, useEffect, useRef, useState } from "react";
 import { usePathname, useSearchParams, useRouter } from "next/navigation";
 import Image from "next/image";
 import { cn } from "@/lib/utils";
-import { resolveTargetUrl, isSameRouteNavigation, createTokenGuard, shouldTreatClickAsNavigation } from "@/lib/navigation-loader";
+import { resolveTargetUrl, isSameRouteNavigation, createTokenGuard, shouldTreatClickAsNavigation, isNavLoaderIgnored } from "@/lib/navigation-loader";
 
 // Only actually show the overlay if a navigation is still pending after this
 // long — most in-app transitions resolve faster than this, so the loader
@@ -156,7 +156,14 @@ function NavigationLoaderInner() {
     // stop propagation) — the earliest possible signal for a <Link> click.
     function onClickCapture(e: MouseEvent) {
       if (e.defaultPrevented) return;
-      const anchor = (e.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      const target = e.target as Element | null;
+      // A same-page control nested inside a <Link> (e.g. a row's completion
+      // checkbox) that intends to suppress the Link's own navigation can't
+      // rely on stopPropagation() to also stop THIS listener — see
+      // NAV_LOADER_IGNORE_ATTR's doc comment in lib/navigation-loader.ts for
+      // why this capture-phase listener always runs first regardless.
+      if (isNavLoaderIgnored(target)) return;
+      const anchor = target?.closest?.("a[href]") as HTMLAnchorElement | null;
       if (!anchor) return;
       const isSameOrigin = anchor.origin === window.location.origin;
       const shouldTreat = shouldTreatClickAsNavigation({

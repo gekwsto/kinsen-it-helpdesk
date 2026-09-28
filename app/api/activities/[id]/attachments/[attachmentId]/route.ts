@@ -4,10 +4,10 @@ import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
-import { UPLOAD_DIR, isSafeStoredFilename, resolvesInsideDir } from "@/lib/attachment-policy";
+import { isSafeStoredFilename, resolvesInsideDir, entityAttachmentDir } from "@/lib/attachment-policy";
 
 function activityUploadDir(activityId: string): string {
-  return path.join(UPLOAD_DIR, "activities", activityId);
+  return entityAttachmentDir("activities", activityId);
 }
 
 /**

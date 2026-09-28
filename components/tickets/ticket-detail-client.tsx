@@ -116,6 +116,8 @@ export interface TicketDetailClientProps {
   effectiveDepartmentId: string | null;
   canCreateProjectInDept: boolean;
   canCreateActivityInDept: boolean;
+  canEditProjectInDept: boolean;
+  canEditActivityInDept: boolean;
   initialStatus: TicketStatus;
   initialPriority: TicketPriority | null;
   initialCategory: TicketCategory | null;
@@ -168,6 +170,8 @@ export function TicketDetailClient({
   effectiveDepartmentId,
   canCreateProjectInDept,
   canCreateActivityInDept,
+  canEditProjectInDept,
+  canEditActivityInDept,
   initialStatus,
   initialPriority,
   initialCategory,
@@ -514,6 +518,8 @@ export function TicketDetailClient({
             effectiveDepartmentId={effectiveDepartmentId}
             canCreateProjectInDept={canCreateProjectInDept}
             canCreateActivityInDept={canCreateActivityInDept}
+            canEditProjectInDept={canEditProjectInDept}
+            canEditActivityInDept={canEditActivityInDept}
           />
         )}
 

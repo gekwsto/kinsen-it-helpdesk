@@ -64,6 +64,10 @@ interface TicketActionsProps {
   effectiveDepartmentId: string | null;
   canCreateProjectInDept: boolean;
   canCreateActivityInDept: boolean;
+  /** Same hasEffectiveEntityPermission union as canCreateProjectInDept, checked against project.edit instead — governs whether the inline "+ New Project" dialog offers attachment selection. project.create never implies project.edit. */
+  canEditProjectInDept: boolean;
+  /** Same, for activity.edit / the inline "+ New Activity" dialog. */
+  canEditActivityInDept: boolean;
 }
 
 export function TicketActions({
@@ -78,6 +82,8 @@ export function TicketActions({
   effectiveDepartmentId,
   canCreateProjectInDept,
   canCreateActivityInDept,
+  canEditProjectInDept,
+  canEditActivityInDept,
 }: TicketActionsProps) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
@@ -636,6 +642,7 @@ export function TicketActions({
             open={projectDialogOpen}
             onOpenChange={closeProjectCreate}
             departmentId={effectiveDepartmentId}
+            canUploadAttachments={canEditProjectInDept}
             onCreated={handleProjectCreated}
           />
           <ActivityCreateDialog
@@ -643,6 +650,7 @@ export function TicketActions({
             onOpenChange={closeActivityCreate}
             departmentId={effectiveDepartmentId}
             preselectedProjectId={selectedProject || null}
+            canUploadAttachments={canEditActivityInDept}
             onCreated={handleActivityCreated}
           />
         </>

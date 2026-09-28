@@ -164,6 +164,20 @@ interface CreateTicketFormProps {
   projectCreateDepartmentIds: string[];
   /** Same, for activity.create. */
   activityCreateDepartmentIds: string[];
+  /**
+   * Departments (a subset of projectCreateDepartmentIds) where the user ALSO
+   * holds effective project.edit (global grant OR that department's own
+   * grant — the hasEffectiveEntityPermission union, computed server-side in
+   * app/(main)/tickets/new/page.tsx). project.create never implies
+   * project.edit; this governs whether the inline "+ New Project" dialog
+   * offers attachment selection for the currently-selected department. The
+   * client only checks membership in this server-truth set — POST
+   * /api/projects/[id]/attachments still independently re-checks the real
+   * permission and is the actual authority.
+   */
+  projectEditDepartmentIds: string[];
+  /** Same, for activity.edit / the inline "+ New Activity" dialog. */
+  activityEditDepartmentIds: string[];
 }
 
 export function CreateTicketForm({
@@ -176,6 +190,8 @@ export function CreateTicketForm({
   linkPermissionDepartmentIds,
   projectCreateDepartmentIds,
   activityCreateDepartmentIds,
+  projectEditDepartmentIds,
+  activityEditDepartmentIds,
 }: CreateTicketFormProps) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -336,6 +352,10 @@ export function CreateTicketForm({
 
   const canCreateProjectHere = canLinkProjectActivityHere && !!selectedDepartmentId && projectCreateDepartmentIds.includes(selectedDepartmentId);
   const canCreateActivityHere = canLinkProjectActivityHere && !!selectedDepartmentId && activityCreateDepartmentIds.includes(selectedDepartmentId);
+  // Purely a membership check against the server-computed set above — never
+  // a fresh permission decision made here.
+  const canEditProjectHere: boolean | null = selectedDepartmentId ? projectEditDepartmentIds.includes(selectedDepartmentId) : null;
+  const canEditActivityHere: boolean | null = selectedDepartmentId ? activityEditDepartmentIds.includes(selectedDepartmentId) : null;
 
   const selectProject = (projectId: string | null) => {
     setValue("projectId", projectId ?? undefined);
@@ -804,6 +824,7 @@ export function CreateTicketForm({
                 onOpenChange={setProjectDialogOpen}
                 departmentId={selectedDepartmentId}
                 departmentName={departments.find((d) => d.id === selectedDepartmentId)?.name}
+                canUploadAttachments={!!canEditProjectHere}
                 onCreated={handleProjectCreated}
               />
               <ActivityCreateDialog
@@ -811,6 +832,7 @@ export function CreateTicketForm({
                 onOpenChange={setActivityDialogOpen}
                 departmentId={selectedDepartmentId}
                 preselectedProjectId={selectedProjectId || null}
+                canUploadAttachments={!!canEditActivityHere}
                 onCreated={handleActivityCreated}
               />
             </>

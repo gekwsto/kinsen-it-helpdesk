@@ -7,6 +7,7 @@ import { ViewToggle } from "@/components/ui/view-toggle";
 import { ProjectList } from "@/components/projects/project-list";
 import { ProjectFilters } from "@/components/projects/project-filters";
 import { ProjectPaginationBar } from "@/components/projects/project-pagination-bar";
+import { ProjectListLiveRefresh } from "@/components/projects/project-list-live-refresh";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
@@ -20,12 +21,46 @@ import {
   resolveProjectActivityWhere,
 } from "@/lib/services/project-query-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { resolveListSort, type SortKeyDef } from "@/lib/list-sort";
 import { ProjectStatus, Role } from "@prisma/client";
+
+// Whitelist for the List view's clickable column headers (Name, Department,
+// Status, Priority, Date range) — the ONLY `sortBy` values ever accepted;
+// anything else falls back to the canonical default below untouched. See
+// lib/list-sort.ts's own doc comment for why this is never a dynamic
+// `{ [sortBy]: order }` object.
+//   - status/priority sort on the raw Prisma enum column: both ProjectStatus
+//     and ActivityPriority are native Postgres enums whose DECLARATION order
+//     (see prisma/schema.prisma) is already the app's own canonical business
+//     order elsewhere (e.g. ALL_PROJECT_STATUSES in project-detail-header.tsx
+//     reads `Object.values(ProjectStatus)` for the exact same reason) — so
+//     ascending sort here reuses that existing order rather than inventing one.
+//   - department is a nullable relation; see the entry below for why it
+//     relies on Postgres's own default null ordering instead of `nulls`.
+const PROJECT_SORT_KEYS: Record<string, SortKeyDef> = {
+  title: (order) => ({ title: order }),
+  // Prisma does not accept a `nulls` modifier on a nested RELATION field's
+  // orderBy (only on a scalar column of the model being directly queried —
+  // confirmed against the real query engine, not just the generated
+  // types). department is a nullable relation, so this relies on
+  // Postgres's own deterministic default instead: NULLS LAST for ASC,
+  // NULLS FIRST for DESC — never random, never an error, just not
+  // independently forced to "last" in both directions the way the
+  // scalar date columns below are.
+  department: (order) => ({ department: { name: order } }),
+  status: (order) => ({ status: order }),
+  priority: (order) => ({ priority: order }),
+  startDate: (order) => ({ startDate: { sort: order, nulls: "last" } }),
+};
+const PROJECT_DEFAULT_ORDER_BY = [{ createdAt: "desc" as const }, { id: "asc" as const }];
 
 interface SearchParams {
   page?: string;
   pageSize?: string;
   view?: string;
+  /** Whitelisted against PROJECT_SORT_KEYS below — see lib/list-sort.ts. Only meaningful in List view; clicking a column header sets both. */
+  sortBy?: string;
+  sortOrder?: string;
   search?: string;
   /** Exact ProjectStatus enum value — distinct from statusGroup below. */
   status?: string;
@@ -193,6 +228,7 @@ export default async function ProjectsPage({
 
   const requestedPage = parsePageParam(params.page);
   const pageSize = parsePageSizeParam(params.pageSize);
+  const sort = resolveListSort(PROJECT_SORT_KEYS, PROJECT_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder);
 
   // Only the two queries that must see an identical snapshot (rows + the
   // total they're paginated against) go inside $transaction, matching
@@ -206,10 +242,13 @@ export default async function ProjectsPage({
       prisma.project.findMany({
         where,
         // id as a secondary sort key guarantees a fully deterministic order
-        // even when two projects share the exact same createdAt — required
-        // for stable pagination (no row ever skipped or duplicated across
-        // pages purely due to timestamp collisions).
-        orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        // even when two projects share the exact same primary sort value —
+        // required for stable pagination (no row ever skipped or duplicated
+        // across pages purely due to a value collision). sort.orderBy is
+        // either this exact canonical default (no/invalid ?sortBy=) or one
+        // whitelisted column from PROJECT_SORT_KEYS above, always with the
+        // same id tie-breaker — see lib/list-sort.ts.
+        orderBy: sort.orderBy,
         skip: (requestedPage - 1) * pageSize,
         take: pageSize,
         include: {
@@ -248,6 +287,7 @@ export default async function ProjectsPage({
 
   return (
     <div className="space-y-6">
+      <ProjectListLiveRefresh />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Projects</h1>
@@ -256,7 +296,7 @@ export default async function ProjectsPage({
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <ViewToggle />
+          <ViewToggle defaultView="list" />
           {canCreate && (
             <Button asChild>
               <Link href="/projects/new">
@@ -282,7 +322,7 @@ export default async function ProjectsPage({
         </div>
       ) : (
         <>
-          <ProjectList projects={projectsWithOverdue} />
+          <ProjectList projects={projectsWithOverdue} defaultView="list" />
           <ProjectPaginationBar pagination={pagination} />
         </>
       )}

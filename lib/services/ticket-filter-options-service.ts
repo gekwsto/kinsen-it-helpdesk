@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { Role } from "@prisma/client";
+import type { Role } from "@prisma/client";
 import { getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
 
 /**
@@ -187,4 +187,43 @@ export async function reconcileTicketFilterParam(
 
   const match = freshOptions.find((o) => o.name === previous.name);
   return match ? match.value : null;
+}
+
+/**
+ * The `Assigned to` filter's option list — derived from the ACTUAL
+ * assignees of Tickets the caller can already see, never from a global
+ * "every user with an agent-capable role" query (that used to be
+ * getScopedTicketAgents(), replaced here after an audit found it could
+ * expose an agent unrelated to the viewer's authorized scope, while also
+ * omitting a CustomRole-holding or since-deactivated assignee who *is* on
+ * a visible ticket — see the final report for the fail-before evidence).
+ *
+ * `baseWhere` must be the exact same AND-condition set the caller's own
+ * ticket query for THIS page already uses (scope + every other active
+ * filter), captured BEFORE the assignedAgentId/unassigned condition is
+ * added — adding it first would collapse the option list down to just
+ * whichever assignee already happens to be selected. Role and isActive are
+ * never consulted: a user appears here exactly when they are the real
+ * assignedAgent of a Ticket this exact where-clause can see, whether or
+ * not they still hold an agent-capable role today.
+ *
+ * A single DISTINCT query against Ticket.assignedAgentId — bounded by the
+ * number of distinct assignees among matching tickets, never a full scan
+ * of the Ticket or User table. Does not decide who MAY be assigned to a
+ * ticket (see lib/services/assignment-eligibility-service.ts for that,
+ * unchanged by this function) — this is read-only historical filtering.
+ */
+export async function getVisibleTicketAssignees(baseWhere: Record<string, unknown>): Promise<{ id: string; name: string | null }[]> {
+  const rows = await prisma.ticket.findMany({
+    where: { AND: [baseWhere, { assignedAgentId: { not: null } }] },
+    distinct: ["assignedAgentId"],
+    select: { assignedAgent: { select: { id: true, name: true } } },
+  });
+  const byId = new Map<string, string | null>();
+  for (const row of rows) {
+    if (row.assignedAgent && !byId.has(row.assignedAgent.id)) byId.set(row.assignedAgent.id, row.assignedAgent.name);
+  }
+  return Array.from(byId, ([id, name]) => ({ id, name })).sort(
+    (a, b) => (a.name ?? "").localeCompare(b.name ?? "", undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id)
+  );
 }

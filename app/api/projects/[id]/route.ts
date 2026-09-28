@@ -6,6 +6,7 @@ import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateProjectSchema } from "@/lib/validations";
+import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { Role } from "@prisma/client";
 
 const PROJECT_INCLUDE = {
@@ -59,7 +60,7 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAuth();
 
-    const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true } });
+    const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true, status: true } });
     if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     const canEdit = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, existing.departmentId, "project.edit");
@@ -126,6 +127,18 @@ export async function PATCH(
       },
       include: PROJECT_INCLUDE,
     });
+
+    // Publish ONLY after the status change has actually committed above —
+    // never before, and never for other field edits (title, dates,
+    // members, ...) that don't affect what the Projects list itself shows.
+    // Fire-and-forget/non-blocking: a realtime publish failure must never
+    // fail (or even slow down) a mutation that already succeeded. See
+    // lib/realtime/project-list-invalidation.ts's doc comment for why this
+    // is a separate channel from tickets', reusing the same established
+    // LISTEN/NOTIFY + SSE + debounced router.refresh() mechanism.
+    if (data.status !== undefined && data.status !== existing.status) {
+      publishProjectListInvalidation();
+    }
 
     return NextResponse.json(project);
   } catch (error: any) {

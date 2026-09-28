@@ -11,6 +11,13 @@ const PUBLIC_PATHS = [
   // Mention Reminder worker: skips the browser-session redirect only; the
   // route itself requires the CRON_SECRET bearer token (fails closed in production).
   "/api/internal/mention-reminders/process",
+  // Canonical suite-to-Helpdesk SSO entry point (app/auth/sso-entry/route.ts)
+  // — must be reachable with NO session at all (that's exactly the "absent"
+  // case it has to classify and act on itself); it independently performs
+  // its own valid/absent/expired classification and never trusts anything
+  // from the request beyond the session cookie itself and a validated
+  // `returnTo`, so bypassing the generic middleware gate here is safe.
+  "/auth/sso-entry",
 ];
 
 // Exact-pathname bypass, checked separately from PUBLIC_PATHS's
@@ -141,7 +148,13 @@ export const authConfig = {
           }
           const loginUrl = new URL("/login", nextUrl);
           loginUrl.searchParams.set("message", "session_expired");
-          loginUrl.searchParams.set("callbackUrl", nextUrl.href);
+          // Relative (pathname + search only), never the full absolute
+          // href — app/(auth)/login/page.tsx's own sanitizeInternalDestination
+          // (lib/safe-redirect.ts) only ever accepts a same-origin relative
+          // path; storing the full origin here would make even this app's
+          // OWN legitimate destination get rejected and fall back to the
+          // default landing route instead of the page the user was on.
+          loginUrl.searchParams.set("callbackUrl", nextUrl.pathname + nextUrl.search);
           return Response.redirect(loginUrl);
         }
         return false;

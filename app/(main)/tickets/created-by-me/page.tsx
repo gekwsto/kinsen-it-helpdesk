@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
-import { getTicketFilterOptions, splitFilterParam } from "@/lib/services/ticket-filter-options-service";
+import { getTicketFilterOptions, splitFilterParam, getVisibleTicketAssignees } from "@/lib/services/ticket-filter-options-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 
 interface SearchParams {
@@ -21,6 +21,9 @@ interface SearchParams {
   categoryId?: string;
   departmentId?: string;
   subDepartmentId?: string;
+  assignedAgentId?: string;
+  /** Same "Only unassigned" special option app/(main)/tickets/page.tsx already supports — see the `assignedAgentId`/`unassigned` condition below. */
+  unassigned?: string;
   source?: string;
   createdAfter?: string;
   createdBefore?: string;
@@ -119,13 +122,30 @@ export default async function CreatedByMeTicketsPage({
     });
   }
 
+  // Snapshot BEFORE assignedAgentId/unassigned — see getVisibleTicketAssignees's
+  // own doc comment for why the option list must never be derived from a
+  // where-clause that already narrows to the currently selected assignee.
+  const assigneeOptionsWhere = { AND: [...andConditions] };
+
+  // Independent of buildCreatedByMeWhere's own requesterId scope above —
+  // "which of the tickets I created is assigned to X" is a real, non-
+  // contradictory combination (unlike /tickets/assigned-to-me, which is
+  // already fixed to assignedAgentId = the viewer and so never offers this
+  // control at all). Same "unassigned wins" precedence as every other
+  // Ticket-list page that supports this filter.
+  if (params.unassigned === "true") {
+    andConditions.push({ assignedAgentId: null });
+  } else if (params.assignedAgentId) {
+    andConditions.push({ assignedAgentId: params.assignedAgentId });
+  }
+
   const where: any = { AND: andConditions };
 
   // No active-workspace concept on this page (an explicit ?departmentId=
   // just narrows an already-personal result set — see buildCreatedByMeWhere
   // above) — filter options are scoped the same way: that one department if
   // given, else the full set the caller may view tickets in.
-  const [tickets, total, filterOptions, departments] = await Promise.all([
+  const [tickets, total, filterOptions, departments, agents] = await Promise.all([
     prisma.ticket.findMany({
       where,
       skip,
@@ -145,6 +165,7 @@ export default async function CreatedByMeTicketsPage({
     prisma.ticket.count({ where }),
     getTicketFilterOptions(params.departmentId, session.user.id, role),
     getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
+    getVisibleTicketAssignees(assigneeOptionsWhere),
   ]);
 
   const pagination = computePagination(total, requestedPage, pageSize);
@@ -170,7 +191,7 @@ export default async function CreatedByMeTicketsPage({
         )}
       </div>
 
-      <TicketFilters options={{ ...filterOptions, departments, agents: [] }} />
+      <TicketFilters options={{ ...filterOptions, departments, agents }} showAssigneeFilter />
 
       <TicketTable
         tickets={tickets as any}

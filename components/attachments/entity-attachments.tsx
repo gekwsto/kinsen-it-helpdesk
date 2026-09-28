@@ -6,22 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Paperclip, Upload, Loader2, Trash2 } from "lucide-react";
 import { formatBytes, formatDateTime } from "@/lib/utils";
-
-const ALLOWED_TYPES: Record<string, string> = {
-  "image/jpeg": "JPG",
-  "image/png": "PNG",
-  "image/gif": "GIF",
-  "image/webp": "WEBP",
-  "application/pdf": "PDF",
-  "application/msword": "DOC",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "DOCX",
-  "application/vnd.ms-excel": "XLS",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "XLSX",
-  "text/plain": "TXT",
-  "application/zip": "ZIP",
-};
-
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB — same cap lib/attachment-policy.ts enforces server-side.
+import { ATTACHMENT_MIME_TYPE_LABELS as ALLOWED_TYPES, MAX_ATTACHMENT_SIZE_BYTES as MAX_FILE_SIZE } from "@/lib/attachment-constants";
 
 interface Attachment {
   id: string;
@@ -32,28 +17,34 @@ interface Attachment {
   uploadedBy?: { id: string; name?: string | null; email: string } | null;
 }
 
-interface ActivityAttachmentsProps {
-  activityId: string;
+interface EntityAttachmentsProps {
+  /** e.g. `/api/projects/${id}` or `/api/activities/${id}` — attachments live at `${apiBasePath}/attachments[/:attachmentId]`, same convention as EntityNotes. */
+  apiBasePath: string;
   initialAttachments: Attachment[];
   /**
    * Whether upload/delete controls are shown at all. This is a UI
-   * convenience only — POST/DELETE /api/activities/[id]/attachments[/...]
-   * independently re-check activity.edit server-side and are the actual
-   * authority (upload/delete = activity.edit, view/download = activity.view
-   * — a stricter gate than the plain view access every member of this page
+   * convenience only — POST/DELETE `${apiBasePath}/attachments[/...]`
+   * independently re-check project.edit/activity.edit server-side and are
+   * the actual authority (upload/delete = *.edit, view/download = *.view —
+   * a stricter gate than the plain view access every member of this page
    * already has once it renders at all).
    */
   canManage: boolean;
 }
 
 /**
- * Activity attachments panel — reuses the exact private-storage
- * architecture already built for Ticket attachments (private UPLOAD_DIR,
- * MIME/size allowlist, authenticated per-entity download route; see
- * lib/attachment-policy.ts and app/api/activities/[id]/attachments/). Every
- * download link points at the authenticated route, never a static URL.
+ * Shared Attachments panel for Project/Activity detail pages — generalized
+ * from what used to be Activity-only (components/activities/activity-
+ * attachments.tsx), the same way EntityNotes generalized Notes. Reuses the
+ * exact private-storage architecture already built for Ticket/Activity
+ * attachments (private UPLOAD_DIR, MIME/size allowlist, authenticated
+ * per-entity download route; see lib/attachment-policy.ts and each of
+ * app/api/{projects,activities}/[id]/attachments/). Every download link
+ * points at the authenticated route, never a static URL. Behavior is
+ * IDENTICAL for both entities — only `apiBasePath` differs; the server
+ * side independently enforces which entity each id actually belongs to.
  */
-export function ActivityAttachments({ activityId, initialAttachments, canManage }: ActivityAttachmentsProps) {
+export function EntityAttachments({ apiBasePath, initialAttachments, canManage }: EntityAttachmentsProps) {
   const [attachments, setAttachments] = useState<Attachment[]>(initialAttachments);
   const [uploading, setUploading] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -72,7 +63,7 @@ export function ActivityAttachments({ activityId, initialAttachments, canManage 
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`/api/activities/${activityId}/attachments`, { method: "POST", body: fd });
+      const res = await fetch(`${apiBasePath}/attachments`, { method: "POST", body: fd });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         toast.error(typeof err.error === "string" ? err.error : "Upload failed");
@@ -96,7 +87,7 @@ export function ActivityAttachments({ activityId, initialAttachments, canManage 
   const deleteAttachment = async (attachmentId: string) => {
     setDeletingId(attachmentId);
     try {
-      const res = await fetch(`/api/activities/${activityId}/attachments/${attachmentId}`, { method: "DELETE" });
+      const res = await fetch(`${apiBasePath}/attachments/${attachmentId}`, { method: "DELETE" });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         toast.error(typeof err.error === "string" ? err.error : "Failed to delete attachment");
@@ -163,7 +154,7 @@ export function ActivityAttachments({ activityId, initialAttachments, canManage 
                 className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs"
               >
                 <a
-                  href={`/api/activities/${activityId}/attachments/${att.id}`}
+                  href={`${apiBasePath}/attachments/${att.id}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-start gap-2 min-w-0 flex-1 hover:opacity-80 transition-opacity"

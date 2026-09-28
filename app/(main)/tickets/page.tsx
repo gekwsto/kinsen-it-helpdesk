@@ -20,9 +20,9 @@ import {
   getTicketFilterOptions,
   splitFilterParam,
   reconcileTicketFilterParam,
+  getVisibleTicketAssignees,
 } from "@/lib/services/ticket-filter-options-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
-import { Role } from "@prisma/client";
 
 /**
  * Rebuilds the current URL with one or more statusId/priorityId/categoryId
@@ -305,11 +305,6 @@ export default async function AllTicketsPage({
   if (params.priorityId) andConditions.push({ priorityId: { in: splitFilterParam(params.priorityId) } });
   if (params.categoryId) andConditions.push({ categoryId: { in: splitFilterParam(params.categoryId) } });
   if (params.source) andConditions.push({ source: params.source });
-  if (params.unassigned === "true") {
-    andConditions.push({ assignedAgentId: null });
-  } else if (params.assignedAgentId) {
-    andConditions.push({ assignedAgentId: params.assignedAgentId });
-  }
   if (params.createdAfter || params.createdBefore) {
     andConditions.push({
       createdAt: {
@@ -317,6 +312,19 @@ export default async function AllTicketsPage({
         ...(params.createdBefore ? { lte: new Date(params.createdBefore) } : {}),
       },
     });
+  }
+
+  // Snapshot (spread copy) of every condition EXCEPT assignedAgentId/
+  // unassigned — the `Assigned to` dropdown's own OPTIONS must reflect who
+  // is actually assigned among tickets this scope+filters combination can
+  // see, never collapse to just whichever assignee happens to already be
+  // selected (see getVisibleTicketAssignees's own doc comment).
+  const assigneeOptionsWhere = { AND: [...andConditions] };
+
+  if (params.unassigned === "true") {
+    andConditions.push({ assignedAgentId: null });
+  } else if (params.assignedAgentId) {
+    andConditions.push({ assignedAgentId: params.assignedAgentId });
   }
 
   const where: any = { AND: andConditions };
@@ -343,7 +351,7 @@ export default async function AllTicketsPage({
     // Only departments the caller can actually filter to — never one that
     // would just 403 if picked.
     getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
-    prisma.user.findMany({ where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true }, orderBy: { name: "asc" }, select: { id: true, name: true } }),
+    getVisibleTicketAssignees(assigneeOptionsWhere),
   ]);
 
   const pagination = computePagination(total, requestedPage, pageSize);
@@ -377,6 +385,7 @@ export default async function AllTicketsPage({
       <TicketFilters
         options={{ ...filterOptions, departments, agents }}
         isAllTickets
+        showAssigneeFilter
         currentUserId={session.user.id}
       />
 

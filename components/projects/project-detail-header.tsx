@@ -58,7 +58,11 @@ interface ProjectDetailHeaderProps {
  * the "one source of truth" requirement). Everything else on the page
  * (activities list, related tickets, notes, sidebar) stays server-rendered
  * and untouched; Project.status has no effect on any of that derived data,
- * so no router.refresh() is needed for this specific change.
+ * so no router.refresh() is needed on THIS page for this change. The
+ * /projects list page is a different matter — PATCH /api/projects/[id]
+ * publishes a project-list-changed realtime signal after a committed status
+ * change (see lib/realtime/project-list-invalidation.ts) so an already-open
+ * Projects list picks it up on its own, with no action needed here.
  */
 export function ProjectDetailHeader({
   projectId,

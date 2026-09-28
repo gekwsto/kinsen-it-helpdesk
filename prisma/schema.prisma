@@ -716,6 +716,7 @@ model User {
   activityNotes            ActivityNote[]        @relation("ActivityNoteAuthor")
   relatedLinksCreated      RelatedLink[]         @relation("RelatedLinkCreator")
   activityAttachments      ActivityAttachment[]
+  projectAttachments       ProjectAttachment[]
   projectNoteMentions      ProjectNoteMention[]
   activityNoteMentions     ActivityNoteMention[]
   ticketMessageMentions    TicketMessageMention[]
@@ -1230,6 +1231,7 @@ model Project {
   yearlyGoals YearlyGoal[]      @relation("GoalProjects")
   notes       ProjectNote[]
   relatedLinks RelatedLink[]
+  attachments ProjectAttachment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1387,6 +1389,41 @@ model ActivityAttachment {
   createdAt    DateTime        @default(now())
 
   @@index([activityId])
+}
+
+// Project's own counterpart of ActivityAttachment above — deliberately an
+// ADDITIVE, separate model rather than a generalized/polymorphic
+// "EntityAttachment" table: ActivityAttachment already has real production
+// rows keyed on a required `activityId`, and turning it polymorphic would
+// mean making that column nullable, adding a projectId column, and a CHECK
+// constraint (the RelatedLink "exactly one owner" pattern) purely for
+// naming symmetry — a real migration/backfill risk this task explicitly
+// avoids. What IS shared: the storage policy (lib/attachment-policy.ts),
+// the route-handler logic (lib/attachments/route-handlers.ts), and the UI
+// (components/attachments/entity-attachments.tsx) — only the Prisma model
+// and the on-disk subdirectory ("projects/<id>" vs "activities/<id>") are
+// duplicated, by design. Upload/delete require project.edit; view/download
+// require project.view — both resolved via hasEffectiveEntityPermission
+// against the Project's own real departmentId, exactly like
+// ActivityAttachment. Project deletion cascades this table the same way
+// Activity deletion cascades ActivityAttachment — DB rows only; the on-disk
+// files are left behind exactly like Activity deletion already leaves
+// ActivityAttachment's files behind (no existing cleanup to diverge from).
+model ProjectAttachment {
+  id           String   @id @default(cuid())
+  project      Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId    String
+  uploadedBy   User?    @relation(fields: [uploadedById], references: [id])
+  uploadedById String?
+  filename     String
+  originalName String
+  mimeType     String
+  size         Int
+  createdAt    DateTime @default(now())
+
+  @@index([projectId])
+  @@index([projectId, createdAt])
+  @@index([uploadedById])
 }
 
 // Per-department, editable status->progress% mapping — Activity progress is

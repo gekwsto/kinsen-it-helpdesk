@@ -12,16 +12,19 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
-import type { ViewMode } from "@/components/ui/view-toggle";
+import { resolveViewMode, type ViewMode } from "@/components/ui/view-toggle";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
 import { ProgressConfigGapInline } from "@/components/shared/progress-display";
 import { ActivityCard, PRIORITY_COLORS } from "@/components/activities/activity-card";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { MemberPreview } from "@/components/shared/member-preview";
 
 export interface SerializedActivity {
   id: string;
@@ -51,11 +54,13 @@ export interface SerializedActivity {
 
 interface ActivityListProps {
   activities: SerializedActivity[];
+  /** Matches the ViewToggle's own `defaultView` on the SAME page (see components/ui/view-toggle.tsx's resolveViewMode) — two independent Client Components reading the same `?view=` param, not prop-linked, so both must agree. Defaults to "grid" (this component's historical behavior, still relied on by /my-activities, which passes nothing). */
+  defaultView?: ViewMode;
 }
 
-export function ActivityList({ activities: initialActivities }: ActivityListProps) {
+export function ActivityList({ activities: initialActivities, defaultView = "grid" }: ActivityListProps) {
   const searchParams = useSearchParams();
-  const view = (searchParams.get("view") as ViewMode | null) ?? "grid";
+  const view = resolveViewMode(searchParams.get("view"), defaultView);
   const [activities, setActivities] = useState(initialActivities);
   // Tracks the last `initialActivities` reference `activities` was synced
   // from — NOT itself rendered, purely a comparison key.
@@ -104,18 +109,19 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
   if (view === "list") {
     return (
       <div className="rounded-lg border overflow-hidden">
+        <TooltipProvider delayDuration={200}>
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/50">
-              <TableHead>Title</TableHead>
-              <TableHead>Project</TableHead>
-              <TableHead>Department</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Priority</TableHead>
+              <SortableTableHead sortKey="title">Title</SortableTableHead>
+              <SortableTableHead sortKey="project">Project</SortableTableHead>
+              <SortableTableHead sortKey="department">Department</SortableTableHead>
+              <SortableTableHead sortKey="status">Status</SortableTableHead>
+              <SortableTableHead sortKey="priority">Priority</SortableTableHead>
               <TableHead>Assigned</TableHead>
-              <TableHead>Start</TableHead>
-              <TableHead>Due</TableHead>
-              <TableHead>Progress</TableHead>
+              <SortableTableHead sortKey="startDate">Start</SortableTableHead>
+              <SortableTableHead sortKey="dueDate">Due</SortableTableHead>
+              <SortableTableHead sortKey="progress">Progress</SortableTableHead>
               <TableHead className="w-16"></TableHead>
             </TableRow>
           </TableHeader>
@@ -149,17 +155,19 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
                 </TableCell>
                 <TableCell>
                   {activity.assignedUsers.length > 0 ? (
-                    <div className="flex items-center gap-1">
-                      {activity.assignedUsers.slice(0, 3).map((u) => (
-                        <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-                          <AvatarImage src={u.image ?? undefined} />
-                          <AvatarFallback className="text-[9px]">{getInitials(u.name)}</AvatarFallback>
-                        </Avatar>
-                      ))}
-                      {activity.assignedUsers.length > 3 && (
-                        <span className="text-xs text-muted-foreground ml-1">+{activity.assignedUsers.length - 3}</span>
-                      )}
-                    </div>
+                    <MemberPreview members={activity.assignedUsers} label="Assigned">
+                      <div className="flex items-center gap-1">
+                        {activity.assignedUsers.slice(0, 3).map((u) => (
+                          <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
+                            <AvatarImage src={u.image ?? undefined} />
+                            <AvatarFallback className="text-[9px]">{getInitials(u.name)}</AvatarFallback>
+                          </Avatar>
+                        ))}
+                        {activity.assignedUsers.length > 3 && (
+                          <span className="text-xs text-muted-foreground ml-1">+{activity.assignedUsers.length - 3}</span>
+                        )}
+                      </div>
+                    </MemberPreview>
                   ) : (
                     <span className="text-xs text-muted-foreground">Unassigned</span>
                   )}
@@ -194,6 +202,7 @@ export function ActivityList({ activities: initialActivities }: ActivityListProp
             ))}
           </TableBody>
         </Table>
+        </TooltipProvider>
       </div>
     );
   }
