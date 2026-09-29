@@ -11,6 +11,8 @@ import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
 import { getTicketFilterOptions, splitFilterParam } from "@/lib/services/ticket-filter-options-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { resolveListSort } from "@/lib/list-sort";
+import { TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY } from "@/lib/services/ticket-list-sort";
 
 interface SearchParams {
   page?: string;
@@ -24,8 +26,9 @@ interface SearchParams {
   source?: string;
   createdAfter?: string;
   createdBefore?: string;
+  /** Whitelisted against TICKET_SORT_KEYS — see lib/list-sort.ts and lib/services/ticket-list-sort.ts. */
   sortBy?: string;
-  sortDir?: string;
+  sortOrder?: string;
 }
 
 /** Preserves every param except `page` — same pattern as app/(main)/projects/page.tsx's own buildCanonicalUrl. */
@@ -87,17 +90,9 @@ export default async function AssignedToMeTicketsPage({
   const pageSize = parsePageSizeParam(params.pageSize);
   const skip = (requestedPage - 1) * pageSize;
 
-  const sortBy = params.sortBy ?? "createdAt";
-  const sortDir = (params.sortDir ?? "desc") as "asc" | "desc";
-  const primarySort =
-    sortBy === "priority"
-      ? { priority: { level: sortDir } }
-      : sortBy === "status"
-      ? { status: { order: sortDir } }
-      : { [sortBy]: sortDir };
-  // `id` as a secondary sort key guarantees fully deterministic pagination
-  // — see app/(main)/tickets/page.tsx's identical comment.
-  const orderBy: any = [primarySort, { id: "asc" }];
+  // Whitelist-only, URL-driven sort — see app/(main)/tickets/page.tsx's
+  // identical comment.
+  const orderBy = resolveListSort(TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder).orderBy;
 
   const andConditions: any[] = [buildAssignedToMeWhere(session.user.id, params.departmentId)];
 

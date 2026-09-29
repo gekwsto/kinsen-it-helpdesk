@@ -23,6 +23,8 @@ import {
   getVisibleTicketAssignees,
 } from "@/lib/services/ticket-filter-options-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { resolveListSort } from "@/lib/list-sort";
+import { TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY } from "@/lib/services/ticket-list-sort";
 
 /**
  * Rebuilds the current URL with one or more statusId/priorityId/categoryId
@@ -110,8 +112,9 @@ interface SearchParams {
   source?: string;
   createdAfter?: string;
   createdBefore?: string;
+  /** Whitelisted against TICKET_SORT_KEYS — see lib/list-sort.ts and lib/services/ticket-list-sort.ts. */
   sortBy?: string;
-  sortDir?: string;
+  sortOrder?: string;
   unassigned?: string;
   myOnly?: string;
 }
@@ -162,19 +165,13 @@ export default async function AllTicketsPage({
   const pageSize = parsePageSizeParam(params.pageSize);
   const skip = (requestedPage - 1) * pageSize;
 
-  const sortBy = params.sortBy ?? "createdAt";
-  const sortDir = (params.sortDir ?? "desc") as "asc" | "desc";
-  const primarySort =
-    sortBy === "priority"
-      ? { priority: { level: sortDir } }
-      : sortBy === "status"
-      ? { status: { order: sortDir } }
-      : { [sortBy]: sortDir };
-  // `id` as a secondary sort key guarantees fully deterministic pagination
-  // even when two tickets share the exact same primary sort value (e.g.
-  // identical createdAt from bulk-seeded/imported data) — same pattern as
-  // app/(main)/projects/page.tsx and app/(main)/activities/page.tsx.
-  const orderBy: any = [primarySort, { id: "asc" }];
+  // Whitelist-only, URL-driven sort — same helper Projects/Activities use.
+  // An unknown/tampered sortBy or sortOrder can never reach Prisma; it just
+  // falls back verbatim to TICKET_DEFAULT_ORDER_BY. `id` is always appended
+  // as a secondary key by resolveListSort itself, guaranteeing fully
+  // deterministic pagination even when many tickets share the exact same
+  // primary sort value.
+  const orderBy = resolveListSort(TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder).orderBy;
 
   // The list's actual scope: an EXPLICIT ?departmentId= is the ONLY thing
   // that ever narrows it. A prior "Phase 2B" version of this page

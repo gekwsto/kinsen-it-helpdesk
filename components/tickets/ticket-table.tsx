@@ -11,6 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Button } from "@/components/ui/button";
 import { PaginationControls } from "@/components/ui/pagination";
 import type { PaginationMeta } from "@/lib/pagination";
@@ -80,17 +81,17 @@ export function TicketTable({
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/50">
-              <TableHead className="w-32">Ticket #</TableHead>
-              <TableHead>Title</TableHead>
-              {showRequester && <TableHead>Requester</TableHead>}
+              <SortableTableHead sortKey="ticketNumber" className="w-32">Ticket #</SortableTableHead>
+              <SortableTableHead sortKey="title">Title</SortableTableHead>
+              {showRequester && <SortableTableHead sortKey="requester">Requester</SortableTableHead>}
               <TableHead className="w-24">Source</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Priority</TableHead>
-              <TableHead>Category</TableHead>
+              <SortableTableHead sortKey="status">Status</SortableTableHead>
+              <SortableTableHead sortKey="priority">Priority</SortableTableHead>
+              <SortableTableHead sortKey="category">Category</SortableTableHead>
               <TableHead>Project</TableHead>
-              <TableHead>Assigned To</TableHead>
+              <SortableTableHead sortKey="assignedAgent">Assigned To</SortableTableHead>
               <TableHead>Dept. changed by</TableHead>
-              <TableHead>Created</TableHead>
+              <SortableTableHead sortKey="createdAt">Created</SortableTableHead>
               <TableHead className="w-16"></TableHead>
             </TableRow>
           </TableHeader>

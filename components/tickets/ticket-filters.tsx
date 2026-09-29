@@ -153,8 +153,18 @@ export function TicketFilters({
   };
 
   const handleSortDir = () => {
-    const cur = get("sortDir") || "desc";
-    push({ sortDir: cur === "desc" ? "asc" : "desc" });
+    const cur = get("sortOrder") || "desc";
+    push({ sortOrder: cur === "desc" ? "asc" : "desc" });
+  };
+
+  // Changing the sort FIELD always writes an explicit sortOrder alongside
+  // it — resolveListSort's own default direction for a recognized sortBy
+  // is "asc" (see lib/list-sort.ts), which would otherwise silently
+  // override the direction this dropdown is already showing (default
+  // "desc") the moment a user just switches criteria without also
+  // touching the direction toggle.
+  const handleSortBySelect = (value: string) => {
+    push({ sortBy: value, sortOrder: get("sortOrder") || "desc" });
   };
 
   const resetAll = () => {
@@ -184,8 +194,8 @@ export function TicketFilters({
     get("sortBy")
   );
 
-  const sortDir = (get("sortDir") || "desc") as "asc" | "desc";
-  const SortIcon = sortDir === "asc" ? ArrowUp : ArrowDown;
+  const sortOrder = (get("sortOrder") || "desc") as "asc" | "desc";
+  const SortIcon = sortOrder === "asc" ? ArrowUp : ArrowDown;
 
   return (
     <div className="space-y-3 rounded-lg border bg-card p-4">
@@ -214,7 +224,7 @@ export function TicketFilters({
         <div className="flex items-center gap-1">
           <Select
             value={get("sortBy") || "createdAt"}
-            onValueChange={(v) => handleSelect("sortBy", v)}
+            onValueChange={handleSortBySelect}
           >
             <SelectTrigger className="h-9 w-[150px]">
               <ArrowUpDown className="h-3.5 w-3.5 mr-1.5 text-muted-foreground" />
@@ -233,7 +243,7 @@ export function TicketFilters({
             size="icon"
             className="h-9 w-9 flex-shrink-0"
             onClick={handleSortDir}
-            title={sortDir === "desc" ? "Newest first" : "Oldest first"}
+            title={sortOrder === "desc" ? "Newest first" : "Oldest first"}
           >
             <SortIcon className="h-4 w-4" />
           </Button>

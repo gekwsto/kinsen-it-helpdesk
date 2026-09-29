@@ -15,6 +15,8 @@ import {
   getVisibleTicketAssignees,
 } from "@/lib/services/ticket-filter-options-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
+import { resolveListSort } from "@/lib/list-sort";
+import { TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY } from "@/lib/services/ticket-list-sort";
 
 /** Same purpose as app/(main)/tickets/page.tsx's own helper — see there for the full rationale. */
 function buildClosedTicketsUrlWithCorrections(
@@ -57,8 +59,9 @@ interface SearchParams {
   assignedAgentId?: string;
   /** Same "Only unassigned" special option app/(main)/tickets/page.tsx already supports — see the `assignedAgentId`/`unassigned` condition below. */
   unassigned?: string;
+  /** Whitelisted against TICKET_SORT_KEYS — see lib/list-sort.ts and lib/services/ticket-list-sort.ts. */
   sortBy?: string;
-  sortDir?: string;
+  sortOrder?: string;
 }
 
 export default async function ClosedTicketsPage({
@@ -85,17 +88,9 @@ export default async function ClosedTicketsPage({
   const pageSize = parsePageSizeParam(params.pageSize);
   const skip = (requestedPage - 1) * pageSize;
 
-  const sortBy = params.sortBy ?? "createdAt";
-  const sortDir = (params.sortDir ?? "desc") as "asc" | "desc";
-  const primarySort =
-    sortBy === "priority"
-      ? { priority: { level: sortDir } }
-      : sortBy === "status"
-      ? { status: { order: sortDir } }
-      : { [sortBy]: sortDir };
-  // `id` as a secondary sort key guarantees fully deterministic pagination
-  // — see app/(main)/tickets/page.tsx's identical comment.
-  const orderBy: any = [primarySort, { id: "asc" }];
+  // Whitelist-only, URL-driven sort — see app/(main)/tickets/page.tsx's
+  // identical comment.
+  const orderBy = resolveListSort(TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder).orderBy;
 
   // Same fix/rationale as app/(main)/tickets/page.tsx: the active workspace
   // must never implicitly narrow this list — only an EXPLICIT
