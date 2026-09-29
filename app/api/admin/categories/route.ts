@@ -11,6 +11,11 @@ import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, in
 // category management the moment this ships — see prisma/seed.ts's
 // TICKET_CONFIG_PERMISSION_KEYS comment.
 const CATEGORY_PERMISSION_KEYS = ["category.manage", "department.manageSettings"];
+// Create additionally accepts the granular category.create key, so a role
+// can be granted create-only capability without also holding category.manage
+// (which also implies edit). Independent of category.delete below — a
+// create-only role can never delete, and vice versa.
+const CATEGORY_CREATE_PERMISSION_KEYS = ["category.create", ...CATEGORY_PERMISSION_KEYS];
 // Delete additionally accepts the granular category.delete key, so a role
 // can be granted delete-only capability without also holding category.manage.
 const CATEGORY_DELETE_PERMISSION_KEYS = ["category.delete", ...CATEGORY_PERMISSION_KEYS];
@@ -62,7 +67,7 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      await requireAnyDepartmentPermission(departmentId, CATEGORY_PERMISSION_KEYS);
+      await requireAnyDepartmentPermission(departmentId, CATEGORY_CREATE_PERMISSION_KEYS);
     } catch (error: any) {
       if (error.message === "Unauthorized") return unauthorizedResponse();
       return forbiddenResponse("You do not have permission to create categories in this department.");

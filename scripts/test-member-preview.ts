@@ -88,7 +88,12 @@ async function main() {
   check("The wrapped trigger markup is rendered via `children`, unchanged — MemberPreview never re-implements the avatar stack/icon+count look itself", /\{children\}/.test(previewSrc));
 
   console.log("\n=== Wiring: list/table view only, never grid/cards, never sortable, never a new column ===\n");
-  check("ProjectList: MemberPreview used inside the Members TableCell", /<TableCell className="text-sm text-muted-foreground">\s*<MemberPreview members=\{project\.members\}/.test(projectListSrc));
+  // Trigger markup was later changed from an icon+count to the SAME
+  // avatar-stack pattern Activity Assigned uses (see
+  // scripts/test-project-members-activity-assigned-parity.ts for that
+  // change's own full regression coverage) — this check only confirms
+  // MemberPreview is still the wrapper, now around the non-empty branch.
+  check("ProjectList: MemberPreview used inside the Members TableCell (non-empty branch)", /<MemberPreview members=\{project\.members\} label="Members">/.test(projectListSrc));
   check("ProjectList: the Members column header stays a plain TableHead — never converted to SortableTableHead", /<TableHead>Members<\/TableHead>/.test(projectListSrc));
   check("ProjectList: MemberPreview is NOT referenced inside the grid (card) branch — that block never imports/renders it a second way", (() => {
     const gridStart = projectListSrc.indexOf('return (\n    <div className="grid gap-4 md:grid-cols-2');

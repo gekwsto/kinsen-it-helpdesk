@@ -12,7 +12,14 @@ import { WorkspaceConfigManager } from "@/components/admin/workspace-config-mana
 // the pre-existing department.manageSettings; category.delete is additive
 // again on top of both, for delete specifically).
 const CATEGORY_MANAGE_KEYS = ["category.manage", "department.manageSettings"];
+// Create additionally accepts the granular category.create key — see
+// app/api/admin/categories/route.ts's CATEGORY_CREATE_PERMISSION_KEYS.
+const CATEGORY_CREATE_KEYS = ["category.create", ...CATEGORY_MANAGE_KEYS];
 const CATEGORY_DELETE_KEYS = ["category.delete", ...CATEGORY_MANAGE_KEYS];
+// Union of every key that should let a viewer reach this page at all — a
+// create-only role must still be able to open this page (to see the Create
+// UI), even though it can't delete anything here.
+const CATEGORY_ANY_ACCESS_KEYS = [...new Set([...CATEGORY_CREATE_KEYS, ...CATEGORY_DELETE_KEYS])];
 
 const CATEGORY_FIELDS = [
   { key: "name", label: "Name", type: "text" as const, required: true },
@@ -32,7 +39,7 @@ export default async function DepartmentCategoriesPage({
 
   let access;
   try {
-    access = await requireAnyDepartmentPermission(id, CATEGORY_DELETE_KEYS);
+    access = await requireAnyDepartmentPermission(id, CATEGORY_ANY_ACCESS_KEYS);
   } catch {
     redirect("/dashboard");
   }
@@ -40,8 +47,9 @@ export default async function DepartmentCategoriesPage({
   const department = await prisma.department.findUnique({ where: { id }, select: { id: true, name: true } });
   if (!department) notFound();
 
-  const [canManage, canDelete] = await Promise.all([
+  const [canManage, canCreate, canDelete] = await Promise.all([
     access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, CATEGORY_MANAGE_KEYS, access.membership!.customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, CATEGORY_CREATE_KEYS, access.membership!.customRoleId),
     access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, CATEGORY_DELETE_KEYS, access.membership!.customRoleId),
   ]);
 
@@ -84,7 +92,7 @@ export default async function DepartmentCategoriesPage({
         mode="scoped"
         canCreateGlobal={false}
         deleteSemantics="hard-when-unused"
-        canCreate={canManage}
+        canCreate={canCreate}
         canEdit={canManage}
         canDelete={canDelete}
       />

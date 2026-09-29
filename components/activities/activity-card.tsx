@@ -11,6 +11,7 @@ import { ActivityPriority } from "@prisma/client";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
 import { ProgressConfigGapInline } from "@/components/shared/progress-display";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { PRIORITY_COLORS } from "@/components/shared/priority-badge";
 import type { SerializedActivity } from "@/components/activities/activity-list";
 
 // Status label/color are no longer a static Record — every activity carries
@@ -18,12 +19,13 @@ import type { SerializedActivity } from "@/components/activities/activity-list";
 // lib/services/activity-status-config.ts), rendered via the shared
 // <StatusBadge> component so List and Grid can never visually drift apart.
 
-export const PRIORITY_COLORS: Record<ActivityPriority, string> = {
-  LOW: "bg-green-50 text-green-700",
-  MEDIUM: "bg-yellow-50 text-yellow-700",
-  HIGH: "bg-orange-50 text-orange-700",
-  URGENT: "bg-red-50 text-red-700",
-};
+// PRIORITY_COLORS now lives in components/shared/priority-badge.tsx (single
+// source of truth, also used by the Project List view) — re-exported here
+// unchanged so this file's own Card-view badge below (deliberately
+// different from the shared <PriorityBadge> the List views use) keeps
+// working without every other existing import of PRIORITY_COLORS from this
+// module needing to change.
+export { PRIORITY_COLORS };
 
 interface ActivityCardProps {
   activity: SerializedActivity;

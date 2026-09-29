@@ -15,13 +15,15 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Calendar, Users } from "lucide-react";
-import { formatDate } from "@/lib/utils";
+import { formatDate, getInitials } from "@/lib/utils";
 import { ProjectStatus } from "@prisma/client";
 import { resolveViewMode, type ViewMode } from "@/components/ui/view-toggle";
-import { PROJECT_PRIORITY_LABEL as PRIORITY_LABELS } from "@/lib/project-priority";
+import { PROJECT_PRIORITY_LABEL as PRIORITY_LABELS, projectPriorityKey } from "@/lib/project-priority";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
 import { MemberPreview } from "@/components/shared/member-preview";
+import { PriorityBadge } from "@/components/shared/priority-badge";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -92,9 +94,7 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    <Badge variant="outline" className="text-xs">
-                      Priority {PRIORITY_LABELS[project.priority]}
-                    </Badge>
+                    <PriorityBadge priority={projectPriorityKey(project.priority)} />
                     {project.overdue && <OverdueBadge />}
                   </div>
                 </TableCell>
@@ -110,13 +110,24 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                     "—"
                   )}
                 </TableCell>
-                <TableCell className="text-sm text-muted-foreground">
-                  <MemberPreview members={project.members} label="Members">
-                    <span className="flex items-center gap-1.5">
-                      <Users className="h-3.5 w-3.5" />
-                      {project.members.length}
-                    </span>
-                  </MemberPreview>
+                <TableCell>
+                  {project.members.length > 0 ? (
+                    <MemberPreview members={project.members} label="Members">
+                      <div className="flex items-center gap-1">
+                        {project.members.slice(0, 3).map((m) => (
+                          <Avatar key={m.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
+                            <AvatarImage src={m.image ?? undefined} />
+                            <AvatarFallback className="text-[9px]">{getInitials(m.name)}</AvatarFallback>
+                          </Avatar>
+                        ))}
+                        {project.members.length > 3 && (
+                          <span className="text-xs text-muted-foreground ml-1">+{project.members.length - 3}</span>
+                        )}
+                      </div>
+                    </MemberPreview>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">No members</span>
+                  )}
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{project._count.activities}</TableCell>
                 <TableCell>

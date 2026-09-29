@@ -9,7 +9,16 @@ import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/w
 import { WorkspaceConfigManager } from "@/components/admin/workspace-config-manager";
 
 const CATEGORY_MANAGE_KEYS = ["category.manage", "department.manageSettings"];
+// Create additionally accepts the granular category.create key — see
+// app/api/admin/categories/route.ts's CATEGORY_CREATE_PERMISSION_KEYS.
+const CATEGORY_CREATE_KEYS = ["category.create", ...CATEGORY_MANAGE_KEYS];
 const CATEGORY_DELETE_KEYS = ["category.delete", ...CATEGORY_MANAGE_KEYS];
+// Union of every key that should let a viewer reach this page at all — the
+// page-entry gate must accept whichever of create/delete/manage the caller
+// holds, not just the delete-associated set; a create-only role must still
+// be able to open this page (to see the Create UI), even though it can't
+// delete anything here.
+const CATEGORY_ANY_ACCESS_KEYS = [...new Set([...CATEGORY_CREATE_KEYS, ...CATEGORY_DELETE_KEYS])];
 
 export default async function CategoriesAdminPage() {
   const session = await auth();
@@ -53,7 +62,7 @@ export default async function CategoriesAdminPage() {
 
   let access;
   try {
-    access = await requireAnyDepartmentPermission(departmentId, CATEGORY_DELETE_KEYS);
+    access = await requireAnyDepartmentPermission(departmentId, CATEGORY_ANY_ACCESS_KEYS);
   } catch {
     redirect("/dashboard");
   }
@@ -64,8 +73,9 @@ export default async function CategoriesAdminPage() {
     include: { _count: { select: { tickets: true } }, department: { select: { id: true, name: true } } },
   });
   const departmentOptions = userIsAdmin ? (await listDepartments()).map((d) => ({ id: d.id, name: d.name })) : [];
-  const [canManage, canDelete] = await Promise.all([
+  const [canManage, canCreate, canDelete] = await Promise.all([
     access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, CATEGORY_MANAGE_KEYS, access.membership!.customRoleId),
+    access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, CATEGORY_CREATE_KEYS, access.membership!.customRoleId),
     access.isSystemAdmin || hasAnyDepartmentPermission(access.membership!.role, CATEGORY_DELETE_KEYS, access.membership!.customRoleId),
   ]);
 
@@ -84,7 +94,7 @@ export default async function CategoriesAdminPage() {
         mode="scoped"
         canCreateGlobal={false}
         deleteSemantics="hard-when-unused"
-        canCreate={canManage}
+        canCreate={canCreate}
         canEdit={canManage}
         canDelete={canDelete}
       />

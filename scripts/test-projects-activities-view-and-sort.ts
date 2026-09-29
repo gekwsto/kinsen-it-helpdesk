@@ -103,7 +103,12 @@ async function main() {
   check("13c. Empty string falls back too (not treated as a real value)", resolveViewMode("", "list") === "list");
 
   // ══════════════ Part 2b: source-level wiring — which pages opted in ══════════════
-  console.log("\n=== Default-view wiring: only /projects and /activities changed; /my-activities did not ===\n");
+  // /my-activities originally did NOT opt in here (kept its grid default) —
+  // a later task (see scripts/test-my-activities-default-view.ts) extended
+  // "default to List" to every real Activity-list page, closing that gap.
+  // This file's own checks below were updated to match; the dedicated test
+  // file has the full regression coverage for that change.
+  console.log("\n=== Default-view wiring: /projects, /activities AND /my-activities all default to List now ===\n");
   const projectsPageSrc = await fs.readFile("app/(main)/projects/page.tsx", "utf8");
   const activitiesPageSrc = await fs.readFile("app/(main)/activities/page.tsx", "utf8");
   const myActivitiesPageSrc = await fs.readFile("app/(main)/my-activities/page.tsx", "utf8");
@@ -111,14 +116,14 @@ async function main() {
   check("/projects passes defaultView=\"list\" to <ProjectList>", /<ProjectList[^>]*defaultView="list"/.test(projectsPageSrc));
   check("/activities passes defaultView=\"list\" to <ViewToggle>", /<ViewToggle defaultView="list"/.test(activitiesPageSrc));
   check("/activities passes defaultView=\"list\" to <ActivityList>", /<ActivityList[^>]*defaultView="list"/.test(activitiesPageSrc));
-  check("/my-activities' <ViewToggle> call is untouched (no defaultView prop)", /<ViewToggle\s*\/>/.test(myActivitiesPageSrc));
-  check("/my-activities' <ActivityList> call is untouched (no defaultView prop)", /<ActivityList activities=\{serializedActivities\}\s*\/>/.test(myActivitiesPageSrc));
+  check("/my-activities ALSO passes defaultView=\"list\" to <ViewToggle> now", /<ViewToggle defaultView="list"\s*\/>/.test(myActivitiesPageSrc));
+  check("/my-activities ALSO passes defaultView=\"list\" to <ActivityList> now", /<ActivityList[^>]*defaultView="list"/.test(myActivitiesPageSrc));
   const viewToggleSrc = await fs.readFile("components/ui/view-toggle.tsx", "utf8");
   const projectListSrc = await fs.readFile("components/projects/project-list.tsx", "utf8");
   const activityListSrc = await fs.readFile("components/activities/activity-list.tsx", "utf8");
-  check("ViewToggle's OWN default stays \"grid\" (unchanged for any caller that doesn't opt in, e.g. /my-activities)", /defaultView = "grid"/.test(viewToggleSrc));
+  check("ViewToggle's OWN default stays \"grid\" — unchanged for any FUTURE caller that doesn't opt in", /defaultView = "grid"/.test(viewToggleSrc));
   check("ProjectList's OWN default stays \"grid\"", /defaultView = "grid"/.test(projectListSrc));
-  check("ActivityList's OWN default stays \"grid\" (this is what actually keeps /my-activities unchanged)", /defaultView = "grid"/.test(activityListSrc));
+  check("ActivityList's OWN default stays \"grid\" too", /defaultView = "grid"/.test(activityListSrc));
   check("Other existing views were not removed — ProjectList still renders a Grid branch", /grid gap-4 md:grid-cols-2/.test(projectListSrc));
   check("...and ActivityList still renders a Grid branch too", /grid gap-4 md:grid-cols-2/.test(activityListSrc));
 

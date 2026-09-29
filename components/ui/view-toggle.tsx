@@ -35,11 +35,10 @@ interface ViewToggleProps {
    * real ViewMode — also the value that gets omitted from the URL entirely
    * when selected (keeps URLs clean), matching ResourcePlanningToolbar's
    * `v === "week" ? null : v` convention. Left at "grid" — this component's
-   * own historical default, unchanged for any caller (e.g. /my-activities)
-   * that doesn't explicitly opt into something else. /projects and
-   * /activities each pass `defaultView="list"` explicitly at their own call
-   * sites (see the final report) rather than this shared default changing
-   * for everyone.
+   * own historical default, unchanged for any FUTURE caller that doesn't
+   * explicitly opt into something else. /projects, /activities and
+   * /my-activities each pass `defaultView="list"` explicitly at their own
+   * call sites rather than this shared default changing for everyone.
    */
   defaultView?: ViewMode;
 }

@@ -166,6 +166,16 @@ const PERMISSIONS = [
   // installs/roles that already had department.manageSettings don't lose
   // category management the moment this ships.
   { key: "category.manage", description: "Create, edit and delete ticket categories", module: "ticketConfig" },
+  // Granular create, additive on top of the blanket category.manage above —
+  // matches the priority.create/status.create/cancelReason.create sibling
+  // keys already below (each of those entities has independent
+  // create/edit/delete keys; category never did, only the bundled
+  // category.manage). Lets an admin grant JUST create capability without
+  // also granting edit — category.edit was deliberately NOT introduced
+  // (editing stays gated by category.manage alone, unchanged). Checked as
+  // an OR alongside category.manage/department.manageSettings in the POST
+  // handler, never a replacement for either.
+  { key: "category.create", description: "Create ticket categories", module: "ticketConfig" },
   // Granular delete, additive on top of the blanket category.manage above —
   // lets an admin grant JUST delete capability (e.g. to a role that should
   // clean up unused categories but not create/edit them) without also
@@ -207,7 +217,7 @@ const PERMISSIONS = [
 // existing database still picks up brand-new keys without any of its other
 // (possibly admin-customized) permissions being touched.
 const TICKET_CONFIG_PERMISSION_KEYS = [
-  "category.manage", "category.delete",
+  "category.manage", "category.create", "category.delete",
   "priority.create", "priority.edit", "priority.delete",
   "status.create", "status.edit", "status.delete",
   "cancelReason.create", "cancelReason.edit", "cancelReason.delete",
@@ -574,6 +584,7 @@ async function main() {
       "businessUnit.delete",
       "gantt.view",
       "ticket.linkProjectActivity",
+      "category.create",
     ],
     DIRECTOR: ["organization.tree.view", "gantt.view"],
     // gantt.view backfill for every OTHER role that already had implicit

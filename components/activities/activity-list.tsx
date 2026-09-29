@@ -22,9 +22,10 @@ import { toggleActivityComplete } from "@/components/activities/toggle-activity-
 import { resolveViewMode, type ViewMode } from "@/components/ui/view-toggle";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
 import { ProgressConfigGapInline } from "@/components/shared/progress-display";
-import { ActivityCard, PRIORITY_COLORS } from "@/components/activities/activity-card";
+import { ActivityCard } from "@/components/activities/activity-card";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { MemberPreview } from "@/components/shared/member-preview";
+import { PriorityBadge } from "@/components/shared/priority-badge";
 
 export interface SerializedActivity {
   id: string;
@@ -54,7 +55,7 @@ export interface SerializedActivity {
 
 interface ActivityListProps {
   activities: SerializedActivity[];
-  /** Matches the ViewToggle's own `defaultView` on the SAME page (see components/ui/view-toggle.tsx's resolveViewMode) — two independent Client Components reading the same `?view=` param, not prop-linked, so both must agree. Defaults to "grid" (this component's historical behavior, still relied on by /my-activities, which passes nothing). */
+  /** Matches the ViewToggle's own `defaultView` on the SAME page (see components/ui/view-toggle.tsx's resolveViewMode) — two independent Client Components reading the same `?view=` param, not prop-linked, so both must agree. Own default stays "grid" for any FUTURE caller that doesn't opt in — every current Activity-list page (/activities, /my-activities) explicitly passes "list" at its own call site. */
   defaultView?: ViewMode;
 }
 
@@ -149,9 +150,7 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
                   <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
                 </TableCell>
                 <TableCell>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${PRIORITY_COLORS[activity.priority]}`}>
-                    {activity.priority}
-                  </span>
+                  <PriorityBadge priority={activity.priority} />
                 </TableCell>
                 <TableCell>
                   {activity.assignedUsers.length > 0 ? (

@@ -92,7 +92,7 @@ export default async function MyActivitiesPage({
           <p className="text-muted-foreground mt-1">Activities assigned to you</p>
         </div>
         <div className="flex items-center gap-2">
-          <ViewToggle />
+          <ViewToggle defaultView="list" />
           {canCreate && (
             <Button asChild>
               <Link href="/activities/new">
@@ -110,7 +110,7 @@ export default async function MyActivitiesPage({
           <p className="text-muted-foreground">No activities assigned to you.</p>
         </div>
       ) : (
-        <ActivityList activities={serializedActivities} />
+        <ActivityList activities={serializedActivities} defaultView="list" />
       )}
     </div>
   );
