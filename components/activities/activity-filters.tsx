@@ -28,7 +28,8 @@ const ACTIVITY_PRIORITY_VALUES = Object.values(ActivityPriority);
 
 export interface ActivityFilterOptions {
   projects: { id: string; title: string }[];
-  users: { id: string; name: string | null }[];
+  /** Distinct ProjectActivity.assignedUsers across the viewer's authorized (and Department-narrowed) scope — see lib/services/activity-query-service.ts's getActivityAssigneeOptions. */
+  assignees: { id: string; name: string | null }[];
   departments: { id: string; name: string }[];
 }
 
@@ -93,8 +94,13 @@ export function ActivityFilters({ options }: ActivityFiltersProps) {
     push({ [key]: value === "all" ? null : value });
   };
 
+  // Assignee options are Department-scoped (see getActivityAssigneeOptions)
+  // — an assignee id valid under the PREVIOUS department can be meaningless
+  // (or, worse, silently stale/misleading) under the new one, so it's
+  // cleared alongside subDepartmentId on every Department change, whether
+  // narrowing to a specific department or clearing back to "Any department".
   const handleDepartmentSelect = (value: string) => {
-    push({ departmentId: value === "all" ? null : value, subDepartmentId: null });
+    push({ departmentId: value === "all" ? null : value, subDepartmentId: null, assignedUserId: null });
   };
 
   const [subDepartments, setSubDepartments] = useState<{ id: string; name: string }[]>([]);
@@ -269,7 +275,7 @@ export function ActivityFilters({ options }: ActivityFiltersProps) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Any assignee</SelectItem>
-                  {options.users.map((u) => (
+                  {options.assignees.map((u) => (
                     <SelectItem key={u.id} value={u.id}>{u.name ?? u.id}</SelectItem>
                   ))}
                 </SelectContent>

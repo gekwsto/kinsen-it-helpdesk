@@ -6,7 +6,7 @@ import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/w
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import { ActivityStatus, ActivityPriority, Role } from "@prisma/client";
+import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { CheckSquare, Plus } from "lucide-react";
 import { ActivityList, type SerializedActivity } from "@/components/activities/activity-list";
 import { ActivityFilters } from "@/components/activities/activity-filters";
@@ -20,6 +20,7 @@ import {
   buildActivitySearchCondition,
   resolveActivityStatusGroupWhere,
   resolveActivityOverdueWhere,
+  getActivityAssigneeOptions,
 } from "@/lib/services/activity-query-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 import { resolveListSort, type SortKeyDef } from "@/lib/list-sort";
@@ -197,7 +198,7 @@ export default async function ActivitiesPage({
   const pageSize = parsePageSizeParam(params.pageSize);
   const sort = resolveListSort(ACTIVITY_SORT_KEYS, ACTIVITY_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder);
 
-  const [[activities, totalCount], projectOptions, departmentOptions, userOptions] = await Promise.all([
+  const [[activities, totalCount], projectOptions, departmentOptions, assigneeOptions] = await Promise.all([
     prisma.$transaction([
       prisma.projectActivity.findMany({
         where,
@@ -227,11 +228,15 @@ export default async function ActivitiesPage({
       });
     })(),
     getAccessibleDepartmentSummaries(session.user.id, session.user.role, "activity.view"),
-    prisma.user.findMany({
-      where: { role: { in: [Role.ADMIN, Role.IT_AGENT, Role.DEPARTMENT_MANAGER, Role.DIRECTOR] }, isActive: true },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true },
-    }),
+    // Assignee filter-dropdown options — built from the REAL
+    // ProjectActivity.assignedUsers relation, scoped by the exact same
+    // authorized+department `scope` the main list query above uses as its
+    // own base condition (never a disconnected, hardcoded-role User query —
+    // see getActivityAssigneeOptions' own doc comment). Independent of
+    // `where` (which also carries status/priority/date/etc. filters) so the
+    // option list stays stable as those OTHER filters change — only
+    // Department narrows it, per spec.
+    getActivityAssigneeOptions(scope as Record<string, unknown>),
   ]);
 
   const pagination = computePagination(totalCount, requestedPage, pageSize);
@@ -287,7 +292,7 @@ export default async function ActivitiesPage({
         </div>
       </div>
 
-      <ActivityFilters options={{ projects: projectOptions, users: userOptions, departments: departmentOptions }} />
+      <ActivityFilters options={{ projects: projectOptions, assignees: assigneeOptions, departments: departmentOptions }} />
 
       {activities.length === 0 ? (
         <div className="text-center py-20">

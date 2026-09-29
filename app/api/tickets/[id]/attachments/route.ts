@@ -4,6 +4,7 @@ import { requireAuth, canViewAllTickets } from "@/lib/permissions";
 import path from "path";
 import fs from "fs/promises";
 import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
+import { publishTicketListInvalidation } from "@/lib/realtime/ticket-list-invalidation";
 
 export async function POST(
   req: NextRequest,
@@ -78,6 +79,15 @@ export async function POST(
         newValue: file.name,
       },
     });
+
+    // The Ticket list's own row displays this ticket's attachment count as
+    // a badge (components/tickets/ticket-table.tsx's `_count.attachments`)
+    // — a successful upload changes that badge, so every open list must be
+    // invalidated the same way a status/priority/assignee change already
+    // is (see lib/realtime/publisher.ts's publishTicketEvent, which this
+    // mirrors; a bare list-invalidation is used here instead since there is
+    // no per-ticket-detail-stream event type for "attachment added").
+    publishTicketListInvalidation();
 
     return NextResponse.json(attachment, { status: 201 });
   } catch (error) {

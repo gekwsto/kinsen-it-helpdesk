@@ -25,8 +25,30 @@
 import { prisma } from "@/lib/prisma";
 import { getActivityTerminalConfigsForDepartments, resolveActivityTerminal } from "@/lib/status-terminal";
 import { startOfTodayUtc } from "@/lib/overdue";
+import type { PersonFilterOption } from "@/lib/services/project-query-service";
 
 const NO_MATCH: Record<string, unknown> = { id: { in: [] as string[] } };
+
+/**
+ * Assignee filter-dropdown options for the All Activities list — built from
+ * the ACTUAL relation the dropdown filters (ProjectActivity.assignedUsers,
+ * the many-to-many currently used by both the list's own `?assignedUserId=`
+ * filter and the rendered Assigned column — never the separate legacy
+ * singular `assignedUser`), scoped by the exact same `scopeWhere` the main
+ * list query's own authorization (buildActivityListWhere) already
+ * resolved. See lib/services/project-query-service.ts's
+ * getProjectOwnerOptions for the full rationale (queried FROM the User
+ * side via the activityAssignments back-relation, so deduplication is a
+ * property of the SQL itself; `isActive` deliberately never filtered here
+ * so a still-attached historical assignee stays selectable).
+ */
+export async function getActivityAssigneeOptions(scopeWhere: Record<string, unknown>): Promise<PersonFilterOption[]> {
+  return prisma.user.findMany({
+    where: { activityAssignments: { some: scopeWhere as any } },
+    select: { id: true, name: true },
+    orderBy: { name: "asc" },
+  });
+}
 
 /** Case-insensitive title/description search. */
 export function buildActivitySearchCondition(search: string): Record<string, unknown> {

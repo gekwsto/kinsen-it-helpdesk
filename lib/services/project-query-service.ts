@@ -32,6 +32,45 @@ import { startOfTodayUtc } from "@/lib/overdue";
 
 const NO_MATCH: Record<string, unknown> = { id: { in: [] as string[] } };
 
+export interface PersonFilterOption {
+  id: string;
+  name: string | null;
+}
+
+/**
+ * Owner/Member filter-dropdown options for the All Projects list — built
+ * from the ACTUAL relation each dropdown filters (Project.owner /
+ * Project.members), scoped by the exact same `scopeWhere` the main list
+ * query's own authorization (buildProjectListWhere) already resolved —
+ * never a disconnected `User.role` query. Queried FROM the User side via
+ * the ownedProjects/projectMemberships back-relations (see prisma/schema.prisma)
+ * so deduplication is a property of the SQL itself (one row per matching
+ * User — an `EXISTS` correlated subquery under the hood, never a
+ * `distinct` pass over loaded rows): a user can own/belong to many
+ * projects in scope and still appears exactly once. Naturally supports any
+ * CustomRole user, and an inactive user is still included as long as
+ * they're still genuinely attached to a project inside `scopeWhere` —
+ * `isActive` is deliberately never filtered on here, since "historical/
+ * inactive users remain filterable if still attached to a visible entity"
+ * is a requirement, not an oversight.
+ */
+export async function getProjectOwnerOptions(scopeWhere: Record<string, unknown>): Promise<PersonFilterOption[]> {
+  return prisma.user.findMany({
+    where: { ownedProjects: { some: scopeWhere as any } },
+    select: { id: true, name: true },
+    orderBy: { name: "asc" },
+  });
+}
+
+/** See getProjectOwnerOptions's doc comment — same rationale, via the Project.members (many-to-many) relation. */
+export async function getProjectMemberOptions(scopeWhere: Record<string, unknown>): Promise<PersonFilterOption[]> {
+  return prisma.user.findMany({
+    where: { projectMemberships: { some: scopeWhere as any } },
+    select: { id: true, name: true },
+    orderBy: { name: "asc" },
+  });
+}
+
 /** Case-insensitive title/description search — the only free-text fields Project has (no code/reference or customer field exists on the model). */
 export function buildProjectSearchCondition(search: string): Record<string, unknown> {
   return {

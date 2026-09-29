@@ -35,7 +35,10 @@ const PROJECT_STATUS_VALUES = Object.values(ProjectStatus);
 
 export interface ProjectFilterOptions {
   departments: { id: string; name: string }[];
-  users: { id: string; name: string | null }[];
+  /** Distinct Project.owner across the viewer's authorized (and Department-narrowed) scope — see lib/services/project-query-service.ts's getProjectOwnerOptions. Never the same list as `members`. */
+  owners: { id: string; name: string | null }[];
+  /** Distinct Project.members across the same scope — see getProjectMemberOptions. */
+  members: { id: string; name: string | null }[];
 }
 
 interface ProjectFiltersProps {
@@ -106,8 +109,14 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
     push({ [key]: value === "all" ? null : value });
   };
 
+  // Owner/Member options are Department-scoped (see getProjectOwnerOptions/
+  // getProjectMemberOptions) — a person id valid under the PREVIOUS
+  // department can be meaningless (or, worse, silently stale/misleading)
+  // under the new one, so both are cleared alongside subDepartmentId on
+  // every Department change, whether narrowing to a specific department or
+  // clearing back to "Any department".
   const handleDepartmentSelect = (value: string) => {
-    push({ departmentId: value === "all" ? null : value, subDepartmentId: null });
+    push({ departmentId: value === "all" ? null : value, subDepartmentId: null, ownerId: null, memberId: null });
   };
 
   const [subDepartments, setSubDepartments] = useState<{ id: string; name: string }[]>([]);
@@ -270,7 +279,7 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Any owner</SelectItem>
-                  {options.users.map((u) => (
+                  {options.owners.map((u) => (
                     <SelectItem key={u.id} value={u.id}>{u.name ?? u.id}</SelectItem>
                   ))}
                 </SelectContent>
@@ -286,7 +295,7 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Any member</SelectItem>
-                  {options.users.map((u) => (
+                  {options.members.map((u) => (
                     <SelectItem key={u.id} value={u.id}>{u.name ?? u.id}</SelectItem>
                   ))}
                 </SelectContent>

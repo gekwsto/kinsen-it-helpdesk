@@ -19,10 +19,12 @@ import {
   resolveProjectStatusGroupWhere,
   resolveProjectOverdueWhere,
   resolveProjectActivityWhere,
+  getProjectOwnerOptions,
+  getProjectMemberOptions,
 } from "@/lib/services/project-query-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 import { resolveListSort, type SortKeyDef } from "@/lib/list-sort";
-import { ProjectStatus, Role } from "@prisma/client";
+import { ProjectStatus } from "@prisma/client";
 
 // Whitelist for the List view's clickable column headers (Name, Department,
 // Status, Priority, Date range) — the ONLY `sortBy` values ever accepted;
@@ -237,7 +239,7 @@ export default async function ProjectsPage({
   // parallel, but NOT inside the array-form $transaction, which requires
   // every element to be a raw PrismaPromise (getAccessibleDepartmentSummaries
   // is a composed service call, not one, and would break at runtime there).
-  const [[projects, totalCount], departments, users] = await Promise.all([
+  const [[projects, totalCount], departments, owners, members] = await Promise.all([
     prisma.$transaction([
       prisma.project.findMany({
         where,
@@ -261,11 +263,15 @@ export default async function ProjectsPage({
       prisma.project.count({ where }),
     ]),
     getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.view"),
-    prisma.user.findMany({
-      where: { role: { in: [Role.ADMIN, Role.IT_AGENT, Role.DEPARTMENT_MANAGER, Role.DIRECTOR] }, isActive: true },
-      orderBy: { name: "asc" },
-      select: { id: true, name: true },
-    }),
+    // Owner/Member filter-dropdown options — built from the REAL Project.owner/
+    // Project.members relations, scoped by the exact same authorized+department
+    // `scope` the main list query above uses as its own base condition (never a
+    // disconnected, hardcoded-role User query — see getProjectOwnerOptions'
+    // own doc comment). Independent of `where` (which also carries status/
+    // priority/date/etc. filters) so the option lists stay stable as those
+    // OTHER filters change — only Department narrows them, per spec.
+    getProjectOwnerOptions(scope as Record<string, unknown>),
+    getProjectMemberOptions(scope as Record<string, unknown>),
   ]);
 
   const pagination = computePagination(totalCount, requestedPage, pageSize);
@@ -308,7 +314,7 @@ export default async function ProjectsPage({
         </div>
       </div>
 
-      <ProjectFilters options={{ departments, users }} />
+      <ProjectFilters options={{ departments, owners, members }} />
 
       {projects.length === 0 ? (
         <div className="text-center py-20">
