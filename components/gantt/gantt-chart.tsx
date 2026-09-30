@@ -40,8 +40,27 @@ import {
   Maximize2,
   Minimize2,
   AlertTriangle,
+  Check,
+  Pause,
+  Ban,
+  Play,
+  Circle,
+  PencilRuler,
 } from "lucide-react";
 import { getInitials } from "@/lib/utils";
+import { readableTextOn } from "@/components/shared/marks";
+
+// Shape carries status alongside colour on every bar (colour alone fails
+// colour-blind users and faint department-picked colours).
+const STATUS_GLYPH: Record<string, typeof Check> = {
+  PLANNING: PencilRuler,
+  TODO: Circle,
+  IN_PROGRESS: Play,
+  ON_HOLD: Pause,
+  BLOCKED: Ban,
+  COMPLETED: Check,
+  CANCELLED: X,
+};
 import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
 import { StatusLegend } from "@/components/gantt/status-legend";
 import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
@@ -691,11 +710,18 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
               style={{ width: `${item.progress}%` }}
             />
           )}
-          {m.width > 48 && (
-            <span className="absolute inset-0 flex items-center px-2 text-[10px] font-medium text-white truncate pointer-events-none z-10 drop-shadow-sm">
-              {item.progress != null && item.progress > 0 ? `${item.progress}%` : item.title}
-            </span>
-          )}
+          {m.width > 20 && (() => {
+            const Glyph = STATUS_GLYPH[item.status];
+            return (
+              <span
+                className="absolute inset-0 flex items-center gap-1 px-1.5 text-[10px] font-medium truncate pointer-events-none z-10"
+                style={{ color: hasCustomColor && item.statusColor ? readableTextOn(item.statusColor) : "#FFFFFF" }}
+              >
+                {Glyph && <Glyph className="h-2.5 w-2.5 shrink-0" strokeWidth={3} aria-hidden="true" />}
+                {m.width > 48 && (item.progress != null && item.progress > 0 ? `${item.progress}%` : item.title)}
+              </span>
+            );
+          })()}
           <div className="absolute inset-0 rounded ring-0 hover:ring-2 hover:ring-white/60 transition-all pointer-events-none" />
         </div>
       </div>
@@ -945,7 +971,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                       ))}
                       {btmCells.map((cell, i) => (
                         <div key={i} className={cn("absolute flex items-center justify-center border-r overflow-hidden", cell.highlight && "bg-primary/15")} style={{ left: cell.left, width: cell.width, height: BTM_H }}>
-                          <span className={cn("text-[10px] truncate px-0.5", cell.highlight ? "text-primary font-bold" : "text-muted-foreground")}>
+                          <span className={cn("text-[10px] truncate px-0.5", cell.highlight ? "text-link font-bold" : "text-muted-foreground")}>
                             {cell.label}
                           </span>
                         </div>
@@ -989,7 +1015,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                     <AvatarFallback className="text-[9px]">{getInitials(group.ownerName)}</AvatarFallback>
                                   </Avatar>
                                 )}
-                                <Link href={group.href} className="font-semibold text-xs truncate hover:text-primary transition-colors">
+                                <Link href={group.href} className="font-semibold text-xs truncate hover:text-link transition-colors">
                                   {group.title}
                                 </Link>
                                 {group.overdue && (
@@ -1034,7 +1060,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                       <AvatarFallback className="text-[8px]">{getInitials(child.assigneeName)}</AvatarFallback>
                                     </Avatar>
                                   )}
-                                  <Link href={child.href} className="text-xs truncate hover:text-primary transition-colors">
+                                  <Link href={child.href} className="text-xs truncate hover:text-link transition-colors">
                                     {child.title}
                                   </Link>
                                   {child.overdue && (
@@ -1092,7 +1118,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                 ) : (
                                   <span className={cn("rounded-full flex-shrink-0", item.isGroup ? "h-2 w-2" : "h-1.5 w-1.5", !item.statusColor && (STATUS_BAR[item.status] ?? "bg-slate-400"))} style={item.statusColor ? { backgroundColor: item.statusColor } : undefined} />
                                 )}
-                                <Link href={item.href} className={cn("truncate hover:text-primary transition-colors text-muted-foreground/70", item.isGroup ? "text-xs font-semibold" : "text-xs")}>
+                                <Link href={item.href} className={cn("truncate hover:text-link transition-colors text-muted-foreground/70", item.isGroup ? "text-xs font-semibold" : "text-xs")}>
                                   {item.title}
                                 </Link>
                               </div>

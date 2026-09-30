@@ -1,4 +1,5 @@
 import { ActivityPriority } from "@prisma/client";
+import { PriorityMark, titleCase } from "@/components/shared/marks";
 
 /**
  * Color mapping per ActivityPriority — single source of truth, moved here
@@ -40,13 +41,20 @@ interface PriorityBadgeProps {
  * (`<Badge variant="outline" className="... border-0 ...">`) — that's a
  * different, existing visual this task does not touch.
  */
+const PRIORITY_RANK: Record<ActivityPriority, number> = { LOW: 1, MEDIUM: 2, HIGH: 3, URGENT: 4 };
+
+// Tailwind colour class -> the mark's fill, so the bars match the existing
+// PRIORITY_COLORS palette ActivityCard still uses.
+const PRIORITY_MARK_COLOR: Record<ActivityPriority, string> = {
+  LOW: "#15803d",
+  MEDIUM: "#a16207",
+  HIGH: "#c2410c",
+  URGENT: "#b91c1c",
+};
+
 export function PriorityBadge({ priority }: PriorityBadgeProps) {
   if (!priority) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
-  return (
-    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${PRIORITY_COLORS[priority]}`}>
-      {priority}
-    </span>
-  );
+  return <PriorityMark label={titleCase(priority)} rank={PRIORITY_RANK[priority]} color={PRIORITY_MARK_COLOR[priority]} />;
 }

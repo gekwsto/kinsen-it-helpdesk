@@ -24,6 +24,7 @@ import { Loader2, ChevronUp, ChevronDown, Trash2, Plus } from "lucide-react";
 import { ActivityStatus } from "@prisma/client";
 import { ACTIVITY_STATUS_KEYS } from "@/components/gantt/status-colors";
 import { cn } from "@/lib/utils";
+import { ColorContrastHint } from "@/components/admin/color-contrast-hint";
 
 export interface ActivityStatusRow {
   status: ActivityStatus;
@@ -420,7 +421,8 @@ export function ActivityStatusConfigForm({ departmentId, initialRows, canCreate,
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Color</label>
-              <input type="color" value={addColor} onChange={(e) => setAddColor(e.target.value)} className="h-9 w-16 rounded border" />
+              <input type="color" value={addColor} onChange={(e) => setAddColor(e.target.value)} className="h-9 w-16 rounded border" aria-label="Color" />
+              <ColorContrastHint color={addColor} label={addLabel || "Preview"} />
             </div>
           </div>
           <DialogFooter>

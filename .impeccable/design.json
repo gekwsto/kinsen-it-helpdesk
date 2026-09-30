@@ -1,0 +1,371 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-09-30T00:00:00Z",
+  "title": "Design System: Kinsen IT Helpdesk",
+  "extensions": {
+    "colorMeta": {
+      "kinsen-teal": {
+        "role": "primary",
+        "displayName": "Kinsen Teal",
+        "canonical": "hsl(182 59.5% 48.4%)",
+        "tonalRamp": [
+          "#0B2B2C",
+          "#0F4547",
+          "#0A747A",
+          "#1E9DA1",
+          "#32C0C5",
+          "#6CD3D6",
+          "#A6E5E7",
+          "#DDF5F6"
+        ]
+      },
+      "link-teal": {
+        "role": "primary",
+        "displayName": "Link Teal",
+        "canonical": "hsl(183.2 84.8% 25.9%)",
+        "tonalRamp": [
+          "#032224",
+          "#053A3D",
+          "#07565A",
+          "#0A747A",
+          "#0E959C",
+          "#3FB9BF",
+          "#8ED8DB",
+          "#D5F1F2"
+        ]
+      },
+      "kinsen-navy": {
+        "role": "secondary",
+        "displayName": "Kinsen Navy",
+        "canonical": "hsl(204.3 87.3% 15.5%)",
+        "tonalRamp": [
+          "#021522",
+          "#052E4A",
+          "#0B3D60",
+          "#0F4A73",
+          "#1E6699",
+          "#4F8DBA",
+          "#96BBD6",
+          "#DCE8F1"
+        ]
+      },
+      "cool-paper": {
+        "role": "neutral",
+        "displayName": "Cool Paper",
+        "canonical": "hsl(200 15.8% 96.3%)",
+        "tonalRamp": [
+          "#0D1B26",
+          "#2A3945",
+          "#52616D",
+          "#84929E",
+          "#B3BEC7",
+          "#D9E0E5",
+          "#E9EEF1",
+          "#F4F6F7"
+        ]
+      },
+      "card-white": {
+        "role": "neutral",
+        "displayName": "Card White",
+        "canonical": "hsl(0 0% 100%)"
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "hsl(206.4 49% 10%)"
+      },
+      "muted-ink": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "hsl(206.7 14.1% 37.5%)"
+      },
+      "mist": {
+        "role": "neutral",
+        "displayName": "Mist",
+        "canonical": "hsl(202.5 22.2% 92.9%)"
+      },
+      "hairline": {
+        "role": "neutral",
+        "displayName": "Hairline",
+        "canonical": "hsl(205 18.8% 87.5%)"
+      },
+      "field-edge": {
+        "role": "neutral",
+        "displayName": "Field Edge",
+        "canonical": "hsl(207.7 11.8% 56.9%)"
+      },
+      "signal-red": {
+        "role": "error",
+        "displayName": "Signal Red",
+        "canonical": "hsl(0 66.4% 46.7%)"
+      },
+      "rail-ink": {
+        "role": "neutral",
+        "displayName": "Rail Ink",
+        "canonical": "hsl(204 26.3% 81.4%)"
+      },
+      "rail-active": {
+        "role": "neutral",
+        "displayName": "Rail Active",
+        "canonical": "hsl(204.7 79.4% 21%)"
+      },
+      "rail-active-ink": {
+        "role": "neutral",
+        "displayName": "Rail Active Ink",
+        "canonical": "hsl(203.1 31.7% 92%)"
+      },
+      "rail-hairline": {
+        "role": "neutral",
+        "displayName": "Rail Hairline",
+        "canonical": "hsl(204.6 76.9% 25.5%)"
+      },
+      "night-field": {
+        "role": "neutral",
+        "displayName": "Night Field",
+        "canonical": "hsl(206.1 62.2% 7.3%)"
+      },
+      "night-card": {
+        "role": "neutral",
+        "displayName": "Night Card",
+        "canonical": "hsl(205.2 56.4% 10.8%)"
+      },
+      "night-mist": {
+        "role": "neutral",
+        "displayName": "Night Mist",
+        "canonical": "hsl(204.9 51.9% 15.5%)"
+      },
+      "night-hairline": {
+        "role": "neutral",
+        "displayName": "Night Hairline",
+        "canonical": "hsl(205.4 48.1% 21.2%)"
+      },
+      "night-muted-ink": {
+        "role": "neutral",
+        "displayName": "Night Muted Ink",
+        "canonical": "hsl(206.2 16.5% 62%)"
+      },
+      "night-field-edge": {
+        "role": "neutral",
+        "displayName": "Night Field Edge",
+        "canonical": "hsl(210 23.2% 43.9%)"
+      },
+      "night-signal-red": {
+        "role": "error",
+        "displayName": "Night Signal Red",
+        "canonical": "hsl(0 90.6% 70.8%)"
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "The page title in PageHeader, once per screen."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "Count-strip numbers, tabular."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Card, section and breakdown titles."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Ledger cells, form text, thread bodies, scope lines."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Column heads, mark labels, metadata; sentence case."
+      },
+      "reference": {
+        "displayName": "Reference",
+        "purpose": "The KIN-N ticket reference column, in Link Teal."
+      }
+    },
+    "shadows": [
+      {
+        "name": "overlay",
+        "value": "0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)",
+        "purpose": "Dropdowns, selects, popovers and toasts only; resting surfaces are flat."
+      }
+    ],
+    "motion": [
+      {
+        "name": "notch-slide",
+        "value": "spring(stiffness 520, damping 42)",
+        "purpose": "The notch sliding between the active nav item or hovered ledger row (shared layoutId); duration 0 under reduced motion."
+      },
+      {
+        "name": "color-transition",
+        "value": "150ms cubic-bezier(0.4, 0, 0.2, 1)",
+        "purpose": "Hover fills on rows, buttons, nav items; notch fade in the count strip."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0.01ms",
+        "purpose": "All animation and transition durations under prefers-reduced-motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "md",
+        "value": "768px"
+      },
+      {
+        "name": "lg",
+        "value": "1024px"
+      },
+      {
+        "name": "xl",
+        "value": "1280px"
+      },
+      {
+        "name": "2xl",
+        "value": "1536px"
+      },
+      {
+        "name": "maxh-800",
+        "value": "(max-height: 800px)"
+      },
+      {
+        "name": "maxh-700",
+        "value": "(max-height: 700px)"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one teal action per page, top right of the PageHeader.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" aria-hidden=\"true\"><path d=\"M12 5v14M5 12h14\"/></svg>New ticket</button>",
+      "css": ".ds-btn-primary { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 8px 16px; border: none; border-radius: 4px; background: #32C0C5; color: #052E4A; font: 500 14px/1 Commissioner, system-ui, sans-serif; cursor: pointer; transition: background-color 150ms cubic-bezier(0.4,0,0.2,1); } .ds-btn-primary:hover { background: rgb(50 192 197 / 0.9); } .ds-btn-primary:focus-visible { outline: none; box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #0A747A; }"
+    },
+    {
+      "name": "Outline Button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "Default secondary action: card fill, field-edge stroke.",
+      "html": "<button class=\"ds-btn-outline\">Export</button>",
+      "css": ".ds-btn-outline { display: inline-flex; align-items: center; height: 36px; padding: 8px 16px; border: 1px solid #84929E; border-radius: 4px; background: #FFFFFF; color: #0D1B26; font: 500 14px/1 Commissioner, system-ui, sans-serif; cursor: pointer; transition: background-color 150ms; } .ds-btn-outline:hover { background: #E9EEF1; } .ds-btn-outline:focus-visible { outline: none; box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #0A747A; }"
+    },
+    {
+      "name": "Text Input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "36px field with a 3:1 stroke and a Link Teal caret and ring.",
+      "html": "<input class=\"ds-input\" placeholder=\"Search tickets\" />",
+      "css": ".ds-input { height: 36px; width: 260px; padding: 8px 12px; border: 1px solid #84929E; border-radius: 4px; background: #FFFFFF; color: #0D1B26; caret-color: #0A747A; font: 400 14px/1.43 Commissioner, system-ui, sans-serif; } .ds-input::placeholder { color: #52616D; } .ds-input:focus-visible { outline: none; box-shadow: 0 0 0 2px #FFFFFF, 0 0 0 4px #0A747A; }"
+    },
+    {
+      "name": "Navy Rail Navigation",
+      "kind": "nav",
+      "refersTo": "nav-item",
+      "description": "Sidebar rows on navy; the active row carries the teal notch.",
+      "html": "<nav class=\"ds-rail\"><a class=\"ds-rail-item\" href=\"#\">Dashboard</a><a class=\"ds-rail-item ds-active\" href=\"#\"><span class=\"ds-notch\"></span>Tickets</a><a class=\"ds-rail-item\" href=\"#\">Projects</a></nav>",
+      "css": ".ds-rail { display: flex; flex-direction: column; gap: 2px; width: 220px; padding: 12px 8px; background: #052E4A; font: 400 14px/1.43 Commissioner, system-ui, sans-serif; } .ds-rail-item { position: relative; display: flex; align-items: center; min-height: 40px; padding: 8px 12px; border-radius: 4px; color: #C3D2DC; text-decoration: none; transition: background-color 150ms, color 150ms; } .ds-rail-item:hover { background: #0B3D60; color: #E4ECF1; } .ds-rail-item.ds-active { background: #0B3D60; color: #FFFFFF; font-weight: 500; } .ds-rail-item:focus-visible { outline: none; box-shadow: 0 0 0 2px #32C0C5; } .ds-notch { position: absolute; left: 0; top: calc(50% - 7px); width: 8px; height: 14px; background: #32C0C5; clip-path: polygon(0 0, 100% 50%, 0 100%); }"
+    },
+    {
+      "name": "Status and Priority Marks",
+      "kind": "chip",
+      "description": "Shaped marks beside neutral text: ring (open), filled check (closed), level bars (priority).",
+      "html": "<div class=\"ds-marks\"><span class=\"ds-mark\"><svg viewBox=\"0 0 12 12\" width=\"12\" height=\"12\" aria-hidden=\"true\"><circle cx=\"6\" cy=\"6\" r=\"4.75\" fill=\"none\" stroke=\"#E0A800\" stroke-width=\"2.5\"/><circle cx=\"6\" cy=\"6\" r=\"1.6\" fill=\"#E0A800\"/></svg>In progress</span><span class=\"ds-mark\"><svg viewBox=\"0 0 12 12\" width=\"12\" height=\"12\" aria-hidden=\"true\"><circle cx=\"6\" cy=\"6\" r=\"6\" fill=\"#2E7D32\"/><path d=\"M3.4 6.2l1.7 1.7 3.5-3.6\" fill=\"none\" stroke=\"white\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>Resolved</span><span class=\"ds-mark\"><svg viewBox=\"0 0 14 12\" width=\"14\" height=\"12\" aria-hidden=\"true\"><rect x=\"0\" y=\"9\" width=\"2.4\" height=\"3\" rx=\"0.4\" fill=\"#C62828\"/><rect x=\"3.6\" y=\"6\" width=\"2.4\" height=\"6\" rx=\"0.4\" fill=\"#C62828\"/><rect x=\"7.2\" y=\"3\" width=\"2.4\" height=\"9\" rx=\"0.4\" fill=\"#C62828\"/><rect x=\"10.8\" y=\"0\" width=\"2.4\" height=\"12\" rx=\"0.4\" fill=\"#D9E0E5\"/></svg>High</span></div>",
+      "css": ".ds-marks { display: flex; gap: 20px; } .ds-mark { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; color: #0D1B26; font: 500 12px/1.33 Commissioner, system-ui, sans-serif; }"
+    },
+    {
+      "name": "Ruled Ledger",
+      "kind": "custom",
+      "refersTo": "ledger-row",
+      "description": "Hairline-ruled list anchored by the KIN-N reference; the notch marks the hovered row.",
+      "html": "<table class=\"ds-ledger\"><thead><tr><th>Ref</th><th>Subject</th><th>Status</th></tr></thead><tbody><tr><td class=\"ds-ref\"><span class=\"ds-row-notch\"></span>KIN-1042</td><td>VPN drops on hotel Wi-Fi</td><td>Open</td></tr><tr><td class=\"ds-ref\"><span class=\"ds-row-notch\"></span>KIN-1041</td><td>New starter laptop</td><td>Resolved</td></tr></tbody></table>",
+      "css": ".ds-ledger { width: 520px; border-collapse: collapse; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 2px; font: 400 14px/1.43 Commissioner, system-ui, sans-serif; color: #0D1B26; font-variant-numeric: tabular-nums; } .ds-ledger th { height: 40px; padding: 0 12px; text-align: left; font-size: 12px; font-weight: 500; color: #52616D; border-bottom: 1px solid #D9E0E5; } .ds-ledger td { position: relative; padding: 10px 12px; border-bottom: 1px solid #D9E0E5; } .ds-ledger tr:last-child td { border-bottom: 0; } .ds-ledger tbody tr { transition: background-color 150ms; } .ds-ledger tbody tr:hover { background: rgb(233 238 241 / 0.6); } .ds-ref { color: #0A747A; font-weight: 600; white-space: nowrap; } .ds-row-notch { position: absolute; left: 0; top: calc(50% - 7px); width: 8px; height: 14px; background: #32C0C5; clip-path: polygon(0 0, 100% 50%, 0 100%); opacity: 0; } .ds-ledger tbody tr:hover .ds-row-notch { opacity: 1; }"
+    },
+    {
+      "name": "Count Strip",
+      "kind": "custom",
+      "description": "Dashboard counts as one hairline-divided module; each cell links to its list.",
+      "html": "<div class=\"ds-strip\"><a class=\"ds-cell\" href=\"#\"><span class=\"ds-notch-c\"></span><span class=\"ds-cl\">Open</span><span class=\"ds-cn\">38</span><span class=\"ds-cs\">Across your departments</span></a><a class=\"ds-cell\" href=\"#\"><span class=\"ds-notch-c\"></span><span class=\"ds-cl\">Unassigned</span><span class=\"ds-cn\">4</span><span class=\"ds-cs\">Waiting for a handler</span></a><a class=\"ds-cell\" href=\"#\"><span class=\"ds-notch-c\"></span><span class=\"ds-cl\">Overdue</span><span class=\"ds-cn\">2</span><span class=\"ds-cs\">Past SLA</span></a></div>",
+      "css": ".ds-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: #D9E0E5; border: 1px solid #D9E0E5; border-radius: 2px; overflow: hidden; width: 560px; font-family: Commissioner, system-ui, sans-serif; } .ds-cell { position: relative; display: block; padding: 16px 20px; background: #FFFFFF; color: #0D1B26; text-decoration: none; transition: background-color 150ms; } .ds-cell:hover { background: rgb(233 238 241 / 0.5); } .ds-cl, .ds-cs { display: block; font-size: 12px; color: #52616D; } .ds-cl { font-weight: 500; } .ds-cn { display: block; margin: 4px 0 6px; font-size: 24px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; } .ds-notch-c { position: absolute; left: 0; top: calc(50% - 7px); width: 8px; height: 14px; background: #32C0C5; clip-path: polygon(0 0, 100% 50%, 0 100%); opacity: 0; transition: opacity 150ms; } .ds-cell:hover .ds-notch-c, .ds-cell:focus-visible .ds-notch-c { opacity: 1; } .ds-cell:focus-visible { outline: none; box-shadow: inset 0 0 0 2px #0A747A; }"
+    },
+    {
+      "name": "Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Flat bordered container, 2px corners, no shadow.",
+      "html": "<div class=\"ds-card\"><h3 class=\"ds-card-title\">By status</h3><p class=\"ds-card-body\">Ruled rows sit flush inside the card edge.</p></div>",
+      "css": ".ds-card { width: 320px; padding: 20px; background: #FFFFFF; border: 1px solid #D9E0E5; border-radius: 2px; color: #0D1B26; font-family: Commissioner, system-ui, sans-serif; } .ds-card-title { margin: 0 0 6px; font-size: 16px; font-weight: 600; line-height: 1.25; } .ds-card-body { margin: 0; font-size: 14px; color: #52616D; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Kinsen Mark",
+    "overview": "The Kinsen K, a square cut by two diagonals, is the product's only authored shape, and the palette is sampled straight from the logo asset (`public/kinsen_vertical.webp`). A navy rail carries the official white lockup in both themes; the work surface is cool paper in light and navy-black in dark. Teal is scarce on purpose: it lights only what is live or actionable, so a glance at any screen finds the one thing to press and the place you are.\n\nThe density is that of a working ledger. Lists are hairline-ruled tables hanging off a fixed KIN-N reference column, dashboard counts are one ruled strip rather than a row of icon cards, and breakdowns are ruled rows with a single neutral bar instead of pies. Status and priority are drawn as small marks with a shape (ring versus filled check, one to four level bars) beside neutral text, because department admins pick those colours freely and some of them are pale yellows.\n\nThe system was built to replace the stock shadcn admin look (slate neutrals, blue primary, stacked soft cards, pill badges tinted in the status colour). Commissioner, a Greek-designed grotesk, sets everything, because staff and department names are often Greek while the interface is English.\n\nCoverage is partial. The shell, sign-in, dashboard and ticket screens were reworked by hand. Admin, projects, activities, goals and organization pages inherit the tokens and primitives but were not reworked, and they still contain hardcoded Tailwind palette classes, tinted priority pills and uppercase tracked labels. Those are drift for future passes to convert. They are not part of this system.",
+    "keyCharacteristics": [
+      "Navy rail, cool-paper (or navy-black) work surface, teal reserved for live and actionable things.",
+      "One shape: the K mark's lower triangle, used as the \"current place\" notch and, at page scale, on the sign-in field.",
+      "Hairline-ruled ledgers, tabular numerals, a fixed KIN-N reference column.",
+      "Status and priority as shaped marks beside neutral text, never as tinted pills.",
+      "Near-square corners (0 to 4px), flat surfaces, borders instead of shadows.",
+      "Light, dark and system themes, applied before first paint."
+    ],
+    "rules": [
+      {
+        "name": "The Live-Only Rule",
+        "body": "Teal appears only on what is live or actionable: the primary action, links, the active nav item, the notch, focus. Never on headings, decoration, section fills or charts.",
+        "section": "colors"
+      },
+      {
+        "name": "The Deep-Teal-For-Text Rule",
+        "body": "Brand teal is never text on a light surface (2.2:1). Teal-coloured copy uses Link Teal in light mode; the dark theme may use brand teal directly.",
+        "section": "colors"
+      },
+      {
+        "name": "The Mark-Not-Paint Rule",
+        "body": "Admin-picked status, priority and category colours appear only as a mark (ring, filled check, level bars, 2px-cornered swatch) beside neutral ink text. They are never the text colour and never tint a pill background. The status-colour admin form shows the mark on both a light and a dark strip so admins can judge it in both themes.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tabular Rule",
+        "body": "Numerals in tables, counts and references are tabular (`td, th` set it globally; figures opt in with `tabular-nums`).",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence-Case Label Rule",
+        "body": "Labels and column heads are small, medium-weight, sentence case. Enum values are title-cased for display (\"URGENT\" becomes \"Urgent\").",
+        "section": "typography"
+      },
+      {
+        "name": "The Hairline-Not-Shadow Rule",
+        "body": "Resting surfaces separate by rules and borders. A shadow means the element floats above the page and will go away.",
+        "section": "elevation"
+      },
+      {
+        "name": "The One-Shape Rule",
+        "body": "The triangle is the system's only decorative form, and it always means \"you are here\". It never appears as an ornament, bullet or divider.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do give every core screen one PageHeader: title, one scope line, at most one teal primary action at top right.",
+      "Do draw status as ring (open) or filled check (closed), and priority as one to four level bars, each beside neutral ink text.",
+      "Do use Link Teal for teal text on light surfaces; keep brand teal for fills, the notch and dark-mode text.",
+      "Do build lists as hairline-ruled ledgers anchored by the KIN-N reference column, hiding secondary columns by breakpoint and folding their facts into a line under the subject.",
+      "Do mark the current place with the notch and let it slide; make it instant under reduced motion.",
+      "Do set counts, references and table numerals in tabular figures.",
+      "Do keep text pairings at 4.5:1 or better and field and outline strokes at 3:1 or better, in both themes."
+    ],
+    "donts": [
+      "Don't set brand teal as text on white or cool paper (2.2:1).",
+      "Don't use an admin-picked colour as text colour or as a tinted pill background.",
+      "Don't let colour be the only signal for a status, priority or Gantt bar.",
+      "Don't stack soft shadowed cards for list items, or put a row of separate icon cards where a count strip belongs.",
+      "Don't use teal for headings, decoration, chart series or section fills.",
+      "Don't use the triangle as an ornament; it marks the current place only.",
+      "Don't redraw the Kinsen mark or re-set the wordmark in another face; crop the official asset.",
+      "Don't return to the stock shadcn look: slate neutrals, a blue primary, large rounded corners, tinted pill badges."
+    ]
+  }
+}

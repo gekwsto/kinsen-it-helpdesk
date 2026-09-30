@@ -139,7 +139,7 @@ export default async function GoalsPage({
                       </div>
                       <div className="flex items-center gap-2 flex-shrink-0">
                         {progress !== null && (
-                          <TrendingUp className="h-4 w-4 text-primary" />
+                          <TrendingUp className="h-4 w-4 text-link" />
                         )}
                       </div>
                     </div>

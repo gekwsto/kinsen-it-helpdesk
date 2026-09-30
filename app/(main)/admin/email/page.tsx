@@ -91,7 +91,7 @@ export default async function EmailAdminPage() {
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
-            <Mail className="h-5 w-5 text-primary" />
+            <Mail className="h-5 w-5 text-link" />
           </div>
           <div>
             <h1 className="text-2xl font-bold">Email Integration</h1>

@@ -188,7 +188,7 @@ export default async function SettingsPage() {
             Email:{" "}
             <a
               href="mailto:kinsenitsupport@kinsen.gr"
-              className="text-primary hover:underline"
+              className="text-link hover:underline"
             >
               kinsenitsupport@kinsen.gr
             </a>

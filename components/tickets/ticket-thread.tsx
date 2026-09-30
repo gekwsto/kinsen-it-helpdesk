@@ -105,7 +105,7 @@ export function TicketThread({
 
   if (messages.length === 0) {
     return (
-      <div className="rounded-xl border bg-muted/20 p-8 text-center text-sm text-muted-foreground">
+      <div className="py-6 text-sm text-muted-foreground">
         No messages yet.
       </div>
     );
@@ -116,7 +116,7 @@ export function TicketThread({
       <div
         ref={scrollRef}
         onScroll={handleScroll}
-        className="max-h-[520px] overflow-y-auto rounded-xl border bg-muted/20 p-4 space-y-5"
+        className="max-h-[520px] overflow-y-auto py-1 pr-1 space-y-5"
       >
         {messages.map((message) => (
           <MessageBubble
@@ -198,11 +198,11 @@ function MessageBubble({
         {/* Author + badges row */}
         <div
           className={cn(
-            "flex items-center gap-1.5 text-xs text-muted-foreground",
+            "flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-muted-foreground [&>*]:whitespace-nowrap",
             isOwn && !isInternal ? "flex-row-reverse" : "flex-row"
           )}
         >
-          <span className="font-medium text-foreground/80">{authorName}</span>
+          <span className="font-medium text-foreground">{authorName}</span>
           {roleLabel && (
             <span className="text-muted-foreground">({roleLabel})</span>
           )}
@@ -213,12 +213,12 @@ function MessageBubble({
             </span>
           )}
           {isEmailInbound && (
-            <span className="flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">
+            <span className="flex items-center gap-0.5 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
               <Mail className="h-2.5 w-2.5" />
               Email
             </span>
           )}
-          <span className="text-muted-foreground/60">
+          <span className="text-muted-foreground">
             {formatDateTime(message.createdAt)}
           </span>
         </div>
@@ -230,7 +230,7 @@ function MessageBubble({
             isInternal
               ? "rounded-tl-sm border border-amber-200 bg-amber-50 text-amber-900"
               : isOwn
-              ? "rounded-tr-sm bg-primary text-primary-foreground"
+              ? "rounded-tr-sm bg-brand-navy text-white"
               : "rounded-tl-sm bg-muted text-foreground"
           )}
         >

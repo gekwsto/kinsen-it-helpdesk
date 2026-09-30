@@ -208,6 +208,9 @@ export function TicketDetailClient({
 
   // Delete ticket dialog
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // Deleting cascades every message, attachment and history entry, so it
+  // asks for the ticket reference to be typed back.
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
   const [deleting, setDeleting] = useState(false);
 
   // Cancel ticket dialog
@@ -331,33 +334,32 @@ export function TicketDetailClient({
       <div className="lg:col-span-2 space-y-4">
         {/* Ticket header */}
         <Card>
-          <CardContent className="pt-6">
-            <div className="flex items-start gap-3 mb-4">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 mb-1 flex-wrap">
-                  <span className="font-mono text-xs text-muted-foreground">
-                    {formatTicketNumber(ticketNumber)}
-                  </span>
-                  <SourceBadge source={ticketSource} />
-                  <StatusBadge name={status.name} color={status.color} />
-                  {priority && (
-                    <PriorityBadge
-                      name={priority.name}
-                      color={priority.color}
-                      level={priority.level}
-                    />
-                  )}
-                </div>
-                <h1 className="text-xl font-bold">{ticketTitle}</h1>
+          <CardContent className="pt-5">
+            <div className="mb-4 min-w-0">
+              <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                <span className="text-sm font-semibold tabular-nums text-link">
+                  {formatTicketNumber(ticketNumber)}
+                </span>
+                <StatusBadge name={status.name} color={status.color} isClosed={status.isClosed} />
+                {priority && (
+                  <PriorityBadge
+                    name={priority.name}
+                    color={priority.color}
+                    level={priority.level}
+                  />
+                )}
+                <SourceBadge source={ticketSource} />
               </div>
+              <h1 className="text-xl font-bold tracking-tight text-balance">{ticketTitle}</h1>
             </div>
             {ticketDescription && (
               <p className="text-sm text-foreground/80 whitespace-pre-wrap mb-4 leading-relaxed">
                 {ticketDescription}
               </p>
             )}
-            <div className="flex items-center gap-3 text-sm text-muted-foreground">
-              <div className="flex items-center gap-2">
+            {/* Each fact wraps as a unit, never word by word, on narrow screens. */}
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
+              <div className="flex items-center gap-2 whitespace-nowrap">
                 <Avatar className="h-5 w-5">
                   <AvatarImage src={requester.image ?? undefined} />
                   <AvatarFallback className="text-[9px]">
@@ -366,8 +368,15 @@ export function TicketDetailClient({
                 </Avatar>
                 {requester.name ?? requester.email}
               </div>
-              <span>·</span>
-              <span>Opened {formatDateTime(ticketCreatedAt)}</span>
+              <span className="whitespace-nowrap">
+                <span aria-hidden="true" className="mr-3">·</span>Opened {formatDateTime(ticketCreatedAt)}
+              </span>
+              {department && (
+                <span className="whitespace-nowrap">
+                  <span aria-hidden="true" className="mr-3">·</span>Sent to{" "}
+                  <span className="font-medium text-foreground">{department.name}</span>
+                </span>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -416,7 +425,13 @@ export function TicketDetailClient({
       </div>
 
       {/* Delete confirmation dialog */}
-      <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+      <Dialog
+        open={deleteOpen}
+        onOpenChange={(open) => {
+          setDeleteOpen(open);
+          if (!open) setDeleteConfirmText("");
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Ticket</DialogTitle>
@@ -424,17 +439,33 @@ export function TicketDetailClient({
           <div className="py-2 space-y-2">
             <p className="text-sm text-muted-foreground">
               Are you sure you want to permanently delete ticket{" "}
-              <strong className="text-foreground font-mono">{formatTicketNumber(ticketNumber)}</strong>?
+              <strong className="text-foreground tabular-nums">{formatTicketNumber(ticketNumber)}</strong>?
             </p>
             <p className="text-sm font-medium text-destructive">
               This will delete all messages, attachments, and history. This action cannot be undone.
             </p>
+            <div className="space-y-1.5 pt-2">
+              <label htmlFor="delete-confirm" className="text-sm">
+                Type <span className="font-semibold tabular-nums">{formatTicketNumber(ticketNumber)}</span> to confirm
+              </label>
+              <input
+                id="delete-confirm"
+                value={deleteConfirmText}
+                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                autoComplete="off"
+                className="flex h-9 w-full rounded border border-input bg-card px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDeleteOpen(false)} disabled={deleting}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={deleting || deleteConfirmText.trim().toUpperCase() !== formatTicketNumber(ticketNumber)}
+            >
               {deleting && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Delete Permanently
             </Button>
@@ -523,124 +554,12 @@ export function TicketDetailClient({
           />
         )}
 
-        {/* Ticket-level attachments (not linked to a specific message) */}
-        {ticketAttachments.length > 0 && (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm flex items-center gap-1.5">
-                <Paperclip className="h-3.5 w-3.5" />
-                Attachments ({ticketAttachments.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {ticketAttachments.map((att) => (
-                <a
-                  key={att.id}
-                  href={`/api/tickets/${ticketId}/attachments/${att.id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs hover:bg-muted transition-colors"
-                >
-                  <Paperclip className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium truncate">{att.originalName}</p>
-                    <p className="text-muted-foreground mt-0.5">
-                      {formatBytes(att.size)} · {att.mimeType}
-                    </p>
-                    <p className="text-muted-foreground">
-                      {formatDateTime(att.createdAt)}
-                      {att.uploadedBy && (
-                        <> · {att.uploadedBy.name ?? att.uploadedBy.email}</>
-                      )}
-                    </p>
-                  </div>
-                </a>
-              ))}
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Admin destructive actions */}
-        {isAdmin && (
-          <Card className="border-destructive/30">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm text-destructive">Admin Actions</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {canCancelNow && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 hover:text-orange-800"
-                  onClick={() => setCancelOpen(true)}
-                  disabled={cancelReasons.length === 0}
-                  title={cancelReasons.length === 0 ? "No active cancel reasons available" : undefined}
-                >
-                  <XCircle className="h-3.5 w-3.5 mr-1.5" />
-                  Cancel Ticket
-                </Button>
-              )}
-              <Button
-                variant="destructive"
-                size="sm"
-                className="w-full"
-                onClick={() => setDeleteOpen(true)}
-              >
-                <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-                Delete Ticket
-              </Button>
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Requester cancel — only visible to the ticket owner, not admins */}
-        {!isAdmin && isRequester && canCancelNow && (
-          <Card className="border-orange-200">
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm text-orange-700">My Request</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {cancelReasons.length === 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  No active cancel reasons are available. Contact support if you need this ticket cancelled.
-                </p>
-              ) : (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="w-full border-orange-300 text-orange-700 hover:bg-orange-50 hover:text-orange-800"
-                  onClick={() => setCancelOpen(true)}
-                >
-                  <XCircle className="h-3.5 w-3.5 mr-1.5" />
-                  Cancel My Request
-                </Button>
-              )}
-            </CardContent>
-          </Card>
-        )}
-
         {/* Details card — reflects real-time state */}
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-sm">Details</CardTitle>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
-            <div className="flex justify-between items-center">
-              <span className="text-muted-foreground">Status</span>
-              <StatusBadge name={status.name} color={status.color} />
-            </div>
-            <div className="flex justify-between items-center">
-              <span className="text-muted-foreground">Priority</span>
-              {priority ? (
-                <PriorityBadge
-                  name={priority.name}
-                  color={priority.color}
-                  level={priority.level}
-                />
-              ) : (
-                <span className="text-muted-foreground text-xs">None</span>
-              )}
-            </div>
             {category && (
               <div className="flex justify-between items-center">
                 <span className="text-muted-foreground">Category</span>
@@ -689,7 +608,7 @@ export function TicketDetailClient({
                 {project ? (
                   <Link
                     href={`/projects/${project.id}`}
-                    className="font-medium text-primary hover:underline text-sm truncate max-w-[140px]"
+                    className="font-medium text-link hover:underline text-sm truncate max-w-[140px]"
                   >
                     {project.title}
                   </Link>
@@ -704,7 +623,7 @@ export function TicketDetailClient({
                 {activity ? (
                   <Link
                     href={`/activities/${activity.id}`}
-                    className="font-medium text-primary hover:underline text-sm truncate max-w-[140px]"
+                    className="font-medium text-link hover:underline text-sm truncate max-w-[140px]"
                   >
                     {activity.title}
                   </Link>
@@ -771,7 +690,7 @@ export function TicketDetailClient({
                   href={sourceUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 text-primary hover:underline text-xs"
+                  className="flex items-center gap-1.5 text-link hover:underline text-xs"
                 >
                   <ExternalLink className="h-3.5 w-3.5" />
                   Open in source application
@@ -795,6 +714,102 @@ export function TicketDetailClient({
             </CardContent>
           </Card>
         )}
+        {/* Ticket-level attachments (not linked to a specific message) */}
+        {ticketAttachments.length > 0 && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm flex items-center gap-1.5">
+                <Paperclip className="h-3.5 w-3.5" />
+                Attachments ({ticketAttachments.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {ticketAttachments.map((att) => (
+                <a
+                  key={att.id}
+                  href={`/api/tickets/${ticketId}/attachments/${att.id}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs hover:bg-muted transition-colors"
+                >
+                  <Paperclip className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
+                  <div className="min-w-0 flex-1">
+                    <p className="font-medium truncate">{att.originalName}</p>
+                    <p className="text-muted-foreground mt-0.5">
+                      {formatBytes(att.size)} · {att.mimeType}
+                    </p>
+                    <p className="text-muted-foreground">
+                      {formatDateTime(att.createdAt)}
+                      {att.uploadedBy && (
+                        <> · {att.uploadedBy.name ?? att.uploadedBy.email}</>
+                      )}
+                    </p>
+                  </div>
+                </a>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Requester cancel — only visible to the ticket owner, not admins */}
+        {!isAdmin && isRequester && canCancelNow && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Don&apos;t need this anymore?</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {cancelReasons.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No active cancel reasons are available. Contact support if you need this ticket cancelled.
+                </p>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => setCancelOpen(true)}
+                >
+                  <XCircle className="h-3.5 w-3.5 mr-1.5" />
+                  Cancel My Request
+                </Button>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Admin destructive actions */}
+        {isAdmin && (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-sm">Admin actions</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {canCancelNow && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="w-full"
+                  onClick={() => setCancelOpen(true)}
+                  disabled={cancelReasons.length === 0}
+                  title={cancelReasons.length === 0 ? "No active cancel reasons available" : undefined}
+                >
+                  <XCircle className="h-3.5 w-3.5 mr-1.5" />
+                  Cancel Ticket
+                </Button>
+              )}
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full border-destructive/50 text-destructive hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => setDeleteOpen(true)}
+              >
+                <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                Delete Ticket
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
       </div>
     </div>
   );

@@ -11,7 +11,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Select,
   SelectContent,
@@ -19,10 +18,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Check, Loader2, Paperclip, Plus } from "lucide-react";
+import { Loader2, Paperclip, Plus } from "lucide-react";
 import { AttachmentDropzone } from "@/components/tickets/attachment-dropzone";
-import { LiveSupportPanel } from "@/components/tickets/live-support-panel";
-import { SimpleCommentBox } from "@/components/tickets/simple-comment-box";
+import { WhatHappensNext } from "@/components/tickets/what-happens-next";
+import { formatTicketNumber } from "@/lib/utils";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
 
@@ -114,12 +113,6 @@ const createTicketFormSchema = createTicketSchema.extend({
 });
 type CreateTicketFormValues = z.infer<typeof createTicketFormSchema>;
 
-interface Agent {
-  id: string;
-  name: string | null;
-  image: string | null;
-}
-
 interface TicketFormProject {
   id: string;
   title: string;
@@ -141,7 +134,6 @@ interface CreateTicketFormProps {
   departments: Array<{ id: string; name: string }>;
   /** Active workspace's department — pre-selected as the default destination, but always changeable via the always-rendered Department field above. */
   defaultDepartmentId?: string | null;
-  itAgents: Agent[];
   /**
    * Same underlying permission (ticket.linkProjectActivity) as the Ticket
    * detail page and the generic PATCH route, resolved the same
@@ -185,7 +177,6 @@ export function CreateTicketForm({
   priorities,
   departments,
   defaultDepartmentId,
-  itAgents,
   hasGlobalLinkPermission,
   linkPermissionDepartmentIds,
   projectCreateDepartmentIds,
@@ -196,7 +187,6 @@ export function CreateTicketForm({
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
-  const [pendingComments, setPendingComments] = useState<string[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
   const [projects, setProjects] = useState<TicketFormProject[]>([]);
   const [activities, setActivities] = useState<TicketFormActivity[]>([]);
@@ -447,18 +437,18 @@ export function CreateTicketForm({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedDepartmentId]);
 
-  const uploadAttachment = async (ticketId: string, file: File) => {
+  // Resolves true only when the server actually stored the file — a non-2xx
+  // response or a network error both count as a failure the user must hear
+  // about, never a silent success.
+  const uploadAttachment = async (ticketId: string, file: File): Promise<boolean> => {
     const fd = new FormData();
     fd.append("file", file);
-    await fetch(`/api/tickets/${ticketId}/attachments`, { method: "POST", body: fd });
-  };
-
-  const postInitialMessage = async (ticketId: string, body: string) => {
-    await fetch(`/api/tickets/${ticketId}/reply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ body, direction: "INBOUND", isInternal: false }),
-    });
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}/attachments`, { method: "POST", body: fd });
+      return res.ok;
+    } catch {
+      return false;
+    }
   };
 
   const onSubmit = async (data: CreateTicketFormValues) => {
@@ -476,20 +466,25 @@ export function CreateTicketForm({
       }
 
       const ticket = await res.json();
+      const ref = formatTicketNumber(ticket.ticketNumber);
+      const departmentName = departments.find((d) => d.id === data.departmentId)?.name;
 
-      // Upload attachments (best-effort, non-blocking on error)
-      if (files.length > 0) {
-        await Promise.allSettled(files.map((f) => uploadAttachment(ticket.id, f)));
+      // The ticket exists at this point, so a failed upload must not block
+      // navigation — but it must be reported, naming what was lost and where
+      // to retry (the ticket page accepts attachments too).
+      const results = await Promise.all(files.map((f) => uploadAttachment(ticket.id, f)));
+      const failed = files.filter((_, i) => !results[i]);
+
+      if (failed.length > 0) {
+        toast.warning(`${ref} created, but ${failed.length} of ${files.length} file${files.length !== 1 ? "s" : ""} didn't upload`, {
+          description: `${failed.map((f) => f.name).join(", ")}. Attach ${failed.length !== 1 ? "them" : "it"} again from the ticket page.`,
+          duration: 10000,
+        });
+      } else {
+        toast.success(`${ref} sent${departmentName ? ` to ${departmentName}` : ""}`, {
+          description: "A confirmation email is on its way.",
+        });
       }
-
-      // Post any saved initial messages
-      if (pendingComments.length > 0) {
-        await Promise.allSettled(
-          pendingComments.map((body) => postInitialMessage(ticket.id, body))
-        );
-      }
-
-      toast.success("Ticket created successfully!");
       router.push(`/tickets/${ticket.id}`);
     } catch (error: any) {
       toast.error(error.message ?? "Something went wrong");
@@ -497,28 +492,69 @@ export function CreateTicketForm({
     }
   };
 
-  const handleInitialComment = async (text: string) => {
-    setPendingComments((prev) => [...prev, text]);
-  };
-
   return (
     <form onSubmit={handleSubmit(onSubmit)}>
-      <div className="grid gap-6 lg:grid-cols-3">
+      {/* One form surface, sections split by hairlines — not a stack of cards. */}
+      <div className="rounded-md border bg-card">
+      <div className="lg:grid lg:grid-cols-3">
         {/* ── Left: main content (2/3) ─────────────────────────── */}
-        <div className="lg:col-span-2 space-y-5">
+        <div className="lg:col-span-2 divide-y">
           {/* Ticket details */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Ticket Details</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
+          <section aria-labelledby="ticket-details-heading" className="space-y-4 p-5">
+            <h2 id="ticket-details-heading" className="text-base font-semibold">Ticket details</h2>
+              {/* Destination department — first, because it decides who
+                  receives the ticket and which categories/priorities apply.
+                  The ticket's actual owning departmentId (existing Ticket
+                  data model/creation architecture; see
+                  resolveTicketDestinationDepartment server-side).
+                  `departments` is every ACTIVE department in the
+                  organization (getTicketDestinationDepartments), NOT scoped
+                  to ones the requester is a DepartmentMembership member of —
+                  addressing a ticket to a department the requester doesn't
+                  belong to (e.g. Finance -> IT) is the whole point of this
+                  field, so it's never hidden just because there'd only be
+                  one choice. Distinct from the "Share with my
+                  department/sub-department" checkboxes, which only widen
+                  VISIBILITY of a ticket that already belongs to this
+                  department — they never change which department owns it.
+                  Category/Priority are re-filtered to whichever department
+                  is selected here — see visibleCategories/visiblePriorities
+                  and the effect that clears an invalid selection when this
+                  changes. */}
+              <div className="space-y-1.5">
+                <Label htmlFor="departmentId">
+                  Send to department <span className="text-destructive">*</span>
+                </Label>
+                <Select
+                  value={selectedDepartmentId ?? ""}
+                  onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
+                >
+                  <SelectTrigger id="departmentId" aria-describedby="departmentId-help">
+                    <SelectValue placeholder="Choose who should handle this…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {departments.map((d) => (
+                      <SelectItem key={d.id} value={d.id}>
+                        {d.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p id="departmentId-help" className="text-xs text-muted-foreground">
+                  The department that will handle your request. It doesn&apos;t have to be your own.
+                </p>
+                {errors.departmentId && (
+                  <p className="text-xs text-destructive" role="alert">{errors.departmentId.message}</p>
+                )}
+              </div>
+
               <div className="space-y-1.5">
                 <Label htmlFor="title">
                   Title <span className="text-destructive">*</span>
                 </Label>
                 <Input
                   id="title"
-                  placeholder="Brief summary of your issue…"
+                  placeholder="e.g. Laptop won't connect to the office Wi-Fi"
                   {...register("title")}
                 />
                 {errors.title && (
@@ -532,7 +568,7 @@ export function CreateTicketForm({
                 </Label>
                 <Textarea
                   id="description"
-                  placeholder="Describe the issue in detail. Include steps to reproduce, error messages, what you expected vs what happened…"
+                  placeholder="What do you need, or what went wrong? Mention when it started, anything you already tried, and how urgent it is."
                   className="min-h-[160px] resize-y"
                   {...register("description")}
                 />
@@ -540,109 +576,32 @@ export function CreateTicketForm({
                   <p className="text-xs text-destructive">{errors.description.message}</p>
                 )}
               </div>
-            </CardContent>
-          </Card>
+          </section>
 
           {/* Attachments */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Paperclip className="h-4 w-4" />
-                Attachments
-                {files.length > 0 && (
-                  <span className="ml-auto text-xs font-normal text-muted-foreground">
-                    {files.length} file{files.length !== 1 ? "s" : ""} selected
-                  </span>
-                )}
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <AttachmentDropzone files={files} onFilesChange={setFiles} />
-            </CardContent>
-          </Card>
-
-          {/* Initial message */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Initial Message</CardTitle>
-              <p className="text-xs text-muted-foreground">
-                Optional message to the IT team — sent after your ticket is submitted.
-              </p>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <SimpleCommentBox
-                onSubmit={handleInitialComment}
-                placeholder="Add context, urgency details, or ask a quick question…"
-              />
-              {pendingComments.length > 0 && (
-                <p className="flex items-center gap-1.5 text-xs text-emerald-600">
-                  <Check className="h-3 w-3" />
-                  {pendingComments.length} message
-                  {pendingComments.length > 1 ? "s" : ""} saved — will be posted with ticket
-                </p>
+          <section aria-labelledby="attachments-heading" className="space-y-3 p-5">
+            <h2 id="attachments-heading" className="flex items-center gap-2 text-base font-semibold">
+              <Paperclip className="h-4 w-4" aria-hidden="true" />
+              Attachments
+              {files.length > 0 && (
+                <span className="ml-auto text-xs font-normal text-muted-foreground">
+                  {files.length} file{files.length !== 1 ? "s" : ""} selected
+                </span>
               )}
-            </CardContent>
-          </Card>
+            </h2>
+            <AttachmentDropzone files={files} onFilesChange={setFiles} />
+          </section>
         </div>
 
-        {/* ── Right: sidebar (1/3) ─────────────────────────────── */}
-        <div className="space-y-4">
+        {/* ── Right: properties (1/3) ──────────────────────────── */}
+        <div className="border-t lg:border-l lg:border-t-0">
           {/* Properties */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Properties</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {/* Destination department — the ticket's actual owning
-                  departmentId (existing Ticket data model/creation
-                  architecture; see resolveTicketDestinationDepartment
-                  server-side). `departments` is every ACTIVE department in
-                  the organization (getTicketDestinationDepartments), NOT
-                  scoped to ones the requester is a DepartmentMembership
-                  member of — addressing a ticket to a department the
-                  requester doesn't belong to (e.g. Finance -> IT) is the
-                  whole point of this field, so it's never hidden just
-                  because there'd only be one choice; a genuinely
-                  single-department organization still shows the field with
-                  that department pre-selected. Distinct from the "Share with
-                  my department/sub-department" checkboxes below, which only
-                  widen VISIBILITY of a ticket that already belongs to this
-                  department — they never change which department owns it.
-                  Category/Priority below are re-filtered to whichever
-                  department is selected here — see
-                  visibleCategories/visiblePriorities and the effect that
-                  clears an invalid selection when this changes. */}
+          <section aria-labelledby="properties-heading" className="space-y-4 p-5">
+            <h2 id="properties-heading" className="text-base font-semibold">Properties</h2>
               <div className="space-y-1.5">
-                <Label>
-                  Department <span className="text-destructive">*</span>
-                </Label>
-                <Select
-                  value={selectedDepartmentId ?? ""}
-                  onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
-                >
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select department…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {departments.map((d) => (
-                      <SelectItem key={d.id} value={d.id}>
-                        {d.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  This selection determines the department the ticket will be sent to, not your own department.
-                </p>
-                {errors.departmentId && (
-                  <p className="text-xs text-destructive">{errors.departmentId.message}</p>
-                )}
-              </div>
-
-              <div className="space-y-1.5">
-                <Label>Category</Label>
+                <Label htmlFor="categoryId">Category</Label>
                 <Select value={watch("categoryId") ?? ""} onValueChange={(v) => setValue("categoryId", v)}>
-                  <SelectTrigger>
+                  <SelectTrigger id="categoryId">
                     <SelectValue placeholder="Select category…" />
                   </SelectTrigger>
                   <SelectContent>
@@ -656,9 +615,9 @@ export function CreateTicketForm({
               </div>
 
               <div className="space-y-1.5">
-                <Label>Priority</Label>
+                <Label htmlFor="priorityId">Priority</Label>
                 <Select value={watch("priorityId") ?? ""} onValueChange={(v) => setValue("priorityId", v)}>
-                  <SelectTrigger>
+                  <SelectTrigger id="priorityId">
                     <SelectValue placeholder="Select priority…" />
                   </SelectTrigger>
                   <SelectContent>
@@ -679,7 +638,7 @@ export function CreateTicketForm({
 
               {subDepartments.length > 0 && (
                 <div className="space-y-1.5">
-                  <Label>Sub-Department</Label>
+                  <Label htmlFor="subDepartmentId">Sub-Department</Label>
                   <Select
                     value={watch("subDepartmentId") ?? "__none__"}
                     onValueChange={(v) => {
@@ -687,7 +646,7 @@ export function CreateTicketForm({
                       if (v === "__none__") setValue("shareWithSubDepartment", false);
                     }}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id="subDepartmentId">
                       <SelectValue placeholder="None" />
                     </SelectTrigger>
                     <SelectContent>
@@ -814,8 +773,23 @@ export function CreateTicketForm({
                   </div>
                 </>
               )}
-            </CardContent>
-          </Card>
+          </section>
+
+          {/* The one primary action stays with the properties, in the first
+              viewport, and sticks while the long left column scrolls. */}
+          <div className="space-y-5 border-t p-5 lg:sticky lg:top-0">
+            <Button type="submit" className="w-full" size="lg" disabled={isSubmitting}>
+              {isSubmitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Submitting…
+                </>
+              ) : (
+                "Submit Ticket"
+              )}
+            </Button>
+            <WhatHappensNext departmentName={departments.find((d) => d.id === selectedDepartmentId)?.name} />
+          </div>
 
           {selectedDepartmentId && (
             <>
@@ -838,20 +812,9 @@ export function CreateTicketForm({
             </>
           )}
 
-          <Button type="submit" className="w-full" size="lg" disabled={isSubmitting}>
-            {isSubmitting ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Submitting…
-              </>
-            ) : (
-              "Submit Ticket"
-            )}
-          </Button>
-
-          {/* Live support panel */}
-          <LiveSupportPanel agents={itAgents} />
         </div>
+      </div>
+
       </div>
     </form>
   );

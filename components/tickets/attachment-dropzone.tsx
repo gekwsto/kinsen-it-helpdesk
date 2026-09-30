@@ -87,7 +87,7 @@ export function AttachmentDropzone({ files, onFilesChange }: AttachmentDropzoneP
         <div>
           <p className="text-sm font-medium">
             Drag &amp; drop files here, or{" "}
-            <span className="text-primary underline-offset-2 hover:underline">browse</span>
+            <span className="text-link underline-offset-2 hover:underline">browse</span>
           </p>
           <p className="text-xs text-muted-foreground mt-0.5">
             JPG, PNG, PDF, DOCX, XLSX, ZIP — max 10 MB each

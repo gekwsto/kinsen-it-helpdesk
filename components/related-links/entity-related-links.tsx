@@ -403,7 +403,7 @@ function ExternalUrl({ url }: { url: string }) {
       target="_blank"
       rel="noopener noreferrer"
       title={safe}
-      className="mt-0.5 flex min-w-0 max-w-full items-center gap-1 text-xs text-primary hover:underline"
+      className="mt-0.5 flex min-w-0 max-w-full items-center gap-1 text-xs text-link hover:underline"
     >
       <span className="truncate">{relatedLinkHostname(safe)}</span>
       <ExternalLink className="h-3 w-3 shrink-0" />

@@ -12,8 +12,8 @@ export default async function UnauthorizedPage({
   const isDomainError = reason === "domain";
 
   return (
-    <div className="w-full max-w-md px-4">
-      <Card className="border-0 shadow-2xl text-center">
+    <div className="w-full max-w-sm">
+      <Card className="text-center">
         <CardHeader className="pb-4">
           <div className="flex justify-center mb-4">
             <div className="h-16 w-16 rounded-full bg-destructive/10 flex items-center justify-center">

@@ -29,6 +29,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Plus, Loader2, Ban, ShieldCheck, Pencil, Trash2 } from "lucide-react";
+import { ColorContrastHint } from "@/components/admin/color-contrast-hint";
 
 // ─── Shared types ───────────────────────────────────────────────────────────
 
@@ -191,6 +192,9 @@ function renderFields(
             }}
             className={error ? "border-destructive" : undefined}
           />
+        )}
+        {field.type === "color" && typeof form[field.key] === "string" && (
+          <ColorContrastHint color={form[field.key] as string} label={(form.name as string) || "Preview"} />
         )}
         {error && <p className="text-xs text-destructive">{error}</p>}
       </div>

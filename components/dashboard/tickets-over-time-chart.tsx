@@ -56,13 +56,13 @@ export function TicketsOverTimeChart({ data, days }: Props) {
                   dataKey="date"
                   ticks={ticks}
                   tickFormatter={shortDate}
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
                   tickLine={false}
                   axisLine={false}
                 />
                 <YAxis
                   allowDecimals={false}
-                  tick={{ fontSize: 11 }}
+                  tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }}
                   tickLine={false}
                   axisLine={false}
                 />
@@ -71,15 +71,16 @@ export function TicketsOverTimeChart({ data, days }: Props) {
                   formatter={(value) => [value, "Tickets"]}
                   contentStyle={{
                     fontSize: 12,
-                    borderRadius: 8,
+                    borderRadius: 4,
                     border: "1px solid hsl(var(--border))",
-                    background: "hsl(var(--background))",
+                    background: "hsl(var(--card))",
+                    color: "hsl(var(--foreground))",
                   }}
                 />
                 <Line
                   type="monotone"
                   dataKey="count"
-                  stroke="hsl(var(--primary))"
+                  stroke="hsl(var(--foreground))"
                   strokeWidth={2}
                   dot={false}
                   activeDot={{ r: 4 }}

@@ -49,8 +49,11 @@ export default async function MainLayout({
         <div className="flex h-screen overflow-hidden bg-background">
           <Sidebar userRole={session.user.role} navFlags={navFlags} />
           <div className="flex-1 flex flex-col overflow-hidden">
-            <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
-            <main className="flex-1 overflow-y-auto p-6">{children}</main>
+            <Topbar canViewAllTickets={navFlags.canViewAllTickets} user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
+            {/* relative: Radix renders hidden native <select>s as position:absolute;
+                without a positioned ancestor they escape main's scroll and
+                stretch the window on phones. */}
+            <main className="relative flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6 lg:px-8">{children}</main>
           </div>
         </div>
         <HelpGuideWidget />

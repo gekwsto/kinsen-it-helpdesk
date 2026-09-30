@@ -4,11 +4,11 @@ import { hasPermission } from "@/lib/permissions";
 import { getAccessibleDepartmentSummaries, getTicketDestinationDepartments, getNavVisibilityFlags, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
-import { Role } from "@prisma/client";
 import { CreateTicketForm } from "@/components/tickets/ticket-form";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { ChevronRight, TicketPlus, ShieldOff } from "lucide-react";
+import { ChevronRight, ShieldOff } from "lucide-react";
+import { PageHeader } from "@/components/layout/page-header";
 import { Button } from "@/components/ui/button";
 
 export default async function NewTicketPage() {
@@ -120,7 +120,7 @@ export default async function NewTicketPage() {
   // in is resolved here — reused as-is by the shared
   // getAccessibleDepartmentSummaries department-permission helper, not a
   // new/parallel permission check.
-  const [categories, priorities, itAgents, projectCreateDepartments, activityCreateDepartments] =
+  const [categories, priorities, projectCreateDepartments, activityCreateDepartments] =
     await Promise.all([
       prisma.ticketCategory.findMany({
         where: scopedWhere,
@@ -131,12 +131,6 @@ export default async function NewTicketPage() {
         where: scopedWhere,
         orderBy: { level: "desc" },
         select: { id: true, name: true, color: true, level: true, departmentId: true },
-      }),
-      prisma.user.findMany({
-        where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
-        orderBy: { name: "asc" },
-        select: { id: true, name: true, image: true },
-        take: 6,
       }),
       // Only a user with ticket.linkProjectActivity SOMEWHERE can ever link
       // a ticket to a Project/Activity at all (see canLinkProjectActivityAnywhere
@@ -180,25 +174,16 @@ export default async function NewTicketPage() {
         <span className="text-foreground font-medium">New Ticket</span>
       </div>
 
-      {/* Header */}
-      <div className="flex items-start gap-4">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-primary/10">
-          <TicketPlus className="h-6 w-6 text-primary" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Create New Ticket</h1>
-          <p className="text-muted-foreground mt-0.5">
-            Submit a support request and our IT team will get back to you shortly.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Create New Ticket"
+        description="Send a request to any department. They'll reply here and by email."
+      />
 
       <CreateTicketForm
         categories={categories}
         priorities={priorities}
         departments={destinationDepartments}
         defaultDepartmentId={activeWorkspace.departmentId}
-        itAgents={itAgents}
         hasGlobalLinkPermission={hasGlobalLinkPermission}
         linkPermissionDepartmentIds={linkPermissionDepartmentIds}
         projectCreateDepartmentIds={projectCreateDepartments.map((d) => d.id)}

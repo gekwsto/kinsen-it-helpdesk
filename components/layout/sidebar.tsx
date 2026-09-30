@@ -16,7 +16,7 @@ import {
   AlertTriangle,
   Settings,
   ChevronDown,
-  Headset,
+  ShieldCheck,
   Target,
   PanelLeftClose,
   PanelLeftOpen,
@@ -26,6 +26,25 @@ import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { useHelpGuide } from "@/components/help/help-guide-provider";
 import { resolveActiveHref } from "@/lib/sidebar-active-route";
+import { motion, LayoutGroup, useReducedMotion } from "motion/react";
+import { KinsenLockup, KinsenMark } from "@/components/layout/kinsen-logo";
+
+/**
+ * The Kinsen notch — the K mark's lower teal triangle — marks the current
+ * place. One shared layoutId, so it slides from the old item to the new one
+ * on navigation (instant under reduced motion).
+ */
+function Notch() {
+  const reduce = useReducedMotion();
+  return (
+    <motion.span
+      layoutId="sidebar-notch"
+      aria-hidden="true"
+      className="kinsen-notch absolute left-0 top-[calc(50%-0.4375rem)] h-3.5 w-2"
+      transition={reduce ? { duration: 0 } : { type: "spring", stiffness: 520, damping: 42 }}
+    />
+  );
+}
 
 // `visible`, when defined, wins outright over `roles` — lets specific items
 // be gated by a server-computed permission flag (e.g. subdepartment.view)
@@ -60,20 +79,32 @@ interface SidebarProps {
 // screens (tailwind.config.ts) — width-based breakpoints (sm/md/lg) don't
 // help here since the constraint is vertical (short laptop viewports), not
 // sidebar width, which is already handled separately by collapsed mode.
-const NAV_ITEM_SIZE = "min-h-[44px] py-2.5 maxh-800:min-h-[40px] maxh-800:py-2 maxh-700:min-h-[36px] maxh-700:py-1.5";
-const NAV_CHILD_SIZE = "min-h-[40px] py-2 maxh-800:min-h-[38px] maxh-800:py-1.5 maxh-700:min-h-[34px] maxh-700:py-1";
+const NAV_ITEM_SIZE = "min-h-[40px] py-2 maxh-800:min-h-[36px] maxh-800:py-1.5 maxh-700:min-h-[34px] maxh-700:py-1";
+const NAV_CHILD_SIZE = "min-h-[34px] py-1.5 maxh-800:min-h-[32px] maxh-700:min-h-[30px] maxh-700:py-1";
 const NAV_ICON_SIZE = "p-2.5 maxh-700:p-2";
 
 export function Sidebar({ userRole, navFlags }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
+  const pathname = usePathname();
+  // The section holding the current page starts (and stays) open, so the
+  // active child is always visible — not just Tickets.
   const [expandedItems, setExpandedItems] = useState<string[]>(["Tickets"]);
   // Help Guide is available to every user regardless of role/permissions —
   // no canAccess() gate applies to it, unlike every other item above.
   const { toggle: toggleHelpGuide } = useHelpGuide();
 
   useEffect(() => {
-    const stored = localStorage.getItem("sidebar-collapsed");
-    if (stored === "true") setCollapsed(true);
+    // Phones always start on the icon rail so the page keeps its width;
+    // that automatic collapse is never written back as a preference.
+    if (window.matchMedia("(max-width: 767px)").matches) {
+      setCollapsed(true);
+      return;
+    }
+    try {
+      if (localStorage.getItem("sidebar-collapsed") === "true") setCollapsed(true);
+    } catch {
+      // Storage blocked: fall back to the expanded default.
+    }
   }, []);
 
   const toggleCollapsed = () => {
@@ -173,7 +204,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
     {
       label: "Administration",
       href: "/admin",
-      icon: Settings,
+      icon: ShieldCheck,
       visible: userRole === "ADMIN" || navFlags.canViewAdminSubDepartments,
       children: [
         { label: "Users", href: "/admin/users", roles: ["ADMIN"] as Role[] },
@@ -196,7 +227,14 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
     },
   ];
 
-  const pathname = usePathname();
+  useEffect(() => {
+    const owner = navItems.find(
+      (item) => item.children?.some((c) => pathname === c.href || pathname.startsWith(c.href + "/"))
+    );
+    if (owner) setExpandedItems((prev) => (prev.includes(owner.label) ? prev : [...prev, owner.label]));
+    // navItems is rebuilt every render from stable props; the pathname is the trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   const toggleExpand = (label: string) => {
     setExpandedItems((prev) =>
@@ -215,194 +253,198 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
     return pathname.startsWith(href + "/");
   };
 
+  const rowBase = "relative flex items-center gap-3 rounded text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring";
+  const rowIdle = "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground";
+  const rowActive = "bg-sidebar-accent text-white font-medium";
+
   return (
     <aside
+      aria-label="Main navigation"
       className={cn(
-        "min-h-screen flex flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border transition-all duration-200 flex-shrink-0",
-        collapsed ? "w-16" : "w-64"
+        "min-h-screen flex flex-col bg-sidebar text-sidebar-foreground transition-[width] duration-200 flex-shrink-0 overflow-hidden",
+        // Phones get the rail width from the first paint; the effect above
+        // then swaps in the rail markup, so there's no expanded flash.
+        collapsed ? "w-16" : "w-64 max-md:w-16"
       )}
     >
-      {/* Logo / Header */}
-      {collapsed ? (
-        <div className="h-16 flex flex-col items-center justify-center gap-1 border-b border-sidebar-border">
+      {/* Brand — the official white logo, cropped into a horizontal lockup. */}
+      <div className={cn("h-14 flex items-center border-b border-sidebar-border", collapsed ? "justify-center" : "gap-3 pl-4 pr-2")}>
+        {collapsed ? (
           <button
             onClick={toggleCollapsed}
             aria-label="Expand sidebar"
             aria-expanded={false}
-            className="rounded-lg p-1.5 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+            title="Expand sidebar"
+            className="group relative rounded p-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
           >
-            <PanelLeftOpen className="h-5 w-5" />
+            <span className="group-hover:opacity-0 transition-opacity"><KinsenMark height={24} /></span>
+            <PanelLeftOpen className="absolute inset-0 m-auto h-5 w-5 opacity-0 group-hover:opacity-100 transition-opacity text-white" />
           </button>
-        </div>
-      ) : (
-        <div className="h-16 flex items-center gap-3 px-4 border-b border-sidebar-border">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-primary flex-shrink-0">
-            <Headset className="h-4 w-4 text-sidebar-primary-foreground" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-white">Kinsen IT</p>
-            <p className="text-xs text-sidebar-foreground/60">Helpdesk</p>
-          </div>
-          <button
-            onClick={toggleCollapsed}
-            aria-label="Collapse sidebar"
-            aria-expanded={true}
-            className="rounded-lg p-1.5 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors flex-shrink-0"
-          >
-            <PanelLeftClose className="h-4 w-4" />
-          </button>
-        </div>
-      )}
-
-      {/* Navigation — sidebar-scroll gives this its own thin/dark scrollbar
-          (globals.css) instead of the app-wide light one; py/space-y shrink
-          slightly on shorter viewports (maxh-800/maxh-700, tailwind.config.ts)
-          so the menu needs less scrolling on laptop-height screens. */}
-      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-1 maxh-800:py-3 maxh-700:py-2 maxh-700:space-y-0.5 sidebar-scroll">
-        {navItems.map((item) => {
-          if (!canAccess(item)) return null;
-
-          const hasChildren = item.children && item.children.length > 0;
-          const isExpanded = expandedItems.includes(item.label);
-          const active = isActive(item.href);
-
-          // Collapsed mode: all items are direct icon links
-          if (collapsed) {
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                title={item.label}
-                className={cn(
-                  "flex items-center justify-center rounded-lg transition-colors",
-                  NAV_ICON_SIZE,
-                  active
-                    ? "bg-sidebar-primary text-sidebar-primary-foreground"
-                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                )}
-              >
-                <item.icon className="h-5 w-5" />
-              </Link>
-            );
-          }
-
-          if (hasChildren) {
-            const visibleChildren = item.children!.filter((c) => canAccess(c));
-            if (visibleChildren.length === 0) return null;
-            // Computed once per section, from ALL visible siblings at once —
-            // never per-child in isolation — so exactly one child (the most
-            // specific href match, or none) is active. See resolveActiveHref's
-            // own doc comment above.
-            const activeChildHref = resolveActiveHref(pathname, visibleChildren.map((c) => c.href));
-
-            return (
-              <div key={item.label}>
-                <button
-                  onClick={() => toggleExpand(item.label)}
-                  className={cn(
-                    "w-full flex items-center justify-between gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
-                    NAV_ITEM_SIZE,
-                    "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                    pathname.startsWith(item.href)
-                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                      : "text-sidebar-foreground/80"
-                  )}
-                >
-                  <span className="flex items-center gap-3">
-                    <item.icon className="h-4 w-4 flex-shrink-0" />
-                    {item.label}
-                  </span>
-                  <ChevronDown
-                    className={cn(
-                      "h-3.5 w-3.5 transition-transform",
-                      isExpanded && "rotate-180"
-                    )}
-                  />
-                </button>
-                {isExpanded && (
-                  <div className="mt-1 ml-4 pl-3 border-l border-sidebar-border space-y-1 maxh-700:space-y-0.5">
-                    {visibleChildren.map((child) => (
-                      <Link
-                        key={child.href}
-                        href={child.href}
-                        className={cn(
-                          "flex items-center gap-2 px-3 rounded-lg text-sm transition-colors",
-                          NAV_CHILD_SIZE,
-                          child.href === activeChildHref
-                            ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium"
-                            : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                        )}
-                      >
-                        {child.label}
-                      </Link>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          }
-
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              className={cn(
-                "flex items-center gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
-                NAV_ITEM_SIZE,
-                active
-                  ? "bg-sidebar-primary text-sidebar-primary-foreground"
-                  : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <item.icon className="h-4 w-4 flex-shrink-0" />
-              {item.label}
-            </Link>
-          );
-        })}
-      </nav>
-
-      {/* Footer */}
-      <div className="p-2 border-t border-sidebar-border space-y-1 maxh-700:space-y-0.5">
-        {collapsed ? (
-          <>
-            <Link
-              href="/settings"
-              title="Settings"
-              className={cn("flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
-            >
-              <Settings className="h-5 w-5" />
-            </Link>
-            <button
-              type="button"
-              onClick={toggleHelpGuide}
-              title="Help Guide"
-              aria-label="Help Guide"
-              className={cn("w-full flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
-            >
-              <BookOpen className="h-5 w-5" />
-            </button>
-          </>
         ) : (
           <>
-            <Link
-              href="/settings"
-              className={cn("flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
-            >
-              <Settings className="h-4 w-4" />
-              Settings
+            <Link href="/dashboard" className="flex min-w-0 flex-1 items-end gap-2.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring">
+              <KinsenLockup height={24} />
+              <span className="pb-px text-xs font-medium text-sidebar-foreground whitespace-nowrap">IT Helpdesk</span>
             </Link>
             <button
-              type="button"
-              onClick={toggleHelpGuide}
-              aria-label="Help Guide"
-              className={cn("w-full flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
+              onClick={toggleCollapsed}
+              aria-label="Collapse sidebar"
+              aria-expanded={true}
+              title="Collapse sidebar"
+              className="rounded p-1.5 text-sidebar-foreground hover:bg-sidebar-accent hover:text-white transition-colors flex-shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
             >
-              <BookOpen className="h-4 w-4" />
-              Help Guide
+              <PanelLeftClose className="h-4 w-4" />
             </button>
           </>
         )}
       </div>
+
+      {/* Navigation — sidebar-scroll gives this its own thin navy scrollbar
+          (globals.css); spacing compacts on shorter viewports
+          (maxh-800/maxh-700, tailwind.config.ts). */}
+      <LayoutGroup id="sidebar">
+        <nav className="flex-1 overflow-y-auto py-3 px-2 space-y-0.5 maxh-700:py-2 sidebar-scroll">
+          {navItems.map((item) => {
+            if (!canAccess(item)) return null;
+
+            const hasChildren = item.children && item.children.length > 0;
+            const isExpanded = expandedItems.includes(item.label);
+            const active = isActive(item.href);
+
+            // Collapsed mode: all items are direct icon links
+            if (collapsed) {
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  title={item.label}
+                  aria-label={item.label}
+                  aria-current={active ? "page" : undefined}
+                  className={cn(rowBase, "justify-center", NAV_ICON_SIZE, active ? rowActive : rowIdle)}
+                >
+                  {active && <Notch />}
+                  <item.icon className="h-[18px] w-[18px]" />
+                </Link>
+              );
+            }
+
+            if (hasChildren) {
+              const visibleChildren = item.children!.filter((c) => canAccess(c));
+              if (visibleChildren.length === 0) return null;
+              // Computed once per section, from ALL visible siblings at once —
+              // never per-child in isolation — so exactly one child (the most
+              // specific href match, or none) is active. See resolveActiveHref's
+              // own doc comment.
+              const activeChildHref = resolveActiveHref(pathname, visibleChildren.map((c) => c.href));
+              const sectionId = `nav-section-${item.label.replace(/\s+/g, "-").toLowerCase()}`;
+
+              return (
+                <div key={item.label}>
+                  <button
+                    onClick={() => toggleExpand(item.label)}
+                    aria-expanded={isExpanded}
+                    aria-controls={sectionId}
+                    className={cn(
+                      rowBase,
+                      "w-full justify-between px-3 font-medium",
+                      NAV_ITEM_SIZE,
+                      activeChildHref ? "text-white" : rowIdle,
+                      activeChildHref && "hover:bg-sidebar-accent"
+                    )}
+                  >
+                    <span className="flex items-center gap-3">
+                      <item.icon className="h-4 w-4 flex-shrink-0" />
+                      {item.label}
+                    </span>
+                    <ChevronDown
+                      className={cn("h-3.5 w-3.5 opacity-70 transition-transform", isExpanded && "rotate-180")}
+                      aria-hidden="true"
+                    />
+                  </button>
+                  {isExpanded && (
+                    <div id={sectionId} className="mt-0.5 mb-1 ml-[1.35rem] pl-3 border-l border-sidebar-border space-y-0.5">
+                      {visibleChildren.map((child) => {
+                        const childActive = child.href === activeChildHref;
+                        return (
+                          <Link
+                            key={child.href}
+                            href={child.href}
+                            aria-current={childActive ? "page" : undefined}
+                            className={cn(rowBase, "px-3", NAV_CHILD_SIZE, childActive ? rowActive : rowIdle)}
+                          >
+                            {childActive && <Notch />}
+                            {child.label}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                aria-current={active ? "page" : undefined}
+                className={cn(rowBase, "px-3 font-medium", NAV_ITEM_SIZE, active ? rowActive : rowIdle)}
+              >
+                {active && <Notch />}
+                <item.icon className="h-4 w-4 flex-shrink-0" />
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* Footer */}
+        <div className="p-2 border-t border-sidebar-border space-y-0.5">
+          {collapsed ? (
+            <>
+              <Link
+                href="/settings"
+                title="Settings"
+                aria-label="Settings"
+                aria-current={isActive("/settings") ? "page" : undefined}
+                className={cn(rowBase, "justify-center", NAV_ICON_SIZE, isActive("/settings") ? rowActive : rowIdle)}
+              >
+                {isActive("/settings") && <Notch />}
+                <Settings className="h-[18px] w-[18px]" />
+              </Link>
+              <button
+                type="button"
+                onClick={toggleHelpGuide}
+                title="Help Guide"
+                aria-label="Help Guide"
+                className={cn(rowBase, "w-full justify-center", NAV_ICON_SIZE, rowIdle)}
+              >
+                <BookOpen className="h-[18px] w-[18px]" />
+              </button>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/settings"
+                aria-current={isActive("/settings") ? "page" : undefined}
+                className={cn(rowBase, "px-3", NAV_ITEM_SIZE, isActive("/settings") ? rowActive : rowIdle)}
+              >
+                {isActive("/settings") && <Notch />}
+                <Settings className="h-4 w-4" />
+                Settings
+              </Link>
+              <button
+                type="button"
+                onClick={toggleHelpGuide}
+                className={cn(rowBase, "w-full px-3", NAV_ITEM_SIZE, rowIdle)}
+              >
+                <BookOpen className="h-4 w-4" />
+                Help Guide
+              </button>
+            </>
+          )}
+        </div>
+      </LayoutGroup>
     </aside>
   );
 }

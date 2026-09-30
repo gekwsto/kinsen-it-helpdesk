@@ -130,13 +130,13 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
             {activities.map((activity) => (
               <TableRow key={activity.id} className={activity.isCompleted ? "opacity-60" : undefined}>
                 <TableCell>
-                  <Link href={`/activities/${activity.id}`} className={`font-medium hover:text-primary line-clamp-1 ${activity.isCompleted ? "line-through" : ""}`}>
+                  <Link href={`/activities/${activity.id}`} className={`font-medium hover:text-link line-clamp-1 ${activity.isCompleted ? "line-through" : ""}`}>
                     {activity.title}
                   </Link>
                 </TableCell>
                 <TableCell>
                   {activity.project ? (
-                    <Link href={`/projects/${activity.project.id}`} className="text-sm text-primary hover:underline">
+                    <Link href={`/projects/${activity.project.id}`} className="text-sm text-link hover:underline">
                       {activity.project.title}
                     </Link>
                   ) : (

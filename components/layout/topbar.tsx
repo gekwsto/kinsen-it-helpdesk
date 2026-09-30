@@ -1,7 +1,8 @@
 "use client";
 
 import { signOut } from "next-auth/react";
-import { LogOut, User, ChevronDown } from "lucide-react";
+import { LogOut, User, ChevronDown, Search, X } from "lucide-react";
+import { useState } from "react";
 import { getInitials } from "@/lib/utils";
 import { Role } from "@prisma/client";
 import { getSessionSyncChannel, broadcastLogout } from "@/lib/client-session-broadcast";
@@ -19,6 +20,8 @@ import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { NotificationDropdown } from "@/components/notifications/notification-dropdown";
 import { WorkspaceSelector } from "@/components/workspace/workspace-selector";
+import { GlobalSearch } from "@/components/layout/global-search";
+import { ThemeToggle } from "@/components/theme/theme";
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
@@ -28,15 +31,8 @@ const ROLE_LABELS: Record<Role, string> = {
   USER: "User",
 };
 
-const ROLE_BADGE_VARIANTS: Record<Role, string> = {
-  ADMIN: "bg-red-100 text-red-700 border-red-200",
-  IT_AGENT: "bg-blue-100 text-blue-700 border-blue-200",
-  DEPARTMENT_MANAGER: "bg-purple-100 text-purple-700 border-purple-200",
-  DIRECTOR: "bg-indigo-100 text-indigo-700 border-indigo-200",
-  USER: "bg-gray-100 text-gray-700 border-gray-200",
-};
-
 interface TopbarProps {
+  canViewAllTickets: boolean;
   user: {
     name?: string | null;
     email?: string | null;
@@ -47,14 +43,37 @@ interface TopbarProps {
   };
 }
 
-export function Topbar({ user }: TopbarProps) {
+export function Topbar({ user, canViewAllTickets }: TopbarProps) {
+  // Phones hide the inline search field; this toggles it as a row under the bar.
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   return (
-    <header className="h-16 border-b bg-white flex items-center justify-between px-6 sticky top-0 z-30">
-      <div className="flex items-center gap-2">
-        <WorkspaceSelector />
+    <header className="relative h-14 border-b bg-card flex items-center gap-3 px-3 sm:gap-4 sm:px-6 sticky top-0 z-30">
+      {mobileSearchOpen && (
+        <div className="absolute inset-x-0 top-full border-b bg-card px-3 py-2 sm:hidden">
+          <GlobalSearch canViewAllTickets={canViewAllTickets} autoFocus onDone={() => setMobileSearchOpen(false)} />
+        </div>
+      )}
+      <div className="flex flex-1 items-center gap-3 min-w-0">
+        <div className="min-w-0 shrink">
+          <WorkspaceSelector />
+        </div>
+        <div className="hidden min-w-0 flex-1 sm:block">
+          <GlobalSearch canViewAllTickets={canViewAllTickets} />
+        </div>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="icon"
+          className="sm:hidden"
+          aria-label={mobileSearchOpen ? "Close search" : "Search tickets"}
+          aria-expanded={mobileSearchOpen}
+          onClick={() => setMobileSearchOpen((v) => !v)}
+        >
+          {mobileSearchOpen ? <X className="h-4 w-4" /> : <Search className="h-4 w-4" />}
+        </Button>
+        <ThemeToggle />
         {/* Notifications */}
         <NotificationDropdown />
 
@@ -63,11 +82,11 @@ export function Topbar({ user }: TopbarProps) {
           <DropdownMenuTrigger asChild>
             <Button
               variant="ghost"
-              className="flex items-center gap-2 pl-2 pr-3 h-9"
+              className="flex items-center gap-2 px-1.5 sm:pl-2 sm:pr-3 h-9 ml-1"
             >
               <Avatar className="h-7 w-7">
                 <AvatarImage src={user.image ?? undefined} alt={user.name ?? "User"} />
-                <AvatarFallback className="text-xs bg-primary text-primary-foreground">
+                <AvatarFallback className="text-xs bg-brand-navy text-white">
                   {getInitials(user.name)}
                 </AvatarFallback>
               </Avatar>
@@ -77,7 +96,7 @@ export function Topbar({ user }: TopbarProps) {
                   {user.email}
                 </p>
               </div>
-              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              <ChevronDown className="hidden sm:block h-3.5 w-3.5 text-muted-foreground" />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
@@ -85,9 +104,7 @@ export function Topbar({ user }: TopbarProps) {
               <div className="flex flex-col gap-1">
                 <p className="text-sm font-medium">{user.name}</p>
                 <p className="text-xs text-muted-foreground">{user.email}</p>
-                <span
-                  className={`mt-1 inline-flex items-center rounded border px-2 py-0.5 text-xs font-medium w-fit ${ROLE_BADGE_VARIANTS[user.role]}`}
-                >
+                <span className="mt-1 inline-flex w-fit items-center rounded-sm border px-2 py-0.5 text-xs font-medium text-foreground">
                   {user.roleName ?? ROLE_LABELS[user.role]}
                 </span>
               </div>

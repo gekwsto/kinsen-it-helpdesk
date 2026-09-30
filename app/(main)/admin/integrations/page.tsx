@@ -58,7 +58,7 @@ export default async function IntegrationsAdminPage() {
     <div className="space-y-8 max-w-6xl">
       <div className="flex items-center gap-3">
         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10">
-          <Plug className="h-5 w-5 text-primary" />
+          <Plug className="h-5 w-5 text-link" />
         </div>
         <div>
           <h1 className="text-2xl font-bold">External Integrations</h1>

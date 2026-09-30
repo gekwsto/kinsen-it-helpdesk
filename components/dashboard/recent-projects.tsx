@@ -30,7 +30,7 @@ export function RecentProjects({ projects }: RecentProjectsProps) {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Recent Projects</CardTitle>
-        <Link href="/projects" className="text-sm text-primary hover:underline">
+        <Link href="/projects" className="text-sm text-link hover:underline">
           View all
         </Link>
       </CardHeader>

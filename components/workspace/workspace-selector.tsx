@@ -113,23 +113,23 @@ export function WorkspaceSelector() {
         <button
           type="button"
           disabled={switching}
-          className="group inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 shadow-sm transition-colors hover:border-blue-300 hover:bg-blue-50/50 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
+          className="group inline-flex h-9 items-center gap-2 rounded border border-input bg-card px-3 transition-colors hover:bg-accent focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 disabled:cursor-not-allowed disabled:opacity-60"
         >
           <ActiveWorkspaceBadge name={activeName} className="border-0 bg-transparent p-0 shadow-none" />
           {switching ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-slate-400" />
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
           ) : (
-            <ChevronDown className="h-3.5 w-3.5 text-slate-400 transition-transform group-data-[state=open]:rotate-180" />
+            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground transition-transform group-data-[state=open]:rotate-180" />
           )}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="w-72 p-0">
-        <DropdownMenuLabel className="px-3 pt-2.5 text-xs font-medium uppercase tracking-wide text-slate-400">
+        <DropdownMenuLabel className="px-3 pt-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground">
           Switch workspace
         </DropdownMenuLabel>
         <div className="px-2 pb-2 pt-1">
           <div className="relative">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <input
               ref={inputRef}
               type="text"
@@ -141,7 +141,7 @@ export function WorkspaceSelector() {
               // search-first control, not a plain menu.
               onKeyDown={(e) => e.stopPropagation()}
               placeholder="Search workspaces..."
-              className="w-full rounded-md border border-slate-200 bg-white py-1.5 pl-8 pr-2 text-sm text-slate-800 outline-none placeholder:text-slate-400 focus:border-blue-300 focus:ring-1 focus:ring-blue-300"
+              className="w-full rounded border border-input bg-card py-1.5 pl-8 pr-2 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
             />
           </div>
         </div>
@@ -158,19 +158,19 @@ export function WorkspaceSelector() {
               className="flex items-center justify-between gap-2"
             >
               <span className="truncate font-medium">All Workspaces</span>
-              {isAllSelected && <Check className="h-4 w-4 shrink-0 text-blue-600" />}
+              {isAllSelected && <Check className="h-4 w-4 shrink-0 text-link" />}
             </DropdownMenuItem>
           )}
 
           {showLoading && (
-            <div className="flex items-center justify-center gap-2 py-4 text-sm text-slate-400">
+            <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
               <Loader2 className="h-4 w-4 animate-spin" />
               Searching…
             </div>
           )}
 
           {showNoResults && (
-            <div className="py-4 text-center text-sm text-slate-400">No workspaces found</div>
+            <div className="py-4 text-center text-sm text-muted-foreground">No workspaces found</div>
           )}
 
           {showList &&
@@ -183,7 +183,7 @@ export function WorkspaceSelector() {
                 className="flex items-center justify-between gap-2"
               >
                 <span className="truncate">{d.name}</span>
-                {!isAllSelected && d.id === departmentId && <Check className="h-4 w-4 shrink-0 text-blue-600" />}
+                {!isAllSelected && d.id === departmentId && <Check className="h-4 w-4 shrink-0 text-link" />}
               </DropdownMenuItem>
             ))}
         </div>

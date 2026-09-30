@@ -12,6 +12,7 @@ import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
 import { TicketListLiveRefresh } from "@/components/tickets/ticket-list-live-refresh";
 import { Button } from "@/components/ui/button";
+import { PageHeader } from "@/components/layout/page-header";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
@@ -335,7 +336,7 @@ export default async function AllTicketsPage({
       include: {
         requester: { select: { id: true, name: true, email: true, image: true } },
         assignedAgent: { select: { id: true, name: true, email: true, image: true } },
-        status: { select: { id: true, name: true, color: true } },
+        status: { select: { id: true, name: true, color: true, isClosed: true } },
         priority: { select: { id: true, name: true, color: true, level: true } },
         category: { select: { id: true, name: true, color: true } },
         department: { select: { id: true, name: true } },
@@ -361,23 +362,37 @@ export default async function AllTicketsPage({
     redirect(buildCanonicalUrl(params, pagination.page));
   }
 
+  // Say which departments this list covers. All Tickets ignores the top-bar
+  // workspace (see effectiveDepartmentId above), so without this a
+  // multi-department user can't tell whose tickets they're looking at.
+  const filteredDepartmentName = effectiveDepartmentId
+    ? departments.find((d) => d.id === effectiveDepartmentId)?.name
+    : undefined;
+  const scopeLabel = filteredDepartmentName
+    ? `Showing ${filteredDepartmentName} only`
+    : departments.length === 1
+      ? `Showing ${departments[0].name}`
+      : departments.length <= 4
+        ? `Showing all your departments: ${departments.map((d) => d.name).join(", ")}`
+        : `Showing all ${departments.length} of your departments. Use the Department filter to narrow it down.`;
+
   return (
     <div className="space-y-6">
       <TicketListLiveRefresh />
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">All Tickets</h1>
-          <p className="text-muted-foreground mt-1">Manage and view all support tickets</p>
-        </div>
-        {canCreate && (
-          <Button asChild>
-            <Link href="/tickets/new">
-              <Plus className="h-4 w-4 mr-2" />
-              New Ticket
-            </Link>
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="All Tickets"
+        description={scopeLabel}
+        action={
+          canCreate && (
+            <Button asChild>
+              <Link href="/tickets/new">
+                <Plus className="h-4 w-4" />
+                New Ticket
+              </Link>
+            </Button>
+          )
+        }
+      />
 
       <TicketFilters
         options={{ ...filterOptions, departments, agents }}

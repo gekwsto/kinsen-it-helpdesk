@@ -27,7 +27,15 @@ const config: Config = {
         "maxh-800": { raw: "(max-height: 800px)" },
         "maxh-700": { raw: "(max-height: 700px)" },
       },
+      fontFamily: {
+        sans: ["var(--font-sans)", "system-ui", "sans-serif"],
+      },
       colors: {
+        link: "hsl(var(--link))",
+        brand: {
+          navy: "hsl(var(--brand-navy))",
+          teal: "hsl(var(--brand-teal))",
+        },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",

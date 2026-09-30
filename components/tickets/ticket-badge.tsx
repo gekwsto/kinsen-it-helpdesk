@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/utils";
 import { Mail, Globe, Plug } from "lucide-react";
+import { StatusMark, PriorityMark } from "@/components/shared/marks";
 
 interface ColorBadgeProps {
   name: string;
@@ -9,49 +10,39 @@ interface ColorBadgeProps {
   className?: string;
 }
 
+/** Category-style label: neutral text with a small square swatch (colour is admin-picked, so never used as text colour). */
 export function ColorBadge({ name, color, className }: ColorBadgeProps) {
   return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium",
-        className
-      )}
-      style={{
-        backgroundColor: color + "20",
-        color: color,
-        border: `1px solid ${color}40`,
-      }}
-    >
+    <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap text-xs font-medium text-foreground", className)}>
+      <span className="h-2 w-2 shrink-0 rounded-[1px]" style={{ backgroundColor: color }} aria-hidden="true" />
       {name}
     </span>
   );
 }
 
-export function StatusBadge({ name, color }: { name: string; color: string }) {
-  return <ColorBadge name={name} color={color} />;
+export function StatusBadge({ name, color, isClosed }: { name: string; color: string; isClosed?: boolean }) {
+  return <StatusMark label={name} color={color} closed={isClosed} />;
 }
 
-export function SourceBadge({ source }: { source: string }) {
-  if (source === "EMAIL") {
+const SOURCES: Record<string, { label: string; icon: typeof Mail }> = {
+  EMAIL: { label: "Email", icon: Mail },
+  API: { label: "Integration", icon: Plug },
+};
+
+export function SourceBadge({ source, compact }: { source: string; compact?: boolean }) {
+  const { label, icon: Icon } = SOURCES[source] ?? { label: "Portal", icon: Globe };
+  if (compact) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 text-[10px] font-medium">
-        <Mail className="h-3 w-3" />
-        Email
-      </span>
-    );
-  }
-  if (source === "API") {
-    return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 text-[10px] font-medium">
-        <Plug className="h-3 w-3" />
-        Integration
+      <span className="inline-flex text-muted-foreground" title={`Source: ${label}`}>
+        <Icon className="h-4 w-4" aria-hidden="true" />
+        <span className="sr-only">{label}</span>
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-slate-50 text-slate-600 border border-slate-200 px-2 py-0.5 text-[10px] font-medium">
-      <Globe className="h-3 w-3" />
-      Portal
+    <span className="inline-flex items-center gap-1 whitespace-nowrap text-xs text-muted-foreground">
+      <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+      {label}
     </span>
   );
 }
@@ -65,20 +56,5 @@ export function PriorityBadge({
   color: string;
   level: number;
 }) {
-  return (
-    <span
-      className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium"
-      style={{
-        backgroundColor: color + "20",
-        color: color,
-        border: `1px solid ${color}40`,
-      }}
-    >
-      <span
-        className="h-1.5 w-1.5 rounded-full"
-        style={{ backgroundColor: color }}
-      />
-      {name}
-    </span>
-  );
+  return <PriorityMark label={name} rank={level} color={color} />;
 }

@@ -21,6 +21,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ColorContrastHint } from "@/components/admin/color-contrast-hint";
 
 interface PriorityPolicy {
   id: string;
@@ -326,7 +327,7 @@ export function WorkspaceSlaManager({
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                  <ShieldCheck className="h-4 w-4 text-primary" />
+                  <ShieldCheck className="h-4 w-4 text-link" />
                 </div>
                 <div>
                   <CardTitle className="text-base">SLA Enforcement</CardTitle>
@@ -542,7 +543,8 @@ export function WorkspaceSlaManager({
             </div>
             <div className="space-y-2">
               <label className="text-sm font-medium">Color</label>
-              <input type="color" value={addColor} onChange={(e) => setAddColor(e.target.value)} className="h-9 w-16 rounded border" />
+              <input type="color" value={addColor} onChange={(e) => setAddColor(e.target.value)} className="h-9 w-16 rounded border" aria-label="Color" />
+              <ColorContrastHint color={addColor} label={addName || "Preview"} />
             </div>
           </div>
           <DialogFooter>

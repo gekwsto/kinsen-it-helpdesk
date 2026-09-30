@@ -94,7 +94,7 @@ export function ActivityCard({ activity, toggling, onToggleComplete }: ActivityC
             {activity.project ? (
               <Link
                 href={`/projects/${activity.project.id}`}
-                className="text-primary hover:underline"
+                className="text-link hover:underline"
                 onClick={(e) => e.stopPropagation()}
               >
                 {activity.project.title}

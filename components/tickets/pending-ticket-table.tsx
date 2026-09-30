@@ -204,7 +204,7 @@ export function PendingTicketTable({
                       <button
                         type="button"
                         onClick={() => setPreviewTarget(pt)}
-                        className="text-sm font-medium truncate hover:text-primary hover:underline text-left block w-full"
+                        className="text-sm font-medium truncate hover:text-link hover:underline text-left block w-full"
                         title="Preview full email"
                       >
                         {pt.subject}

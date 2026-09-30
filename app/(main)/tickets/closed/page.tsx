@@ -1,3 +1,4 @@
+import { PageHeader } from "@/components/layout/page-header";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { buildTicketListWhere, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
@@ -7,7 +8,6 @@ import { TicketTable } from "@/components/tickets/ticket-table";
 import { TicketFilters } from "@/components/tickets/ticket-filters";
 import { TicketListLiveRefresh } from "@/components/tickets/ticket-list-live-refresh";
 import { redirect } from "next/navigation";
-import { ArchiveX } from "lucide-react";
 import {
   getTicketFilterOptions,
   splitFilterParam,
@@ -177,7 +177,7 @@ export default async function ClosedTicketsPage({
       include: {
         requester: { select: { id: true, name: true, email: true, image: true } },
         assignedAgent: { select: { id: true, name: true, email: true, image: true } },
-        status: { select: { id: true, name: true, color: true } },
+        status: { select: { id: true, name: true, color: true, isClosed: true } },
         priority: { select: { id: true, name: true, color: true, level: true } },
         category: { select: { id: true, name: true, color: true } },
         department: { select: { id: true, name: true } },
@@ -201,17 +201,7 @@ export default async function ClosedTicketsPage({
   return (
     <div className="space-y-6">
       <TicketListLiveRefresh />
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
-          <ArchiveX className="h-5 w-5 text-muted-foreground" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold">Closed Tickets</h1>
-          <p className="text-muted-foreground mt-0.5">
-            All resolved, closed, and cancelled tickets
-          </p>
-        </div>
-      </div>
+      <PageHeader title="Closed Tickets" description="Resolved, closed and cancelled tickets" />
 
       <TicketFilters
         options={{ ...filterOptions, departments, agents }}

@@ -17,14 +17,9 @@ interface NoteComposerProps {
 
 /**
  * Generic plain-text note composer — textarea, Ctrl/Cmd+Enter to submit,
- * loading state, clears on success. Same UX shape as
- * components/tickets/simple-comment-box.tsx (textarea + Ctrl+Enter +
- * loading + clear-on-success), reimplemented standalone here rather than
- * shared: SimpleCommentBox is a Ticket-specific component (its copy says
- * "Post Comment" / "Add a message for the IT team…") and must keep behaving
- * exactly as it does today. This component only ever says "Add Note" /
- * "Write a note…" — there is no Reply/Internal toggle here or anywhere in
- * Project/Activity Notes.
+ * loading state, clears on success. This component only ever says "Add
+ * Note" / "Write a note…" — there is no Reply/Internal toggle here or
+ * anywhere in Project/Activity Notes.
  *
  * The textarea is MentionTextarea (typing `@` opens a searchable user
  * picker — see that component's own doc comment); the deduped list of

@@ -176,7 +176,7 @@ export function EmailAdminActions() {
                   {ticketResult.pendingTicketId && (
                     <Link
                       href="/tickets/pending"
-                      className="flex items-center gap-1 pl-5 text-primary hover:underline"
+                      className="flex items-center gap-1 pl-5 text-link hover:underline"
                     >
                       Review in Pending Tickets
                       <ExternalLink className="h-3 w-3" />

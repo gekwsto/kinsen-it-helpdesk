@@ -80,7 +80,7 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
             {projects.map((project) => (
               <TableRow key={project.id}>
                 <TableCell>
-                  <Link href={`/projects/${project.id}`} className="font-medium hover:text-primary line-clamp-1">
+                  <Link href={`/projects/${project.id}`} className="font-medium hover:text-link line-clamp-1">
                     {project.title}
                   </Link>
                 </TableCell>

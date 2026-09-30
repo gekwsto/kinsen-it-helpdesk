@@ -291,6 +291,18 @@ export default async function ProjectsPage({
     overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(terminalConfigs, p.departmentId, p.status), now),
   }));
 
+  // Unlike All Tickets (union of every department), Projects follows the
+  // top-bar workspace when no ?departmentId= is given — say so, so a
+  // multi-department user doesn't assume projects are missing.
+  const scopedDepartmentName = effectiveDepartmentId
+    ? departments.find((d) => d.id === effectiveDepartmentId)?.name
+    : undefined;
+  const projectScopeLabel = !effectiveDepartmentId
+    ? "Showing projects from every department you can access"
+    : params.departmentId
+      ? `Showing ${scopedDepartmentName ?? "the selected department"} only`
+      : `Showing ${scopedDepartmentName ?? "your current workspace"}, your current workspace. Switch workspace or use the Department filter to see others.`;
+
   return (
     <div className="space-y-6">
       <ProjectListLiveRefresh />
@@ -298,7 +310,7 @@ export default async function ProjectsPage({
         <div>
           <h1 className="text-2xl font-bold">Projects</h1>
           <p className="text-muted-foreground mt-1">
-            Manage IT projects and initiatives
+            {projectScopeLabel}
           </p>
         </div>
         <div className="flex items-center gap-2">

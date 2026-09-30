@@ -338,7 +338,7 @@ export function NotificationDropdown() {
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative">
+        <Button variant="ghost" size="icon" className="relative" aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : "Notifications"}>
           {/* Same push-enabled state the header's own push toggle uses below
               (pushSupported && pushEnabled) — this is the one canonical
               "are notifications enabled" flag in this component; the navbar
@@ -351,7 +351,7 @@ export function NotificationDropdown() {
             <Bell className="h-4 w-4" />
           )}
           {unreadCount > 0 && (
-            <span className="absolute -top-0.5 -right-0.5 h-4 w-4 rounded-full bg-red-500 text-[10px] font-bold text-white flex items-center justify-center leading-none">
+            <span className="absolute top-0.5 right-0.5 min-w-4 h-4 px-1 rounded-full bg-primary text-[10px] font-bold text-primary-foreground flex items-center justify-center leading-none tabular-nums">
               {unreadCount > 9 ? "9+" : unreadCount}
             </span>
           )}
@@ -382,7 +382,7 @@ export function NotificationDropdown() {
                 {pushLoading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 ) : pushEnabled ? (
-                  <Bell className="h-3.5 w-3.5 text-primary" />
+                  <Bell className="h-3.5 w-3.5 text-link" />
                 ) : (
                   <BellOff className="h-3.5 w-3.5 text-muted-foreground" />
                 )}
@@ -439,13 +439,13 @@ export function NotificationDropdown() {
               const row = (
                 <div
                   className={`flex items-start gap-3 px-4 py-3 border-b last:border-0 hover:bg-muted/50 cursor-pointer transition-colors ${
-                    !n.isRead ? "bg-blue-50/60" : ""
+                    !n.isRead ? "bg-primary/10" : ""
                   }`}
                   onClick={() => markRead(n)}
                 >
                   <span
                     className={`mt-1.5 h-2 w-2 rounded-full flex-shrink-0 ${
-                      n.isRead ? "opacity-0" : "bg-blue-500"
+                      n.isRead ? "opacity-0" : "bg-primary"
                     }`}
                   />
                   <div className="flex-1 min-w-0">

@@ -1,9 +1,8 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { buildTicketListWhere, hasAnyFullTicketView } from "@/lib/services/department-scope-service";
+import { buildTicketListWhere, hasAnyFullTicketView, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getProjectsDashboardData } from "@/lib/services/projects-dashboard-service";
-import { buildTicketStatusGroupCondition } from "@/lib/services/ticket-status-groups";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { KpiCards } from "@/components/dashboard/kpi-cards";
 import { RecentTickets } from "@/components/dashboard/recent-tickets";
@@ -18,7 +17,8 @@ import { DashboardBarCard } from "@/components/dashboard/dashboard-bar-card";
 import { RecentProjects } from "@/components/dashboard/recent-projects";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ShieldOff, FolderKanban } from "lucide-react";
+import { ShieldOff, FolderKanban, Plus } from "lucide-react";
+import { PageHeader } from "@/components/layout/page-header";
 import { formatRelative, formatTicketNumber } from "@/lib/utils";
 import Link from "next/link";
 
@@ -97,13 +97,7 @@ export default async function DashboardPage({
 
     return (
       <div className="space-y-6">
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <div>
-            <h1 className="text-2xl font-bold">Dashboard</h1>
-            <p className="text-muted-foreground mt-1">Projects overview</p>
-          </div>
-          <DashboardTabs active={tab} />
-        </div>
+        <PageHeader title="Dashboard" description="Projects and activities overview" action={<DashboardTabs active={tab} />} />
 
         <ProjectsKpiCards
           totalProjects={data.totalProjects}
@@ -159,6 +153,8 @@ export default async function DashboardPage({
   }
 
   const isPersonalView = !(await hasAnyFullTicketView(userId, role));
+  // cache()-wrapped — the (main) layout already computed it for the sidebar.
+  const { canViewClosedTickets, canCreateTickets } = await getNavVisibilityFlags(userId, role, session.user.customRoleId);
 
   const scope = await buildTicketListWhere(
     userId,
@@ -170,12 +166,29 @@ export default async function DashboardPage({
 
   const timelineStart = new Date(Date.now() - TIMELINE_DAYS * 24 * 60 * 60 * 1000);
 
+  // KPI cards: each count uses exactly the conditions of the list its card
+  // opens, and each href carries the active workspace's departmentId —
+  // All Tickets deliberately ignores the workspace (it shows the union of
+  // every accessible department), so without an explicit ?departmentId= a
+  // card showing 4 would open a list of 30. Open/Unassigned/From Email
+  // mirror All Tickets' default scope (non-closed, never-cancelled);
+  // Closed mirrors /tickets/closed (closed status OR cancelled).
+  const workspaceDepartmentId = activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId ?? undefined;
+  const workspaceName = activeWorkspace.departments.find((d) => d.id === workspaceDepartmentId)?.name;
+  const openListWhere = { AND: [ticketWhere, { cancelReasonId: null }, { status: { isClosed: false } }] };
+  const closedListWhere = { AND: [ticketWhere, { OR: [{ status: { isClosed: true } }, { cancelReasonId: { not: null } }] }] };
+  const listHref = (path: string, extra: Record<string, string> = {}) => {
+    const qs = new URLSearchParams({ ...(workspaceDepartmentId ? { departmentId: workspaceDepartmentId } : {}), ...extra }).toString();
+    return qs ? `${path}?${qs}` : path;
+  };
+
   const [
-    totalCount,
     openCount,
-    inProgressCount,
-    closedCount,
+    unassignedCount,
     emailCount,
+    closedCount,
+    myRequestsCount,
+    unprioritisedCount,
     byStatus,
     byPriority,
     byCategory,
@@ -183,14 +196,13 @@ export default async function DashboardPage({
     recentTickets,
     recentActivity,
   ] = await Promise.all([
-    // KPI counts — each condition comes from buildTicketStatusGroupCondition,
-    // the exact same function the All Tickets list's `?status=` filter uses,
-    // so a card's count and what clicking it shows can never disagree.
-    prisma.ticket.count({ where: ticketWhere }),
-    prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("open") } }),
-    prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("in_progress") } }),
-    prisma.ticket.count({ where: { ...ticketWhere, ...buildTicketStatusGroupCondition("closed") } }),
-    prisma.ticket.count({ where: { ...ticketWhere, source: "EMAIL" } }),
+    // KPI counts — see openListWhere/closedListWhere above.
+    isPersonalView ? 0 : prisma.ticket.count({ where: openListWhere }),
+    isPersonalView ? 0 : prisma.ticket.count({ where: { AND: [openListWhere, { assignedAgentId: null }] } }),
+    isPersonalView ? 0 : prisma.ticket.count({ where: { AND: [openListWhere, { source: "EMAIL" }] } }),
+    prisma.ticket.count({ where: closedListWhere }),
+    isPersonalView ? prisma.ticket.count({ where: { requesterId: userId } }) : 0,
+    isPersonalView ? 0 : prisma.ticket.count({ where: { AND: [openListWhere, { priorityId: null }] } }),
 
     // Chart: by status — scoped to the active workspace's own department.
     // Every status/priority/category is department-owned now (no more
@@ -204,6 +216,7 @@ export default async function DashboardPage({
         id: true,
         name: true,
         color: true,
+        isClosed: true,
         _count: { select: { tickets: { where: ticketWhere } } },
       },
       orderBy: { order: "asc" },
@@ -217,7 +230,9 @@ export default async function DashboardPage({
         name: true,
         color: true,
         level: true,
-        _count: { select: { tickets: { where: { ...ticketWhere, status: { isClosed: false } } } } },
+        // Same "not closed" definition as the KPI strip (openListWhere), so the
+        // rows plus the "No priority" count below add up to that number.
+        _count: { select: { tickets: { where: { AND: [openListWhere] } } } },
       },
       orderBy: { level: "desc" },
     }),
@@ -247,7 +262,7 @@ export default async function DashboardPage({
       orderBy: { createdAt: "desc" },
       include: {
         requester: { select: { id: true, name: true, email: true, image: true } },
-        status: { select: { id: true, name: true, color: true } },
+        status: { select: { id: true, name: true, color: true, isClosed: true } },
         priority: { select: { id: true, name: true, color: true, level: true } },
         category: { select: { id: true, name: true } },
       },
@@ -280,9 +295,15 @@ export default async function DashboardPage({
   // Serialise chart data — aggregated by name (see aggregateByName above),
   // since "All Workspaces" can legitimately return several departments' own
   // same-named status/priority/category rows as separate DB rows now.
-  const statusChartData = aggregateByName(byStatus, (s) => s._count.tickets);
+  const statusChartData = aggregateByName(byStatus, (s) => s._count.tickets).map((row) => ({
+    ...row,
+    closed: byStatus.find((s) => s.name === row.name)?.isClosed,
+  }));
 
-  const priorityChartData = aggregateByName(byPriority, (p) => p._count.tickets);
+  const priorityChartData = aggregateByName(byPriority, (p) => p._count.tickets).map((row) => ({
+    ...row,
+    level: byPriority.find((p) => p.name === row.name)?.level,
+  }));
 
   const categoryChartData = aggregateByName(byCategory, (c) => c._count.tickets).map((c) => ({
     name: c.name,
@@ -292,45 +313,51 @@ export default async function DashboardPage({
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">
-            {isPersonalView ? "My Dashboard" : "Dashboard"}
-          </h1>
-          <p className="text-muted-foreground mt-1">
-            {isPersonalView
-              ? "Your personal ticket overview"
-              : `Welcome back, ${session.user.name?.split(" ")[0]}`}
-          </p>
-        </div>
-        <DashboardTabs active={tab} />
-      </div>
+      <PageHeader
+        title={isPersonalView ? "My Dashboard" : "Dashboard"}
+        description={
+          isPersonalView
+            ? "Your requests at a glance"
+            : activeWorkspace.isAllSelected
+              ? "Tickets across all your departments"
+              : `Tickets in ${workspaceName ?? "your current workspace"} (your current workspace)`
+        }
+        action={
+          <>
+            <DashboardTabs active={tab} />
+            {canCreateTickets && (
+              <Button asChild>
+                <Link href="/tickets/new">
+                  <Plus className="h-4 w-4" />
+                  New Ticket
+                </Link>
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {/* Row 1 — KPI cards */}
       <KpiCards
-        total={totalCount}
-        open={openCount}
-        inProgress={inProgressCount}
-        closed={closedCount}
-        emailCreated={emailCount}
+        cards={
+          isPersonalView
+            ? [
+                { key: "myRequests" as const, count: myRequestsCount, href: "/tickets/created-by-me" },
+                // /tickets/closed bounces anyone without ticket.closed.view back here.
+                ...(canViewClosedTickets ? [{ key: "closed" as const, count: closedCount, href: "/tickets/closed" }] : []),
+              ]
+            : [
+                { key: "open" as const, count: openCount, href: listHref("/tickets") },
+                { key: "unassigned" as const, count: unassignedCount, href: listHref("/tickets", { unassigned: "true" }) },
+                { key: "fromEmail" as const, count: emailCount, href: listHref("/tickets", { source: "EMAIL" }) },
+                ...(canViewClosedTickets ? [{ key: "closed" as const, count: closedCount, href: listHref("/tickets/closed") }] : []),
+              ]
+        }
       />
 
-      {/* Row 2 — Status + Priority pie/donut */}
-      <div className="grid gap-6 md:grid-cols-2">
-        <TicketsByStatusChart data={statusChartData} />
-        <TicketsByPriorityChart data={priorityChartData} />
-      </div>
-
-      {/* Row 3 — Category bar + Timeline line */}
-      <div className="grid gap-6 md:grid-cols-2">
-        <TicketsByCategoryChart data={categoryChartData} />
-        <TicketsOverTimeChart data={timelineData} days={TIMELINE_DAYS} />
-      </div>
-
-      {/* Row 4 — Recent tickets + Recent activity */}
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-2">
+      {/* Recent tickets + Recent activity */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        <div className="min-w-0 lg:col-span-2">
           <RecentTickets tickets={recentTickets as any} />
         </div>
 
@@ -343,14 +370,14 @@ export default async function DashboardPage({
               <div className="space-y-3">
                 {recentActivity.map((a) => (
                   <div key={a.id} className="flex items-start gap-3 text-sm">
-                    <div className="h-1.5 w-1.5 rounded-full bg-primary mt-2 flex-shrink-0" />
+                    <div className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 mt-2 flex-shrink-0" />
                     <div className="flex-1 min-w-0">
                       <span className="font-medium">{a.changedBy?.name ?? "System"}</span>{" "}
                       <span className="text-muted-foreground">{a.description}</span>{" "}
                       on{" "}
                       <Link
                         href={`/tickets/${a.ticket.id}`}
-                        className="font-medium text-primary hover:underline"
+                        className="font-medium text-link hover:underline"
                       >
                         {formatTicketNumber(a.ticket.ticketNumber)}
                       </Link>
@@ -365,6 +392,24 @@ export default async function DashboardPage({
           </Card>
         )}
       </div>
+
+      {/* Analysis comes after the work itself; requesters don't need charts about their own few tickets. */}
+      {!isPersonalView && (
+        <>
+      {/* Status + Priority */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <TicketsByStatusChart data={statusChartData} />
+        <TicketsByPriorityChart data={priorityChartData} unprioritised={unprioritisedCount} />
+      </div>
+
+      {/* Category + Timeline */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <TicketsByCategoryChart data={categoryChartData} />
+        <TicketsOverTimeChart data={timelineData} days={TIMELINE_DAYS} />
+      </div>
+
+        </>
+      )}
     </div>
   );
 }

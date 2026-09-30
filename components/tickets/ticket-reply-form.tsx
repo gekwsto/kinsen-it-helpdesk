@@ -141,7 +141,7 @@ export function TicketReplyForm({
             entityType="ticket"
             entityId={ticketId}
             onKeyDown={handleKeyDown}
-            placeholder="Internal note — only visible to IT staff... (Ctrl+Enter to send, @ to mention someone)"
+            placeholder="Internal note, hidden from the requester (Ctrl+Enter to add, @ to mention someone)"
             className={cn(
               "min-h-[100px] resize-none border-0 focus-visible:ring-0 rounded-b-none text-sm",
               "bg-amber-50 placeholder:text-amber-700/50"

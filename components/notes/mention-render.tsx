@@ -47,7 +47,7 @@ export function renderNoteBodyWithMentions(body: string, mentions: RenderedMenti
       parts.push(
         createElement(
           "span",
-          { key: `mention-${i}`, className: "inline-block rounded bg-primary/10 px-1 font-medium text-primary" },
+          { key: `mention-${i}`, className: "inline-block rounded bg-primary/10 px-1 font-medium text-link" },
           `@${label}`
         )
       );

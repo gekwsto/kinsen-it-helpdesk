@@ -32,7 +32,7 @@ export default async function ChangePasswordPage() {
       <Card>
         <CardHeader className="pb-4">
           <div className="flex items-center gap-2">
-            <ShieldCheck className="h-5 w-5 text-primary" />
+            <ShieldCheck className="h-5 w-5 text-link" />
             <CardTitle className="text-base">Admin Account Password</CardTitle>
           </div>
           <CardDescription>

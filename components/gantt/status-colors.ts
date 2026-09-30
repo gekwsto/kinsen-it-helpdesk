@@ -4,14 +4,17 @@
 // Tailwind's content glob (components/**, app/**) actually scans these
 // class-name strings; lib/** is not scanned and the classes would be purged.
 
+// Deep enough that the bars' white 10px labels clear 4.5:1, and On Hold
+// moved off orange so it no longer reads as In Progress. Colour is never
+// the only signal: each bar also carries a STATUS_GLYPH (gantt-chart.tsx).
 export const STATUS_BAR: Record<string, string> = {
-  PLANNING: "bg-blue-500",
-  TODO: "bg-slate-400",
-  IN_PROGRESS: "bg-amber-500",
-  ON_HOLD: "bg-orange-400",
-  BLOCKED: "bg-red-500",
-  COMPLETED: "bg-emerald-500",
-  CANCELLED: "bg-gray-300",
+  PLANNING: "bg-blue-700",
+  TODO: "bg-slate-600",
+  IN_PROGRESS: "bg-amber-700",
+  ON_HOLD: "bg-violet-700",
+  BLOCKED: "bg-red-700",
+  COMPLETED: "bg-emerald-700",
+  CANCELLED: "bg-gray-500",
 };
 
 export const STATUS_LABEL: Record<string, string> = {

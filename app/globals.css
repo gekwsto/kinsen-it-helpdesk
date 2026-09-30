@@ -2,59 +2,80 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Kinsen Mark — tokens. Brand navy #052E4A and teal #32C0C5 are sampled
+   from public/kinsen_vertical.webp. Teal is reserved for what is live or
+   actionable (primary action, links, active navigation, focus); status and
+   priority colour only ever appears as a mark beside neutral text. Every
+   text pairing below was checked for WCAG AA (4.5:1) against its surface;
+   --input clears 3:1 against --card so field edges stay visible. */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --background: 200 15.8% 96.3%;
+    --foreground: 206.4 49% 10%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 206.4 49% 10%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
-    --primary: 221.2 83.2% 53.3%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 221.2 83.2% 53.3%;
-    --radius: 0.5rem;
+    --popover-foreground: 206.4 49% 10%;
+    --primary: 182 59.5% 48.4%;
+    --primary-foreground: 204.3 87.3% 15.5%;
+    --secondary: 202.5 22.2% 92.9%;
+    --secondary-foreground: 206.4 49% 10%;
+    --muted: 202.5 22.2% 92.9%;
+    --muted-foreground: 206.7 14.1% 37.5%;
+    --accent: 202.5 22.2% 92.9%;
+    --accent-foreground: 206.4 49% 10%;
+    --destructive: 0 66.4% 46.7%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 205 18.8% 87.5%;
+    --input: 207.7 11.8% 56.9%;
+    --ring: 183.2 84.8% 25.9%;
+    /* Teal as text: the brand teal itself is 2.2:1 on white, so links and
+       teal-coloured copy use this deeper step of the same hue (5.5:1). */
+    --link: 183.2 84.8% 25.9%;
+    --brand-navy: 204.3 87.3% 15.5%;
+    --brand-teal: 182 59.5% 48.4%;
+    --radius: 0.25rem;
 
-    --sidebar-background: 222 47% 11%;
-    --sidebar-foreground: 210 40% 90%;
-    --sidebar-primary: 221.2 83.2% 53.3%;
-    --sidebar-primary-foreground: 210 40% 98%;
-    --sidebar-accent: 217 33% 17%;
-    --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 217 33% 20%;
-    --sidebar-ring: 221.2 83.2% 53.3%;
+    --sidebar-background: 204.3 87.3% 15.5%;
+    --sidebar-foreground: 204 26.3% 81.4%;
+    --sidebar-primary: 182 59.5% 48.4%;
+    --sidebar-primary-foreground: 204.3 87.3% 15.5%;
+    --sidebar-accent: 204.7 79.4% 21%;
+    --sidebar-accent-foreground: 203.1 31.7% 92%;
+    --sidebar-border: 204.6 76.9% 25.5%;
+    --sidebar-ring: 182 59.5% 48.4%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
-    --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 217.2 91.2% 59.8%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-    --secondary: 217.2 32.6% 17.5%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
-    --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 224.3 76.3% 48%;
+    --background: 206.1 62.2% 7.3%;
+    --foreground: 203.1 31.7% 92%;
+    --card: 205.2 56.4% 10.8%;
+    --card-foreground: 203.1 31.7% 92%;
+    --popover: 205.2 56.4% 10.8%;
+    --popover-foreground: 203.1 31.7% 92%;
+    --primary: 182 59.5% 48.4%;
+    --primary-foreground: 204.3 87.3% 15.5%;
+    --secondary: 204.9 51.9% 15.5%;
+    --secondary-foreground: 203.1 31.7% 92%;
+    --muted: 204.9 51.9% 15.5%;
+    --muted-foreground: 206.2 16.5% 62%;
+    --accent: 204.9 51.9% 15.5%;
+    --accent-foreground: 203.1 31.7% 92%;
+    --destructive: 0 90.6% 70.8%;
+    --destructive-foreground: 206.1 62.2% 7.3%;
+    --border: 205.4 48.1% 21.2%;
+    --input: 210 23.2% 43.9%;
+    --ring: 182 59.5% 48.4%;
+    --link: 182 59.5% 48.4%;
+
+    --sidebar-background: 204.3 87.3% 15.5%;
+    --sidebar-foreground: 204 26.3% 81.4%;
+    --sidebar-primary: 182 59.5% 48.4%;
+    --sidebar-primary-foreground: 204.3 87.3% 15.5%;
+    --sidebar-accent: 204.7 79.4% 21%;
+    --sidebar-accent-foreground: 203.1 31.7% 92%;
+    --sidebar-border: 204.6 76.9% 25.5%;
+    --sidebar-ring: 182 59.5% 48.4%;
   }
 }
 
@@ -63,7 +84,36 @@
     @apply border-border;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    caret-color: hsl(var(--link));
+  }
+  ::selection {
+    background: hsl(var(--brand-teal) / 0.28);
+    color: inherit;
+  }
+  /* Tables are data: numerals line up by column. */
+  td, th {
+    font-variant-numeric: tabular-nums;
+  }
+  a {
+    text-underline-offset: 3px;
+  }
+  :focus-visible {
+    outline-color: hsl(var(--ring));
+  }
+}
+
+/* The Kinsen notch — the lower triangle of the K mark, used ONLY to mark
+   the current place (active nav item, focused/hovered ledger row). */
+.kinsen-notch {
+  clip-path: polygon(0 0, 100% 50%, 0 100%);
+  background: hsl(var(--brand-teal));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
@@ -93,8 +143,12 @@ input[type="number"] {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--border));
-  border-radius: 3px;
+  background: hsl(var(--input) / 0.5);
+  border-radius: 0;
+}
+html {
+  scrollbar-color: hsl(var(--input) / 0.5) transparent;
+  scrollbar-width: thin;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: hsl(var(--muted-foreground));

@@ -1,3 +1,4 @@
+import { PageHeader } from "@/components/layout/page-header";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasPermission } from "@/lib/permissions";
@@ -11,7 +12,6 @@ import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/w
 import { PendingTicketTable } from "@/components/tickets/pending-ticket-table";
 import { PendingTicketFilters } from "@/components/tickets/pending-ticket-filters";
 import { redirect } from "next/navigation";
-import { Inbox } from "lucide-react";
 import { PendingTicketStatus } from "@prisma/client";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 import { normalizeStoredEmailBody } from "@/lib/email-ticket-parser";
@@ -127,17 +127,10 @@ export default async function PendingTicketsPage({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3">
-        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted">
-          <Inbox className="h-5 w-5 text-muted-foreground" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold">Pending Tickets</h1>
-          <p className="text-muted-foreground mt-0.5">
-            Emails awaiting review — accept to create a real ticket, or reject to discard.
-          </p>
-        </div>
-      </div>
+      <PageHeader
+        title="Pending Tickets"
+        description="Emails waiting for review. Accept one to create a ticket. Rejected emails move to Rejected Tickets, where they can still be turned into a ticket."
+      />
 
       <PendingTicketFilters departments={departments} />
 

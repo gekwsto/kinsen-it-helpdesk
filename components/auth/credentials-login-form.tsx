@@ -98,7 +98,7 @@ export function CredentialsLoginForm() {
       <Button
         type="submit"
         variant="outline"
-        className="w-full h-9 gap-2 border-slate-300 text-sm"
+        className="w-full gap-2"
         disabled={isPending}
       >
         {isPending ? (

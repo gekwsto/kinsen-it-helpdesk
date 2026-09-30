@@ -368,7 +368,7 @@ export default async function TicketDetailPage({
           Tickets
         </Link>
         <ChevronRight className="h-4 w-4" />
-        <span className="text-foreground font-mono font-medium">
+        <span className="text-foreground font-medium tabular-nums" aria-current="page">
           {formatTicketNumber(ticket.ticketNumber)}
         </span>
       </div>

@@ -198,10 +198,11 @@ export function TicketFilters({
   const SortIcon = sortOrder === "asc" ? ArrowUp : ArrowDown;
 
   return (
-    <div className="space-y-3 rounded-lg border bg-card p-4">
+    <div className="space-y-3 rounded-md border bg-card p-4">
       {/* Row 1: Search + Sort + Reset */}
-      <div className="flex items-center gap-2">
-        <form onSubmit={handleSearch} className="relative flex-1">
+      <div className="flex flex-wrap items-center gap-2">
+        {/* Full width on phones; sort controls wrap underneath. */}
+        <form onSubmit={handleSearch} className="relative min-w-[12rem] flex-1 basis-full sm:basis-0">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <Input
             placeholder="Search by number, title, description, or requester…"
@@ -213,6 +214,7 @@ export function TicketFilters({
             <button
               type="button"
               className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label="Clear search"
               onClick={() => { setSearch(""); push({ search: null }); }}
             >
               <X className="h-3.5 w-3.5" />

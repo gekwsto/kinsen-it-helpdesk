@@ -335,7 +335,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
                 {activity.isCompleted ? (
                   <CheckCircle2 className="h-5 w-5 text-green-600" />
                 ) : (
-                  <Circle className="h-5 w-5 text-muted-foreground hover:text-primary" />
+                  <Circle className="h-5 w-5 text-muted-foreground hover:text-link" />
                 )}
               </button>
               <div>
@@ -427,7 +427,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
               {activity.project ? (
                 <Link
                   href={`/projects/${activity.project.id}`}
-                  className="font-medium text-primary hover:underline"
+                  className="font-medium text-link hover:underline"
                 >
                   {activity.project.title}
                 </Link>
@@ -499,7 +499,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
                       <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded ${isPred ? "bg-indigo-50 text-indigo-700" : "bg-amber-50 text-amber-700"}`}>
                         {isPred ? "blocks" : "blocked by"}
                       </span>
-                      <Link href={`/activities/${other.id}`} className="truncate font-medium hover:text-primary transition-colors">
+                      <Link href={`/activities/${other.id}`} className="truncate font-medium hover:text-link transition-colors">
                         {other.title}
                       </Link>
                       <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
