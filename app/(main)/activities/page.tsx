@@ -11,6 +11,7 @@ import { CheckSquare, Plus } from "lucide-react";
 import { ActivityList, type SerializedActivity } from "@/components/activities/activity-list";
 import { ActivityFilters } from "@/components/activities/activity-filters";
 import { ActivityPaginationBar } from "@/components/activities/activity-pagination-bar";
+import { ActivityListLiveRefresh } from "@/components/activities/activity-list-live-refresh";
 import { ViewToggle } from "@/components/ui/view-toggle";
 import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "@/lib/activities/activity-progress";
 import { getActivityTerminalConfigsForDepartments, resolveActivityTerminal } from "@/lib/status-terminal";
@@ -274,6 +275,7 @@ export default async function ActivitiesPage({
 
   return (
     <div className="space-y-6">
+      <ActivityListLiveRefresh />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Activities</h1>

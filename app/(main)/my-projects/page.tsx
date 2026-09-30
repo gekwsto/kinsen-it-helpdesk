@@ -9,6 +9,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { FolderKanban, Plus } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
+import { ProjectListLiveRefresh } from "@/components/projects/project-list-live-refresh";
 
 const STATUS_COLORS: Record<ProjectStatus, string> = {
   PLANNING: "bg-blue-100 text-blue-700",
@@ -60,6 +61,7 @@ export default async function MyProjectsPage() {
 
   return (
     <div className="space-y-6">
+      <ProjectListLiveRefresh />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">My Projects</h1>

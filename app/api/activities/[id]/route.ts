@@ -10,7 +10,32 @@ import { recalculateProjectRollup, type ProjectRollupResult } from "@/lib/projec
 import { tryGetActivityProgressFromStatus, getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { getActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
+import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
+import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { Role } from "@prisma/client";
+
+// Every field the Activity List (table) or Grid (card) view actually
+// renders, or that any real Activity-list page's filters/sorting/scope
+// keys off (see components/activities/activity-list.tsx,
+// app/(main)/my-activities/page.tsx, app/(main)/activities/page.tsx's
+// ACTIVITY_SORT_KEYS and projectId/subDepartmentId/assignedUserId filters —
+// GET /api/activities also filters by subDepartmentId, matching Projects).
+// Deliberately excludes description, isMilestone and businessUnitId — none
+// of those are rendered, filtered, or sorted on by any real Activity list
+// page today. `progress` is always re-derived below regardless of what's in
+// this list (see derivedProgress), so it doesn't need its own entry here.
+const ACTIVITY_LIST_RELEVANT_FIELDS = [
+  "title",
+  "projectId",
+  "departmentId",
+  "subDepartmentId",
+  "status",
+  "priority",
+  "assignedUserIds",
+  "startDate",
+  "dueDate",
+  "isCompleted",
+] as const;
 
 export async function GET(
   _req: NextRequest,
@@ -305,6 +330,24 @@ export async function PATCH(
     const settledRollups = rollups.length > 0 ? await Promise.all(rollups) : [];
     const projectRollups: ProjectRollupResult[] = settledRollups.filter((r): r is ProjectRollupResult => r !== null);
 
+    // Published only after the update AND every awaited rollup above has
+    // actually committed — never before. One coalesced publish per request
+    // regardless of how many list-relevant fields changed together.
+    if (ACTIVITY_LIST_RELEVANT_FIELDS.some((field) => (data as Record<string, unknown>)[field] !== undefined)) {
+      publishActivityListInvalidation();
+    }
+    // Cross-entity: `rollups` was only ever populated when this update
+    // actually affected a project's aggregate — either its visible
+    // _count.activities (a reassignment: old and/or new project) or its
+    // progress rollup (a status/completion change on an activity that
+    // belongs to a project). Reusing that SAME condition here means this
+    // publish fires in exactly the cases that genuinely changed something
+    // the Project list (specifically /my-projects, which renders progress)
+    // depends on — never on an unrelated field edit.
+    if (rollups.length > 0) {
+      publishProjectListInvalidation();
+    }
+
     const statusDisplay = await getActivityStatusDisplay(effectiveDepartmentId, effectiveStatus);
     return NextResponse.json({ ...activity, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, projectRollups });
   } catch (error: any) {
@@ -325,7 +368,7 @@ export async function DELETE(
 
     const activity = await prisma.projectActivity.findUnique({
       where: { id },
-      select: { id: true, departmentId: true },
+      select: { id: true, departmentId: true, projectId: true },
     });
     if (!activity) {
       return NextResponse.json({ error: "Activity not found" }, { status: 404 });
@@ -346,6 +389,30 @@ export async function DELETE(
     //   Ticket.activityId           → nullable, DB SetNull default
     //   _ActivityAssignees join rows → DB CASCADE (implicit M2M)
     await prisma.projectActivity.delete({ where: { id } });
+
+    // AWAITED — same rationale as the create/PATCH rollup calls above: the
+    // realtime publish below (and the router.refresh() it triggers) must
+    // never race ahead of the parent project's own progress recalculation.
+    // Deleting an activity changes that project's activity count/average
+    // immediately, previously left stale here until some unrelated rollup.
+    if (activity.projectId) {
+      await recalculateProjectRollup(activity.projectId).catch((err) => {
+        console.error("[progress-rollup] activity delete recalculation failed:", err);
+        return null;
+      });
+    }
+
+    // Published only after the delete (and, if applicable, the project
+    // rollup) has actually committed above. The deleted activity disappears
+    // from every Activity list.
+    publishActivityListInvalidation();
+    // Cross-entity: deleting an activity that belonged to a project changes
+    // that project's visible _count.activities (and, now recalculated,
+    // progress) — refresh the Project list too.
+    if (activity.projectId) {
+      publishProjectListInvalidation();
+    }
+
     return new NextResponse(null, { status: 204 });
   } catch (error: any) {
     if (error.message === "Unauthorized") {

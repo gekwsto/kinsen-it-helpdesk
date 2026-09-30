@@ -13,6 +13,8 @@ import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department
 import { createActivitySchema } from "@/lib/validations";
 import { getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
+import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
+import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { ActivityStatus } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
@@ -163,10 +165,29 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    // AWAITED (not fire-and-forget) — same fix/rationale as PATCH
+    // /api/activities/[id]'s own rollup call: a fire-and-forget version here
+    // could let the realtime publish below (and the client's own
+    // router.refresh() it triggers) race ahead of the rollup's
+    // prisma.project.update(), rendering a stale Project.progress in
+    // /my-projects. Never allowed to fail the activity create itself — a
+    // rollup error is caught and logged, not thrown.
     if (activity.projectId) {
-      recalculateProjectRollup(activity.projectId).catch((err) => {
+      await recalculateProjectRollup(activity.projectId).catch((err) => {
         console.error("[progress-rollup] activity create recalculation failed:", err);
+        return null;
       });
+    }
+
+    // Published only after the create (and, if applicable, the project
+    // rollup) has actually committed above. The new activity needs to
+    // appear in every open, matching Activity list.
+    publishActivityListInvalidation();
+    // Cross-entity: a new activity under a project changes that project's
+    // visible `_count.activities` (and, once resolved.length > 0, its
+    // progress rollup) — refresh the Project list too.
+    if (activity.projectId) {
+      publishProjectListInvalidation();
     }
 
     return NextResponse.json(activity, { status: 201 });

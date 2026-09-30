@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { ActivityStatus } from "@prisma/client";
 import { CheckSquare, Plus } from "lucide-react";
 import { ActivityList, type SerializedActivity } from "@/components/activities/activity-list";
+import { ActivityListLiveRefresh } from "@/components/activities/activity-list-live-refresh";
 import { ViewToggle } from "@/components/ui/view-toggle";
 import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "@/lib/activities/activity-progress";
 import { getActivityTerminalConfigsForDepartments, resolveActivityTerminal } from "@/lib/status-terminal";
@@ -86,6 +87,7 @@ export default async function MyActivitiesPage({
 
   return (
     <div className="space-y-6">
+      <ActivityListLiveRefresh />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">My Activities</h1>

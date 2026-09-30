@@ -7,7 +7,28 @@ import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateProjectSchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
+import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { Role } from "@prisma/client";
+
+// Every field the Project List (table) or Grid (card) view actually
+// renders, or that any real Project-list page's filters/sorting/scope
+// keys off (see components/projects/project-list.tsx,
+// app/(main)/my-projects/page.tsx, app/(main)/projects/page.tsx's
+// PROJECT_SORT_KEYS and subDepartmentId filter). Deliberately excludes
+// businessUnitId, successTarget and isGoal — none of those are rendered,
+// filtered, or sorted on by any real Project list page today (confirmed by
+// grep across project-list.tsx/my-projects/page.tsx/projects/page.tsx).
+const PROJECT_LIST_RELEVANT_FIELDS = [
+  "title",
+  "description",
+  "status",
+  "priority",
+  "departmentId",
+  "subDepartmentId",
+  "startDate",
+  "endDate",
+  "memberIds",
+] as const;
 
 const PROJECT_INCLUDE = {
   owner: { select: { id: true, name: true, email: true, image: true } },
@@ -60,7 +81,7 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAuth();
 
-    const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true, status: true } });
+    const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true, status: true, title: true } });
     if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     const canEdit = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, existing.departmentId, "project.edit");
@@ -128,16 +149,32 @@ export async function PATCH(
       include: PROJECT_INCLUDE,
     });
 
-    // Publish ONLY after the status change has actually committed above —
-    // never before, and never for other field edits (title, dates,
-    // members, ...) that don't affect what the Projects list itself shows.
-    // Fire-and-forget/non-blocking: a realtime publish failure must never
-    // fail (or even slow down) a mutation that already succeeded. See
-    // lib/realtime/project-list-invalidation.ts's doc comment for why this
-    // is a separate channel from tickets', reusing the same established
-    // LISTEN/NOTIFY + SSE + debounced router.refresh() mechanism.
-    if (data.status !== undefined && data.status !== existing.status) {
+    // Publish ONLY after the update has actually committed above — never
+    // before. One coalesced publish per request regardless of how many
+    // list-relevant fields changed together (a compound PATCH never fires
+    // more than once here). Fire-and-forget/non-blocking: a realtime
+    // publish failure must never fail (or even slow down) a mutation that
+    // already succeeded. See lib/realtime/project-list-invalidation.ts's
+    // doc comment for why this is a separate channel from tickets'/
+    // activities', reusing the same established LISTEN/NOTIFY + SSE +
+    // debounced router.refresh() mechanism.
+    if (PROJECT_LIST_RELEVANT_FIELDS.some((field) => data[field] !== undefined)) {
       publishProjectListInvalidation();
+    }
+
+    // Cross-entity: the Activity List/Grid views render `activity.project.title`
+    // for every linked activity — a rename must refresh those lists too, or
+    // they'd keep showing the project's old name until an unrelated refresh.
+    // Gated on an ACTUAL value change (not just "title present in the
+    // payload") since this is the one cross-entity case cheap to diff
+    // precisely against `existing` fetched above. Department/other Project
+    // field changes are deliberately NOT propagated to the Activity list:
+    // an Activity's own `departmentId` is an independent field, never
+    // derived from its parent Project's, so moving a Project between
+    // departments doesn't change anything the Activity list itself renders,
+    // filters, or scopes on.
+    if (data.title !== undefined && data.title !== existing.title) {
+      publishActivityListInvalidation();
     }
 
     return NextResponse.json(project);
@@ -159,7 +196,7 @@ export async function DELETE(
 
     const project = await prisma.project.findUnique({
       where: { id },
-      select: { id: true, departmentId: true },
+      select: { id: true, departmentId: true, _count: { select: { activities: true } } },
     });
     if (!project) {
       return NextResponse.json({ error: "Project not found" }, { status: 404 });
@@ -182,6 +219,18 @@ export async function DELETE(
     //   _ProjectMembers join rows → DB CASCADE (implicit M2M)
     //   _GoalProjects join rows   → DB CASCADE (implicit M2M)
     await prisma.project.delete({ where: { id } });
+
+    // The deleted project disappears from every Project list.
+    publishProjectListInvalidation();
+    // Cross-entity: any activity that belonged to this project just had its
+    // projectId SetNull'd (never cascade-deleted) — the Activity List's
+    // "Project" column for each of them now shows "Standalone" instead of
+    // this project's title, so those lists need refreshing too. Only
+    // published when this project actually had linked activities.
+    if (project._count.activities > 0) {
+      publishActivityListInvalidation();
+    }
+
     return new NextResponse(null, { status: 204 });
   } catch (error: any) {
     if (error.message === "Unauthorized") {

@@ -10,8 +10,11 @@
  *   - PostgreSQL LISTEN/NOTIFY actually delivers cross-process (a raw `pg`
  *     LISTEN connection, independent of Prisma's own pool).
  *   - projectListChangeHub coalesces a burst into one local dispatch.
- *   - PATCH /api/projects/[id] publishes ONLY when `status` actually
- *     changes (committed) — never for other field edits, and never for a
+ *   - PATCH /api/projects/[id] publishes when any List/Grid-visible field is
+ *     committed (broadened by a later task from "status only" — see
+ *     PROJECT_LIST_RELEVANT_FIELDS there and
+ *     scripts/test-project-activity-realtime-mutation-inventory.ts for the
+ *     full field-by-field/cross-entity coverage), and never for a
  *     failed/rejected mutation (403, 404, validation error).
  *   - The REAL SSE route (GET /api/projects/stream) requires auth, sends a
  *     CONNECTED message, and forwards a genuine status change as
@@ -185,15 +188,29 @@ async function main() {
     check("PATCH {status} -> 200", statusRes.status === 200);
     check("...a REAL Project status change produced a NOTIFY", (await waitStatus) !== null);
 
-    const waitNoop = waitForNotification(rawListener, 1_500);
+    // A later task broadened this: title is a real Project List/Grid-visible
+    // field (see PROJECT_LIST_RELEVANT_FIELDS in app/api/projects/[id]/route.ts)
+    // — previously only `status` ever published here, which was exactly the
+    // gap that task's audit found and fixed. See
+    // scripts/test-project-activity-realtime-mutation-inventory.ts for the
+    // FULL field-by-field/cross-entity coverage this broadening added; this
+    // file keeps its own original, narrower "status" scenario for continuity.
+    const waitTitle = waitForNotification(rawListener, 1_500);
     const titleRes = await projectRoute.PATCH(jsonReq({ title: `RT Project ${RUN_ID} renamed` }), { params: Promise.resolve({ id: project.id }) });
     check("PATCH {title} (no status change) -> 200", titleRes.status === 200);
-    check("...an unrelated field edit publishes NOTHING", (await waitNoop) === null);
+    check("...a title edit (a real, list-visible field) NOW also publishes — see the mutation-inventory test for the full field list", (await waitTitle) !== null);
 
+    // Re-sending the SAME status still results in a publish under the
+    // broadened, "any list-relevant field present in the payload" check —
+    // a deliberate simplicity/precision tradeoff (see
+    // PROJECT_LIST_RELEVANT_FIELDS's own doc comment): diffing every one of
+    // the 9 list-relevant fields against their stored values (memberIds
+    // especially) isn't worth the extra complexity for a harmless, cheap,
+    // coalesced no-op publish.
     const waitSameStatus = waitForNotification(rawListener, 1_500);
     const sameStatusRes = await projectRoute.PATCH(jsonReq({ status: "IN_PROGRESS" }), { params: Promise.resolve({ id: project.id }) });
     check("PATCH {status: <same value>} -> 200", sameStatusRes.status === 200);
-    check("...re-sending the SAME status publishes nothing (status didn't actually change)", (await waitSameStatus) === null);
+    check("...re-sending the SAME status still publishes (field-presence check, not a value diff — see above)", (await waitSameStatus) !== null);
 
     currentSession = { user: { id: admin.id, role: Role.USER, customRoleId: null } }; // no edit permission anywhere
     const waitForbidden = waitForNotification(rawListener, 1_500);

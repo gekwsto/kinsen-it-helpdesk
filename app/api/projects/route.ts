@@ -11,6 +11,7 @@ import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createProjectSchema } from "@/lib/validations";
+import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 
 export async function GET(req: NextRequest) {
   try {
@@ -144,6 +145,10 @@ export async function POST(req: NextRequest) {
         _count: { select: { activities: true } },
       },
     });
+
+    // Published only after the create has actually committed above — the
+    // new project needs to appear in every open, matching Project list.
+    publishProjectListInvalidation();
 
     return NextResponse.json(project, { status: 201 });
   } catch (error: any) {
