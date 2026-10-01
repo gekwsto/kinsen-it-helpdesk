@@ -179,8 +179,8 @@ enum GoalStatus {
 // ─── Organisation Structure ───────────────────────────────────────────────────
 
 model Company {
-  id            String         @id @default(cuid())
-  name          String
+  id                String         @id @default(cuid())
+  name              String
   // Trim + collapse-whitespace + lowercase of `name` (see
   // lib/services/organization-normalization.ts's normalizeCompanyName) — the
   // real duplicate-prevention backstop for "one Company root per
@@ -189,13 +189,13 @@ model Company {
   // database-level-constraint-as-hard-backstop pattern already used for
   // User.email (see the add_user_email_case_insensitive_unique migration) —
   // application-level normalization alone is a convention, not a guarantee.
-  normalizedName String        @unique
+  normalizedName    String         @unique
   // Optional: a Microsoft-sourced company (matched/created purely from
   // Entra's free-text companyName) has no inherent domain — only a manually
   // admin-created company (via /admin/companies) is expected to always set
   // one. Still unique when present.
-  domain        String?        @unique
-  businessUnits BusinessUnit[]
+  domain            String?        @unique
+  businessUnits     BusinessUnit[]
   // Departments attached directly to this Company (no BusinessUnit) — the
   // path Microsoft Directory Sync always uses, since Entra has no "business
   // unit" concept of its own. A manually admin-organized department instead
@@ -203,10 +203,10 @@ model Company {
   // lib/services/organization-directory-sync-service.ts and
   // lib/services/organization-tree-service.ts (which renders both paths
   // under the same Company node).
-  directDepartments Department[] @relation("DepartmentDirectCompany")
-  users         User[]
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  directDepartments Department[]   @relation("DepartmentDirectCompany")
+  users             User[]
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
 }
 
 model BusinessUnit {
@@ -261,6 +261,7 @@ model Department {
   pendingTickets          PendingTicket[]
   projects                Project[]
   activities              ProjectActivity[]
+  projectRequests         ProjectRequest[]
   categories              TicketCategory[]
   priorities              TicketPriority[]
   statuses                TicketStatus[]
@@ -377,20 +378,24 @@ model DepartmentMembership {
 // `microsoftValue` itself remains the raw, admin-entered display value —
 // never the lookup key on its own anymore.
 model MicrosoftDepartmentMapping {
-  id             String                     @id @default(cuid())
-  sourceType     MicrosoftMappingSourceType
-  microsoftValue String
-  /** "" (global, every non-PROFILE_JOB_TITLE row) or a real Entra domain (PROFILE_JOB_TITLE only) — see this model's header comment. */
-  domain         String                     @default("")
-  /** Deterministic match key — see this model's header comment for the per-sourceType computation rule. */
-  normalizedMicrosoftValue String            @default("")
-  department     Department                 @relation(fields: [departmentId], references: [id])
-  departmentId   String
+  id                       String                     @id @default(cuid())
+  sourceType               MicrosoftMappingSourceType
+  microsoftValue           String
+  /**
+   * "" (global, every non-PROFILE_JOB_TITLE row) or a real Entra domain (PROFILE_JOB_TITLE only) — see this model's header comment.
+   */
+  domain                   String                     @default("")
+  /**
+   * Deterministic match key — see this model's header comment for the per-sourceType computation rule.
+   */
+  normalizedMicrosoftValue String                     @default("")
+  department               Department                 @relation(fields: [departmentId], references: [id])
+  departmentId             String
   // The GLOBAL role (matches /admin/roles / User.role) — so this dropdown
   // shows exactly the same roles as Roles & Permissions. Required, DB-level
   // placeholder when `globalCustomRole` below is set (mirrors User.role's
   // relationship to User.customRoleId) — see globalCustomRoleId's comment.
-  role           Role                       @default(USER)
+  role                     Role                       @default(USER)
   // Custom GLOBAL role (CustomRole.scope GLOBAL/BOTH, isBuiltIn: false) —
   // when set, this is the authoritative Global Role this mapping grants and
   // `role` above just holds the required placeholder USER, exactly
@@ -401,8 +406,8 @@ model MicrosoftDepartmentMapping {
   // actual product rule (never silently orphan a mapping) is enforced by
   // blocking CustomRole deletion while referenced — see the DELETE guard in
   // app/api/admin/roles/[id]/route.ts, extended to check this relation too.
-  globalCustomRole   CustomRole?            @relation("MicrosoftMappingGlobalCustomRole", fields: [globalCustomRoleId], references: [id], onDelete: SetNull)
-  globalCustomRoleId String?
+  globalCustomRole         CustomRole?                @relation("MicrosoftMappingGlobalCustomRole", fields: [globalCustomRoleId], references: [id], onDelete: SetNull)
+  globalCustomRoleId       String?
   // The DepartmentRole granted in `department` above. Explicitly chosen by
   // the admin (no longer derived from `role` at sync time) — see
   // resolveDepartmentMemberships in lib/services/microsoft-mapping-service.ts.
@@ -410,18 +415,18 @@ model MicrosoftDepartmentMapping {
   // analog of Role.ADMIN) — see isDepartmentRoleAllowedForMicrosoftMapping in
   // lib/services/department-role-translation.ts. Required, DB-level
   // placeholder when `departmentCustomRole` below is set.
-  departmentRole DepartmentRole
+  departmentRole           DepartmentRole
   // Custom DEPARTMENT role (CustomRole.scope DEPARTMENT/BOTH, isBuiltIn:
   // false) — when set, authoritative for the resulting DepartmentMembership
   // and `departmentRole` above just holds the required placeholder VIEWER,
   // exactly mirroring DepartmentMembership.customRoleId's relationship to
   // DepartmentMembership.role. Same nullable/additive/backward-compatible
   // reasoning as globalCustomRoleId above.
-  departmentCustomRole   CustomRole?        @relation("MicrosoftMappingDepartmentCustomRole", fields: [departmentCustomRoleId], references: [id], onDelete: SetNull)
-  departmentCustomRoleId String?
-  isActive       Boolean                    @default(true)
-  createdAt      DateTime                   @default(now())
-  updatedAt      DateTime                   @updatedAt
+  departmentCustomRole     CustomRole?                @relation("MicrosoftMappingDepartmentCustomRole", fields: [departmentCustomRoleId], references: [id], onDelete: SetNull)
+  departmentCustomRoleId   String?
+  isActive                 Boolean                    @default(true)
+  createdAt                DateTime                   @default(now())
+  updatedAt                DateTime                   @updatedAt
 
   usersWithGlobalRoleFromThisMapping User[] @relation("UserGlobalRoleMapping")
 
@@ -482,20 +487,28 @@ model MicrosoftDirectoryDepartmentValue {
 // Rows are never deleted, only marked inactive if a later sync no longer
 // sees them, so history isn't lost.
 model MicrosoftDirectoryJobTitleValue {
-  id             String   @id @default(cuid())
-  /** Display-only — first-seen raw casing/spacing. NOT unique (see this model's header comment) — (domain, normalizedValue) below is the real identity. */
-  value          String
-  /** Backfilled to the then-current ALLOWED_EMAIL_DOMAIN for every pre-existing row at migration time (see 20260807110000_job_title_directory_domain_scope) — never left blank, since it's part of a unique key. */
-  domain         String   @default("")
-  /** trim + collapse-whitespace + lowercase of `value`; also backfilled at migration time for pre-existing rows. */
-  normalizedValue String  @default("")
-  /** Eligible (@<domain>, userType=Member) users seen with this exact job title as of the last domain-aware sync — 0 for legacy rows never touched by it. */
-  userCount      Int      @default(0)
-  firstSeenAt    DateTime @default(now())
-  lastSeenAt     DateTime @default(now())
-  isActive       Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id              String   @id @default(cuid())
+  /**
+   * Display-only — first-seen raw casing/spacing. NOT unique (see this model's header comment) — (domain, normalizedValue) below is the real identity.
+   */
+  value           String
+  /**
+   * Backfilled to the then-current ALLOWED_EMAIL_DOMAIN for every pre-existing row at migration time (see 20260807110000_job_title_directory_domain_scope) — never left blank, since it's part of a unique key.
+   */
+  domain          String   @default("")
+  /**
+   * trim + collapse-whitespace + lowercase of `value`; also backfilled at migration time for pre-existing rows.
+   */
+  normalizedValue String   @default("")
+  /**
+   * Eligible (@<domain>, userType=Member) users seen with this exact job title as of the last domain-aware sync — 0 for legacy rows never touched by it.
+   */
+  userCount       Int      @default(0)
+  firstSeenAt     DateTime @default(now())
+  lastSeenAt      DateTime @default(now())
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@unique([domain, normalizedValue])
   @@index([domain])
@@ -653,9 +666,9 @@ model User {
   // navigation properties (lib/services/organization-manager-sync-service.ts)
   // — there is no admin-editable manual override, since Entra is the sole
   // authoritative source for reporting lines per the feature's design.
-  manager                      User?                       @relation("UserManager", fields: [managerId], references: [id], onDelete: SetNull)
-  managerId                    String?
-  directReports                User[]                      @relation("UserManager")
+  manager                 User?     @relation("UserManager", fields: [managerId], references: [id], onDelete: SetNull)
+  managerId               String?
+  directReports           User[]    @relation("UserManager")
   // True when the most recent manager sync (organization-manager-sync-service.ts,
   // directReports inversion) found this user AS a direct report of some
   // manager in Entra, but that manager was itself excluded from the synced
@@ -668,27 +681,27 @@ model User {
   // rather than re-deriving it (the signal only exists transiently during a
   // sync run's Graph responses, so it must be persisted here to be
   // reportable afterward without another Graph call).
-  managerExcludedFromSync      Boolean                     @default(false)
+  managerExcludedFromSync Boolean   @default(false)
   // Entra `employeeId`/`employeeType` — diagnostic/organization-context
   // fields only; not used by any RBAC/department-mapping decision today.
-  employeeId                   String?
-  employeeType                 String?
+  employeeId              String?
+  employeeType            String?
   // Entra `accountEnabled`/`userType` at last sync — distinct from this
   // app's own `isActive` (a TicketApp-local decision, never overwritten by
   // sync). Used only to flag/report a mismatch (e.g. an Entra-disabled
   // account that's still `isActive` locally), never to auto-disable a user.
-  entraAccountEnabled          Boolean?
-  entraUserType                String?
+  entraAccountEnabled     Boolean?
+  entraUserType           String?
   // Entra `jobTitle` at last sync — was previously only ever transient
   // (read from Graph at login, used for mapping resolution, then discarded).
   // Stored now so the organization-context API/visualization can display it
   // without an extra Graph call.
-  jobTitle                     String?
+  jobTitle                String?
   // Set on every successful organization-sync write for this user (full
   // tenant scan, incremental refresh, or the per-user login-time manager
   // lookup) — distinct from `lastMicrosoftSyncAt` above, which tracks the
   // unrelated department/global-role sync.
-  organizationSyncedAt         DateTime?
+  organizationSyncedAt    DateTime?
 
   customRole   CustomRole? @relation("UserCustomRole", fields: [customRoleId], references: [id])
   customRoleId String?
@@ -696,31 +709,33 @@ model User {
   departmentMemberships    DepartmentMembership[]
   subDepartmentMemberships SubDepartmentMembership[]
 
-  requestedTickets         Ticket[]              @relation("TicketRequester")
-  assignedTickets          Ticket[]              @relation("TicketAgent")
-  departmentChangedTickets Ticket[]              @relation("TicketDepartmentChangedBy")
+  requestedTickets         Ticket[]               @relation("TicketRequester")
+  assignedTickets          Ticket[]               @relation("TicketAgent")
+  departmentChangedTickets Ticket[]               @relation("TicketDepartmentChangedBy")
   ticketMessages           TicketMessage[]
   ticketAttachments        TicketAttachment[]
   ticketHistories          TicketHistory[]
-  pendingTicketsRequested  PendingTicket[]       @relation("PendingTicketRequester")
-  pendingTicketsAccepted   PendingTicket[]       @relation("PendingTicketAccepted")
-  createdIntegrations      ExternalIntegration[] @relation("IntegrationCreatedBy")
-  pendingTicketsRejected   PendingTicket[]       @relation("PendingTicketRejected")
-  ownedProjects            Project[]             @relation("ProjectOwner")
-  projectMemberships       Project[]             @relation("ProjectMembers")
-  assignedActivities       ProjectActivity[]     @relation("ActivityAssignee")
-  activityAssignments      ProjectActivity[]     @relation("ActivityAssignees")
-  createdActivities        ProjectActivity[]     @relation("ActivityCreator")
-  createdDependencies      ActivityDependency[]  @relation("ActivityDependenciesCreatedBy")
-  projectNotes             ProjectNote[]         @relation("ProjectNoteAuthor")
-  activityNotes            ActivityNote[]        @relation("ActivityNoteAuthor")
-  relatedLinksCreated      RelatedLink[]         @relation("RelatedLinkCreator")
+  pendingTicketsRequested  PendingTicket[]        @relation("PendingTicketRequester")
+  pendingTicketsAccepted   PendingTicket[]        @relation("PendingTicketAccepted")
+  createdIntegrations      ExternalIntegration[]  @relation("IntegrationCreatedBy")
+  pendingTicketsRejected   PendingTicket[]        @relation("PendingTicketRejected")
+  ownedProjects            Project[]              @relation("ProjectOwner")
+  projectMemberships       Project[]              @relation("ProjectMembers")
+  projectRequestsSubmitted ProjectRequest[]       @relation("ProjectRequestRequester")
+  projectRequestsApproved  ProjectRequest[]       @relation("ProjectRequestApprover")
+  assignedActivities       ProjectActivity[]      @relation("ActivityAssignee")
+  activityAssignments      ProjectActivity[]      @relation("ActivityAssignees")
+  createdActivities        ProjectActivity[]      @relation("ActivityCreator")
+  createdDependencies      ActivityDependency[]   @relation("ActivityDependenciesCreatedBy")
+  projectNotes             ProjectNote[]          @relation("ProjectNoteAuthor")
+  activityNotes            ActivityNote[]         @relation("ActivityNoteAuthor")
+  relatedLinksCreated      RelatedLink[]          @relation("RelatedLinkCreator")
   activityAttachments      ActivityAttachment[]
   projectAttachments       ProjectAttachment[]
   projectNoteMentions      ProjectNoteMention[]
   activityNoteMentions     ActivityNoteMention[]
   ticketMessageMentions    TicketMessageMention[]
-  ownedGoals               YearlyGoal[]          @relation("GoalOwner")
+  ownedGoals               YearlyGoal[]           @relation("GoalOwner")
   notifications            Notification[]
   pushSubscriptions        PushSubscription[]
   accounts                 Account[]
@@ -1225,13 +1240,13 @@ model Project {
   successTarget   String?        @db.Text
   isGoal          Boolean        @default(false)
 
-  members     User[]            @relation("ProjectMembers")
-  activities  ProjectActivity[]
-  tickets     Ticket[]
-  yearlyGoals YearlyGoal[]      @relation("GoalProjects")
-  notes       ProjectNote[]
+  members      User[]              @relation("ProjectMembers")
+  activities   ProjectActivity[]
+  tickets      Ticket[]
+  yearlyGoals  YearlyGoal[]        @relation("GoalProjects")
+  notes        ProjectNote[]
   relatedLinks RelatedLink[]
-  attachments ProjectAttachment[]
+  attachments  ProjectAttachment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1304,15 +1319,15 @@ model ProjectActivity {
 // authoritative create/read rules (project.view to read, project.edit to
 // write — no separate `project.note` permission is introduced).
 model ProjectNote {
-  id        String   @id @default(cuid())
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  id        String               @id @default(cuid())
+  project   Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
   projectId String
-  author    User?    @relation("ProjectNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  author    User?                @relation("ProjectNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   authorId  String?
-  body      String   @db.Text
+  body      String               @db.Text
   mentions  ProjectNoteMention[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
 
   @@index([projectId, createdAt])
 }
@@ -1321,12 +1336,12 @@ model ProjectNote {
 // TicketMessageMention's doc comment for the shared design rationale (three
 // small entity-appropriate join tables, one shared mention service/UI).
 model ProjectNoteMention {
-  id        String      @id @default(cuid())
-  note      ProjectNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  id        String           @id @default(cuid())
+  note      ProjectNote      @relation(fields: [noteId], references: [id], onDelete: Cascade)
   noteId    String
-  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId    String
-  createdAt DateTime    @default(now())
+  createdAt DateTime         @default(now())
   reminder  MentionReminder?
 
   @@unique([noteId, userId])
@@ -1336,15 +1351,15 @@ model ProjectNoteMention {
 // Same concept as ProjectNote, for a ProjectActivity — see that model's own
 // doc comment for what this deliberately does NOT contain.
 model ActivityNote {
-  id         String          @id @default(cuid())
-  activity   ProjectActivity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  id         String                @id @default(cuid())
+  activity   ProjectActivity       @relation(fields: [activityId], references: [id], onDelete: Cascade)
   activityId String
-  author     User?           @relation("ActivityNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  author     User?                 @relation("ActivityNoteAuthor", fields: [authorId], references: [id], onDelete: SetNull)
   authorId   String?
-  body       String          @db.Text
+  body       String                @db.Text
   mentions   ActivityNoteMention[]
-  createdAt  DateTime        @default(now())
-  updatedAt  DateTime        @updatedAt
+  createdAt  DateTime              @default(now())
+  updatedAt  DateTime              @updatedAt
 
   @@index([activityId, createdAt])
 }
@@ -1352,12 +1367,12 @@ model ActivityNote {
 // A structured @mention of a User inside an ActivityNote — see
 // TicketMessageMention's doc comment for the shared design rationale.
 model ActivityNoteMention {
-  id        String       @id @default(cuid())
-  note      ActivityNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  id        String           @id @default(cuid())
+  note      ActivityNote     @relation(fields: [noteId], references: [id], onDelete: Cascade)
   noteId    String
-  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId    String
-  createdAt DateTime     @default(now())
+  createdAt DateTime         @default(now())
   reminder  MentionReminder?
 
   @@unique([noteId, userId])
@@ -1424,6 +1439,139 @@ model ProjectAttachment {
   @@index([projectId])
   @@index([projectId, createdAt])
   @@index([uploadedById])
+}
+
+// ─── Project Request Form (separate business entity — NEVER auto-creates a
+// real Project; see the "Create Project from approved request" note below) ──
+
+// A configurable classification a Project Request is filed under (e.g.
+// "New Product", "Process Improvement") — NOT department-scoped (a single,
+// global, admin-managed list every department's requesters choose from; see
+// components/admin/project-request-type-management.tsx). Deliberately
+// separate from ProjectRequest's own audit trail: deactivating a type here
+// only hides it from the create form's dropdown (see the isActive filter in
+// the GET handler) — it never deletes or relabels any ProjectRequest that
+// already references it, so historical requests keep their original type
+// forever, matching the same "soft delete" convention TicketStatus/
+// TicketPriority/TicketCategory already use for their own isActive flag.
+model ProjectRequestType {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  // The current/default EUR cost for this type — NOT the cost of any
+  // specific Project Request (see ProjectRequest.cost below, which snapshots
+  // this value at submission time and never changes afterward, even if this
+  // field is later edited). Nullable only because the pre-existing row(s)
+  // from before this feature shipped have no authoritative historical cost
+  // to invent — every NEW type is required to have a real cost at creation
+  // time (enforced in projectRequestTypeSchema, not at the DB level).
+  // Decimal(10,2), never Float — exact currency precision, no
+  // floating-point drift.
+  cost      Decimal? @db.Decimal(10, 2)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projectRequests ProjectRequest[]
+}
+
+enum ProjectRequestStatus {
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+// A user-submitted request to start a new Project, routed through a SINGLE
+// department-scoped approval stage before anyone is authorized to act on
+// it — see lib/services/project-request-service.ts for the full state
+// machine. Approval is never tied to the requester's own org-chart manager;
+// it's ANY user who holds effective `projectRequest.approve` for this
+// request's own department (global grant, or that department's own
+// grant — same union project.edit/gantt.view already use). This model is
+// intentionally NOT linked to Project at all (no projectId field anywhere
+// in either direction): reaching APPROVED only records that the business
+// case was accepted, it is a distinct milestone, not a trigger. Turning an
+// approved request into a real Project is an explicitly out-of-scope
+// future feature.
+model ProjectRequest {
+  id String @id @default(cuid())
+
+  title       String
+  description String @db.Text
+  // Reuses Project's OWN 1(Low)/2(Medium)/3(High) Int scale verbatim (see
+  // lib/project-priority.ts's PROJECT_PRIORITY_LABEL/projectPriorityKey) —
+  // the same semantic meaning, deliberately not a second/independent
+  // importance mapping.
+  importance  Int
+
+  projectType   ProjectRequestType @relation(fields: [projectTypeId], references: [id])
+  projectTypeId String
+  // A SNAPSHOT of ProjectRequestType.cost taken server-side at submission
+  // time (see POST /api/project-requests) — NEVER re-read live from the
+  // type afterward, by design: an admin later editing the type's own cost
+  // must never retroactively change an already-submitted request's cost.
+  // Never trusted from client input (the server resolves the type and
+  // copies its authoritative cost; a client-submitted cost value is simply
+  // discarded). Null only when this request predates the feature, or the
+  // selected type itself had no cost set at the time of submission —
+  // never a fabricated value. Decimal(10,2), never Float.
+  cost          Decimal?           @db.Decimal(10, 2)
+
+  teamConcerned                     String
+  expectedBenefits                  String  @db.Text
+  // Legacy only — this was the requester-filled "Business Assessment" field
+  // from the original form. The requester no longer fills ANY business
+  // assessment; that moved entirely to the approver's decision (see
+  // `businessAssessment` below, on the approval side of this model).
+  // Nullable because every NEW request leaves it null forever; a non-null
+  // value here means ONLY that this is a pre-redesign row — read-only,
+  // rendered separately on the detail page, never conflated with the new
+  // approver-side field of (confusingly) the same base name.
+  legacyRequesterBusinessAssessment String? @db.Text
+  replacesExisting                  Boolean @default(false)
+  // Required (trimmed, non-empty) exactly when replacesExisting is true,
+  // and ALWAYS null when it's false — enforced server-side in
+  // createProjectRequestSchema (lib/validations.ts), never trusted from
+  // client state alone. Nullable at the DB level purely because it's
+  // conditionally absent (false case), not because it's ever optional
+  // while replacesExisting is true.
+  replacementDescription            String? @db.Text
+
+  // Every field below this point is written ONLY by the server (see
+  // lib/services/project-request-service.ts) — never accepted, trusted, or
+  // echoed back from client input on submission or on any approval action.
+  requester    User       @relation("ProjectRequestRequester", fields: [requesterId], references: [id])
+  requesterId  String
+  department   Department @relation(fields: [departmentId], references: [id])
+  departmentId String
+
+  status ProjectRequestStatus @default(PENDING_APPROVAL)
+
+  // Single approval stage — null until decided. Whoever holds effective
+  // projectRequest.approve for `departmentId` (checked fresh at decision
+  // time via hasEffectiveEntityPermission, never a snapshot) may act;
+  // atomically guarded by the current status (see decideApproval).
+  approver           User?     @relation("ProjectRequestApprover", fields: [approverId], references: [id])
+  approverId         String?
+  approvedAt         DateTime?
+  rejectedAt         DateTime?
+  // The approver's OWN mandatory justification for this decision — required
+  // at the application level (projectRequestApprovalDecisionSchema) for
+  // every approve/reject; nullable here only because a never-decided
+  // (PENDING_APPROVAL) row has no decision yet. Formerly an optional
+  // decision "comment" (pre-redesign); renamed in place via migration,
+  // preserving any legacy comment text as-is. Never the requester's own
+  // text — see legacyRequesterBusinessAssessment above for that.
+  businessAssessment String?   @db.Text
+
+  submittedAt DateTime @default(now())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status])
+  @@index([departmentId])
+  @@index([requesterId])
+  @@index([approverId])
+  @@index([createdAt])
 }
 
 // Per-department, editable status->progress% mapping — Activity progress is
@@ -1583,11 +1731,11 @@ enum RoleScope {
 }
 
 model CustomRole {
-  id                    String                 @id @default(cuid())
-  key                   String                 @unique
-  name                  String
-  description           String?
-  isBuiltIn             Boolean                @default(false)
+  id                                String                       @id @default(cuid())
+  key                               String                       @unique
+  name                              String
+  description                       String?
+  isBuiltIn                         Boolean                      @default(false)
   // Disable lever for built-in roles (which can never be hard-deleted — see
   // lib/services/role-safety-service.ts) and custom roles alike. A disabled
   // role stops being offered for new assignment (getDepartmentRoleOptions)
@@ -1596,10 +1744,10 @@ model CustomRole {
   // enum-based built-in role (User.role/DepartmentMembership.role used
   // directly, no customRoleId) can't be retroactively revoked this way; see
   // the doc-comment on wouldOrphanAdminAccessByDisablingRole.
-  isActive              Boolean                @default(true)
-  scope                 RoleScope              @default(GLOBAL)
-  users                 User[]                 @relation("UserCustomRole")
-  departmentMemberships DepartmentMembership[] @relation("DepartmentMembershipCustomRole")
+  isActive                          Boolean                      @default(true)
+  scope                             RoleScope                    @default(GLOBAL)
+  users                             User[]                       @relation("UserCustomRole")
+  departmentMemberships             DepartmentMembership[]       @relation("DepartmentMembershipCustomRole")
   // Microsoft mappings that grant this role — see MicrosoftDepartmentMapping's
   // globalCustomRoleId/departmentCustomRoleId comments. Referenced by the
   // role-deletion guard (app/api/admin/roles/[id]/route.ts) so a role in use
@@ -1610,10 +1758,10 @@ model CustomRole {
   // see DefaultRoleConfig. A CustomRole currently configured as either
   // default can never be deleted or deactivated until the default is
   // changed/cleared first (app/api/admin/roles/[id]/route.ts).
-  defaultRoleConfigsAsGlobal     DefaultRoleConfig[] @relation("DefaultRoleConfigGlobal")
-  defaultRoleConfigsAsDepartment DefaultRoleConfig[] @relation("DefaultRoleConfigDepartment")
-  createdAt             DateTime               @default(now())
-  updatedAt             DateTime               @updatedAt
+  defaultRoleConfigsAsGlobal        DefaultRoleConfig[]          @relation("DefaultRoleConfigGlobal")
+  defaultRoleConfigsAsDepartment    DefaultRoleConfig[]          @relation("DefaultRoleConfigDepartment")
+  createdAt                         DateTime                     @default(now())
+  updatedAt                         DateTime                     @updatedAt
 }
 
 // Singleton (fixed id "singleton", same idiom as OrganizationSyncLock) admin
@@ -1700,21 +1848,21 @@ enum MentionReminderStatus {
 // claimToken); a PROCESSING row whose claimedAt is older than the stale
 // timeout is reclaimable, so a crashed worker never strands a reminder.
 model MentionReminder {
-  id                     String                @id @default(cuid())
-  projectNoteMention     ProjectNoteMention?   @relation(fields: [projectNoteMentionId], references: [id], onDelete: Cascade)
-  projectNoteMentionId   String?               @unique
-  activityNoteMention    ActivityNoteMention?  @relation(fields: [activityNoteMentionId], references: [id], onDelete: Cascade)
-  activityNoteMentionId  String?               @unique
-  dueAt                  DateTime
-  status                 MentionReminderStatus @default(PENDING)
-  sentAt                 DateTime?
-  respondedAt            DateTime?
-  cancelledAt            DateTime?
-  cancellationReason     String?
-  claimedAt              DateTime?
-  claimToken             String?
-  createdAt              DateTime              @default(now())
-  updatedAt              DateTime              @updatedAt
+  id                    String                @id @default(cuid())
+  projectNoteMention    ProjectNoteMention?   @relation(fields: [projectNoteMentionId], references: [id], onDelete: Cascade)
+  projectNoteMentionId  String?               @unique
+  activityNoteMention   ActivityNoteMention?  @relation(fields: [activityNoteMentionId], references: [id], onDelete: Cascade)
+  activityNoteMentionId String?               @unique
+  dueAt                 DateTime
+  status                MentionReminderStatus @default(PENDING)
+  sentAt                DateTime?
+  respondedAt           DateTime?
+  cancelledAt           DateTime?
+  cancellationReason    String?
+  claimedAt             DateTime?
+  claimToken            String?
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
 
   @@index([status, dueAt])
 }
@@ -1792,15 +1940,15 @@ model EmailProcessingLog {
 }
 
 model EmailPollRun {
-  id         String    @id @default(cuid())
-  startedAt  DateTime  @default(now())
-  finishedAt DateTime?
-  created    Int       @default(0)
-  appended   Int       @default(0)
-  skipped    Int       @default(0)
-  errors     Int       @default(0)
-  lastError  String?   @db.Text
-  succeeded  Boolean   @default(false)
+  id             String    @id @default(cuid())
+  startedAt      DateTime  @default(now())
+  finishedAt     DateTime?
+  created        Int       @default(0)
+  appended       Int       @default(0)
+  skipped        Int       @default(0)
+  errors         Int       @default(0)
+  lastError      String?   @db.Text
+  succeeded      Boolean   @default(false)
   // Per-mailbox breakdown for THIS run — one entry per mailbox actually
   // polled (central support mailbox + every active department's
   // inboundEmail), each shaped like MailboxPollResult in

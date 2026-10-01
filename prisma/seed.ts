@@ -53,6 +53,25 @@ const PERMISSIONS = [
   // project.view + activity.view since it's a view over exactly that data,
   // not a new capability of its own.
   { key: "resourcePlanning.view", description: "View the resource planning timeline", module: "projects" },
+  // Project Request Form — a separate business workflow from Project itself
+  // (see prisma/schema.prisma's ProjectRequest model doc comment). Gates the
+  // single approval stage (PENDING_APPROVAL -> APPROVED/REJECTED) —
+  // submitting a request needs no permission beyond an active department
+  // membership; there is no separate manager stage or org-chart dependency.
+  // Checked via hasEffectiveEntityPermission against each request's own
+  // departmentId (global grant -> every department; department-scoped grant
+  // -> that department only), same union project.edit/gantt.view already
+  // use — any user holding this for a request's department may decide it,
+  // never tied to the requester's own manager. New feature: seeded
+  // ADMIN-only by default (see ROLE_PERMISSIONS/NEW_PERMISSION_DEFAULT_GRANTS
+  // below) — deliberately NOT backfilled onto any manager/agent role or
+  // existing custom role.
+  // Description explicitly names both outcomes: this key gates BOTH the
+  // Approve AND the Reject/decline action — a single permission check before
+  // the decision branches (see decideApproval in
+  // lib/services/project-request-service.ts), never a separate
+  // decline-only permission.
+  { key: "projectRequest.approve", description: "Give approval or rejection on Project Requests", module: "projectRequests" },
   // Goals
   { key: "goal.view", description: "View yearly goals", module: "goals" },
   { key: "goal.create", description: "Create yearly goals", module: "goals" },
@@ -585,6 +604,7 @@ async function main() {
       "gantt.view",
       "ticket.linkProjectActivity",
       "category.create",
+      "projectRequest.approve",
     ],
     DIRECTOR: ["organization.tree.view", "gantt.view"],
     // gantt.view backfill for every OTHER role that already had implicit

@@ -21,6 +21,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   BookOpen,
+  FileText,
 } from "lucide-react";
 import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
@@ -143,6 +144,21 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
       ],
     },
     {
+      // Every authenticated user with at least one active department
+      // membership may submit a Project Request — no permission flag gates
+      // this section (matching "users from all departments can submit"),
+      // the same as Dashboard. Server-side department/manager resolution
+      // (never this link's own visibility) is the real authorization
+      // boundary — see lib/services/project-request-service.ts.
+      label: "Project Requests",
+      href: "/project-requests",
+      icon: FileText,
+      children: [
+        { label: "All Requests", href: "/project-requests" },
+        { label: "New Request", href: "/project-requests/new" },
+      ],
+    },
+    {
       label: "Goals",
       href: "/goals",
       icon: Target,
@@ -183,6 +199,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
         { label: "Departments", href: "/admin/departments", roles: ["ADMIN"] as Role[] },
         { label: "Sub Departments", href: "/admin/sub-departments", visible: navFlags.canViewAdminSubDepartments },
         { label: "Microsoft Mappings", href: "/admin/microsoft-mappings", roles: ["ADMIN"] as Role[] },
+        { label: "Project Request Types", href: "/admin/project-request-types", roles: ["ADMIN"] as Role[] },
         { label: "Categories", href: "/admin/categories", roles: ["ADMIN"] as Role[] },
         { label: "Priorities", href: "/admin/priorities", roles: ["ADMIN"] as Role[] },
         { label: "Statuses", href: "/admin/statuses", roles: ["ADMIN"] as Role[] },

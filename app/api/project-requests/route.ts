@@ -1,0 +1,103 @@
+import { NextRequest, NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { requireAuth } from "@/lib/permissions";
+import { createProjectRequestSchema } from "@/lib/validations";
+import { apiError, zodErrorResponse, unauthorizedResponse, internalErrorResponse } from "@/lib/api-errors";
+import { resolveDepartmentForRequest, notifyEligibleApproversOfSubmission } from "@/lib/services/project-request-service";
+
+// POST — submit a new Project Request. Every trust-sensitive field
+// (requesterId, department membership, status, cost) is resolved/verified
+// SERVER-SIDE only — the client never supplies, and the server never
+// trusts, an id (or a cost) for any of them. Submission itself needs no special
+// permission beyond an active department membership (or, for a
+// global-scope role, canViewAllDepartments) — ANY authenticated user may
+// submit a request; approval is a separate, department-scoped permission
+// checked only later, at decision time. See
+// lib/services/project-request-service.ts for resolveDepartmentForRequest.
+export async function POST(req: NextRequest) {
+  try {
+    const session = await requireAuth();
+
+    const body = await req.json();
+    const parsed = createProjectRequestSchema.safeParse(body);
+    if (!parsed.success) return zodErrorResponse(parsed.error);
+    const data = parsed.data;
+
+    // Department: resolved from the SAME canonical accessible-departments
+    // set the workspace selector uses (see resolveDepartmentForRequest's own
+    // doc comment) — a single accessible department is auto-selected; more
+    // than one requires an explicit, real match — a forged departmentId (or
+    // the synthetic "All Workspaces" value) is rejected here, never
+    // silently accepted or substituted.
+    const departmentResolution = await resolveDepartmentForRequest(session.user.id, session.user.role, data.departmentId);
+    if (!departmentResolution.ok) {
+      const message =
+        departmentResolution.reason === "no_department"
+          ? "You don't belong to any active department, so you can't submit a Project Request."
+          : departmentResolution.reason === "ambiguous"
+          ? "You belong to more than one department — select which one this request is for."
+          : departmentResolution.reason === "all_workspaces_not_allowed"
+          ? "Select a specific department — \"All Workspaces\" isn't a real department."
+          : "You don't have access to the selected department.";
+      return NextResponse.json(apiError("invalid_department", message, { field: "departmentId" }), { status: 400 });
+    }
+
+    // Project Type: must be a REAL, currently ACTIVE type — never trusted
+    // from the client beyond its id. A forged id for an inactive or
+    // nonexistent type is rejected outright (fail closed), never silently
+    // accepted or substituted.
+    const projectType = await prisma.projectRequestType.findUnique({ where: { id: data.projectTypeId }, select: { id: true, isActive: true, cost: true } });
+    if (!projectType || !projectType.isActive) {
+      return NextResponse.json(apiError("invalid_project_type", "The selected Project Type is not available.", { field: "projectTypeId" }), { status: 400 });
+    }
+
+    // The canonical server-side invariant — never trusted from client state
+    // or HTML `required` alone (createProjectRequestSchema's .superRefine
+    // already rejects a missing/empty value when replacesExisting is true,
+    // so reaching this line with replacesExisting true guarantees
+    // data.replacementDescription is a real, trimmed, non-empty string).
+    // When replacesExisting is false, ANY value the client sent is
+    // discarded here — this always persists null, never a forged/stale
+    // string.
+    const replacementDescription = data.replacesExisting ? data.replacementDescription! : null;
+
+    const created = await prisma.projectRequest.create({
+      data: {
+        title: data.title,
+        description: data.description,
+        importance: data.importance,
+        projectTypeId: data.projectTypeId,
+        // A SNAPSHOT of the type's authoritative cost, taken HERE,
+        // server-side, from the row just re-fetched above — never from
+        // anything the client sent. A client-supplied `cost` in the
+        // request body is simply discarded (createProjectRequestSchema
+        // never accepts that key at all). This value is frozen forever: a
+        // later edit to ProjectRequestType.cost must never retroactively
+        // change this request's own cost.
+        cost: projectType.cost,
+        teamConcerned: data.teamConcerned,
+        expectedBenefits: data.expectedBenefits,
+        replacesExisting: data.replacesExisting,
+        replacementDescription,
+        requesterId: session.user.id,
+        departmentId: departmentResolution.departmentId,
+        // status defaults to PENDING_APPROVAL at the schema level.
+      },
+      select: { id: true, title: true },
+    });
+
+    // Best-effort, AFTER the row has genuinely committed above — a
+    // notification failure must never turn an already-successful submission
+    // into an error response. Notifies every user currently eligible to
+    // approve within this request's own department (global grant holders,
+    // and that department's own grant holders) — the same set that would
+    // see it in their own "Awaiting My Approval" tab.
+    await notifyEligibleApproversOfSubmission(departmentResolution.departmentId, created.id, created.title);
+
+    return NextResponse.json({ id: created.id }, { status: 201 });
+  } catch (error: any) {
+    if (error.message === "Unauthorized") return unauthorizedResponse();
+    console.error("[api/project-requests] POST failed", error);
+    return internalErrorResponse();
+  }
+}

@@ -60,6 +60,31 @@ export async function listAccessibleWorkspaces(
 }
 
 /**
+ * Whether `departmentId` is in the user's REAL, canonical accessible-
+ * departments set — the SAME rule listAccessibleWorkspaces/
+ * resolveActiveWorkspace already use (a global-scope role, i.e.
+ * canViewAllDepartments, can access every ACTIVE department; everyone else
+ * only an active DepartmentMembership's own department) — but without
+ * listAccessibleWorkspaces' WORKSPACE_LIST_TAKE bound or resolveActiveWorkspace's
+ * silent-fallback-to-something-else behavior. For validating ONE already-
+ * known id a caller must not trust blindly (a client-submitted
+ * `departmentId`, an active-workspace cookie value before it's used as a
+ * default) — never for listing/display candidates, where
+ * listAccessibleWorkspaces is still the right call. Added for the Project
+ * Request Form's server-side department validation (see
+ * lib/services/project-request-service.ts) so it can reuse this exact rule
+ * instead of a second, narrower (and, as found, buggy) resolver of its own.
+ */
+export async function isAccessibleDepartment(userId: string, role: Role, departmentId: string): Promise<boolean> {
+  if (canViewAllDepartments(role)) {
+    const dept = await prisma.department.findFirst({ where: { id: departmentId, isActive: true }, select: { id: true } });
+    return !!dept;
+  }
+  const memberships = await getUserDepartmentMemberships(userId);
+  return memberships.some((m) => m.departmentId === departmentId);
+}
+
+/**
  * Ensures the currently-active department is present in a (take-bounded)
  * workspace list, even when it wasn't among the first N by name — a real
  * requirement, not a nicety: without this, switching to a department that

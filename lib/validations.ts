@@ -595,6 +595,91 @@ export const changePasswordSchema = z
     path: ["confirmPassword"],
   });
 
+// ─── Project Request Form Schemas ──────────────────────────────────────────────
+// Client-submittable fields ONLY — requesterId, status, and every
+// approval/audit field (including businessAssessment, now an APPROVER-side
+// field written only at decision time — see projectRequestApprovalDecisionSchema
+// below) are always server-derived (see lib/services/project-request-service.ts)
+// and never accepted here.
+// `departmentId` is accepted as the caller's CHOICE among their own real
+// memberships, never trusted as an authorization decision by itself — the
+// route re-verifies it via resolveDepartmentForRequest before it's ever used.
+
+export const createProjectRequestSchema = z
+  .object({
+    title: z.string().trim().min(3, "Title must be at least 3 characters").max(200),
+    description: z.string().trim().min(10, "Description must be at least 10 characters").max(5000),
+    // Reuses Project's own 1(Low)/2(Medium)/3(High) Int scale — see
+    // lib/project-priority.ts. Never a second/independent importance mapping.
+    importance: z.number().int().min(1).max(3),
+    projectTypeId: z.string().min(1, "Project Type is required"),
+    teamConcerned: z.string().trim().min(2, "Team concerned must be at least 2 characters").max(200),
+    expectedBenefits: z.string().trim().min(10, "Expected benefits must be at least 10 characters").max(5000),
+    // businessAssessment is deliberately NOT accepted here — it moved to the
+    // approver's decision (see projectRequestApprovalDecisionSchema). Any
+    // businessAssessment a client sends in the create payload is discarded
+    // server-side (zod's default strip-unknown-keys behavior), never
+    // persisted anywhere.
+    replacesExisting: z.boolean().default(false),
+    // Required (trimmed, non-empty) EXACTLY when replacesExisting is true —
+    // enforced below via .superRefine, never trusted from client state or
+    // HTML `required` alone. When replacesExisting is false, ANY value sent
+    // here (forged or otherwise) is simply discarded — the route always
+    // persists null in that case (see POST /api/project-requests), never
+    // whatever a client happened to submit. max(5000) matches every other
+    // free-text Project Request field.
+    replacementDescription: z.string().trim().max(5000).optional(),
+    // Only meaningful (and only ever consulted) when the requester belongs to
+    // more than one active department — resolveDepartmentForRequest ignores
+    // this entirely for a single-department requester and auto-selects
+    // instead. A value here that isn't one of the requester's OWN real,
+    // active memberships is always rejected server-side.
+    departmentId: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.replacesExisting && !data.replacementDescription) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Describe the existing solution or project that this request will replace.",
+        path: ["replacementDescription"],
+      });
+    }
+  });
+
+// businessAssessment is MANDATORY for every decision (both approve and
+// reject) — the approver's own contextual justification, never optional and
+// never the requester's. max(5000) matches every other large Project
+// Request text field. Trimmed here so a whitespace-only value is rejected
+// by min(1), never silently accepted as "blank but technically present".
+export const projectRequestApprovalDecisionSchema = z.object({
+  decision: z.enum(["approve", "reject"]),
+  businessAssessment: z.string().trim().min(1, "Business Assessment is required").max(5000),
+});
+
+// A plain number from the client (a <input type="number"> value) — never
+// trusted as-is for currency storage without re-validating precision here:
+// non-negative, at most 2 decimal places (the refine check tolerates tiny
+// floating-point representation error, e.g. 19.99 * 100 landing at
+// 1998.9999999999998, rather than requiring exact binary equality), and
+// capped well above any realistic project cost (matches Decimal(10,2)'s own
+// storage ceiling).
+const projectRequestTypeCostSchema = z
+  .number({ invalid_type_error: "Cost must be a number" })
+  .finite("Cost must be a finite number")
+  .nonnegative("Cost cannot be negative")
+  .max(99999999.99, "Cost is too large")
+  .refine((v) => Math.abs(Math.round(v * 100) - v * 100) < 1e-6, "Cost supports at most 2 decimal places");
+
+export const projectRequestTypeSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
+  isActive: z.boolean().optional(),
+  // Required when creating a NEW type (every type going forward must have a
+  // real, authoritative cost) — optional only via .partial() below for
+  // PATCH, where an isActive-only toggle or a name-only rename must still
+  // work without resupplying cost every time.
+  cost: projectRequestTypeCostSchema,
+});
+
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
 export type CreateTicketInput = z.infer<typeof createTicketSchema>;
@@ -610,3 +695,6 @@ export type UpdateUserRoleInput = z.infer<typeof updateUserRoleSchema>;
 export type CreateUserInput = z.infer<typeof createUserSchema>;
 export type AdminLoginInput = z.infer<typeof adminLoginSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
+export type CreateProjectRequestInput = z.infer<typeof createProjectRequestSchema>;
+export type ProjectRequestApprovalDecisionInput = z.infer<typeof projectRequestApprovalDecisionSchema>;
+export type ProjectRequestTypeInput = z.infer<typeof projectRequestTypeSchema>;
