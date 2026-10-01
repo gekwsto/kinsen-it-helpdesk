@@ -5,9 +5,11 @@ import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 import { canViewProjectRequest } from "@/lib/services/project-request-service";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { getAssignableUsersForProject } from "@/lib/services/assignment-eligibility-service";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
 import { ApprovalActions } from "@/components/project-requests/approval-actions";
+import { IntermediateApprovalActions } from "@/components/project-requests/intermediate-approval-actions";
 import { formatEUR } from "@/lib/currency";
 
 export default async function ProjectRequestDetailPage({
@@ -26,13 +28,19 @@ export default async function ProjectRequestDetailPage({
       department: { select: { id: true, name: true } },
       requester: { select: { id: true, name: true, email: true } },
       approver: { select: { id: true, name: true, email: true } },
+      intermediateApprovers: {
+        include: { approver: { select: { id: true, name: true, email: true } } },
+        orderBy: { createdAt: "asc" },
+      },
+      project: { select: { id: true, title: true } },
     },
   });
   if (!request) notFound();
 
-  // Visibility: requester, or effective projectRequest.approve for THIS
-  // request's own department — never a broader shortcut. A user outside
-  // both sees a plain 404, never a distinguishable "exists but forbidden"
+  // Visibility: requester, within effective FINAL approval scope for THIS
+  // request's own department, or one of THIS request's own selected
+  // intermediate approvers — never a broader shortcut. A user outside all
+  // three sees a plain 404, never a distinguishable "exists but forbidden"
   // response, so a forged URL can't be used to probe for a request's
   // existence.
   const canView = await canViewProjectRequest(session.user.id, session.user.role, session.user.customRoleId, request);
@@ -41,6 +49,16 @@ export default async function ProjectRequestDetailPage({
   const canDecideNow =
     request.status === "PENDING_APPROVAL" &&
     (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, request.departmentId, "projectRequest.approve"));
+
+  // Every candidate owner for the Project that gets auto-created if this
+  // request is approved (see decideApproval) — only meaningfully needed
+  // while canDecideNow, but a single cheap query either way, never a
+  // per-click fetch.
+  const ownerOptions = canDecideNow ? await getAssignableUsersForProject(request.departmentId) : [];
+
+  // THIS viewer's own intermediate-approver row, only if the requester
+  // explicitly selected them for THIS request — never derived any other way.
+  const myIntermediateRow = request.intermediateApprovers.find((r) => r.approver.id === session.user.id) ?? null;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -83,16 +101,30 @@ export default async function ProjectRequestDetailPage({
 
       <div className="rounded-lg border">
         <div className="px-4 py-3">
-          <h2 className="text-sm font-semibold mb-2">Approval</h2>
-          <ApprovalActions
-            requestId={request.id}
-            status={request.status}
-            canDecideNow={canDecideNow}
-            approver={request.approver}
-            approvedAt={request.approvedAt}
-            rejectedAt={request.rejectedAt}
-            businessAssessment={request.businessAssessment}
-          />
+          <h2 className="text-sm font-semibold mb-2">Intermediate Approval</h2>
+          <p className="text-xs text-muted-foreground mb-2">Every selected approver below must approve — any one rejecting ends the request.</p>
+          <IntermediateApprovalActions requestId={request.id} approvers={request.intermediateApprovers} myRow={myIntermediateRow} />
+        </div>
+      </div>
+
+      <div className="rounded-lg border">
+        <div className="px-4 py-3">
+          <h2 className="text-sm font-semibold mb-2">Final Approval</h2>
+          {request.status === "PENDING_INTERMEDIATE_APPROVAL" ? (
+            <p className="text-sm text-muted-foreground">Waiting for intermediate approval before final approval can begin.</p>
+          ) : (
+            <ApprovalActions
+              requestId={request.id}
+              status={request.status}
+              canDecideNow={canDecideNow}
+              approver={request.approver}
+              approvedAt={request.approvedAt}
+              rejectedAt={request.rejectedAt}
+              businessAssessment={request.businessAssessment}
+              ownerOptions={ownerOptions}
+              project={request.project}
+            />
+          )}
         </div>
       </div>
     </div>

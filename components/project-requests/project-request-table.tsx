@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { toast } from "sonner";
 import {
   Table,
@@ -19,13 +20,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Check, FileText, X, Eye } from "lucide-react";
+import { Check, FileText, X, Eye, FolderKanban } from "lucide-react";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
-import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
+import { ProjectRequestDecisionDialog, type ProjectOwnerOption } from "@/components/project-requests/project-request-decision-dialog";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { formatDateTime } from "@/lib/utils";
 import { formatEUR } from "@/lib/currency";
-import type { ProjectRequestStatus } from "@prisma/client";
+import type { ProjectRequestStatus, IntermediateApprovalStatus } from "@prisma/client";
 
 export interface ProjectRequestRow {
   id: string;
@@ -48,6 +49,10 @@ export interface ProjectRequestRow {
   rejectedAt: Date | null;
   businessAssessment: string | null;
   legacyRequesterBusinessAssessment: string | null;
+  /** Every requester-selected intermediate approver for this request and their individual decision — read-only informational display in Preview; the actual decision UI lives on the detail page. */
+  intermediateApprovers: { id: string; status: IntermediateApprovalStatus; approver: { name: string | null; email: string } }[];
+  /** The Project auto-created from this request once it was approved (see decideApproval) — null until then. */
+  project: { id: string; title: string } | null;
   /**
    * Server-computed (status === PENDING_APPROVAL AND effective
    * projectRequest.approve for THIS row's own department — the same
@@ -62,6 +67,8 @@ export interface ProjectRequestRow {
 interface ProjectRequestTableProps {
   requests: ProjectRequestRow[];
   emptyMessage: string;
+  /** Every active, project-assignable user for each department represented among `requests` — keyed by departmentId. Pre-fetched once per page load (never a per-row/on-open fetch — the SAME no-N+1 convention this table's own Approve/Reject already follows) so the owner picker has real data the instant a row's Approve dialog opens. */
+  assignableOwnersByDepartment: Record<string, ProjectOwnerOption[]>;
 }
 
 type Decision = "approve" | "reject";
@@ -76,7 +83,7 @@ type Decision = "approve" | "reject";
  * ApprovalActions uses — never a second/duplicated approval modal or a
  * second copy of the decision logic.
  */
-export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTableProps) {
+export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersByDepartment }: ProjectRequestTableProps) {
   const router = useRouter();
 
   const [previewTarget, setPreviewTarget] = useState<ProjectRequestRow | null>(null);
@@ -99,7 +106,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
     setServerError(null);
   };
 
-  const submitDecision = async (businessAssessment: string) => {
+  const submitDecision = async ({ businessAssessment, projectOwnerId }: { businessAssessment: string; projectOwnerId?: string }) => {
     if (!decisionTarget) return;
     const { row, decision } = decisionTarget;
     setSubmitting(true);
@@ -108,7 +115,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
       const res = await fetch(`/api/project-requests/${row.id}/approval`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, businessAssessment }),
+        body: JSON.stringify({ decision, businessAssessment, projectOwnerId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -264,6 +271,29 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                 {previewTarget.replacesExisting && previewTarget.replacementDescription && (
                   <PreviewField label="Solution/project to be replaced" value={previewTarget.replacementDescription} multiline />
                 )}
+                {previewTarget.intermediateApprovers.length > 0 && (
+                  <div className="px-4 py-3">
+                    <p className="text-xs font-medium text-muted-foreground mb-1.5">Intermediate Approval</p>
+                    <div className="space-y-1">
+                      {previewTarget.intermediateApprovers.map((row) => (
+                        <div key={row.id} className="flex items-center justify-between text-sm">
+                          <span>{row.approver.name ?? row.approver.email}</span>
+                          <span
+                            className={
+                              row.status === "APPROVED"
+                                ? "text-xs font-medium text-green-700"
+                                : row.status === "REJECTED"
+                                ? "text-xs font-medium text-red-700"
+                                : "text-xs font-medium text-muted-foreground"
+                            }
+                          >
+                            {row.status === "APPROVED" ? "Approved" : row.status === "REJECTED" ? "Rejected" : "Pending"}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {previewTarget.approver && (
                   <div className="px-4 py-3">
                     <p className="text-xs font-medium text-muted-foreground mb-1">
@@ -275,6 +305,15 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                     </p>
                     {previewTarget.businessAssessment && (
                       <p className="text-sm whitespace-pre-wrap mt-2">{previewTarget.businessAssessment}</p>
+                    )}
+                    {previewTarget.project && (
+                      <Link
+                        href={`/projects/${previewTarget.project.id}`}
+                        className="inline-flex items-center gap-1.5 mt-2 text-sm text-primary hover:underline"
+                      >
+                        <FolderKanban className="h-3.5 w-3.5" />
+                        View Project
+                      </Link>
                     )}
                   </div>
                 )}
@@ -312,6 +351,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
         serverError={serverError}
         onCancel={cancelDecision}
         onConfirm={submitDecision}
+        ownerOptions={decisionTarget ? assignableOwnersByDepartment[decisionTarget.row.department.id] ?? [] : undefined}
       />
     </div>
   );

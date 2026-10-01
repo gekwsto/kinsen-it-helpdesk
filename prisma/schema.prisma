@@ -709,37 +709,38 @@ model User {
   departmentMemberships    DepartmentMembership[]
   subDepartmentMemberships SubDepartmentMembership[]
 
-  requestedTickets         Ticket[]               @relation("TicketRequester")
-  assignedTickets          Ticket[]               @relation("TicketAgent")
-  departmentChangedTickets Ticket[]               @relation("TicketDepartmentChangedBy")
-  ticketMessages           TicketMessage[]
-  ticketAttachments        TicketAttachment[]
-  ticketHistories          TicketHistory[]
-  pendingTicketsRequested  PendingTicket[]        @relation("PendingTicketRequester")
-  pendingTicketsAccepted   PendingTicket[]        @relation("PendingTicketAccepted")
-  createdIntegrations      ExternalIntegration[]  @relation("IntegrationCreatedBy")
-  pendingTicketsRejected   PendingTicket[]        @relation("PendingTicketRejected")
-  ownedProjects            Project[]              @relation("ProjectOwner")
-  projectMemberships       Project[]              @relation("ProjectMembers")
-  projectRequestsSubmitted ProjectRequest[]       @relation("ProjectRequestRequester")
-  projectRequestsApproved  ProjectRequest[]       @relation("ProjectRequestApprover")
-  assignedActivities       ProjectActivity[]      @relation("ActivityAssignee")
-  activityAssignments      ProjectActivity[]      @relation("ActivityAssignees")
-  createdActivities        ProjectActivity[]      @relation("ActivityCreator")
-  createdDependencies      ActivityDependency[]   @relation("ActivityDependenciesCreatedBy")
-  projectNotes             ProjectNote[]          @relation("ProjectNoteAuthor")
-  activityNotes            ActivityNote[]         @relation("ActivityNoteAuthor")
-  relatedLinksCreated      RelatedLink[]          @relation("RelatedLinkCreator")
-  activityAttachments      ActivityAttachment[]
-  projectAttachments       ProjectAttachment[]
-  projectNoteMentions      ProjectNoteMention[]
-  activityNoteMentions     ActivityNoteMention[]
-  ticketMessageMentions    TicketMessageMention[]
-  ownedGoals               YearlyGoal[]           @relation("GoalOwner")
-  notifications            Notification[]
-  pushSubscriptions        PushSubscription[]
-  accounts                 Account[]
-  sessions                 Session[]
+  requestedTickets                    Ticket[]                             @relation("TicketRequester")
+  assignedTickets                     Ticket[]                             @relation("TicketAgent")
+  departmentChangedTickets            Ticket[]                             @relation("TicketDepartmentChangedBy")
+  ticketMessages                      TicketMessage[]
+  ticketAttachments                   TicketAttachment[]
+  ticketHistories                     TicketHistory[]
+  pendingTicketsRequested             PendingTicket[]                      @relation("PendingTicketRequester")
+  pendingTicketsAccepted              PendingTicket[]                      @relation("PendingTicketAccepted")
+  createdIntegrations                 ExternalIntegration[]                @relation("IntegrationCreatedBy")
+  pendingTicketsRejected              PendingTicket[]                      @relation("PendingTicketRejected")
+  ownedProjects                       Project[]                            @relation("ProjectOwner")
+  projectMemberships                  Project[]                            @relation("ProjectMembers")
+  projectRequestsSubmitted            ProjectRequest[]                     @relation("ProjectRequestRequester")
+  projectRequestsApproved             ProjectRequest[]                     @relation("ProjectRequestApprover")
+  projectRequestIntermediateApprovals ProjectRequestIntermediateApprover[] @relation("ProjectRequestIntermediateApprover")
+  assignedActivities                  ProjectActivity[]                    @relation("ActivityAssignee")
+  activityAssignments                 ProjectActivity[]                    @relation("ActivityAssignees")
+  createdActivities                   ProjectActivity[]                    @relation("ActivityCreator")
+  createdDependencies                 ActivityDependency[]                 @relation("ActivityDependenciesCreatedBy")
+  projectNotes                        ProjectNote[]                        @relation("ProjectNoteAuthor")
+  activityNotes                       ActivityNote[]                       @relation("ActivityNoteAuthor")
+  relatedLinksCreated                 RelatedLink[]                        @relation("RelatedLinkCreator")
+  activityAttachments                 ActivityAttachment[]
+  projectAttachments                  ProjectAttachment[]
+  projectNoteMentions                 ProjectNoteMention[]
+  activityNoteMentions                ActivityNoteMention[]
+  ticketMessageMentions               TicketMessageMention[]
+  ownedGoals                          YearlyGoal[]                         @relation("GoalOwner")
+  notifications                       Notification[]
+  pushSubscriptions                   PushSubscription[]
+  accounts                            Account[]
+  sessions                            Session[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1233,6 +1234,15 @@ model Project {
   // lib/services/sub-department-service.ts, not enforced at the DB level.
   subDepartment   SubDepartment? @relation(fields: [subDepartmentId], references: [id])
   subDepartmentId String?
+  // Set only when this Project was auto-created from an approved Project
+  // Request's FINAL approval (see decideApproval in
+  // lib/services/project-request-service.ts) — null for every
+  // manually-created Project. @unique enforces at most one Project per
+  // request; combined with decideApproval's own race-guarded transaction,
+  // this makes the creation naturally idempotent (a concurrent duplicate
+  // decision can never produce two Projects for the same request).
+  projectRequest   ProjectRequest? @relation(fields: [projectRequestId], references: [id])
+  projectRequestId String?         @unique
   businessUnit    BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
   businessUnitId  String?
   startDate       DateTime?
@@ -1475,7 +1485,24 @@ model ProjectRequestType {
 }
 
 enum ProjectRequestStatus {
+  // The requester-selected set of intermediate approvers (see
+  // ProjectRequestIntermediateApprover) must ALL approve, unanimously,
+  // before this status can ever advance to PENDING_APPROVAL. Any ONE of
+  // them rejecting moves the request straight to REJECTED. New requests
+  // default here; legacy rows created before this stage existed were never
+  // retroactively moved back to this status (see this enum's own migration
+  // — additive only, no backfill).
+  PENDING_INTERMEDIATE_APPROVAL
+  // The pre-existing single, department-scoped final stage — completely
+  // unchanged by the intermediate stage's addition. A request only reaches
+  // this status once every selected intermediate approver has approved.
   PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+enum IntermediateApprovalStatus {
+  PENDING
   APPROVED
   REJECTED
 }
@@ -1544,24 +1571,52 @@ model ProjectRequest {
   department   Department @relation(fields: [departmentId], references: [id])
   departmentId String
 
-  status ProjectRequestStatus @default(PENDING_APPROVAL)
+  // New requests start awaiting unanimous intermediate approval (see
+  // ProjectRequestIntermediateApprover) — only after every selected
+  // intermediate approver has approved does this advance to
+  // PENDING_APPROVAL, the pre-existing single final stage. Legacy rows
+  // (created before this stage existed) were already at PENDING_APPROVAL/
+  // APPROVED/REJECTED and are left exactly as they were — this default
+  // only governs NEW rows, see this migration's own doc comment.
+  status ProjectRequestStatus @default(PENDING_INTERMEDIATE_APPROVAL)
 
-  // Single approval stage — null until decided. Whoever holds effective
-  // projectRequest.approve for `departmentId` (checked fresh at decision
-  // time via hasEffectiveEntityPermission, never a snapshot) may act;
-  // atomically guarded by the current status (see decideApproval).
+  // Every user the REQUESTER selected, at submission time, as an
+  // intermediate approver for THIS request — a snapshot (see
+  // ProjectRequestIntermediateApprover's own doc comment): later changes to
+  // who holds projectRequest.intermediateApprove never add/remove anyone
+  // from an already-submitted request's own list.
+  intermediateApprovers ProjectRequestIntermediateApprover[]
+
+  // Single FINAL approval stage — completely unchanged by the intermediate
+  // stage's addition (same fields, same decideApproval, same
+  // projectRequest.approve permission). Null until decided. Whoever holds
+  // effective projectRequest.approve for `departmentId` (checked fresh at
+  // decision time via hasEffectiveEntityPermission, never a snapshot) may
+  // act — but ONLY once status has actually reached PENDING_APPROVAL, which
+  // decideApproval's own status guard already enforces for free (a request
+  // still at PENDING_INTERMEDIATE_APPROVAL simply isn't PENDING_APPROVAL
+  // yet — no separate "is intermediate done" check needed anywhere).
   approver           User?     @relation("ProjectRequestApprover", fields: [approverId], references: [id])
   approverId         String?
   approvedAt         DateTime?
   rejectedAt         DateTime?
-  // The approver's OWN mandatory justification for this decision — required
-  // at the application level (projectRequestApprovalDecisionSchema) for
-  // every approve/reject; nullable here only because a never-decided
-  // (PENDING_APPROVAL) row has no decision yet. Formerly an optional
-  // decision "comment" (pre-redesign); renamed in place via migration,
-  // preserving any legacy comment text as-is. Never the requester's own
-  // text — see legacyRequesterBusinessAssessment above for that.
+  // The FINAL approver's OWN mandatory justification — required at the
+  // application level (projectRequestApprovalDecisionSchema) for every
+  // approve/reject; nullable here only because a never-decided row has no
+  // decision yet. Never touched by the intermediate stage — see each
+  // ProjectRequestIntermediateApprover row's OWN businessAssessment for
+  // that stage's own, separate audit trail. Formerly an optional decision
+  // "comment" (pre-redesign); renamed in place via migration, preserving
+  // any legacy comment text as-is. Never the requester's own text — see
+  // legacyRequesterBusinessAssessment above for that.
   businessAssessment String?   @db.Text
+
+  // The Project automatically created once this request's FINAL approval
+  // completes (see decideApproval) — null for every request not yet
+  // approved, and for every row that predates this feature. The FK lives
+  // on Project (projectRequestId, @unique) since a Project originates from
+  // at most one request, never the reverse.
+  project Project?
 
   submittedAt DateTime @default(now())
   createdAt   DateTime @default(now())
@@ -1572,6 +1627,45 @@ model ProjectRequest {
   @@index([requesterId])
   @@index([approverId])
   @@index([createdAt])
+}
+
+// One row per user the requester selected as an intermediate approver for a
+// SPECIFIC ProjectRequest — a snapshot taken at submission time, never
+// re-derived later. ALL rows for a given request must reach APPROVED
+// (unanimous) before that request's own status advances past
+// PENDING_INTERMEDIATE_APPROVAL; any ONE row reaching REJECTED immediately
+// rejects the whole request (see decideIntermediateApproval). This is the
+// complete, independent audit trail for the intermediate stage — who was
+// asked, whether/when/why each one decided, and by whom — entirely separate
+// from ProjectRequest's own approver/approvedAt/businessAssessment fields,
+// which remain reserved for the FINAL stage only.
+model ProjectRequestIntermediateApprover {
+  id String @id @default(cuid())
+
+  projectRequest   ProjectRequest @relation(fields: [projectRequestId], references: [id], onDelete: Cascade)
+  projectRequestId String
+
+  approver   User   @relation("ProjectRequestIntermediateApprover", fields: [approverId], references: [id])
+  approverId String
+
+  status             IntermediateApprovalStatus @default(PENDING)
+  decidedAt          DateTime?
+  // This approver's OWN mandatory justification — required at the
+  // application level for every approve/reject, mirroring the final
+  // stage's own businessAssessment requirement; nullable here only because
+  // a still-PENDING row has no decision yet.
+  businessAssessment String?                    @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One decision per (request, approver) pair — a user selected twice for
+  // the same request (never possible via the UI's own dedup, but never
+  // trusted from client input alone) can still only ever hold ONE row,
+  // never a duplicate that could be decided twice.
+  @@unique([projectRequestId, approverId])
+  @@index([projectRequestId])
+  @@index([approverId])
 }
 
 // Per-department, editable status->progress% mapping — Activity progress is

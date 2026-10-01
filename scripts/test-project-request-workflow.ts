@@ -81,6 +81,7 @@ async function main() {
   const { hasPermission } = await import("@/lib/permissions");
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
+  const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const typesGET = (await import("@/app/api/admin/project-request-types/route")).GET;
   const typesPOST = (await import("@/app/api/admin/project-request-types/route")).POST;
   const { default: ProjectRequestDetailPage } = await import("@/app/(main)/project-requests/[id]/page");
@@ -117,6 +118,26 @@ async function main() {
     const perm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.approve" } });
     await prisma.rolePermission.create({ data: { roleKey: r.key, permissionId: perm.id } });
     return r;
+  }
+  /**
+   * Clears the mandatory intermediate stage (as whichever user holds
+   * projectRequest.intermediateApprove was selected for this request — this
+   * file always selects `admin`, who holds it by default, see
+   * prisma/seed.ts's NEW_PERMISSION_DEFAULT_GRANTS) so the request lands at
+   * PENDING_APPROVAL — the pre-existing starting point every test below was
+   * originally written against, before this stage existed. Restores
+   * `sessionAfter` once done; this file is about the FINAL stage, so the
+   * intermediate stage is only ever cleared here as fixture setup.
+   */
+  async function clearIntermediate(
+    requestId: string,
+    approverUser: { id: string; role: any; customRoleId: string | null },
+    sessionAfter: { id: string; role: any; customRoleId: string | null }
+  ) {
+    currentSession = { user: approverUser };
+    const res = await intermediateApprovalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Intermediate approval clear for test setup." }), { params: Promise.resolve({ id: requestId }) });
+    if (res.status !== 200) throw new Error(`Fixture setup failed: intermediate approval returned ${res.status}`);
+    currentSession = { user: sessionAfter };
   }
 
   try {
@@ -179,6 +200,11 @@ async function main() {
       teamConcerned: "Engineering",
       expectedBenefits: "Faster delivery of important features to customers.",
       replacesExisting: false,
+      // Every fixture in this file selects `admin` as its single
+      // intermediate approver — this file is about the pre-existing FINAL
+      // stage, so the intermediate stage is only ever cleared as setup (see
+      // clearIntermediate), never itself under test here.
+      intermediateApproverIds: [admin.id],
     };
     const submitRes = await requestsPOST(jsonReq("POST", basePayload));
     check("Single-department user: POST /api/project-requests -> 201", submitRes.status === 201);
@@ -187,14 +213,26 @@ async function main() {
 
     const created = await prisma.projectRequest.findUniqueOrThrow({ where: { id: submitted.id } });
     check("departmentId was auto-selected server-side (the user's only membership)", created.departmentId === deptA.id);
-    check("Status starts at PENDING_APPROVAL (no manager stage)", created.status === "PENDING_APPROVAL");
+    check("Status starts at PENDING_INTERMEDIATE_APPROVAL (the mandatory intermediate stage)", created.status === "PENDING_INTERMEDIATE_APPROVAL");
     check("requesterId is the authenticated caller, never client-supplied", created.requesterId === requester.id);
-    check("businessAssessment (approver-side) is null at submission — the requester never fills it", created.businessAssessment === null);
+    check("businessAssessment (final-approver-side) is null at submission — the requester never fills it", created.businessAssessment === null);
     check("legacyRequesterBusinessAssessment is null for a brand-new request — never populated by anything but the old pre-redesign rows", created.legacyRequesterBusinessAssessment === null);
 
-    console.log("\n-- Notification created only after a successful commit, fanned out to EVERY eligible approver for the request's department --\n");
+    console.log("\n-- Submission notifies ONLY the selected intermediate approver, never the final stage's eligible approvers yet --\n");
+    const adminIntermediateNotif = await prisma.notification.findFirst({ where: { userId: admin.id, link: `/project-requests/${submitted.id}` } });
+    check("The selected intermediate approver (admin) received an in-app notification for this request", adminIntermediateNotif !== null);
+    if (adminIntermediateNotif) notificationIds.push(adminIntermediateNotif.id);
+    const globalApproverNotifBeforeIntermediate = await prisma.notification.findFirst({ where: { userId: globalApproverUser.id, link: `/project-requests/${submitted.id}` } });
+    check("...the FINAL stage's global approver received NOTHING yet — no misleading 'ready for final approval' notification before intermediate approval", globalApproverNotifBeforeIntermediate === null);
+    check("Notification body does NOT leak the Description text", !adminIntermediateNotif?.body.includes(basePayload.description));
+
+    console.log("\n-- Clearing the intermediate stage advances status AND fans out to EVERY eligible FINAL approver for the request's department --\n");
+    await clearIntermediate(submitted.id, { id: admin.id, role: Role.ADMIN, customRoleId: null }, { id: requester.id, role: Role.USER, customRoleId: null });
+    const afterIntermediate = await prisma.projectRequest.findUniqueOrThrow({ where: { id: submitted.id } });
+    check("Status advances to PENDING_APPROVAL once the (sole) intermediate approver approves", afterIntermediate.status === "PENDING_APPROVAL");
+
     const globalApproverNotif = await prisma.notification.findFirst({ where: { userId: globalApproverUser.id, link: `/project-requests/${submitted.id}` } });
-    check("The global approver received an in-app notification for this Dept-A request", globalApproverNotif !== null);
+    check("NOW the global approver received an in-app notification for this Dept-A request", globalApproverNotif !== null);
     if (globalApproverNotif) notificationIds.push(globalApproverNotif.id);
     const deptAApproverNotif = await prisma.notification.findFirst({ where: { userId: deptAScopedUser.id, link: `/project-requests/${submitted.id}` } });
     check("The Dept-A-scoped approver received an in-app notification for this Dept-A request", deptAApproverNotif !== null);
@@ -225,6 +263,7 @@ async function main() {
     requestIds.push(validMulti.id);
     const validMultiRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: validMulti.id } });
     check("Server-side re-verification stored the EXACT department the requester actually chose and belongs to", validMultiRow.departmentId === deptB.id);
+    await clearIntermediate(validMulti.id, { id: admin.id, role: Role.ADMIN, customRoleId: null }, { id: multiRequester.id, role: Role.USER, customRoleId: null });
 
     console.log("\n-- Inactive Project Type cannot be used, even with a forged request --\n");
     const inactiveTypeRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR Inactive Type ${RUN_ID}`, projectTypeId: typeInactive.id }));
@@ -235,14 +274,14 @@ async function main() {
     // ══════════════ 4. Approval authorization — global, department-scoped, out-of-scope ══════════════
     console.log("\n=== 4. Out-of-scope department approver is rejected ===\n");
     currentSession = { user: { id: deptBScopedUser.id, role: Role.USER, customRoleId: null } };
-    const wrongDeptApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: submitted.id }) });
+    const wrongDeptApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: admin.id }), { params: Promise.resolve({ id: submitted.id }) });
     check("A Dept-B-scoped approver is OUT of scope for a Dept-A request -> 403", wrongDeptApproveRes.status === 403);
     check("...status genuinely unchanged", (await prisma.projectRequest.findUniqueOrThrow({ where: { id: submitted.id } })).status === "PENDING_APPROVAL");
     check("...and the rejected call's businessAssessment was never persisted", (await prisma.projectRequest.findUniqueOrThrow({ where: { id: submitted.id } })).businessAssessment === null);
 
     console.log("\n=== 5. Global approver approves a request from ANY department ===\n");
     currentSession = { user: { id: globalApproverUser.id, role: Role.USER, customRoleId: null } };
-    const globalApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "  Approved centrally — positive ROI.  " }), { params: Promise.resolve({ id: submitted.id }) });
+    const globalApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "  Approved centrally — positive ROI.  ", projectOwnerId: admin.id }), { params: Promise.resolve({ id: submitted.id }) });
     check("Global projectRequest.approve holder approves a Dept A request -> 200", globalApproveRes.status === 200);
     const afterGlobalApprove = await prisma.projectRequest.findUniqueOrThrow({ where: { id: submitted.id } });
     check("Status -> APPROVED", afterGlobalApprove.status === "APPROVED");
@@ -250,17 +289,17 @@ async function main() {
     check("Audit: businessAssessment stored TRIMMED", afterGlobalApprove.businessAssessment === "Approved centrally — positive ROI.");
 
     console.log("\n-- A decided request is terminal — a second decision attempt -> 409, not a silent success --\n");
-    const doubleDecideRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Second attempt" }), { params: Promise.resolve({ id: submitted.id }) });
+    const doubleDecideRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Second attempt", projectOwnerId: admin.id }), { params: Promise.resolve({ id: submitted.id }) });
     check("Approving an already-APPROVED request AGAIN -> 409", doubleDecideRes.status === 409);
     check("...the first decision's businessAssessment is untouched by the rejected second attempt", (await prisma.projectRequest.findUniqueOrThrow({ where: { id: submitted.id } })).businessAssessment === "Approved centrally — positive ROI.");
 
     console.log("\n=== 6. Department-scoped approver: only within their own department ===\n");
     currentSession = { user: { id: deptAScopedUser.id, role: Role.USER, customRoleId: null } };
-    const wrongScopeForMultiRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: validMulti.id }) });
+    const wrongScopeForMultiRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: admin.id }), { params: Promise.resolve({ id: validMulti.id }) });
     check("A Dept-A-scoped approver is OUT of scope for a Dept-B request -> 403", wrongScopeForMultiRes.status === 403);
 
     currentSession = { user: { id: deptBScopedUser.id, role: Role.USER, customRoleId: null } };
-    const rightDeptApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Dept B approval rationale." }), { params: Promise.resolve({ id: validMulti.id }) });
+    const rightDeptApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Dept B approval rationale.", projectOwnerId: admin.id }), { params: Promise.resolve({ id: validMulti.id }) });
     check("A Dept-B-scoped approver CAN approve a Dept-B request -> 200", rightDeptApproveRes.status === 200);
 
     console.log("\n-- Notification only after successful commit; requester notified on the decision --\n");
@@ -277,6 +316,7 @@ async function main() {
     const rejectSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR To Reject ${RUN_ID}` }));
     const rejectSubmit = await rejectSubmitRes.json();
     requestIds.push(rejectSubmit.id);
+    await clearIntermediate(rejectSubmit.id, { id: admin.id, role: Role.ADMIN, customRoleId: null }, { id: rejectRequester.id, role: Role.USER, customRoleId: null });
 
     currentSession = { user: { id: deptAScopedUser.id, role: Role.USER, customRoleId: null } };
     const rejectRes = await approvalPOST(jsonReq("POST", { decision: "reject", businessAssessment: "  Not needed at this time.  " }), { params: Promise.resolve({ id: rejectSubmit.id }) });
@@ -285,12 +325,12 @@ async function main() {
     check("Status -> REJECTED", afterReject.status === "REJECTED");
     check("Audit: rejectedAt + approverId set", afterReject.rejectedAt !== null && afterReject.approverId === deptAScopedUser.id);
     check("Audit: businessAssessment stored TRIMMED", afterReject.businessAssessment === "Not needed at this time.");
-    check("A REJECTED request is terminal — a second decision attempt on it -> 409", (await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Too late" }), { params: Promise.resolve({ id: rejectSubmit.id }) })).status === 409);
+    check("A REJECTED request is terminal — a second decision attempt on it -> 409", (await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Too late", projectOwnerId: admin.id }), { params: Promise.resolve({ id: rejectSubmit.id }) })).status === 409);
     check("...the terminal request's businessAssessment is untouched by the rejected second attempt", (await prisma.projectRequest.findUniqueOrThrow({ where: { id: rejectSubmit.id } })).businessAssessment === "Not needed at this time.");
 
     console.log("\n-- Failed/forbidden action creates NO notification --\n");
     const notifCountBeforeFailed = await prisma.notification.count({ where: { userId: rejectRequester.id } });
-    await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Too late" }), { params: Promise.resolve({ id: rejectSubmit.id }) }); // already REJECTED -> 409
+    await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Too late", projectOwnerId: admin.id }), { params: Promise.resolve({ id: rejectSubmit.id }) }); // already REJECTED -> 409
     const notifCountAfterFailed = await prisma.notification.count({ where: { userId: rejectRequester.id } });
     check("A rejected-again attempt (409) creates no additional notification", notifCountBeforeFailed === notifCountAfterFailed);
 
@@ -309,9 +349,10 @@ async function main() {
     const anotherSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR No Perm Check ${RUN_ID}` }));
     const anotherSubmit = await anotherSubmitRes.json();
     requestIds.push(anotherSubmit.id);
+    await clearIntermediate(anotherSubmit.id, { id: admin.id, role: Role.ADMIN, customRoleId: null }, { id: anotherRequester.id, role: Role.USER, customRoleId: null });
 
     currentSession = { user: { id: noPermUser.id, role: Role.USER, customRoleId: null } };
-    const noPermApiRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: anotherSubmit.id }) });
+    const noPermApiRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: admin.id }), { params: Promise.resolve({ id: anotherSubmit.id }) });
     check("Direct API call from a user with no projectRequest.approve -> 403", noPermApiRes.status === 403);
 
     // ══════════════ 10. Double-click / concurrent approval never creates a second transition ══════════════
@@ -322,11 +363,12 @@ async function main() {
     const raceSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR Race ${RUN_ID}` }));
     const raceSubmit = await raceSubmitRes.json();
     requestIds.push(raceSubmit.id);
+    await clearIntermediate(raceSubmit.id, { id: admin.id, role: Role.ADMIN, customRoleId: null }, { id: raceRequester.id, role: Role.USER, customRoleId: null });
 
     currentSession = { user: { id: globalApproverUser.id, role: Role.USER, customRoleId: null } };
     const [raceA, raceB] = await Promise.all([
-      approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Race call A" }), { params: Promise.resolve({ id: raceSubmit.id }) }),
-      approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Race call B" }), { params: Promise.resolve({ id: raceSubmit.id }) }),
+      approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Race call A", projectOwnerId: admin.id }), { params: Promise.resolve({ id: raceSubmit.id }) }),
+      approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Race call B", projectOwnerId: admin.id }), { params: Promise.resolve({ id: raceSubmit.id }) }),
     ]);
     const raceStatuses = [raceA.status, raceB.status].sort();
     check("Exactly ONE of the two concurrent identical calls succeeds (200), the other loses the race (409) — never both 200", raceStatuses[0] === 200 && raceStatuses[1] === 409);
@@ -392,10 +434,21 @@ async function main() {
     check("Dept-B-scoped approver's History tab includes the Dept-B request they approved", historyIds.includes(validMulti.id));
     check("...but does NOT include the Dept-A request they have no involvement in", !historyIds.includes(submitted.id));
 
-    // ══════════════ 12. Final approval never creates a Project; existing Project permissions unaffected ══════════════
-    console.log("\n=== 12. Final APPROVED status never creates a real Project row ===\n");
-    const projectCountBefore = await prisma.project.count({ where: { title: { contains: RUN_ID.toString() } } });
-    check("No Project row exists anywhere named after this run's requests (approval never auto-creates one)", projectCountBefore === 0);
+    // ══════════════ 12. Final approval auto-creates a Project, pre-filled from the request ══════════════
+    // Full dedicated coverage (owner validation, idempotency, field
+    // mapping, reject never creating one) lives in
+    // scripts/test-project-request-project-creation.ts — this is a single
+    // end-to-end confirmation using THIS file's own already-approved
+    // `submitted` request from section 5 above.
+    console.log("\n=== 12. Final APPROVED status auto-creates a real Project row, pre-filled from the request ===\n");
+    const autoProject = await prisma.project.findUnique({ where: { projectRequestId: submitted.id } });
+    check("A Project was auto-created, linked back to the request via projectRequestId", autoProject !== null);
+    check("...title matches the request's own title", autoProject?.title === created.title);
+    check("...departmentId matches the request's own department", autoProject?.departmentId === deptA.id);
+    check("...priority matches the request's importance (same 1/2/3 scale)", autoProject?.priority === created.importance);
+    check("...ownerId is the approver's own choice at decision time (projectOwnerId), never the requester or the approver themselves", autoProject?.ownerId === admin.id);
+    const rejectedProject = await prisma.project.findUnique({ where: { projectRequestId: rejectSubmit.id } });
+    check("A REJECTED request never gets a Project auto-created for it", rejectedProject === null);
 
     console.log("\n=== 13. project.create and other Project permissions are completely unaffected ===\n");
     check("hasPermission(USER, 'project.create') is unchanged (false by default, same as before this feature)", (await hasPermission(Role.USER, "project.create", null)) === false);
@@ -418,6 +471,7 @@ async function main() {
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
+      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],

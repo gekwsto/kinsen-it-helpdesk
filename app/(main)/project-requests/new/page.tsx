@@ -2,6 +2,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { getIntermediateApproverOptions } from "@/lib/services/project-request-service";
 import { ProjectRequestForm } from "@/components/project-requests/project-request-form";
 import { FileText } from "lucide-react";
 
@@ -37,12 +38,19 @@ export default async function NewProjectRequestPage() {
   // <ProjectRequestForm>.
   const activeTypes = activeTypesRaw.map((t) => ({ ...t, cost: t.cost ? Number(t.cost) : null }));
 
+  // Every real, currently-eligible intermediate approver, system-wide —
+  // never department-scoped. This stage is mandatory (fail closed): if
+  // nobody currently holds projectRequest.intermediateApprove, submission
+  // must be blocked below rather than silently skipping the stage.
+  const intermediateApproverOptions = await getIntermediateApproverOptions();
+
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h1 className="text-2xl font-bold">Project Request Form</h1>
         <p className="text-muted-foreground mt-1">
-          Submit a request for a new Project — it will be routed to your manager, then to a system approver.
+          Submit a request for a new Project — select who should intermediate-approve it; once they all approve, it
+          goes to final approval.
         </p>
       </div>
 
@@ -61,8 +69,21 @@ export default async function NewProjectRequestPage() {
             No Project Types have been configured yet. Contact an administrator before submitting a request.
           </p>
         </div>
+      ) : intermediateApproverOptions.length === 0 ? (
+        <div className="text-center py-20 border rounded-lg">
+          <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+          <p className="text-muted-foreground">
+            No one is currently assigned the intermediate approval permission. The Project Request cannot be
+            submitted for approval. Contact an administrator.
+          </p>
+        </div>
       ) : (
-        <ProjectRequestForm departments={departments} types={activeTypes} defaultDepartmentId={defaultDepartmentId} />
+        <ProjectRequestForm
+          departments={departments}
+          types={activeTypes}
+          defaultDepartmentId={defaultDepartmentId}
+          intermediateApproverOptions={intermediateApproverOptions}
+        />
       )}
     </div>
   );

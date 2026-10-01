@@ -91,6 +91,7 @@ async function main() {
     teamConcerned: "Engineering",
     expectedBenefits: "Benefits text that is definitely long enough for validation.",
     replacesExisting: false,
+    intermediateApproverIds: ["some-approver-id"],
   };
   check("2. createProjectRequestSchema accepts a payload with NO businessAssessment at all", createProjectRequestSchema.safeParse(minimalPayload).success);
   check("2. POST /api/project-requests never writes businessAssessment into the create() call", !/businessAssessment:\s*data\.businessAssessment/.test(routeSrc));
@@ -105,9 +106,10 @@ async function main() {
   check("7. Empty string businessAssessment fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "" }).success);
   check("7. Whitespace-only businessAssessment fails (trimmed to empty)", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "   \n\t  " }).success);
   check("7. Over-length (5001 chars) businessAssessment fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "x".repeat(5001) }).success);
-  const trimParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "  Looks solid.  " });
+  const trimParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "  Looks solid.  ", projectOwnerId: "cmx0000000000000000000001" });
   check("9. A valid businessAssessment passes and is persisted-ready TRIMMED by the schema itself", trimParse.success && (trimParse as any).data.businessAssessment === "Looks solid.");
-  check("...and 'reject' accepts the exact same mandatory field (never optional for reject)", projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success);
+  check("...and 'reject' accepts the exact same mandatory field (never optional for reject, and never needs a projectOwnerId — no Project is ever created from a rejection)", projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success);
+  check("...but 'approve' WITHOUT a projectOwnerId is now rejected — a Project is always auto-created on approval, so an owner must always be chosen", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "Looks solid." }).success);
 
   // ══════════════════════ SECTION A2 — shared dialog / client behavior (source checks) ══════════════════════
   console.log("\n=== SECTION A2 — the ONE shared decision dialog; click never mutates by itself ===\n");
@@ -126,8 +128,15 @@ async function main() {
   check("5. The Reject button's onClick ONLY sets pendingDecision state (opens the dialog) — same shared flow as Approve", rejectButtonBlock !== null);
   check("...neither button's onClick handler calls fetch/submit directly", !/onClick=\{\(\) => setPendingDecision\("(approve|reject)"\)\}[^}]*fetch/.test(actionsSrc));
 
-  // 7 (client). Empty/whitespace-only is blocked before onConfirm ever fires.
-  check("7. The dialog computes isEmpty from the TRIMMED value and blocks confirm when empty (client-side gate, independent of the server's own re-check)", /isEmpty = value\.trim\(\)\.length === 0/.test(dialogSrc) && /if \(isEmpty\) return;/.test(dialogSrc));
+  // 7 (client). Empty/whitespace-only is blocked before onConfirm ever fires
+  // (gated by assessmentRequired, which is true/default for the FINAL
+  // stage this file is about — the intermediate stage passes
+  // assessmentRequired={false} and never shows this field at all, see
+  // scripts/test-project-request-intermediate-approval.ts).
+  check(
+    "7. The dialog computes isEmpty from the TRIMMED value and blocks confirm when empty (client-side gate, independent of the server's own re-check)",
+    /isEmpty = value\.trim\(\)\.length === 0/.test(dialogSrc) && /if \(assessmentRequired && isEmpty\) return;/.test(dialogSrc)
+  );
   check("...maxLength={5000} matches every other large Project Request text field", /maxLength=\{MAX_LENGTH\}/.test(dialogSrc) && /MAX_LENGTH = 5000/.test(dialogSrc));
 
   // 8/14. Cancel/Escape closes without mutation; a failed submit keeps the
@@ -166,6 +175,7 @@ async function main() {
   const { createDepartment } = await import("@/lib/services/department-service");
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
+  const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const { default: ProjectRequestDetailPage } = await import("@/app/(main)/project-requests/[id]/page");
   const { ApprovalActions } = await import("@/components/project-requests/approval-actions");
 
@@ -180,8 +190,11 @@ async function main() {
   const jsonReq = (method: string, body?: unknown) =>
     new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
-  async function makeUser(email: string) {
-    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+  let intermediateApproverUser: { id: string };
+  let intermediateApproverCustomRoleId: string;
+
+  async function makeUser(email: string, customRoleId: string | null = null) {
+    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId } });
     userIds.push(u.id);
     return u;
   }
@@ -190,13 +203,24 @@ async function main() {
       data: { userId, departmentId, role: DepartmentRole.VIEWER, customRoleId, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
     });
   }
-  async function makeApproverRole(tag: string, scope: "GLOBAL" | "DEPARTMENT") {
+  async function makeApproverRole(tag: string, scope: "GLOBAL" | "DEPARTMENT", permissionKey = "projectRequest.approve") {
     const r = await prisma.customRole.create({ data: { key: `PR_BA_${tag}_${RUN_ID}`, name: `${tag} ${RUN_ID}`, isBuiltIn: false, scope: scope as any, isActive: true } });
     customRoleIds.push(r.id);
     customRoleKeys.push(r.key);
-    const perm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.approve" } });
+    const perm = await prisma.permission.findUniqueOrThrow({ where: { key: permissionKey } });
     await prisma.rolePermission.create({ data: { roleKey: r.key, permissionId: perm.id } });
     return r;
+  }
+  /** Submits via the real route AND immediately clears the mandatory intermediate stage (as the one designated intermediate approver) so the returned request lands at PENDING_APPROVAL — the pre-existing starting point every test in this file was written against. */
+  async function submitAndClearIntermediate(payload: Record<string, unknown>, sessionAfter: { id: string; role: any; customRoleId: string | null }) {
+    const res = await requestsPOST(jsonReq("POST", payload));
+    const body = await res.json();
+    requestIds.push(body.id);
+    currentSession = { user: { id: intermediateApproverUser.id, role: Role.USER, customRoleId: intermediateApproverCustomRoleId } };
+    const intermediateRes = await intermediateApprovalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Intermediate approval clear for test setup." }), { params: Promise.resolve({ id: body.id }) });
+    if (intermediateRes.status !== 200) throw new Error(`Fixture setup failed: intermediate approval returned ${intermediateRes.status}`);
+    currentSession = { user: sessionAfter };
+    return { res, body };
   }
 
   try {
@@ -215,6 +239,25 @@ async function main() {
     const noPermUser = await makeUser(`pr-ba-noperm-${RUN_ID}@kinsen.gr`);
     await addMembership(noPermUser.id, dept.id);
 
+    // Every successful FINAL approve now also needs a real, valid Project
+    // owner (see projectRequestApprovalDecisionSchema/decideApproval) — a
+    // dedicated department-scoped `project.assignable` holder, distinct
+    // from the approver itself, so the owner-picker is exercised against a
+    // real, independently-checked identity rather than reusing the
+    // approver's own id.
+    const projectOwnerRole = await makeApproverRole("PROJECTOWNER", "DEPARTMENT", "project.assignable");
+    const projectOwnerUser = await makeUser(`pr-ba-projectowner-${RUN_ID}@kinsen.gr`);
+    await addMembership(projectOwnerUser.id, dept.id, projectOwnerRole.id);
+
+    // The single intermediate approver every fixture in this file selects —
+    // this file is about businessAssessment at the FINAL stage, so the
+    // intermediate stage is only ever cleared here as fixture setup, never
+    // itself under test (see scripts/test-project-request-intermediate-approval.ts
+    // for the intermediate stage's own dedicated coverage).
+    const intermediateApproverRole = await makeApproverRole("INTERMEDIATE", "GLOBAL", "projectRequest.intermediateApprove");
+    intermediateApproverUser = await makeUser(`pr-ba-intermediate-${RUN_ID}@kinsen.gr`, intermediateApproverRole.id);
+    intermediateApproverCustomRoleId = intermediateApproverRole.id;
+
     const basePayload = {
       title: `PR BA Request ${RUN_ID}`,
       description: "A description that is definitely long enough.",
@@ -223,6 +266,7 @@ async function main() {
       teamConcerned: "Engineering",
       expectedBenefits: "Benefits text that is definitely long enough for validation.",
       replacesExisting: false,
+      intermediateApproverIds: [intermediateApproverUser.id],
     };
 
     // ══════════════════════ 3. Forged create-time assessment never fills approval fields ══════════════════════
@@ -238,16 +282,17 @@ async function main() {
 
     // ══════════════════════ 7 (server). Empty / whitespace-only rejected server-side ══════════════════════
     console.log("\n=== 7. Empty and whitespace-only businessAssessment are rejected server-side on the real route ===\n");
-    const mainSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR BA Main ${RUN_ID}` }));
-    const mainSubmit = await mainSubmitRes.json();
-    requestIds.push(mainSubmit.id);
+    const { body: mainSubmit } = await submitAndClearIntermediate(
+      { ...basePayload, title: `PR BA Main ${RUN_ID}` },
+      { id: requester.id, role: Role.USER, customRoleId: null }
+    );
 
     currentSession = { user: { id: approverUser.id, role: Role.USER, customRoleId: null } };
-    const missingRes = await approvalPOST(jsonReq("POST", { decision: "approve" }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    const missingRes = await approvalPOST(jsonReq("POST", { decision: "approve", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
     check("7. Missing businessAssessment key -> 422 (zod rejection, never reaches decideApproval)", missingRes.status === 422);
-    const emptyRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "" }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    const emptyRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
     check("7. Empty string businessAssessment -> 422", emptyRes.status === 422);
-    const whitespaceRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "   \n\t  " }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    const whitespaceRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "   \n\t  ", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
     check("7. Whitespace-only businessAssessment -> 422", whitespaceRes.status === 422);
     const stillPending = await prisma.projectRequest.findUniqueOrThrow({ where: { id: mainSubmit.id } });
     check("7. ...none of the three rejected attempts changed the status — still PENDING_APPROVAL", stillPending.status === "PENDING_APPROVAL");
@@ -257,7 +302,7 @@ async function main() {
     console.log("\n=== 11. Unauthorized decision attempt persists no assessment and sends no notification ===\n");
     currentSession = { user: { id: noPermUser.id, role: Role.USER, customRoleId: null } };
     const notifBefore = await prisma.notification.count({ where: { userId: requester.id } });
-    const unauthorizedRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    const unauthorizedRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
     check("11. A user without projectRequest.approve -> 403", unauthorizedRes.status === 403);
     const afterUnauthorized = await prisma.projectRequest.findUniqueOrThrow({ where: { id: mainSubmit.id } });
     check("11. ...businessAssessment is STILL null after the rejected unauthorized attempt", afterUnauthorized.businessAssessment === null);
@@ -267,7 +312,7 @@ async function main() {
     // ══════════════════════ 9/10. Valid assessment persists trimmed; a terminal request's assessment is immutable ══════════════════════
     console.log("\n=== 9. A valid businessAssessment is approved and persists TRIMMED, tied to decision/approver/timestamp ===\n");
     currentSession = { user: { id: approverUser.id, role: Role.USER, customRoleId: null } };
-    const approveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "  Strong ROI case, proceed.  " }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    const approveRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "  Strong ROI case, proceed.  ", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
     check("9. Valid businessAssessment -> 200", approveRes.status === 200);
     const afterApprove = await prisma.projectRequest.findUniqueOrThrow({ where: { id: mainSubmit.id } });
     check("9. ...status -> APPROVED", afterApprove.status === "APPROVED");
@@ -287,13 +332,14 @@ async function main() {
     const raceRequester = await makeUser(`pr-ba-racerequester-${RUN_ID}@kinsen.gr`);
     await addMembership(raceRequester.id, dept.id);
     currentSession = { user: { id: raceRequester.id, role: Role.USER, customRoleId: null } };
-    const raceSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR BA Race ${RUN_ID}` }));
-    const raceSubmit = await raceSubmitRes.json();
-    requestIds.push(raceSubmit.id);
+    const { body: raceSubmit } = await submitAndClearIntermediate(
+      { ...basePayload, title: `PR BA Race ${RUN_ID}` },
+      { id: raceRequester.id, role: Role.USER, customRoleId: null }
+    );
 
     currentSession = { user: { id: approverUser.id, role: Role.USER, customRoleId: null } };
     const [raceA, raceB] = await Promise.all([
-      approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Race A assessment" }), { params: Promise.resolve({ id: raceSubmit.id }) }),
+      approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Race A assessment", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: raceSubmit.id }) }),
       approvalPOST(jsonReq("POST", { decision: "reject", businessAssessment: "Race B assessment" }), { params: Promise.resolve({ id: raceSubmit.id }) }),
     ]);
     const raceStatuses = [raceA.status, raceB.status].sort();
@@ -326,6 +372,12 @@ async function main() {
         replacesExisting: false,
         requesterId: requester.id,
         departmentId: dept.id,
+        // A row this old genuinely predates the intermediate stage
+        // entirely (it never existed for it) — explicitly PENDING_APPROVAL,
+        // never the new default PENDING_INTERMEDIATE_APPROVAL, exactly
+        // matching how the real pre-existing rows in this app's own
+        // database behave (see this feature's own migration strategy).
+        status: "PENDING_APPROVAL",
       },
     });
     requestIds.push(legacyRow.id);
@@ -356,6 +408,7 @@ async function main() {
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
+      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],

@@ -5,13 +5,15 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { parsePageParam, parsePageSizeParam, computePagination } from "@/lib/pagination";
-import { resolveApprovalScope, buildAwaitingMyApprovalWhere, buildHistoryWhere } from "@/lib/services/project-request-service";
+import { resolveApprovalScope, buildAwaitingMyApprovalWhere, buildAwaitingMyIntermediateApprovalWhere, buildHistoryWhere } from "@/lib/services/project-request-service";
+import { getAssignableUsersForProject, type AssignableUserSummary } from "@/lib/services/assignment-eligibility-service";
 import { ProjectRequestTable } from "@/components/project-requests/project-request-table";
 import { cn } from "@/lib/utils";
 import type { Prisma } from "@prisma/client";
 
 const TABS = [
   { key: "mine", label: "My Requests" },
+  { key: "awaitingIntermediate", label: "Awaiting My Intermediate Approval" },
   { key: "awaiting", label: "Awaiting My Approval" },
   { key: "history", label: "History" },
 ] as const;
@@ -50,6 +52,8 @@ export default async function ProjectRequestsPage({
   let where: Prisma.ProjectRequestWhereInput;
   if (tab === "mine") {
     where = { requesterId: session.user.id };
+  } else if (tab === "awaitingIntermediate") {
+    where = buildAwaitingMyIntermediateApprovalWhere(session.user.id);
   } else if (tab === "awaiting") {
     where = buildAwaitingMyApprovalWhere(session.user.id, scope);
   } else {
@@ -67,12 +71,29 @@ export default async function ProjectRequestsPage({
         department: { select: { id: true, name: true } },
         requester: { select: { id: true, name: true, email: true } },
         approver: { select: { id: true, name: true, email: true } },
+        intermediateApprovers: {
+          include: { approver: { select: { id: true, name: true, email: true } } },
+          orderBy: { createdAt: "asc" },
+        },
+        project: { select: { id: true, title: true } },
       },
     }),
     prisma.projectRequest.count({ where }),
   ]);
 
   const pagination = computePagination(total, requestedPage, pageSize);
+
+  // Every candidate Project owner for each department actually represented
+  // on this page — pre-fetched ONCE per distinct department (never a
+  // per-row/on-open fetch), so the inline Approve dialog's owner picker has
+  // real data the instant it opens.
+  const distinctDepartmentIds = Array.from(new Set(requests.map((r) => r.departmentId)));
+  const assignableOwnersByDepartment: Record<string, AssignableUserSummary[]> = {};
+  await Promise.all(
+    distinctDepartmentIds.map(async (departmentId) => {
+      assignableOwnersByDepartment[departmentId] = await getAssignableUsersForProject(departmentId);
+    })
+  );
 
   const tabHref = (key: TabKey) => `/project-requests?tab=${key}`;
   const pageHref = (page: number) => `/project-requests?tab=${tab}&page=${page}`;
@@ -125,8 +146,15 @@ export default async function ProjectRequestsPage({
 
       <ProjectRequestTable
         requests={rowsWithActions}
+        assignableOwnersByDepartment={assignableOwnersByDepartment}
         emptyMessage={
-          tab === "mine" ? "You haven't submitted any Project Requests yet." : tab === "awaiting" ? "Nothing is awaiting your approval." : "No decided requests to show."
+          tab === "mine"
+            ? "You haven't submitted any Project Requests yet."
+            : tab === "awaitingIntermediate"
+            ? "Nothing is awaiting your intermediate approval."
+            : tab === "awaiting"
+            ? "Nothing is awaiting your approval."
+            : "No decided requests to show."
         }
       />
 

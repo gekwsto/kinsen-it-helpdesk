@@ -32,6 +32,11 @@ interface ProjectTypeOption {
   /** The type's current/default cost — informational only here; the server independently resolves and snapshots this at submission time (see POST /api/project-requests), never trusting anything the client displays or sends. */
   cost: number | null;
 }
+interface IntermediateApproverOption {
+  id: string;
+  name: string | null;
+  email: string;
+}
 
 interface ProjectRequestFormProps {
   /** The caller's own real, canonical accessible-departments set — the SAME one the workspace selector itself uses (see app/(main)/project-requests/new/page.tsx). A single entry is auto-selected and the picker is hidden entirely. */
@@ -40,11 +45,13 @@ interface ProjectRequestFormProps {
   types: ProjectTypeOption[];
   /** The active workspace's departmentId, ONLY when it's a real department (never the synthetic "All Workspaces" state) and already confirmed by the page to be in `departments` — a pre-selected default when there's more than one option, never an authorization decision; the server re-verifies whatever is actually submitted regardless. */
   defaultDepartmentId?: string;
+  /** Every real, currently-eligible intermediate approver, system-wide (never department-scoped) — the page already renders a clean empty state instead of this form when there are none (this stage is mandatory, never silently skipped). */
+  intermediateApproverOptions: IntermediateApproverOption[];
 }
 
 const IMPORTANCE_LEVELS = [1, 2, 3] as const;
 
-export function ProjectRequestForm({ departments, types, defaultDepartmentId }: ProjectRequestFormProps) {
+export function ProjectRequestForm({ departments, types, defaultDepartmentId, intermediateApproverOptions }: ProjectRequestFormProps) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
 
@@ -61,6 +68,7 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId }: 
       importance: 2,
       replacesExisting: false,
       departmentId: departments.length === 1 ? departments[0].id : defaultDepartmentId,
+      intermediateApproverIds: [],
     },
   });
 
@@ -68,6 +76,13 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId }: 
   const projectTypeId = watch("projectTypeId");
   const departmentId = watch("departmentId");
   const replacesExisting = watch("replacesExisting");
+  const intermediateApproverIds = watch("intermediateApproverIds") ?? [];
+
+  const toggleIntermediateApprover = (userId: string, checked: boolean) => {
+    const current = intermediateApproverIds;
+    const next = checked ? [...current, userId] : current.filter((id) => id !== userId);
+    setValue("intermediateApproverIds", next, { shouldValidate: true });
+  };
 
   // Purely derived from whichever type is currently selected — never its
   // own form field, never submitted, never editable. Changing the
@@ -201,6 +216,38 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId }: 
             </Label>
             <Textarea id="expectedBenefits" rows={3} placeholder="What benefits will this bring" {...register("expectedBenefits")} />
             {errors.expectedBenefits && <p className="text-xs text-destructive">{errors.expectedBenefits.message}</p>}
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="intermediateApproverIds">
+              Intermediate Approvers <span className="text-destructive">*</span>
+            </Label>
+            <p id="intermediateApproverIds-helper" className="text-xs text-muted-foreground">
+              Select everyone who must approve this request before it goes to final approval — all of them must approve.
+            </p>
+            <div
+              id="intermediateApproverIds"
+              role="group"
+              aria-describedby={errors.intermediateApproverIds ? "intermediateApproverIds-helper intermediateApproverIds-error" : "intermediateApproverIds-helper"}
+              className="max-h-48 overflow-y-auto rounded-md border divide-y"
+            >
+              {intermediateApproverOptions.map((u) => (
+                <label key={u.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-muted/50">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded border-input"
+                    checked={intermediateApproverIds.includes(u.id)}
+                    onChange={(e) => toggleIntermediateApprover(u.id, e.target.checked)}
+                  />
+                  <span>{u.name ?? u.email}</span>
+                </label>
+              ))}
+            </div>
+            {errors.intermediateApproverIds && (
+              <p id="intermediateApproverIds-error" className="text-xs text-destructive">
+                {errors.intermediateApproverIds.message as string}
+              </p>
+            )}
           </div>
 
           <label className="flex items-center gap-2 text-sm">

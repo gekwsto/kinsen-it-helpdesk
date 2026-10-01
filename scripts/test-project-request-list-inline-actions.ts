@@ -142,6 +142,7 @@ async function main() {
   const { createDepartment } = await import("@/lib/services/department-service");
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
+  const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const { default: ProjectRequestsPage } = await import("@/app/(main)/project-requests/page");
   const { default: ProjectRequestDetailPage } = await import("@/app/(main)/project-requests/[id]/page");
   const { ProjectRequestTable } = await import("@/components/project-requests/project-request-table");
@@ -157,8 +158,8 @@ async function main() {
   const jsonReq = (method: string, body?: unknown) =>
     new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
-  async function makeUser(email: string) {
-    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+  async function makeUser(email: string, customRoleId: string | null = null) {
+    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId } });
     userIds.push(u.id);
     return u;
   }
@@ -167,11 +168,11 @@ async function main() {
       data: { userId, departmentId, role: DepartmentRole.VIEWER, customRoleId, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
     });
   }
-  async function makeApproverRole(tag: string, scope: "GLOBAL" | "DEPARTMENT") {
+  async function makeApproverRole(tag: string, scope: "GLOBAL" | "DEPARTMENT", permissionKey: string = "projectRequest.approve") {
     const r = await prisma.customRole.create({ data: { key: `PR_LIST_${tag}_${RUN_ID}`, name: `${tag} ${RUN_ID}`, isBuiltIn: false, scope: scope as any, isActive: true } });
     customRoleIds.push(r.id);
     customRoleKeys.push(r.key);
-    const perm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.approve" } });
+    const perm = await prisma.permission.findUniqueOrThrow({ where: { key: permissionKey } });
     await prisma.rolePermission.create({ data: { roleKey: r.key, permissionId: perm.id } });
     return r;
   }
@@ -197,12 +198,32 @@ async function main() {
     const approverUser = await makeUser(`pr-list-approver-${RUN_ID}@kinsen.gr`);
     await addMembership(approverUser.id, dept.id, approverRole.id);
 
+    // Every successful FINAL approve now also needs a real, valid Project
+    // owner (see decideApproval) — a dedicated department-scoped
+    // `project.assignable` holder.
+    const projectOwnerRole = await makeApproverRole("PROJECTOWNER", "DEPARTMENT", "project.assignable");
+    const projectOwnerUser = await makeUser(`pr-list-projectowner-${RUN_ID}@kinsen.gr`);
+    await addMembership(projectOwnerUser.id, dept.id, projectOwnerRole.id);
+
     const otherDeptApproverRole = await makeApproverRole("OTHER", "DEPARTMENT");
     const otherDeptApproverUser = await makeUser(`pr-list-otherapprover-${RUN_ID}@kinsen.gr`);
     await addMembership(otherDeptApproverUser.id, otherDept.id, otherDeptApproverRole.id);
 
     const noPermUser = await makeUser(`pr-list-noperm-${RUN_ID}@kinsen.gr`);
     await addMembership(noPermUser.id, dept.id);
+
+    const intermediateApproverRole = await makeApproverRole("INTERMEDIATE", "GLOBAL", "projectRequest.intermediateApprove");
+    // The global-permission reverse lookup used at submission time reads the
+    // User's own top-level customRoleId DB column, never a
+    // DepartmentMembership's — must be set directly here.
+    const intermediateApproverUser = await makeUser(`pr-list-intermediate-${RUN_ID}@kinsen.gr`, intermediateApproverRole.id);
+    async function clearIntermediate(requestId: string) {
+      const prior = currentSession;
+      currentSession = { user: { id: intermediateApproverUser.id, role: Role.USER, customRoleId: intermediateApproverRole.id } };
+      const res = await intermediateApprovalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Cleared for fixture setup." }), { params: Promise.resolve({ id: requestId }) });
+      if (res.status !== 200) throw new Error(`Failed to clear intermediate approval for ${requestId}: ${res.status}`);
+      currentSession = prior;
+    }
 
     const basePayload = {
       title: `PR List Request ${RUN_ID}`,
@@ -212,18 +233,21 @@ async function main() {
       teamConcerned: "Engineering",
       expectedBenefits: "Benefits text that is definitely long enough for validation.",
       replacesExisting: false,
+      intermediateApproverIds: [intermediateApproverUser.id],
     };
 
     currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
     const mainSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR List Main ${RUN_ID}` }));
     const mainSubmit = await mainSubmitRes.json();
     requestIds.push(mainSubmit.id);
+    await clearIntermediate(mainSubmit.id);
 
     const withReplacementRes = await requestsPOST(
       jsonReq("POST", { ...basePayload, title: `PR List Replaces ${RUN_ID}`, replacesExisting: true, replacementDescription: "The legacy spreadsheet tracker." })
     );
     const withReplacement = await withReplacementRes.json();
     requestIds.push(withReplacement.id);
+    await clearIntermediate(withReplacement.id);
 
     // ══════════════════════ 7/8. canDecideNow is correctly gated by real authorization, per row ══════════════════════
     console.log("\n=== 7/8. canDecideNow on each row matches real authorization — never from ownership alone ===\n");
@@ -277,6 +301,9 @@ async function main() {
         replacesExisting: false,
         requesterId: requester.id,
         departmentId: dept.id,
+        // A row from before the intermediate-approval redesign must not
+        // silently pick up the new PENDING_INTERMEDIATE_APPROVAL default.
+        status: "PENDING_APPROVAL",
       },
     });
     requestIds.push(legacyRow.id);
@@ -293,7 +320,7 @@ async function main() {
     const beforeHistory = await getTableRows({ tab: "history" });
     check("12. ...and NOT yet in 'History'", !beforeHistory.some((r) => r.id === mainSubmit.id));
 
-    const decideRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Looks solid, approve." }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    const decideRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Looks solid, approve.", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
     check("9. The SAME approval endpoint the list's inline Approve button posts to -> 200", decideRes.status === 200);
 
     // 11. "Success -> router.refresh(), same URL/tab" — proven at the data
@@ -345,6 +372,7 @@ async function main() {
     const historyRegressionSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR List History Regression ${RUN_ID}` }));
     const historyRegressionSubmit = await historyRegressionSubmitRes.json();
     requestIds.push(historyRegressionSubmit.id);
+    await clearIntermediate(historyRegressionSubmit.id);
 
     currentSession = { user: { id: approverUser.id, role: Role.USER, customRoleId: null } };
     const decideRegressionRes = await approvalPOST(jsonReq("POST", { decision: "reject", businessAssessment: "Deferred for this cycle." }), { params: Promise.resolve({ id: historyRegressionSubmit.id }) });
@@ -362,7 +390,7 @@ async function main() {
     currentSession = { user: { id: noPermUser.id, role: Role.USER, customRoleId: null } };
     const noPermRows = await getTableRows({ tab: "mine" });
     void noPermRows; // noPermUser has no rows of their own; the real point is the forged API call below.
-    const forgedRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: withReplacement.id }) });
+    const forgedRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: withReplacement.id }) });
     check("15. A user with no projectRequest.approve -> 403, regardless of what any client claimed", forgedRes.status === 403);
     const stillPending = await prisma.projectRequest.findUniqueOrThrow({ where: { id: withReplacement.id } });
     check("15. ...status is untouched", stillPending.status === "PENDING_APPROVAL");
@@ -381,6 +409,7 @@ async function main() {
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
+      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],

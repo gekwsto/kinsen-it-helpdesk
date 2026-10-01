@@ -2,6 +2,7 @@ import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { hasPermission, hasDepartmentPermission } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { listAccessibleWorkspaces, isAccessibleDepartment } from "@/lib/services/workspace-service";
 import { DEPARTMENT_ROLE_OPTIONS } from "@/lib/services/department-role-translation";
 import { ALL_WORKSPACES_VALUE } from "@/types/department";
@@ -9,6 +10,13 @@ import { createInAppNotification, dispatchCreatedNotification } from "@/lib/noti
 import { Role, DepartmentRole, type ProjectRequestStatus, type Prisma } from "@prisma/client";
 
 const APPROVE_PERMISSION_KEY = "projectRequest.approve";
+// The intermediate stage, ahead of APPROVE_PERMISSION_KEY above. Holding
+// this permission is NECESSARY but NOT SUFFICIENT to decide any given
+// request — the requester must have ALSO explicitly selected that exact
+// user as one of THIS request's own intermediate approvers at submission
+// time (see ProjectRequestIntermediateApprover) — never inferred, never
+// department-scoped, never derived from the org-chart manager relationship.
+const INTERMEDIATE_APPROVE_PERMISSION_KEY = "projectRequest.intermediateApprove";
 
 // ─── Department resolution ──────────────────────────────────────────────────
 
@@ -128,6 +136,87 @@ export async function notifyEligibleApproversOfSubmission(departmentId: string, 
   );
 }
 
+// ─── Intermediate stage: requester-selected, unanimous, multi-approver ─────
+
+/**
+ * Every ACTIVE user who holds `permissionKey` GLOBALLY — via their own Role
+ * enum grant or their own top-level User.customRoleId grant — deliberately
+ * NEVER via a department-scoped DepartmentMembership customRole grant
+ * (unlike getEligibleApproverUserIds above, which IS department-scoped by
+ * design). Used for the intermediate-approver picker: the requester must be
+ * able to choose from EVERY such user system-wide, regardless of
+ * department. Same two-phase cheap-prefilter-then-exact-check shape as
+ * getEligibleApproverUserIds, minus the department-membership OR-branches
+ * that don't apply to a non-department-scoped permission.
+ */
+export async function getUsersWithGlobalPermission(permissionKey: string): Promise<{ id: string; name: string | null; email: string }[]> {
+  const rows = await prisma.rolePermission.findMany({ where: { permission: { key: permissionKey } }, select: { roleKey: true } });
+  const roleKeys = rows.map((r) => r.roleKey);
+  const globalRoleValues = new Set<string>(Object.values(Role));
+  const globalRoles = roleKeys.filter((k): k is Role => globalRoleValues.has(k));
+  // Includes custom-role keys too, matched against User.customRole.key.
+  const allRoleKeys = roleKeys;
+
+  const orConditions: Record<string, unknown>[] = [];
+  if (globalRoles.length > 0) orConditions.push({ role: { in: globalRoles } });
+  if (allRoleKeys.length > 0) orConditions.push({ customRole: { key: { in: allRoleKeys } } });
+  if (orConditions.length === 0) return [];
+
+  const candidates = await prisma.user.findMany({
+    where: { isActive: true, OR: orConditions },
+    select: { id: true, role: true, customRoleId: true, name: true, email: true },
+  });
+
+  const eligible: { id: string; name: string | null; email: string }[] = [];
+  for (const candidate of candidates) {
+    if (await hasPermission(candidate.role, permissionKey, candidate.customRoleId)) {
+      eligible.push({ id: candidate.id, name: candidate.name, email: candidate.email });
+    }
+  }
+  return eligible;
+}
+
+/** The real, current pool the New Project Request form's intermediate-approver picker offers — every active user who genuinely holds projectRequest.intermediateApprove right now. */
+export async function getIntermediateApproverOptions(): Promise<{ id: string; name: string | null; email: string }[]> {
+  return getUsersWithGlobalPermission(INTERMEDIATE_APPROVE_PERMISSION_KEY);
+}
+
+export type IntermediateApproverResolution =
+  | { ok: true; approverIds: string[] }
+  | { ok: false; reason: "no_approvers_selected" | "invalid_approver" };
+
+/**
+ * Server-side re-verification of the requester's own selection — never
+ * trusted as-is. Every id must belong to a real, ACTIVE user who genuinely
+ * holds projectRequest.intermediateApprove GLOBALLY at this exact moment;
+ * a single forged/stale/no-longer-eligible id fails the WHOLE submission
+ * (fail closed — never silently drops the bad one and proceeds with the
+ * rest, and never silently skips the stage entirely).
+ */
+export async function resolveIntermediateApprovers(selectedIds: string[]): Promise<IntermediateApproverResolution> {
+  if (selectedIds.length === 0) return { ok: false, reason: "no_approvers_selected" };
+  const eligible = await getIntermediateApproverOptions();
+  const eligibleIds = new Set(eligible.map((u) => u.id));
+  for (const id of selectedIds) {
+    if (!eligibleIds.has(id)) return { ok: false, reason: "invalid_approver" };
+  }
+  return { ok: true, approverIds: selectedIds };
+}
+
+/** Submission-time notification to every SELECTED intermediate approver — best-effort, called only after the ProjectRequest + ProjectRequestIntermediateApprover rows have actually committed. The final stage's own eligible approvers are deliberately NOT notified yet — see notifyEligibleApproversOfSubmission's new call site in decideIntermediateApproval, fired only once intermediate approval is unanimously complete. */
+export async function notifyIntermediateApprovers(requestId: string, title: string, approverIds: string[]): Promise<void> {
+  await Promise.all(
+    approverIds.map((userId) =>
+      createInAppNotification({
+        userId,
+        title: "New Project Request awaiting your intermediate approval",
+        body: `A new Project Request "${title}" needs your intermediate approval.`,
+        link: `/project-requests/${requestId}`,
+      })
+    )
+  );
+}
+
 // ─── Visibility / scope ─────────────────────────────────────────────────────
 
 /** Every departmentId where this user has effective projectRequest.approve via a real, active DepartmentMembership (never the active workspace). Empty when they hold no department-scoped grant at all. */
@@ -173,6 +262,14 @@ export function buildAwaitingMyApprovalWhere(userId: string, scope: RequesterApp
   return { id: { in: [] } };
 }
 
+/** "Awaiting My Intermediate Approval": PENDING_INTERMEDIATE_APPROVAL requests where THIS user has their own still-PENDING ProjectRequestIntermediateApprover row — never a department/permission-scoped query, since this stage is purely per-request selection. A user who already decided their own row (approved or rejected) no longer sees the request here, even if OTHER selected approvers haven't decided yet. */
+export function buildAwaitingMyIntermediateApprovalWhere(userId: string): Prisma.ProjectRequestWhereInput {
+  return {
+    status: "PENDING_INTERMEDIATE_APPROVAL",
+    intermediateApprovers: { some: { approverId: userId, status: "PENDING" } },
+  };
+}
+
 /** History tab: Approved/Rejected requests this user was actually involved in (requester, or within their own effective approval scope) — never every request in the system. */
 export function buildHistoryWhere(userId: string, scope: RequesterApprovalScope): Prisma.ProjectRequestWhereInput {
   if (scope.hasGlobalApprove) {
@@ -187,22 +284,34 @@ export function buildHistoryWhere(userId: string, scope: RequesterApprovalScope)
     // smoke test.
     return { status: { in: ["APPROVED", "REJECTED"] } };
   }
-  const or: Prisma.ProjectRequestWhereInput[] = [{ requesterId: userId }];
+  const or: Prisma.ProjectRequestWhereInput[] = [
+    { requesterId: userId },
+    // Any request they were EVER asked to intermediate-approve, regardless
+    // of how they decided (or whether another approver's rejection beat
+    // them to it) — real involvement, not department-scoped.
+    { intermediateApprovers: { some: { approverId: userId } } },
+  ];
   if (scope.approveDepartmentIds.length > 0) {
     or.push({ departmentId: { in: scope.approveDepartmentIds } });
   }
   return { status: { in: ["APPROVED", "REJECTED"] }, OR: or };
 }
 
-/** Detail-page/API visibility — requester, or within effective approval scope for THIS request's own department. Never a broader "any admin-adjacent role" shortcut. */
+/** Detail-page/API visibility — requester, within effective FINAL approval scope for THIS request's own department, OR one of THIS request's own selected intermediate approvers (even though they hold no department-scoped grant at all — their authority is the explicit per-request selection, not a department). Never a broader "any admin-adjacent role" shortcut. */
 export async function canViewProjectRequest(
   userId: string,
   role: Role,
   customRoleId: string | null | undefined,
-  request: { requesterId: string; departmentId: string }
+  request: { id: string; requesterId: string; departmentId: string }
 ): Promise<boolean> {
   if (request.requesterId === userId) return true;
-  return hasEffectiveEntityPermission(userId, role, customRoleId, request.departmentId, APPROVE_PERMISSION_KEY);
+  const isFinalApprover = await hasEffectiveEntityPermission(userId, role, customRoleId, request.departmentId, APPROVE_PERMISSION_KEY);
+  if (isFinalApprover) return true;
+  const intermediateRow = await prisma.projectRequestIntermediateApprover.findUnique({
+    where: { projectRequestId_approverId: { projectRequestId: request.id, approverId: userId } },
+    select: { id: true },
+  });
+  return intermediateRow !== null;
 }
 
 // ─── Approval transition ────────────────────────────────────────────────────
@@ -211,10 +320,11 @@ export type ApprovalActionError =
   | { code: "not_found" }
   | { code: "forbidden" }
   | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
-  | { code: "invalid_assessment" };
+  | { code: "invalid_assessment" }
+  | { code: "invalid_project_owner" };
 
 export type ApprovalActionResult =
-  | { ok: true }
+  | { ok: true; projectId?: string }
   | { ok: false; error: ApprovalActionError };
 
 const MAX_BUSINESS_ASSESSMENT_LENGTH = 5000;
@@ -238,6 +348,20 @@ const MAX_BUSINESS_ASSESSMENT_LENGTH = 5000;
  * created in the SAME transaction as the status + assessment write (publish
  * only after a real commit) — the realtime publish + push dispatch happens
  * AFTER the transaction commits, via dispatchCreatedNotification.
+ *
+ * On APPROVE only, a Project is auto-created in the SAME transaction as the
+ * status transition (never a separate step that could leave an approved
+ * request with no Project, or a Project with no corresponding approval) —
+ * pre-filled from the request (title/description/departmentId, and
+ * priority from importance, which already shares the exact same 1/2/3
+ * scale — see ProjectRequest.importance's own doc comment), owned by
+ * `projectOwnerId`, the approver's own explicit choice at decision time —
+ * re-verified here (a real, active, project-assignable user for THIS
+ * request's own department, via userHasAssignablePermissionForEntity;
+ * never trusted from the client beyond the id). Project.projectRequestId
+ * is @unique, so even a theoretical double-create attempt could never
+ * produce two Projects for one request — though the guarded `updateMany`
+ * above already makes that structurally impossible on its own.
  */
 export async function decideApproval(
   requestId: string,
@@ -245,7 +369,8 @@ export async function decideApproval(
   role: Role,
   customRoleId: string | null | undefined,
   decision: "approve" | "reject",
-  businessAssessment: string
+  businessAssessment: string,
+  projectOwnerId?: string
 ): Promise<ApprovalActionResult> {
   const trimmedAssessment = businessAssessment.trim();
   if (trimmedAssessment.length === 0 || trimmedAssessment.length > MAX_BUSINESS_ASSESSMENT_LENGTH) {
@@ -254,7 +379,7 @@ export async function decideApproval(
 
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, status: true, departmentId: true, requesterId: true },
+    select: { id: true, title: true, description: true, importance: true, status: true, departmentId: true, requesterId: true },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
   if (existing.status !== "PENDING_APPROVAL") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
@@ -262,10 +387,17 @@ export async function decideApproval(
   const allowed = await hasEffectiveEntityPermission(userId, role, customRoleId, existing.departmentId, APPROVE_PERMISSION_KEY);
   if (!allowed) return { ok: false, error: { code: "forbidden" } };
 
+  if (decision === "approve") {
+    if (!projectOwnerId) return { ok: false, error: { code: "invalid_project_owner" } };
+    const ownerValid = await userHasAssignablePermissionForEntity(projectOwnerId, "project", existing.departmentId);
+    if (!ownerValid) return { ok: false, error: { code: "invalid_project_owner" } };
+  }
+
   const nextStatus: ProjectRequestStatus = decision === "approve" ? "APPROVED" : "REJECTED";
   const now = new Date();
 
   let notificationRow: { id: string; userId: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date } | null = null;
+  let createdProjectId: string | undefined;
 
   await prisma.$transaction(async (tx) => {
     const updateResult = await tx.projectRequest.updateMany({
@@ -288,6 +420,21 @@ export async function decideApproval(
         link: `/project-requests/${requestId}`,
       },
     });
+
+    if (decision === "approve" && projectOwnerId) {
+      const project = await tx.project.create({
+        data: {
+          title: existing.title,
+          description: existing.description,
+          priority: existing.importance,
+          departmentId: existing.departmentId,
+          ownerId: projectOwnerId,
+          projectRequestId: requestId,
+        },
+        select: { id: true },
+      });
+      createdProjectId = project.id;
+    }
   });
 
   if (!notificationRow) {
@@ -296,5 +443,170 @@ export async function decideApproval(
   }
 
   await dispatchCreatedNotification(notificationRow);
+  return { ok: true, projectId: createdProjectId };
+}
+
+/**
+ * Approve/Reject at the INTERMEDIATE stage — requires BOTH: the acting user
+ * genuinely holds `projectRequest.intermediateApprove` GLOBALLY right now
+ * (re-checked fresh, never trusted from a stale session), AND the requester
+ * explicitly selected that exact user as one of THIS request's own
+ * intermediate approvers at submission time (a real
+ * ProjectRequestIntermediateApprover row must exist for this
+ * (requestId, userId) pair — holding the permission alone is NEVER
+ * sufficient, and never grants reach into another requester's chosen
+ * approvers).
+ *
+ * Reject: immediately terminal — the WHOLE request moves straight to
+ * REJECTED, regardless of how many other approvers were selected or already
+ * decided. Approve: only the ACTING approver's own row is marked APPROVED;
+ * the request only advances to PENDING_APPROVAL (unlocking the pre-existing
+ * FINAL stage) once EVERY selected approver's row is APPROVED (unanimous).
+ *
+ * Race safety: acquires a `SELECT ... FOR UPDATE` row lock on the parent
+ * ProjectRequest as the FIRST statement inside the transaction, serializing
+ * every concurrent decision (by any of this request's approvers) through a
+ * single critical section. A plain conditional UPDATE alone cannot fully
+ * close the "last two approvers both approve at the same instant" race:
+ * under READ COMMITTED, each transaction's own "are all rows approved yet"
+ * check might not see the OTHER transaction's not-yet-committed row update,
+ * so both could conclude "not all approved" and the parent could get
+ * permanently stuck at PENDING_INTERMEDIATE_APPROVAL even though both
+ * individual decisions did persist. The row lock makes that structurally
+ * impossible — only one decision for this request is ever "in flight" at a
+ * time.
+ *
+ * Never mutates ProjectRequest.approver/approvedAt/rejectedAt/
+ * businessAssessment (those remain the FINAL stage's own, separate audit
+ * trail) or ProjectRequest.cost — this stage only ever writes to its own
+ * ProjectRequestIntermediateApprover rows and, on a terminal outcome, the
+ * parent's `status`/`rejectedAt`.
+ *
+ * Unlike the FINAL stage, `businessAssessment` is OPTIONAL here (confirmed
+ * with the user: the intermediate stage asks for a decision only, never a
+ * written justification) — an empty/whitespace-only value is simply stored
+ * as null, never rejected.
+ */
+export async function decideIntermediateApproval(
+  requestId: string,
+  userId: string,
+  role: Role,
+  customRoleId: string | null | undefined,
+  decision: "approve" | "reject",
+  businessAssessment?: string
+): Promise<ApprovalActionResult> {
+  const trimmedAssessment = businessAssessment?.trim() || null;
+  if (trimmedAssessment && trimmedAssessment.length > MAX_BUSINESS_ASSESSMENT_LENGTH) {
+    return { ok: false, error: { code: "invalid_assessment" } };
+  }
+
+  const existing = await prisma.projectRequest.findUnique({
+    where: { id: requestId },
+    select: { id: true, title: true, status: true, departmentId: true, requesterId: true },
+  });
+  if (!existing) return { ok: false, error: { code: "not_found" } };
+
+  // Never selected for THIS request at all -> forbidden, regardless of
+  // whether they hold the permission globally. This is the "necessary but
+  // not sufficient" guarantee — checked BEFORE the global-permission check
+  // so an arbitrary permission-holder with zero relationship to this
+  // specific request gets the same forbidden outcome either way, never a
+  // different error that would leak which check failed.
+  const myRow = await prisma.projectRequestIntermediateApprover.findUnique({
+    where: { projectRequestId_approverId: { projectRequestId: requestId, approverId: userId } },
+    select: { id: true, status: true },
+  });
+  if (!myRow) return { ok: false, error: { code: "forbidden" } };
+
+  const hasGlobalPermission = await hasPermission(role, INTERMEDIATE_APPROVE_PERMISSION_KEY, customRoleId);
+  if (!hasGlobalPermission) return { ok: false, error: { code: "forbidden" } };
+
+  if (existing.status !== "PENDING_INTERMEDIATE_APPROVAL") {
+    return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
+  }
+  if (myRow.status !== "PENDING") {
+    return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
+  }
+
+  const nextRowStatus = decision === "approve" ? "APPROVED" : "REJECTED";
+  const now = new Date();
+
+  let myDecisionRecorded = false;
+  let rejectNotificationRow: { id: string; userId: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date } | null = null;
+  let justCompletedUnanimously = false;
+
+  await prisma.$transaction(async (tx) => {
+    // See this function's own doc comment — serializes every concurrent
+    // decision for THIS request through one critical section.
+    await tx.$queryRaw`SELECT id FROM "ProjectRequest" WHERE id = ${requestId} FOR UPDATE`;
+
+    const rowUpdate = await tx.projectRequestIntermediateApprover.updateMany({
+      where: { id: myRow.id, status: "PENDING" },
+      data: { status: nextRowStatus, decidedAt: now, businessAssessment: trimmedAssessment },
+    });
+    if (rowUpdate.count === 0) {
+      // Lost a race against a concurrent identical call (e.g. a double
+      // click) — nothing else to do.
+      return;
+    }
+    myDecisionRecorded = true;
+
+    if (decision === "reject") {
+      const parentUpdate = await tx.projectRequest.updateMany({
+        where: { id: requestId, status: "PENDING_INTERMEDIATE_APPROVAL" },
+        data: { status: "REJECTED", rejectedAt: now },
+      });
+      // Guarded by the row lock above, this should always succeed given
+      // myRow.status was genuinely PENDING a moment ago — but never assume;
+      // if some other path already moved the parent on, skip the
+      // notification rather than fabricate one for a transition that
+      // didn't actually happen here.
+      if (parentUpdate.count > 0) {
+        rejectNotificationRow = await tx.notification.create({
+          data: {
+            userId: existing.requesterId,
+            title: "Project Request rejected",
+            body: `Your Project Request "${existing.title}" was rejected during intermediate approval.`,
+            link: `/project-requests/${requestId}`,
+          },
+        });
+      }
+      return;
+    }
+
+    // decision === "approve" — only advance the parent once EVERY selected
+    // approver (including the one just updated above) is APPROVED.
+    const stillPending = await tx.projectRequestIntermediateApprover.count({
+      where: { projectRequestId: requestId, status: "PENDING" },
+    });
+    if (stillPending === 0) {
+      const parentUpdate = await tx.projectRequest.updateMany({
+        where: { id: requestId, status: "PENDING_INTERMEDIATE_APPROVAL" },
+        data: { status: "PENDING_APPROVAL" },
+      });
+      if (parentUpdate.count > 0) justCompletedUnanimously = true;
+    }
+  });
+
+  if (!myDecisionRecorded) {
+    const nowState = await prisma.projectRequest.findUnique({ where: { id: requestId }, select: { status: true } });
+    return { ok: false, error: { code: "invalid_status", currentStatus: nowState?.status ?? existing.status } };
+  }
+
+  if (rejectNotificationRow) {
+    await dispatchCreatedNotification(rejectNotificationRow);
+  }
+
+  // Fired only AFTER the transaction committed, and only by whichever
+  // approver's decision was genuinely the LAST one — the final stage's
+  // eligible approvers become actionable (and are told so) only now, never
+  // at submission time and never before unanimous intermediate approval. A
+  // misleading "ready for final approval" notification before this point
+  // is structurally impossible: this call site is the ONLY place that
+  // fires it, gated by justCompletedUnanimously.
+  if (justCompletedUnanimously) {
+    await notifyEligibleApproversOfSubmission(existing.departmentId, requestId, existing.title);
+  }
+
   return { ok: true };
 }

@@ -153,9 +153,11 @@ async function main() {
   const typeIds: string[] = [];
   const requestIds: string[] = [];
   const notificationIds: string[] = [];
+  const customRoleIds: string[] = [];
+  const customRoleKeys: string[] = [];
 
-  async function makeUser(email: string) {
-    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+  async function makeUser(email: string, customRoleId: string | null = null) {
+    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId } });
     userIds.push(u.id);
     return u;
   }
@@ -225,7 +227,18 @@ async function main() {
       data: { userId: requester.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
     });
 
+    const intermediateApproverRole = await prisma.customRole.create({ data: { key: `NOTIF_HYGIENE_INTERMEDIATE_${RUN_ID}`, name: `Notif Hygiene Intermediate ${RUN_ID}`, isBuiltIn: false, scope: "GLOBAL" as any, isActive: true } });
+    customRoleIds.push(intermediateApproverRole.id);
+    customRoleKeys.push(intermediateApproverRole.key);
+    const intermediateApprovePerm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.intermediateApprove" } });
+    await prisma.rolePermission.create({ data: { roleKey: intermediateApproverRole.key, permissionId: intermediateApprovePerm.id } });
+    // The global-permission reverse lookup used at submission time reads the
+    // User's own top-level customRoleId DB column, never a
+    // DepartmentMembership's — must be set directly here.
+    const intermediateApprover = await makeUser(`notif-hygiene-intermediate-${RUN_ID}@kinsen.gr`, intermediateApproverRole.id);
+
     const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
+    const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
     const { NextRequest } = await import("next/server");
     const jsonReq = (method: string, body?: unknown) =>
       new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
@@ -240,6 +253,7 @@ async function main() {
         teamConcerned: "Ops",
         expectedBenefits: "Benefits text that is definitely long enough for validation.",
         replacesExisting: false,
+        intermediateApproverIds: [intermediateApprover.id],
       })
     );
     check("Real submission -> 201", submitRes.status === 201);
@@ -247,10 +261,24 @@ async function main() {
     requestIds.push(submitted.id);
 
     const realAdmin = await prisma.user.findFirstOrThrow({ where: { email: "admin@kinsen.gr" } });
+
+    // Submission notifies the INTERMEDIATE approver first — the final,
+    // global approver (the real admin account) isn't notified until the
+    // intermediate stage completes.
+    const intermediateNotifsForThisRequest = await prisma.notification.findMany({ where: { userId: intermediateApprover.id, link: `/project-requests/${submitted.id}` } });
+    check("1. Exactly ONE notification was created for the selected intermediate approver for this ONE submission event — never more", intermediateNotifsForThisRequest.length === 1);
+    notificationIds.push(...intermediateNotifsForThisRequest.map((n) => n.id));
+    const adminNotifsAtSubmission = await prisma.notification.findMany({ where: { userId: realAdmin.id, link: `/project-requests/${submitted.id}` } });
+    check("1. ...and the real admin account (final-stage global approver) is NOT yet notified — the final stage hasn't unlocked", adminNotifsAtSubmission.length === 0);
+
+    currentSession = { user: { id: intermediateApprover.id, role: Role.USER, customRoleId: intermediateApproverRole.id } };
+    const clearIntermediateRes = await intermediateApprovalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Cleared for fixture setup." }), { params: Promise.resolve({ id: submitted.id }) });
+    check("The intermediate approver clears the stage -> 200", clearIntermediateRes.status === 200);
     const adminNotifsForThisRequest = await prisma.notification.findMany({ where: { userId: realAdmin.id, link: `/project-requests/${submitted.id}` } });
-    check("1. Exactly ONE notification was created for the real admin account (global approver) for this ONE submission event — never more", adminNotifsForThisRequest.length === 1);
+    check("1. Exactly ONE notification was created for the real admin account (global approver) once the intermediate stage completed — never more", adminNotifsForThisRequest.length === 1);
     notificationIds.push(...adminNotifsForThisRequest.map((n) => n.id));
 
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
     const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
     const noPermUser = await makeUser(`notif-hygiene-noperm-${RUN_ID}@kinsen.gr`);
     await prisma.departmentMembership.create({
@@ -258,7 +286,7 @@ async function main() {
     });
     currentSession = { user: { id: noPermUser.id, role: Role.USER, customRoleId: null } };
     const notifCountBeforeRejectedMutation = await prisma.notification.count();
-    const rejectedMutationRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: submitted.id }) });
+    const rejectedMutationRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: realAdmin.id }), { params: Promise.resolve({ id: submitted.id }) });
     check("4. Unauthorized decision attempt -> 403 (rejected mutation)", rejectedMutationRes.status === 403);
     const notifCountAfterRejectedMutation = await prisma.notification.count();
     check("4. ...a rejected/failed mutation creates ZERO notifications anywhere", notifCountBeforeRejectedMutation === notifCountAfterRejectedMutation);
@@ -294,6 +322,7 @@ async function main() {
             teamConcerned: "Ops",
             expectedBenefits: "Benefits text that is definitely long enough for validation.",
             replacesExisting: false,
+            intermediateApproverIds: [intermediateApprover.id],
           })
         );
         const throwSubmitted = await throwSubmitRes.json();
@@ -319,6 +348,8 @@ async function main() {
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
+      ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
+      ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],
       ["users", () => prisma.user.deleteMany({ where: { id: { in: userIds } } })],
       ["ticket categories", () => prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } })],
       ["ticket priorities", () => prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } })],

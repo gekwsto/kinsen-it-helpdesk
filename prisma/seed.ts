@@ -55,23 +55,35 @@ const PERMISSIONS = [
   { key: "resourcePlanning.view", description: "View the resource planning timeline", module: "projects" },
   // Project Request Form — a separate business workflow from Project itself
   // (see prisma/schema.prisma's ProjectRequest model doc comment). Gates the
-  // single approval stage (PENDING_APPROVAL -> APPROVED/REJECTED) —
-  // submitting a request needs no permission beyond an active department
-  // membership; there is no separate manager stage or org-chart dependency.
-  // Checked via hasEffectiveEntityPermission against each request's own
-  // departmentId (global grant -> every department; department-scoped grant
-  // -> that department only), same union project.edit/gantt.view already
-  // use — any user holding this for a request's department may decide it,
-  // never tied to the requester's own manager. New feature: seeded
-  // ADMIN-only by default (see ROLE_PERMISSIONS/NEW_PERMISSION_DEFAULT_GRANTS
-  // below) — deliberately NOT backfilled onto any manager/agent role or
-  // existing custom role.
+  // FINAL approval stage (PENDING_APPROVAL -> APPROVED/REJECTED) — reaching
+  // PENDING_APPROVAL at all already requires the intermediate stage below
+  // to have been unanimously approved first. Checked via
+  // hasEffectiveEntityPermission against each request's own departmentId
+  // (global grant -> every department; department-scoped grant -> that
+  // department only), same union project.edit/gantt.view already use — any
+  // user holding this for a request's department may decide it. New
+  // feature: seeded ADMIN-only by default (see ROLE_PERMISSIONS/
+  // NEW_PERMISSION_DEFAULT_GRANTS below) — deliberately NOT backfilled onto
+  // any manager/agent role or existing custom role.
   // Description explicitly names both outcomes: this key gates BOTH the
   // Approve AND the Reject/decline action — a single permission check before
   // the decision branches (see decideApproval in
   // lib/services/project-request-service.ts), never a separate
   // decline-only permission.
-  { key: "projectRequest.approve", description: "Give approval or rejection on Project Requests", module: "projectRequests" },
+  { key: "projectRequest.approve", description: "Give final approval or rejection on Project Requests", module: "projectRequests" },
+  // The INTERMEDIATE stage, ahead of projectRequest.approve above — NOT
+  // department-scoped and NOT tied to org-chart management in any way
+  // (deliberately: an earlier design used the org hierarchy's manager
+  // relationship here and it fail-closed real users with no manager set;
+  // this one doesn't). Holding this permission is necessary but NOT
+  // sufficient to decide any given request — the requester must ALSO have
+  // explicitly selected that specific user as one of THIS request's own
+  // intermediate approvers at submission time (see
+  // ProjectRequestIntermediateApprover) — checked via
+  // decideIntermediateApproval, never inferred from this permission alone.
+  // Seeded ADMIN-only by default, same as projectRequest.approve — never
+  // auto-granted to every user/manager/existing custom role.
+  { key: "projectRequest.intermediateApprove", description: "Be selectable as an intermediate approver on Project Requests, and decide requests where assigned", module: "projectRequests" },
   // Goals
   { key: "goal.view", description: "View yearly goals", module: "goals" },
   { key: "goal.create", description: "Create yearly goals", module: "goals" },
@@ -605,6 +617,7 @@ async function main() {
       "ticket.linkProjectActivity",
       "category.create",
       "projectRequest.approve",
+      "projectRequest.intermediateApprove",
     ],
     DIRECTOR: ["organization.tree.view", "gantt.view"],
     // gantt.view backfill for every OTHER role that already had implicit

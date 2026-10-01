@@ -210,6 +210,7 @@ async function main() {
         expectedBenefits: "Benefits text long enough to pass validation.",
         replacesExisting: false,
         departmentId: ALL_WORKSPACES_VALUE,
+        intermediateApproverIds: [admin.id],
       })
     );
     check('7. A client explicitly submitting departmentId="ALL" (the synthetic value) is rejected, never stored', allWorkspacesSubmitRes.status === 400);
@@ -228,6 +229,7 @@ async function main() {
         expectedBenefits: "Benefits text long enough to pass validation.",
         replacesExisting: false,
         departmentId: deptInactive.id,
+        intermediateApproverIds: [admin.id],
       })
     );
     check("Forged inactive departmentId -> rejected (400)", inactiveDeptRes.status === 400);
@@ -246,6 +248,7 @@ async function main() {
         expectedBenefits: "Benefits text long enough to pass validation.",
         replacesExisting: false,
         departmentId: deptB.id, // singleDeptUser is NOT a member of deptB
+        intermediateApproverIds: [admin.id],
       })
     );
     check("A single-department user forging deptB (not their own) -> rejected (400)", forgedRes.status === 400);
@@ -280,13 +283,26 @@ async function main() {
         expectedBenefits: "Benefits text long enough to pass validation.",
         replacesExisting: false,
         departmentId: deptA.id,
+        // Self-selected — managerlessAdmin is itself Role.ADMIN, which
+        // holds projectRequest.intermediateApprove by default (see
+        // prisma/seed.ts's NEW_PERMISSION_DEFAULT_GRANTS), so no extra
+        // fixture is needed just to clear this file's own intermediate
+        // stage (this file is about department resolution, not the
+        // intermediate stage itself).
+        intermediateApproverIds: [managerlessAdmin.id],
       })
     );
     check("Department resolves successfully (ADMIN, real active department) AND submission succeeds outright — no manager-related failure of any kind", managerlessRes.status === 201);
     const managerless = await managerlessRes.json();
     requestIds.push(managerless.id);
     const managerlessCreated = await prisma.projectRequest.findUniqueOrThrow({ where: { id: managerless.id } });
-    check("...status starts at PENDING_APPROVAL immediately (single-stage, department-scoped approval only)", managerlessCreated.status === "PENDING_APPROVAL");
+    check("...status starts at PENDING_INTERMEDIATE_APPROVAL immediately (the mandatory intermediate stage, no manager dependency)", managerlessCreated.status === "PENDING_INTERMEDIATE_APPROVAL");
+
+    const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
+    const clearManagerlessRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Self-cleared for fixture setup." }), { params: Promise.resolve({ id: managerless.id }) });
+    check("...managerlessAdmin (self-selected) clears the intermediate stage -> 200", clearManagerlessRes.status === 200);
+    const managerlessAfterIntermediate = await prisma.projectRequest.findUniqueOrThrow({ where: { id: managerless.id } });
+    check("...status now advances to PENDING_APPROVAL", managerlessAfterIntermediate.status === "PENDING_APPROVAL");
 
     // ══════════════════════ 12. The single department-scoped approval stage works for this previously-mis-resolved flow ══════════════════════
     console.log("\n=== 12. The single department-scoped approval stage decides the request correctly ===\n");
@@ -301,7 +317,7 @@ async function main() {
 
     const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
     currentSession = { user: { id: deptAApproverUser.id, role: Role.USER, customRoleId: null } };
-    const approveRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Dept A approval rationale." }), { params: Promise.resolve({ id: managerless.id }) });
+    const approveRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Dept A approval rationale.", projectOwnerId: managerlessAdmin.id }), { params: Promise.resolve({ id: managerless.id }) });
     check("A Dept-A-scoped approver decides the request -> 200 (never tied to the requester's own manager)", approveRes.status === 200);
     const afterApprove = await prisma.projectRequest.findUniqueOrThrow({ where: { id: managerless.id } });
     check("...status transitions straight to APPROVED", afterApprove.status === "APPROVED");
@@ -311,6 +327,7 @@ async function main() {
     console.log("\nCleaning up test data...\n");
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
+      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],

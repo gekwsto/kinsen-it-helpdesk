@@ -635,6 +635,17 @@ export const createProjectRequestSchema = z
     // instead. A value here that isn't one of the requester's OWN real,
     // active memberships is always rejected server-side.
     departmentId: z.string().optional(),
+    // The requester's OWN choice of who must unanimously clear the
+    // intermediate stage before this request can ever reach final approval
+    // — mandatory (fail closed, never silently skipped), at least one id.
+    // Each id is re-verified server-side against who ACTUALLY holds
+    // projectRequest.intermediateApprove at submission time (see
+    // resolveIntermediateApprovers in lib/services/project-request-service.ts)
+    // — a forged/stale id here is always rejected, never silently accepted.
+    intermediateApproverIds: z
+      .array(z.string().min(1))
+      .min(1, "Select at least one intermediate approver")
+      .refine((ids) => new Set(ids).size === ids.length, "The same approver was selected more than once"),
   })
   .superRefine((data, ctx) => {
     if (data.replacesExisting && !data.replacementDescription) {
@@ -646,14 +657,41 @@ export const createProjectRequestSchema = z
     }
   });
 
-// businessAssessment is MANDATORY for every decision (both approve and
+// businessAssessment is MANDATORY for every FINAL decision (both approve and
 // reject) — the approver's own contextual justification, never optional and
 // never the requester's. max(5000) matches every other large Project
 // Request text field. Trimmed here so a whitespace-only value is rejected
 // by min(1), never silently accepted as "blank but technically present".
-export const projectRequestApprovalDecisionSchema = z.object({
+//
+// projectOwnerId is required EXACTLY when decision is "approve" — the
+// approving user's own choice of who should own the Project that gets
+// auto-created from this request (see decideApproval in
+// lib/services/project-request-service.ts). Never required on reject, since
+// no Project is ever created from a rejection. Re-verified server-side
+// (a real, active, project-assignable user for this request's own
+// department) regardless of what the client sent — see decideApproval's own
+// doc comment.
+export const projectRequestApprovalDecisionSchema = z
+  .object({
+    decision: z.enum(["approve", "reject"]),
+    businessAssessment: z.string().trim().min(1, "Business Assessment is required").max(5000),
+    projectOwnerId: z.string().trim().min(1).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.decision === "approve" && !data.projectOwnerId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["projectOwnerId"], message: "Select who should own the new Project." });
+    }
+  });
+
+// The intermediate stage deliberately does NOT require a Business
+// Assessment (confirmed with the user: only the FINAL decision needs one) —
+// accepted here only as optional free text, trimmed, capped at 5000 like
+// every other large Project Request text field. No projectOwnerId either:
+// a Project is only ever created once the FINAL stage approves, never from
+// an intermediate decision.
+export const projectRequestIntermediateApprovalDecisionSchema = z.object({
   decision: z.enum(["approve", "reject"]),
-  businessAssessment: z.string().trim().min(1, "Business Assessment is required").max(5000),
+  businessAssessment: z.string().trim().max(5000).optional(),
 });
 
 // A plain number from the client (a <input type="number"> value) — never
@@ -697,4 +735,5 @@ export type AdminLoginInput = z.infer<typeof adminLoginSchema>;
 export type ChangePasswordInput = z.infer<typeof changePasswordSchema>;
 export type CreateProjectRequestInput = z.infer<typeof createProjectRequestSchema>;
 export type ProjectRequestApprovalDecisionInput = z.infer<typeof projectRequestApprovalDecisionSchema>;
+export type ProjectRequestIntermediateApprovalDecisionInput = z.infer<typeof projectRequestIntermediateApprovalDecisionSchema>;
 export type ProjectRequestTypeInput = z.infer<typeof projectRequestTypeSchema>;

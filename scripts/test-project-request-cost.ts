@@ -96,6 +96,7 @@ async function main() {
   const typePATCH = (await import("@/app/api/admin/project-request-types/[id]/route")).PATCH;
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
+  const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const { default: NewProjectRequestPage } = await import("@/app/(main)/project-requests/new/page");
   const { default: ProjectRequestDetailPage } = await import("@/app/(main)/project-requests/[id]/page");
   const { ProjectRequestForm } = await import("@/components/project-requests/project-request-form");
@@ -179,7 +180,21 @@ async function main() {
       teamConcerned: "Engineering",
       expectedBenefits: "Benefits text that is definitely long enough for validation.",
       replacesExisting: false,
+      // admin is Role.ADMIN, which holds projectRequest.intermediateApprove
+      // by default (see prisma/seed.ts's NEW_PERMISSION_DEFAULT_GRANTS) — no
+      // extra custom-role fixture needed just to clear this file's own
+      // intermediate stage (this file is about the cost feature, not the
+      // intermediate stage itself).
+      intermediateApproverIds: [admin.id],
     };
+
+    async function clearIntermediate(requestId: string) {
+      const prior = currentSession;
+      currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+      const res = await intermediateApprovalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Cleared for fixture setup." }), { params: Promise.resolve({ id: requestId }) });
+      if (res.status !== 200) throw new Error(`Failed to clear intermediate approval for ${requestId}: ${res.status}`);
+      currentSession = prior;
+    }
 
     // ══════════════════════ C. New Project Request form displays the current cost ══════════════════════
     console.log("\n=== C. New Project Request form receives the real, current cost for the selected type ===\n");
@@ -196,6 +211,7 @@ async function main() {
     check("D. Submission A -> 201", submitARes.status === 201);
     const submittedA = await submitARes.json();
     requestIds.push(submittedA.id);
+    await clearIntermediate(submittedA.id);
     const rowA = await prisma.projectRequest.findUniqueOrThrow({ where: { id: submittedA.id } });
     check("D. Request A's snapshotted cost is exactly 600.00 (the type's cost AT SUBMISSION TIME)", rowA.cost?.toNumber() === 600);
 
@@ -242,11 +258,11 @@ async function main() {
     const noPermUser = await makeUser(`pr-cost-noperm-${RUN_ID}@kinsen.gr`);
     await addMembership(noPermUser.id, dept.id);
     currentSession = { user: { id: noPermUser.id, role: Role.USER, customRoleId: null } };
-    const forbiddenDecisionRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist" }), { params: Promise.resolve({ id: submittedA.id }) });
+    const forbiddenDecisionRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Should never persist", projectOwnerId: admin.id }), { params: Promise.resolve({ id: submittedA.id }) });
     check("I. A user with no projectRequest.approve still correctly gets 403 (unchanged authorization)", forbiddenDecisionRes.status === 403);
 
     currentSession = { user: { id: approverUser.id, role: Role.USER, customRoleId: null } };
-    const decideRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Looks good, approving." }), { params: Promise.resolve({ id: submittedA.id }) });
+    const decideRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Looks good, approving.", projectOwnerId: admin.id }), { params: Promise.resolve({ id: submittedA.id }) });
     check("I. The real approver can still decide normally -> 200 (approval workflow itself untouched)", decideRes.status === 200);
     const decidedRowA = await prisma.projectRequest.findUniqueOrThrow({ where: { id: submittedA.id } });
     check("I. ...status transitions to APPROVED as always", decidedRowA.status === "APPROVED");
@@ -255,6 +271,7 @@ async function main() {
     console.log("\nCleaning up test data...\n");
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
+      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],

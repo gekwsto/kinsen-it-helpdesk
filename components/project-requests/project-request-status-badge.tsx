@@ -1,7 +1,8 @@
 import type { ProjectRequestStatus } from "@prisma/client";
 
 const STATUS_CONFIG: Record<ProjectRequestStatus, { label: string; className: string }> = {
-  PENDING_APPROVAL: { label: "Pending Approval", className: "bg-amber-50 text-amber-700" },
+  PENDING_INTERMEDIATE_APPROVAL: { label: "Pending Intermediate Approval", className: "bg-amber-50 text-amber-700" },
+  PENDING_APPROVAL: { label: "Pending Final Approval", className: "bg-amber-50 text-amber-700" },
   APPROVED: { label: "Approved", className: "bg-green-50 text-green-700" },
   REJECTED: { label: "Rejected", className: "bg-red-50 text-red-700" },
 };

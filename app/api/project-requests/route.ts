@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { createProjectRequestSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, internalErrorResponse } from "@/lib/api-errors";
-import { resolveDepartmentForRequest, notifyEligibleApproversOfSubmission } from "@/lib/services/project-request-service";
+import { resolveDepartmentForRequest, resolveIntermediateApprovers, notifyIntermediateApprovers } from "@/lib/services/project-request-service";
 
 // POST — submit a new Project Request. Every trust-sensitive field
 // (requesterId, department membership, status, cost) is resolved/verified
@@ -61,38 +61,67 @@ export async function POST(req: NextRequest) {
     // string.
     const replacementDescription = data.replacesExisting ? data.replacementDescription! : null;
 
-    const created = await prisma.projectRequest.create({
-      data: {
-        title: data.title,
-        description: data.description,
-        importance: data.importance,
-        projectTypeId: data.projectTypeId,
-        // A SNAPSHOT of the type's authoritative cost, taken HERE,
-        // server-side, from the row just re-fetched above — never from
-        // anything the client sent. A client-supplied `cost` in the
-        // request body is simply discarded (createProjectRequestSchema
-        // never accepts that key at all). This value is frozen forever: a
-        // later edit to ProjectRequestType.cost must never retroactively
-        // change this request's own cost.
-        cost: projectType.cost,
-        teamConcerned: data.teamConcerned,
-        expectedBenefits: data.expectedBenefits,
-        replacesExisting: data.replacesExisting,
-        replacementDescription,
-        requesterId: session.user.id,
-        departmentId: departmentResolution.departmentId,
-        // status defaults to PENDING_APPROVAL at the schema level.
-      },
-      select: { id: true, title: true },
+    // Intermediate approvers: the requester's OWN selection, re-verified
+    // here against who ACTUALLY holds projectRequest.intermediateApprove
+    // GLOBALLY right now — a single forged/stale id fails the WHOLE
+    // submission (fail closed), never silently dropped or skipped. This is
+    // the mandatory gate ahead of final approval; there is no path that
+    // creates a ProjectRequest without at least one real intermediate
+    // approver.
+    const intermediateResolution = await resolveIntermediateApprovers(data.intermediateApproverIds);
+    if (!intermediateResolution.ok) {
+      const message =
+        intermediateResolution.reason === "no_approvers_selected"
+          ? "Select at least one intermediate approver."
+          : "One or more selected intermediate approvers are no longer eligible. Please re-select.";
+      return NextResponse.json(apiError("invalid_intermediate_approvers", message, { field: "intermediateApproverIds" }), { status: 400 });
+    }
+
+    // The ProjectRequest row and its full set of
+    // ProjectRequestIntermediateApprover rows are created atomically — a
+    // request can never exist with zero approvers because one half of this
+    // write failed.
+    const created = await prisma.$transaction(async (tx) => {
+      const request = await tx.projectRequest.create({
+        data: {
+          title: data.title,
+          description: data.description,
+          importance: data.importance,
+          projectTypeId: data.projectTypeId,
+          // A SNAPSHOT of the type's authoritative cost, taken HERE,
+          // server-side, from the row just re-fetched above — never from
+          // anything the client sent. A client-supplied `cost` in the
+          // request body is simply discarded (createProjectRequestSchema
+          // never accepts that key at all). This value is frozen forever: a
+          // later edit to ProjectRequestType.cost must never retroactively
+          // change this request's own cost.
+          cost: projectType.cost,
+          teamConcerned: data.teamConcerned,
+          expectedBenefits: data.expectedBenefits,
+          replacesExisting: data.replacesExisting,
+          replacementDescription,
+          requesterId: session.user.id,
+          departmentId: departmentResolution.departmentId,
+          // status defaults to PENDING_INTERMEDIATE_APPROVAL at the schema
+          // level — the mandatory intermediate stage, never skipped.
+        },
+        select: { id: true, title: true },
+      });
+      await tx.projectRequestIntermediateApprover.createMany({
+        data: intermediateResolution.approverIds.map((approverId) => ({ projectRequestId: request.id, approverId })),
+      });
+      return request;
     });
 
-    // Best-effort, AFTER the row has genuinely committed above — a
+    // Best-effort, AFTER the rows have genuinely committed above — a
     // notification failure must never turn an already-successful submission
-    // into an error response. Notifies every user currently eligible to
-    // approve within this request's own department (global grant holders,
-    // and that department's own grant holders) — the same set that would
-    // see it in their own "Awaiting My Approval" tab.
-    await notifyEligibleApproversOfSubmission(departmentResolution.departmentId, created.id, created.title);
+    // into an error response. Only the SELECTED intermediate approvers are
+    // notified now; the final stage's own eligible approvers are
+    // deliberately notified later, only once intermediate approval is
+    // unanimously complete (see decideIntermediateApproval) — never at
+    // submission time, never a misleading "ready for final approval"
+    // notification before that.
+    await notifyIntermediateApprovers(created.id, created.title, intermediateResolution.approverIds);
 
     return NextResponse.json({ id: created.id }, { status: 201 });
   } catch (error: any) {

@@ -59,6 +59,10 @@ const VALID_BASE = {
   importance: 2,
   teamConcerned: "Engineering",
   expectedBenefits: "Benefits text that is definitely long enough for validation.",
+  // Any non-empty array — intermediateApproverIds' own DB-level eligibility
+  // is checked separately by the route (Section C); Section A only exercises
+  // the replacesExisting <-> replacementDescription schema invariant.
+  intermediateApproverIds: ["cmx0000000000000000000001"],
 };
 
 async function main() {
@@ -170,9 +174,25 @@ async function main() {
     customRoleKeys.push(globalApproverRole.key);
     const approvePerm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.approve" } });
     await prisma.rolePermission.create({ data: { roleKey: globalApproverRole.key, permissionId: approvePerm.id } });
+    // Also project-assignable, via the SAME role — systemApprover doubles
+    // as the chosen owner of the Project auto-created on approval (see
+    // decideApproval), no separate fixture needed just for that.
+    const projectAssignablePerm = await prisma.permission.findUniqueOrThrow({ where: { key: "project.assignable" } });
+    await prisma.rolePermission.create({ data: { roleKey: globalApproverRole.key, permissionId: projectAssignablePerm.id } });
     const systemApprover = await prisma.user.create({ data: { email: `pr-replace-sysapprover-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
     userIds.push(systemApprover.id);
     await prisma.departmentMembership.create({ data: { userId: systemApprover.id, departmentId: dept.id, role: DepartmentRole.VIEWER, customRoleId: globalApproverRole.id, source: MembershipSource.MANUAL, isPrimary: true, isActive: true } });
+
+    const intermediateApproverRole = await prisma.customRole.create({ data: { key: `PR_REPLACE_INTERMEDIATE_${RUN_ID}`, name: `PR Replace Intermediate Approver ${RUN_ID}`, isBuiltIn: false, scope: "GLOBAL" as any, isActive: true } });
+    customRoleIds.push(intermediateApproverRole.id);
+    customRoleKeys.push(intermediateApproverRole.key);
+    const intermediateApprovePerm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.intermediateApprove" } });
+    await prisma.rolePermission.create({ data: { roleKey: intermediateApproverRole.key, permissionId: intermediateApprovePerm.id } });
+    // The global-permission reverse lookup used at submission time reads the
+    // User's own top-level customRoleId DB column, never a
+    // DepartmentMembership's — must be set directly here.
+    const intermediateApprover = await prisma.user.create({ data: { email: `pr-replace-intermediate-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId: intermediateApproverRole.id } });
+    userIds.push(intermediateApprover.id);
 
     currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
 
@@ -189,6 +209,9 @@ async function main() {
         replacesExisting: false,
         requesterId: requester.id,
         departmentId: dept.id,
+        // A row from before the intermediate-approval redesign must not
+        // silently pick up the new PENDING_INTERMEDIATE_APPROVAL default.
+        status: "PENDING_APPROVAL",
         // replacementDescription deliberately omitted — must default to NULL.
       },
     });
@@ -199,7 +222,7 @@ async function main() {
 
     console.log("\n-- 6. Checkbox off + forged description via a direct API call -> stored as NULL, never the forged text --\n");
     const forgedFalseRes = await requestsPOST(
-      jsonReq({ ...VALID_BASE, title: `PR Replace ForgedFalse ${RUN_ID}`, projectTypeId: type.id, replacesExisting: false, replacementDescription: "forged text that must be discarded" })
+      jsonReq({ ...VALID_BASE, title: `PR Replace ForgedFalse ${RUN_ID}`, projectTypeId: type.id, replacesExisting: false, replacementDescription: "forged text that must be discarded", intermediateApproverIds: [intermediateApprover.id] })
     );
     check("replacesExisting:false with a forged description -> 201 (request itself is valid)", forgedFalseRes.status === 201);
     const forgedFalseBody = await forgedFalseRes.json();
@@ -211,7 +234,7 @@ async function main() {
     const countBefore = await prisma.projectRequest.count();
     const notifCountBefore = await prisma.notification.count({ where: { userId: systemApprover.id } });
     const whitespaceRes = await requestsPOST(
-      jsonReq({ ...VALID_BASE, title: `PR Replace Whitespace ${RUN_ID}`, projectTypeId: type.id, replacesExisting: true, replacementDescription: "   \n\t   " })
+      jsonReq({ ...VALID_BASE, title: `PR Replace Whitespace ${RUN_ID}`, projectTypeId: type.id, replacesExisting: true, replacementDescription: "   \n\t   ", intermediateApproverIds: [intermediateApprover.id] })
     );
     check("10. Whitespace-only replacementDescription with replacesExisting:true -> 422 (validation failure)", whitespaceRes.status === 422);
     const countAfter = await prisma.projectRequest.count();
@@ -221,7 +244,7 @@ async function main() {
 
     console.log("\n-- 5. Checkbox on + a valid description -> successful creation, TRIMMED persistence --\n");
     const validRes = await requestsPOST(
-      jsonReq({ ...VALID_BASE, title: `PR Replace Valid ${RUN_ID}`, projectTypeId: type.id, replacesExisting: true, replacementDescription: "  The legacy on-prem ticketing tool.  " })
+      jsonReq({ ...VALID_BASE, title: `PR Replace Valid ${RUN_ID}`, projectTypeId: type.id, replacesExisting: true, replacementDescription: "  The legacy on-prem ticketing tool.  ", intermediateApproverIds: [intermediateApprover.id] })
     );
     check("Valid replacesExisting:true submission -> 201", validRes.status === 201);
     const validBody = await validRes.json();
@@ -231,8 +254,11 @@ async function main() {
     check("...replacementDescription is persisted TRIMMED (no leading/trailing whitespace)", validRow.replacementDescription === "The legacy on-prem ticketing tool.");
 
     console.log("\n-- 12. The submission notification body does NOT include the replacement description text --\n");
-    const submitNotif = await prisma.notification.findFirst({ where: { userId: systemApprover.id, link: `/project-requests/${validBody.id}` } });
-    check("Eligible approver notification exists for this submission", submitNotif !== null);
+    // Submission now notifies the intermediate approver first (the final,
+    // department-scoped approver isn't notified until the intermediate
+    // stage completes — see below).
+    const submitNotif = await prisma.notification.findFirst({ where: { userId: intermediateApprover.id, link: `/project-requests/${validBody.id}` } });
+    check("Intermediate approver notification exists for this submission", submitNotif !== null);
     check("...its body does NOT contain the replacement description text", !submitNotif?.body.includes("legacy on-prem ticketing tool"));
 
     console.log("\n-- 9. Detail page shows the replacement description ONLY when replacesExisting === true --\n");
@@ -262,10 +288,23 @@ async function main() {
     const withoutReplacementMatches = findElementsByProps(detailWithoutReplacement, (p) => p.label === "Solution/project to be replaced");
     check("replacesExisting:false detail page does NOT render the 'Solution/project to be replaced' section at all", withoutReplacementMatches.length === 0);
 
+    console.log("\n-- Clearing the mandatory intermediate stage before the final approval workflow can run --\n");
+    const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
+    currentSession = { user: { id: intermediateApprover.id, role: Role.USER, customRoleId: intermediateApproverRole.id } };
+    const clearIntermediateRes = await intermediateApprovalPOST(
+      jsonReq({ decision: "approve", businessAssessment: "Intermediate approval granted." }),
+      { params: Promise.resolve({ id: validBody.id }) }
+    );
+    check("Intermediate approver clears the stage -> 200", clearIntermediateRes.status === 200);
+    const afterIntermediate = await prisma.projectRequest.findUniqueOrThrow({ where: { id: validBody.id } });
+    check("...status now advances to PENDING_APPROVAL, unlocking the final stage", afterIntermediate.status === "PENDING_APPROVAL");
+    const finalStageNotif = await prisma.notification.findFirst({ where: { userId: systemApprover.id, link: `/project-requests/${validBody.id}` } });
+    check("...and ONLY NOW is the final, department-scoped approver notified", finalStageNotif !== null);
+
     console.log("\n-- 11. The single-stage approval workflow itself is completely unaffected by this addition --\n");
     const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
     currentSession = { user: { id: systemApprover.id, role: Role.USER, customRoleId: null } };
-    const approveRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Positive ROI, proceed." }), { params: Promise.resolve({ id: validBody.id }) });
+    const approveRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Positive ROI, proceed.", projectOwnerId: systemApprover.id }), { params: Promise.resolve({ id: validBody.id }) });
     check("Approval on a replacesExisting:true request still works normally -> 200", approveRes.status === 200);
     const afterApprove = await prisma.projectRequest.findUniqueOrThrow({ where: { id: validBody.id } });
     check("...status -> APPROVED as always", afterApprove.status === "APPROVED");
@@ -278,6 +317,7 @@ async function main() {
     console.log("\nCleaning up test data...\n");
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
+      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],

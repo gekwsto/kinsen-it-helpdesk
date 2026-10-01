@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, X } from "lucide-react";
+import { Loader2, Check, X, FolderKanban } from "lucide-react";
 import type { ProjectRequestStatus } from "@prisma/client";
-import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
+import { ProjectRequestDecisionDialog, type ProjectOwnerOption } from "@/components/project-requests/project-request-decision-dialog";
 
 interface ApprovalActionsProps {
   requestId: string;
@@ -18,6 +19,10 @@ interface ApprovalActionsProps {
   rejectedAt: Date | null;
   /** The approver's OWN mandatory justification for the decision — written only at decision time, never the requester's text (see legacyRequesterBusinessAssessment on the detail page for that). */
   businessAssessment: string | null;
+  /** Every active, project-assignable user for this request's own department — offered to the approver to pick the owner of the Project that gets auto-created on approve (see decideApproval). */
+  ownerOptions: ProjectOwnerOption[];
+  /** The Project auto-created from this request once it was approved — null until then. */
+  project: { id: string; title: string } | null;
 }
 
 /**
@@ -33,13 +38,13 @@ interface ApprovalActionsProps {
  * request's department may act — never tied to the requester's own
  * manager/org-chart in any way.
  */
-export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment }: ApprovalActionsProps) {
+export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, ownerOptions, project }: ApprovalActionsProps) {
   const router = useRouter();
   const [pendingDecision, setPendingDecision] = useState<"approve" | "reject" | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
-  const submit = async (assessment: string) => {
+  const submit = async ({ businessAssessment: assessment, projectOwnerId }: { businessAssessment: string; projectOwnerId?: string }) => {
     if (!pendingDecision) return;
     setSubmitting(true);
     setServerError(null);
@@ -47,7 +52,7 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
       const res = await fetch(`/api/project-requests/${requestId}/approval`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision: pendingDecision, businessAssessment: assessment }),
+        body: JSON.stringify({ decision: pendingDecision, businessAssessment: assessment, projectOwnerId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -80,6 +85,12 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
         </p>
         {approvedAt && <p className="text-muted-foreground">{approvedAt.toLocaleString()}</p>}
         {businessAssessment && <p className="whitespace-pre-wrap mt-1">{businessAssessment}</p>}
+        {project && (
+          <Link href={`/projects/${project.id}`} className="inline-flex items-center gap-1.5 mt-2 text-primary hover:underline">
+            <FolderKanban className="h-3.5 w-3.5" />
+            View Project
+          </Link>
+        )}
       </div>
     );
   }
@@ -113,7 +124,14 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
         </Button>
       </div>
 
-      <ProjectRequestDecisionDialog decision={pendingDecision} submitting={submitting} serverError={serverError} onCancel={cancel} onConfirm={submit} />
+      <ProjectRequestDecisionDialog
+        decision={pendingDecision}
+        submitting={submitting}
+        serverError={serverError}
+        onCancel={cancel}
+        onConfirm={submit}
+        ownerOptions={ownerOptions}
+      />
     </>
   );
 }
