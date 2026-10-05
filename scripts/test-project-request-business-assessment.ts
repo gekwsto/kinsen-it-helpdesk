@@ -106,10 +106,13 @@ async function main() {
   check("7. Empty string businessAssessment fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "" }).success);
   check("7. Whitespace-only businessAssessment fails (trimmed to empty)", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "   \n\t  " }).success);
   check("7. Over-length (5001 chars) businessAssessment fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "x".repeat(5001) }).success);
-  const trimParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "  Looks solid.  ", projectOwnerId: "cmx0000000000000000000001" });
+  const trimParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "  Looks solid.  " });
   check("9. A valid businessAssessment passes and is persisted-ready TRIMMED by the schema itself", trimParse.success && (trimParse as any).data.businessAssessment === "Looks solid.");
-  check("...and 'reject' accepts the exact same mandatory field (never optional for reject, and never needs a projectOwnerId — no Project is ever created from a rejection)", projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success);
-  check("...but 'approve' WITHOUT a projectOwnerId is now rejected — a Project is always auto-created on approval, so an owner must always be chosen", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "Looks solid." }).success);
+  check("...and 'reject' accepts the exact same mandatory field (never optional for reject)", projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success);
+  check(
+    "...FINAL approval no longer requires (or even accepts a meaningful) projectOwnerId — Project setup moved to a separate follow-up step, see scripts/test-project-request-project-creation.ts",
+    projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "Looks solid." }).success
+  );
 
   // ══════════════════════ SECTION A2 — shared dialog / client behavior (source checks) ══════════════════════
   console.log("\n=== SECTION A2 — the ONE shared decision dialog; click never mutates by itself ===\n");

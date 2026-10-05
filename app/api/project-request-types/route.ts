@@ -15,9 +15,9 @@ export async function GET() {
     const types = await prisma.projectRequestType.findMany({
       where: { isActive: true },
       orderBy: { name: "asc" },
-      select: { id: true, name: true, cost: true },
+      select: { id: true, name: true },
     });
-    return NextResponse.json(types.map((t) => ({ ...t, cost: t.cost ? Number(t.cost) : null })));
+    return NextResponse.json(types);
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }

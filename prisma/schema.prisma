@@ -723,10 +723,12 @@ model User {
   projectMemberships                  Project[]                            @relation("ProjectMembers")
   projectRequestsSubmitted            ProjectRequest[]                     @relation("ProjectRequestRequester")
   projectRequestsApproved             ProjectRequest[]                     @relation("ProjectRequestApprover")
+  submittedProjectFeedback            ProjectFeedback[]                    @relation("ProjectFeedbackSubmitter")
   projectRequestIntermediateApprovals ProjectRequestIntermediateApprover[] @relation("ProjectRequestIntermediateApprover")
   assignedActivities                  ProjectActivity[]                    @relation("ActivityAssignee")
   activityAssignments                 ProjectActivity[]                    @relation("ActivityAssignees")
   createdActivities                   ProjectActivity[]                    @relation("ActivityCreator")
+  ownedActivities                     ProjectActivity[]                    @relation("ActivityOwner")
   createdDependencies                 ActivityDependency[]                 @relation("ActivityDependenciesCreatedBy")
   projectNotes                        ProjectNote[]                        @relation("ProjectNoteAuthor")
   activityNotes                       ActivityNote[]                       @relation("ActivityNoteAuthor")
@@ -1220,35 +1222,72 @@ model TicketHistory {
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 model Project {
-  id              String         @id @default(cuid())
-  title           String
-  description     String?        @db.Text
-  status          ProjectStatus  @default(PLANNING)
-  priority        Int            @default(2)
-  progress        Int            @default(0)
-  owner           User           @relation("ProjectOwner", fields: [ownerId], references: [id])
-  ownerId         String
-  department      Department?    @relation(fields: [departmentId], references: [id])
-  departmentId    String?
+  id               String          @id @default(cuid())
+  title            String
+  description      String?         @db.Text
+  status           ProjectStatus   @default(PLANNING)
+  priority         Int             @default(2)
+  progress         Int             @default(0)
+  owner            User            @relation("ProjectOwner", fields: [ownerId], references: [id])
+  ownerId          String
+  department       Department?     @relation(fields: [departmentId], references: [id])
+  departmentId     String?
   // Must belong to the same departmentId as this project — validated in
   // lib/services/sub-department-service.ts, not enforced at the DB level.
-  subDepartment   SubDepartment? @relation(fields: [subDepartmentId], references: [id])
-  subDepartmentId String?
-  // Set only when this Project was auto-created from an approved Project
-  // Request's FINAL approval (see decideApproval in
-  // lib/services/project-request-service.ts) — null for every
+  subDepartment    SubDepartment?  @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId  String?
+  // Set only when this Project was created through the request-origin setup
+  // flow for an APPROVED Project Request (see
+  // createProjectFromApprovedRequest in
+  // lib/services/project-request-service.ts, and
+  // POST /api/project-requests/[id]/project) — null for every
   // manually-created Project. @unique enforces at most one Project per
-  // request; combined with decideApproval's own race-guarded transaction,
-  // this makes the creation naturally idempotent (a concurrent duplicate
-  // decision can never produce two Projects for the same request).
+  // request; combined with that route's own race-guarded transaction, this
+  // makes the creation naturally idempotent (a concurrent duplicate
+  // submission can never produce two Projects for the same request).
   projectRequest   ProjectRequest? @relation(fields: [projectRequestId], references: [id])
   projectRequestId String?         @unique
-  businessUnit    BusinessUnit?  @relation(fields: [businessUnitId], references: [id])
-  businessUnitId  String?
-  startDate       DateTime?
-  endDate         DateTime?
-  successTarget   String?        @db.Text
-  isGoal          Boolean        @default(false)
+  businessUnit     BusinessUnit?   @relation(fields: [businessUnitId], references: [id])
+  businessUnitId   String?
+  startDate        DateTime?
+  endDate          DateTime?
+  successTarget    String?         @db.Text
+  isGoal           Boolean         @default(false)
+
+  // ─── Request-origin-only metadata (section 6/7 of the Project Request →
+  // Project setup feature) — all nullable at the DB level since manual
+  // Projects, legacy Projects, and the OLD auto-created-on-approval
+  // Projects from before this feature never have real historical values
+  // for these; the mandatory-at-creation guarantee for a NEW request-origin
+  // Project lives entirely at the application boundary
+  // (createProjectFromApprovedRequest), never at the schema level. Deliberately
+  // separate from the pre-existing startDate/endDate above — those keep
+  // their original Gantt/filter/overdue semantics untouched; these are
+  // purely additional planning metadata.
+  expectedStartDate        DateTime?
+  expectedFinishDate       DateTime?
+  // The INITIAL baseline duration (expectedFinishDate - expectedStartDate,
+  // whole calendar days), computed server-side ONCE at creation and never
+  // silently recalculated if Expected Start/Finish are edited later — see
+  // createProjectFromApprovedRequest's own doc comment for the exact
+  // calculation and PATCH /api/projects/[id] for why it's never accepted
+  // as client input on update.
+  expectedTotalInitialDays Int?
+  expenseType              ProjectExpenseType? @relation(fields: [expenseTypeId], references: [id])
+  expenseTypeId            String?
+  // Budget, and the old user-entered Estimated/Actual Cost columns, were
+  // REMOVED here (see
+  // prisma/migrations/.../remove_project_budget_and_cost_columns) — all
+  // three existed solely for this request-origin feature (confirmed: no
+  // other Project feature ever read/wrote them) and are now fully derived,
+  // never stored: Project Estimated/Actual Cost are computed fresh from the
+  // CURRENT state of this Project's own Activities every time they're read
+  // (see lib/services/project-financials-service.ts's
+  // computeProjectFinancials — the single authoritative aggregation),
+  // avoiding any possibility of the displayed total drifting from the
+  // Activities that actually make it up. Budget has no replacement — the
+  // business rule simply no longer tracks it for request-origin Projects.
+  external                 Boolean             @default(false)
 
   members      User[]              @relation("ProjectMembers")
   activities   ProjectActivity[]
@@ -1257,6 +1296,11 @@ model Project {
   notes        ProjectNote[]
   relatedLinks RelatedLink[]
   attachments  ProjectAttachment[]
+  // At most one — see ProjectFeedback's own doc comment for the full
+  // eligibility/uniqueness rule (request-origin Projects only, one
+  // immutable row per Project, enforced via @unique on
+  // ProjectFeedback.projectId).
+  feedback     ProjectFeedback?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1265,47 +1309,156 @@ model Project {
   @@index([status])
   @@index([departmentId])
   @@index([subDepartmentId])
+  @@index([expenseTypeId])
   // Matches Ticket's own @@index([createdAt]) — app/(main)/projects/page.tsx
   // (and the Projects Dashboard) always order by createdAt desc, id asc, the
   // same pagination-ordering pattern Ticket already has this index for.
   @@index([createdAt])
 }
 
+// Feedback the ORIGINAL Project Request requester submits evaluating a
+// delivered, request-origin Project — applies ONLY to a Project where
+// Project.projectRequestId != null (enforced at the application boundary,
+// POST /api/projects/[id]/feedback — never trusted from this schema
+// alone). At most one row per Project (@unique below). Deliberately
+// immutable once created — no updatedAt, no edit/delete route — this is a
+// historical record of what the requester evaluated at completion time,
+// not a living document; reopening the Project later never deletes it.
+model ProjectFeedback {
+  id String @id @default(cuid())
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String  @unique
+
+  // Denormalized from Project.projectRequestId at submission time — lets
+  // the Administration review list (app/(main)/admin/project-feedback)
+  // join straight to the originating request without going through
+  // Project first. Set ONCE, by the same server check that verifies
+  // eligibility (createProjectFeedback) — never re-derived afterward.
+  // @unique here too (not just on projectId) because it's transitively
+  // true anyway (Project.projectRequestId is itself @unique, so one
+  // Project Request has at most one Project, which has at most one
+  // ProjectFeedback) — declaring it explicitly lets ProjectRequest's own
+  // `feedback ProjectFeedback?` back-relation be a real one-to-one.
+  projectRequest   ProjectRequest @relation(fields: [projectRequestId], references: [id])
+  projectRequestId String         @unique
+
+  // The original Project Request's own requesterId at submission time —
+  // the ONLY identity ever allowed to create this row. Never
+  // client-supplied: set from the authenticated session only after the
+  // server has independently confirmed session.user.id ===
+  // projectRequest.requesterId.
+  submittedByUser   User   @relation("ProjectFeedbackSubmitter", fields: [submittedByUserId], references: [id])
+  submittedByUserId String
+
+  // 1-10 inclusive, integer — see projectFeedbackSchema in
+  // lib/validations.ts. Re-validated server-side on every write; never
+  // trusted from the DB type alone.
+  satisfactionScore Int
+  // Optional free text, trimmed server-side; an empty/whitespace-only
+  // submission normalizes to null rather than an empty string.
+  comments          String? @db.Text
+
+  createdAt DateTime @default(now())
+
+  @@index([submittedByUserId])
+}
+
 model ProjectActivity {
-  id              String               @id @default(cuid())
-  title           String
-  description     String?              @db.Text
-  status          ActivityStatus       @default(TODO)
-  priority        ActivityPriority     @default(MEDIUM)
-  project         Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
-  projectId       String?
-  assignedUser    User?                @relation("ActivityAssignee", fields: [assignedUserId], references: [id])
-  assignedUserId  String?
-  assignedUsers   User[]               @relation("ActivityAssignees")
-  createdBy       User?                @relation("ActivityCreator", fields: [createdById], references: [id])
-  createdById     String?
-  department      Department?          @relation(fields: [departmentId], references: [id])
-  departmentId    String?
+  id                 String               @id @default(cuid())
+  title              String
+  description        String?              @db.Text
+  status             ActivityStatus       @default(TODO)
+  priority           ActivityPriority     @default(MEDIUM)
+  project            Project?             @relation(fields: [projectId], references: [id], onDelete: SetNull)
+  projectId          String?
+  assignedUser       User?                @relation("ActivityAssignee", fields: [assignedUserId], references: [id])
+  assignedUserId     String?
+  assignedUsers      User[]               @relation("ActivityAssignees")
+  createdBy          User?                @relation("ActivityCreator", fields: [createdById], references: [id])
+  createdById        String?
+  department         Department?          @relation(fields: [departmentId], references: [id])
+  departmentId       String?
   // Must belong to the same departmentId as this activity — validated in
   // lib/services/sub-department-service.ts, not enforced at the DB level.
-  subDepartment   SubDepartment?       @relation(fields: [subDepartmentId], references: [id])
-  subDepartmentId String?
-  businessUnit    BusinessUnit?        @relation(fields: [businessUnitId], references: [id])
-  businessUnitId  String?
-  startDate       DateTime?
-  dueDate         DateTime?
-  progress        Int                  @default(0)
-  isMilestone     Boolean              @default(false)
-  completedAt     DateTime?
-  isCompleted     Boolean              @default(false)
-  tickets         Ticket[]
-  predecessorDeps ActivityDependency[] @relation("ActivityDependencyPredecessor")
-  successorDeps   ActivityDependency[] @relation("ActivityDependencySuccessor")
-  notes           ActivityNote[]
-  relatedLinks    RelatedLink[]
-  attachments     ActivityAttachment[]
-  createdAt       DateTime             @default(now())
-  updatedAt       DateTime             @updatedAt
+  subDepartment      SubDepartment?       @relation(fields: [subDepartmentId], references: [id])
+  subDepartmentId    String?
+  businessUnit       BusinessUnit?        @relation(fields: [businessUnitId], references: [id])
+  businessUnitId     String?
+  startDate          DateTime?
+  dueDate            DateTime?
+  progress           Int                  @default(0)
+  isMilestone        Boolean              @default(false)
+  completedAt        DateTime?
+  isCompleted        Boolean              @default(false)
+  // ─── Request-origin-only Activity metadata ──────────────────────────────
+  // Only ever REQUIRED at creation when the parent Project itself
+  // originates from a Project Request (Project.projectRequestId != null) —
+  // see createActivitySchema/requestOriginActivitySchema in
+  // lib/validations.ts. Every field below is nullable at the DB level
+  // because legacy Activities (predating this feature, or belonging to a
+  // normal/manual Project) never have it filled in — never fabricated,
+  // never backfilled.
+  //
+  // owner is a SEPARATE, NEW single-user field, deliberately NOT a reuse of
+  // the legacy singular `assignedUser` above (that field is unused/stale —
+  // repurposing it would be silently reinterpreting an unrelated field).
+  // Named after Project's own owner/ownerId for consistency.
+  owner              User?                @relation("ActivityOwner", fields: [ownerId], references: [id])
+  ownerId            String?
+  // "Related Users" reuses the EXISTING `assignedUsers` many-to-many above
+  // (already the canonical "who is assigned to this activity" relation,
+  // used everywhere — Gantt, Resource Planning, lists) — see this
+  // feature's own doc comment in lib/validations.ts for why no parallel
+  // relation was added. The "at least one required" rule is enforced only
+  // at the request-origin creation boundary, not as a DB constraint (a
+  // manual Activity may still have zero assignees, exactly as today).
+  expectedStartDate  DateTime?
+  expectedFinishDate DateTime?
+  // Whole calendar days (expectedFinishDate - expectedStartDate),
+  // RECALCULATED server-side any time either date legitimately changes —
+  // unlike Project.expectedTotalInitialDays, this is NOT an immutable
+  // creation-time baseline. Null whenever either date is missing (e.g. a
+  // legacy/grandfathered record with only one of the two set).
+  expectedDays       Int?
+  // Whole calendar days (completion date - expectedStartDate), computed
+  // ONCE at the authoritative COMPLETED transition (see
+  // app/api/activities/route.ts and app/api/activities/[id]/route.ts).
+  // Null until the Activity is actually completed; null forever if
+  // expectedStartDate was never set (legacy record). Cleared back to null
+  // if the Activity is reopened away from COMPLETED, and recomputed from
+  // the NEW completion date if completed again later.
+  actualDays         Int?
+  taskType           ActivityTaskType?    @relation(fields: [taskTypeId], references: [id])
+  taskTypeId         String?
+  // A HISTORICAL SNAPSHOT of taskType.cost at the moment it was set on this
+  // Activity (at creation, or whenever Task Type is CHANGED during edit) —
+  // never recalculated just because the admin later changes the Task
+  // Type's own current cost. Mirrors the same snapshot principle this
+  // repository previously used for Project Request Type cost.
+  taskTypeCost       Decimal?             @db.Decimal(10, 2)
+  // The user-controlled execution/priority ORDER of this Activity within
+  // its parent Project's vertical sequence — request-origin Projects only
+  // (Project.projectRequestId != null; see
+  // lib/services/activity-sequence-service.ts, the single authoritative
+  // place this field is ever read or written). Always a contiguous 1..N
+  // per Project after this feature's own reorder/create/delete/move paths
+  // run (never duplicates, never gaps) — nullable purely because a
+  // standalone Activity or one under a manual Project never has it set at
+  // all (ordering is meaningless there; the existing Activity list simply
+  // ignores this field for them). Pure ORDERING — carries no dependency/
+  // blocking semantics; see ActivityDependency above for this repo's
+  // actual (separate, currently unused by any UI) dependency-graph model,
+  // which this field is never confused with or derived from.
+  sequence           Int?
+  tickets            Ticket[]
+  predecessorDeps    ActivityDependency[] @relation("ActivityDependencyPredecessor")
+  successorDeps      ActivityDependency[] @relation("ActivityDependencySuccessor")
+  notes              ActivityNote[]
+  relatedLinks       RelatedLink[]
+  attachments        ActivityAttachment[]
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
 
   @@index([projectId])
   @@index([assignedUserId])
@@ -1313,10 +1466,33 @@ model ProjectActivity {
   @@index([status])
   @@index([departmentId])
   @@index([subDepartmentId])
+  @@index([ownerId])
+  @@index([taskTypeId])
   // Matches Ticket's own @@index([createdAt]) — app/(main)/activities/page.tsx
   // orders by createdAt desc, id asc, the same pattern Ticket already has
   // this index for.
   @@index([createdAt])
+  // Supports the request-origin Project detail page's own ORDER BY
+  // (projectId, sequence) — see activity-sequence-service.ts.
+  @@index([projectId, sequence])
+}
+
+// Global reference data (not department-scoped) defining the configured
+// COST of a kind of task — see ProjectExpenseType for the identical
+// reference-data shape/pattern this mirrors (id, name, isActive,
+// timestamps). Managed through its own dedicated permission (taskType.manage,
+// see prisma/seed.ts's PERMISSIONS), never bare "admin access".
+model ActivityTaskType {
+  id         String            @id @default(cuid())
+  name       String            @unique
+  // REQUIRED (unlike Project's optional Expense Type) — every Task Type
+  // must have a configured cost; see taskTypeCostSchema in
+  // lib/validations.ts.
+  cost       Decimal           @db.Decimal(10, 2)
+  isActive   Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  updatedAt  DateTime          @updatedAt
+  activities ProjectActivity[]
 }
 
 // A ProjectNote is an authenticated user's plain internal collaboration note
@@ -1468,20 +1644,33 @@ model ProjectRequestType {
   id        String   @id @default(cuid())
   name      String   @unique
   isActive  Boolean  @default(true)
-  // The current/default EUR cost for this type — NOT the cost of any
-  // specific Project Request (see ProjectRequest.cost below, which snapshots
-  // this value at submission time and never changes afterward, even if this
-  // field is later edited). Nullable only because the pre-existing row(s)
-  // from before this feature shipped have no authoritative historical cost
-  // to invent — every NEW type is required to have a real cost at creation
-  // time (enforced in projectRequestTypeSchema, not at the DB level).
-  // Decimal(10,2), never Float — exact currency precision, no
-  // floating-point drift.
-  cost      Decimal? @db.Decimal(10, 2)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   projectRequests ProjectRequest[]
+}
+
+// A configurable classification for a Project's EXPENSE TYPE — e.g. "CapEx",
+// "OpEx", "Maintenance". A single, global, admin-managed list (not
+// department-scoped — same rationale as ProjectRequestType above), offered
+// only to Projects created through the request-origin setup flow (see
+// createProjectFromApprovedRequest). Deactivating a type here only hides it
+// from the setup form's dropdown (the isActive filter in
+// GET /api/project-expense-types) — it never deletes or relabels any
+// Project that already references it, so a Project created against a since-
+// deactivated Expense Type keeps displaying it correctly forever, matching
+// the same "soft delete" convention ProjectRequestType/TicketStatus/
+// TicketPriority/TicketCategory already use for their own isActive flag.
+// Hard delete (DELETE /api/admin/project-expense-types/[id]) is blocked
+// while any Project still references it — see that route's own doc comment.
+model ProjectExpenseType {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  projects Project[]
 }
 
 enum ProjectRequestStatus {
@@ -1532,16 +1721,6 @@ model ProjectRequest {
 
   projectType   ProjectRequestType @relation(fields: [projectTypeId], references: [id])
   projectTypeId String
-  // A SNAPSHOT of ProjectRequestType.cost taken server-side at submission
-  // time (see POST /api/project-requests) — NEVER re-read live from the
-  // type afterward, by design: an admin later editing the type's own cost
-  // must never retroactively change an already-submitted request's cost.
-  // Never trusted from client input (the server resolves the type and
-  // copies its authoritative cost; a client-submitted cost value is simply
-  // discarded). Null only when this request predates the feature, or the
-  // selected type itself had no cost set at the time of submission —
-  // never a fabricated value. Decimal(10,2), never Float.
-  cost          Decimal?           @db.Decimal(10, 2)
 
   teamConcerned                     String
   expectedBenefits                  String  @db.Text
@@ -1617,6 +1796,12 @@ model ProjectRequest {
   // on Project (projectRequestId, @unique) since a Project originates from
   // at most one request, never the reverse.
   project Project?
+
+  // The ONE feedback row the original requester (above) may submit once
+  // this request's Project is completed — see ProjectFeedback's own doc
+  // comment. Null until submitted; null forever for a request whose
+  // Project was never completed, or that has no Project yet.
+  feedback ProjectFeedback?
 
   submittedAt DateTime @default(now())
   createdAt   DateTime @default(now())

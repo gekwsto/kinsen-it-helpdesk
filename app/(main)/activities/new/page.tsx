@@ -1,10 +1,16 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
+import { prisma } from "@/lib/prisma";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { canActOnEntity, getNavVisibilityFlags, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { ActivityNewForm } from "@/components/activities/activity-new-form";
 
-export default async function NewActivityPage() {
+export default async function NewActivityPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ projectId?: string }>;
+}) {
+  const { projectId: requestedProjectId } = await searchParams;
   const session = await auth();
   if (!session?.user) redirect("/login");
 
@@ -20,8 +26,38 @@ export default async function NewActivityPage() {
   ).canCreateActivities;
   if (!canCreate) redirect("/activities");
 
+  // Resolve + VALIDATE the incoming ?projectId= server-side — never trusted
+  // blindly. Existence and project.view (the same gate the Project detail
+  // page itself uses) are both re-checked here; a missing/forged/
+  // unauthorized id silently falls back to "no preselection" rather than an
+  // error page, so a stale/bad link never breaks the create form itself.
+  // request-origin detection is NEVER decided from this — only
+  // `project.id`/`project.title` are used for prefill; projectRequestId is
+  // reloaded straight from this same row and handed to the client purely as
+  // data (ActivityNewForm derives isRequestOrigin from it the same way it
+  // already does for every other project in the dropdown), and POST
+  // /api/activities independently re-resolves the Project from the DB
+  // again at submit time regardless of what this page rendered.
+  let preselectedProject: { id: string; departmentId: string | null } | null = null;
+  if (requestedProjectId) {
+    const project = await prisma.project.findUnique({
+      where: { id: requestedProjectId },
+      select: { id: true, departmentId: true },
+    });
+    if (project) {
+      const canViewProject = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
+      if (canViewProject) preselectedProject = project;
+    }
+  }
+
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  const departmentId = activeWorkspace.isAllSelected ? null : activeWorkspace.departmentId;
+  // The validated Project's own department takes priority over the active
+  // workspace — same precedence ActivityNewForm's existing inline mode
+  // already uses (a Ticket's own department overrides the caller's active
+  // workspace there too), so the Project dropdown/eligible-users/sub-
+  // departments/statuses all resolve against the Project's REAL department
+  // from the very first render, not a possibly-different active workspace.
+  const departmentId = preselectedProject ? preselectedProject.departmentId : activeWorkspace.isAllSelected ? null : activeWorkspace.departmentId;
 
   // Same canActOnEntity gate POST /api/projects itself enforces (via
   // resolveDepartmentForCreate) — computed here only to decide whether the
@@ -62,6 +98,7 @@ export default async function NewActivityPage() {
   return (
     <ActivityNewForm
       departmentId={departmentId}
+      preselectedProjectId={preselectedProject?.id ?? null}
       canCreateProject={canCreateProject}
       canUploadAttachments={canUploadAttachments}
       canUploadProjectAttachments={canUploadProjectAttachments}

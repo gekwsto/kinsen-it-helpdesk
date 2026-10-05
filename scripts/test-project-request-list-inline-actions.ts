@@ -88,9 +88,14 @@ async function main() {
   check("...row Approve/Reject and Preview's Approve/Reject both call the SAME openDecision() opener — never a separate code path", (tableSrc.match(/openDecision\(/g) ?? []).length >= 4);
   check("...the list never imports/defines a second decision-dialog component", !/function \w*DecisionDialog/.test(tableSrc.replace(/ProjectRequestDecisionDialog/g, "")));
 
-  // 6/11/17. No redirect/URL change on success — only router.refresh().
-  check("6/17. The table NEVER calls router.push/router.replace/window.location (no redirect, no URL change, no navigation overlay trigger)", !/router\.push|router\.replace|window\.location/.test(tableSrc));
-  check("6/11. On success, router.refresh() is the ONLY state-sync mechanism used (same authoritative-refresh pattern as the detail page's ApprovalActions)", (tableSrc.match(/router\.refresh\(\)/g) ?? []).length >= 2);
+  // 6/11/17. Reject: no redirect/URL change, only router.refresh(). Approve:
+  // a deliberate, full navigation to the request-origin Project setup page
+  // (/projects/new?projectRequestId=...) — Project setup is a dedicated
+  // page, never another modal stacked on this list, and never created
+  // automatically by the approval itself anymore.
+  check("6/17. A successful APPROVE navigates to the request-origin Project setup page, never silently staying on the list", /router\.push\(`\/projects\/new\?projectRequestId=\$\{row\.id\}`\)/.test(tableSrc));
+  check("6. ...the table never calls router.replace or window.location (the ONE navigation path is router.push to Project setup)", !/router\.replace|window\.location/.test(tableSrc));
+  check("6/11. On a REJECT (or a failed/conflicting decision), router.refresh() is the state-sync mechanism — never a redirect", (tableSrc.match(/router\.refresh\(\)/g) ?? []).length >= 2);
 
   // 8. Conflict (409) handled distinctly — closes cleanly, refreshes, never a false success.
   check("8. A 409 response is handled distinctly from other errors — closes the dialog and refreshes rather than retrying a call that can only fail again", /res\.status === 409/.test(tableSrc) && /setDecisionTarget\(null\);\s*\n\s*router\.refresh\(\);\s*\n\s*return;/.test(tableSrc));

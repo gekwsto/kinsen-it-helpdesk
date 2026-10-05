@@ -29,11 +29,7 @@ export async function GET() {
       orderBy: { createdAt: "asc" },
       include: { _count: { select: { projectRequests: true } } },
     });
-    // Decimal -> plain number for the wire — Prisma.Decimal's own
-    // Prisma.toJSON() would stringify it instead, which is correct but an
-    // implicit behavior; being explicit keeps the API's actual response
-    // shape (and this route's own callers/tests) honest about the contract.
-    return NextResponse.json(types.map((t) => ({ ...t, cost: t.cost ? Number(t.cost) : null })));
+    return NextResponse.json(types);
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();
     if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Project Request Types.");
@@ -55,9 +51,9 @@ export async function POST(req: NextRequest) {
     }
 
     const type = await prisma.projectRequestType.create({
-      data: { name: parsed.data.name, isActive: parsed.data.isActive ?? true, cost: parsed.data.cost },
+      data: { name: parsed.data.name, isActive: parsed.data.isActive ?? true },
     });
-    return NextResponse.json({ ...type, cost: type.cost ? Number(type.cost) : null, _count: { projectRequests: 0 } }, { status: 201 });
+    return NextResponse.json({ ...type, _count: { projectRequests: 0 } }, { status: 201 });
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();
     if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Project Request Types.");

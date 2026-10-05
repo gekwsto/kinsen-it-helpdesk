@@ -50,7 +50,12 @@ export default async function MainLayout({
           <Sidebar userRole={session.user.role} navFlags={navFlags} />
           <div className="flex-1 flex flex-col overflow-hidden">
             <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
-            <main className="flex-1 overflow-y-auto p-6">{children}</main>
+            {/* position:relative makes main the containing block for absolutely-positioned
+                descendants (e.g. Radix Select's hidden native <select> for form bubbling).
+                Without it, such elements anchor to <body> using their current viewport-relative
+                top, which can land past main's own clipped bottom edge on a long scrolled page
+                and inflate document.scrollHeight — a second, phantom window-level scrollbar. */}
+            <main className="relative flex-1 min-h-0 overflow-y-auto p-6">{children}</main>
           </div>
         </div>
         <HelpGuideWidget />

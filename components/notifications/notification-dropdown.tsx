@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
-import { Bell, BellOff, Check, Loader2 } from "lucide-react";
+import { Bell, BellOff, Check, Loader2, X, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -18,6 +18,8 @@ import {
   applyNotificationCreated,
   applyMarkRead,
   applyMarkAllRead,
+  applyDeleted,
+  applyClearAll,
   applyReconcile,
   type NotificationState,
 } from "@/lib/notifications/notification-state";
@@ -41,6 +43,7 @@ export function NotificationDropdown() {
   const [state, setState] = useState<NotificationState>(EMPTY_NOTIFICATION_STATE);
   const [loading, setLoading] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
+  const [clearingAll, setClearingAll] = useState(false);
 
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -333,6 +336,24 @@ export function NotificationDropdown() {
     }
   };
 
+  /** Dismisses a single notification — stops the click from bubbling to the row's own markRead/navigation (the "x" sits inside a clickable row, and for a linked notification, inside a <Link> too). Optimistic: the row disappears immediately, so there's nothing left to show a per-row loading state on. */
+  const deleteNotification = async (e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setState((prev) => applyDeleted(prev, id));
+    await fetch(`/api/notifications/${id}`, { method: "DELETE" });
+  };
+
+  const clearAll = async () => {
+    setClearingAll(true);
+    try {
+      setState((prev) => applyClearAll(prev));
+      await fetch("/api/notifications/clear-all", { method: "DELETE" });
+    } finally {
+      setClearingAll(false);
+    }
+  };
+
   const { items, unreadCount } = state;
 
   return (
@@ -404,6 +425,23 @@ export function NotificationDropdown() {
                 All read
               </Button>
             )}
+            {items.length > 0 && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-7 text-xs gap-1"
+                onClick={clearAll}
+                disabled={clearingAll}
+                title="Clear all notifications"
+              >
+                {clearingAll ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Trash2 className="h-3 w-3" />
+                )}
+                Clear all
+              </Button>
+            )}
           </div>
         </div>
 
@@ -438,7 +476,7 @@ export function NotificationDropdown() {
             items.map((n) => {
               const row = (
                 <div
-                  className={`flex items-start gap-3 px-4 py-3 border-b last:border-0 hover:bg-muted/50 cursor-pointer transition-colors ${
+                  className={`group flex items-start gap-3 px-4 py-3 border-b last:border-0 hover:bg-muted/50 cursor-pointer transition-colors ${
                     !n.isRead ? "bg-blue-50/60" : ""
                   }`}
                   onClick={() => markRead(n)}
@@ -455,6 +493,19 @@ export function NotificationDropdown() {
                       {formatRelative(new Date(n.createdAt))}
                     </p>
                   </div>
+                  {/* Per-row dismiss — visible on hover (and always, for
+                      keyboard/touch users who can't hover) via opacity, never
+                      disabled behind a hover-only affordance that a keyboard
+                      user couldn't reach at all. */}
+                  <button
+                    type="button"
+                    onClick={(e) => deleteNotification(e, n.id)}
+                    className="flex-shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-muted text-muted-foreground transition-opacity"
+                    aria-label="Dismiss notification"
+                    title="Dismiss"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               );
 

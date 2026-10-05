@@ -20,7 +20,6 @@ import {
 } from "@/components/ui/select";
 import { Loader2 } from "lucide-react";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
-import { formatEUR } from "@/lib/currency";
 
 interface DepartmentOption {
   id: string;
@@ -29,8 +28,6 @@ interface DepartmentOption {
 interface ProjectTypeOption {
   id: string;
   name: string;
-  /** The type's current/default cost — informational only here; the server independently resolves and snapshots this at submission time (see POST /api/project-requests), never trusting anything the client displays or sends. */
-  cost: number | null;
 }
 interface IntermediateApproverOption {
   id: string;
@@ -83,13 +80,6 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
     const next = checked ? [...current, userId] : current.filter((id) => id !== userId);
     setValue("intermediateApproverIds", next, { shouldValidate: true });
   };
-
-  // Purely derived from whichever type is currently selected — never its
-  // own form field, never submitted, never editable. Changing the
-  // selection re-derives this on every render; the server independently
-  // resolves and snapshots the authoritative cost at submission time (see
-  // POST /api/project-requests) regardless of what this shows.
-  const selectedType = types.find((t) => t.id === projectTypeId);
 
   const onSubmit = async (data: CreateProjectRequestInput) => {
     setSubmitting(true);
@@ -191,14 +181,6 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
                 </SelectContent>
               </Select>
               {errors.projectTypeId && <p className="text-xs text-destructive">{errors.projectTypeId.message}</p>}
-              {/* Read-only, derived display only — never a form field of its
-                  own, never submitted, never editable by the requester. */}
-              {selectedType && (
-                <p className="text-sm">
-                  <span className="text-muted-foreground">Cost: </span>
-                  {formatEUR(selectedType.cost) ?? <span className="text-muted-foreground italic">Not set</span>}
-                </p>
-              )}
             </div>
           </div>
 

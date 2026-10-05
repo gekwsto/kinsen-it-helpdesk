@@ -200,6 +200,13 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
         { label: "Sub Departments", href: "/admin/sub-departments", visible: navFlags.canViewAdminSubDepartments },
         { label: "Microsoft Mappings", href: "/admin/microsoft-mappings", roles: ["ADMIN"] as Role[] },
         { label: "Project Request Types", href: "/admin/project-request-types", roles: ["ADMIN"] as Role[] },
+        { label: "Project Expense Types", href: "/admin/project-expense-types", roles: ["ADMIN"] as Role[] },
+        { label: "Task Types", href: "/admin/activity-task-types", roles: ["ADMIN"] as Role[] },
+        // Permission-gated (projectFeedback.view), NOT a hardcoded
+        // roles:["ADMIN"] — see navFlags.canViewProjectFeedback's own doc
+        // comment (lib/services/department-scope-service.ts) for why this
+        // one deliberately differs from its siblings above.
+        { label: "Feedback", href: "/admin/project-feedback", visible: navFlags.canViewProjectFeedback },
         { label: "Categories", href: "/admin/categories", roles: ["ADMIN"] as Role[] },
         { label: "Priorities", href: "/admin/priorities", roles: ["ADMIN"] as Role[] },
         { label: "Statuses", href: "/admin/statuses", roles: ["ADMIN"] as Role[] },
@@ -235,7 +242,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
   return (
     <aside
       className={cn(
-        "min-h-screen flex flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border transition-all duration-200 flex-shrink-0",
+        "h-screen flex flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border transition-all duration-200 flex-shrink-0",
         collapsed ? "w-16" : "w-64"
       )}
     >
@@ -275,7 +282,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
           (globals.css) instead of the app-wide light one; py/space-y shrink
           slightly on shorter viewports (maxh-800/maxh-700, tailwind.config.ts)
           so the menu needs less scrolling on laptop-height screens. */}
-      <nav className="flex-1 overflow-y-auto py-4 px-2 space-y-1 maxh-800:py-3 maxh-700:py-2 maxh-700:space-y-0.5 sidebar-scroll">
+      <nav className="flex-1 min-h-0 overflow-y-auto py-4 px-2 space-y-1 maxh-800:py-3 maxh-700:py-2 maxh-700:space-y-0.5 sidebar-scroll">
         {navItems.map((item) => {
           if (!canAccess(item)) return null;
 

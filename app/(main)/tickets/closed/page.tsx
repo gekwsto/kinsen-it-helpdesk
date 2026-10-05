@@ -92,14 +92,13 @@ export default async function ClosedTicketsPage({
   // identical comment.
   const orderBy = resolveListSort(TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder).orderBy;
 
-  // Same fix/rationale as app/(main)/tickets/page.tsx: the active workspace
-  // must never implicitly narrow this list — only an EXPLICIT
-  // ?departmentId= does. buildTicketListWhere/getTicketFilterOptions
-  // already resolve an absent departmentId to the full union of every
-  // department this user may view tickets in. activeWorkspace is still
-  // used below only to detect "zero accessible departments at all".
+  // Same precedence rule as app/(main)/tickets/page.tsx (see its own doc
+  // comment for the full history): an explicit ?departmentId= wins
+  // outright; absent one, the list now follows the active Workspace;
+  // "All Workspaces" (canViewAllDepartments roles only) explicitly expands
+  // to the full accessible union.
   const activeWorkspace = await getActiveWorkspace(session.user.id, session.user.role);
-  const effectiveDepartmentId = params.departmentId;
+  const effectiveDepartmentId = params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
   if (activeWorkspace.departments.length === 0) {
     return <NoWorkspaceState />;

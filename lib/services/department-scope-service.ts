@@ -541,6 +541,19 @@ export interface NavVisibilityFlags {
   canViewAllTickets: boolean;
   /** Gates the "Closed Tickets" sidebar entry and app/(main)/tickets/closed's own page-level check — ticket.closed.view, department-scoped or global, same union shape as every other canView* flag. Previously hardcoded to isAdmin(role)/roles:["ADMIN"]. */
   canViewClosedTickets: boolean;
+  /**
+   * Gates the "Feedback" Administration sidebar entry AND
+   * app/(main)/admin/project-feedback's own page-level check —
+   * projectFeedback.view, a plain GLOBAL-only permission (see
+   * GLOBAL_ONLY_PERMISSION_KEYS), never department-scoped and never a
+   * `roles: ["ADMIN"]` hardcode. Computed via a real hasPermission() check
+   * even in the canViewAllDepartments branch below — same deliberate
+   * exception as canViewGantt above, since this permission is genuinely
+   * independently revocable (an admin can take it away from a DIRECTOR via
+   * /admin/roles and that must actually take effect), unlike every other
+   * flag in that branch, which is safely hardcoded true.
+   */
+  canViewProjectFeedback: boolean;
 }
 
 // cache()-wrapped: app/(main)/layout.tsx computes this once for Sidebar,
@@ -560,6 +573,7 @@ export const getNavVisibilityFlags = cache(async (
     // safely hardcoded true because the canViewAllDepartments bypass
     // itself already grants those unconditionally at the code level.
     const canViewGantt = await hasPermission(role, "gantt.view", customRoleId);
+    const canViewFeedback = await hasPermission(role, "projectFeedback.view", customRoleId);
     return {
       canViewAdminSubDepartments: true,
       canViewMyDepartments: true,
@@ -578,6 +592,7 @@ export const getNavVisibilityFlags = cache(async (
       canCreateGoals: true,
       canViewAllTickets: true,
       canViewClosedTickets: true,
+      canViewProjectFeedback: canViewFeedback,
     };
   }
 
@@ -609,6 +624,7 @@ export const getNavVisibilityFlags = cache(async (
     canCreateGoals,
     canViewAllTickets,
     canViewClosedTickets,
+    canViewProjectFeedback,
   ] = await Promise.all([
     getAccessibleDepartmentSummaries(userId, role, "subdepartment.view"),
     getUserDepartmentMemberships(userId),
@@ -630,6 +646,12 @@ export const getNavVisibilityFlags = cache(async (
     moduleGrant("goal.create"),
     hasAnyFullTicketView(userId, role),
     moduleGrant("ticket.closed.view"),
+    // Plain hasPermission, NOT moduleGrant — projectFeedback.view is
+    // GLOBAL-only (see GLOBAL_ONLY_PERMISSION_KEYS), never grantable to a
+    // department-scoped custom role via /admin/roles, so the
+    // department-membership half of moduleGrant's union would always be
+    // empty anyway; this skips that wasted query.
+    hasPermission(role, "projectFeedback.view", customRoleId),
   ]);
 
   return {
@@ -650,6 +672,7 @@ export const getNavVisibilityFlags = cache(async (
     canCreateGoals,
     canViewAllTickets,
     canViewClosedTickets,
+    canViewProjectFeedback,
   };
 });
 

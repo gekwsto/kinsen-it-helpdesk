@@ -57,6 +57,21 @@ export function applyMarkAllRead(state: NotificationState): NotificationState {
   return { items: state.items.map((n) => ({ ...n, isRead: true })), unreadCount: 0 };
 }
 
+/** Local optimistic single-item dismissal — the per-row "clear" (x) button removes it from the list immediately, decrementing unreadCount only if the removed item was actually unread. A no-op if the id is unknown (never double-decrements, never throws on a stale id). */
+export function applyDeleted(state: NotificationState, id: string): NotificationState {
+  const target = state.items.find((n) => n.id === id);
+  if (!target) return state;
+  return {
+    items: state.items.filter((n) => n.id !== id),
+    unreadCount: target.isRead ? state.unreadCount : Math.max(0, state.unreadCount - 1),
+  };
+}
+
+/** Local optimistic "Clear all" — empties the list and zeroes the badge immediately, before the DELETE request resolves. */
+export function applyClearAll(_state: NotificationState): NotificationState {
+  return EMPTY_NOTIFICATION_STATE;
+}
+
 /**
  * Authoritative reconciliation — a full replace from a fresh server fetch.
  * Used for the initial load AND on realtime reconnect: the database is

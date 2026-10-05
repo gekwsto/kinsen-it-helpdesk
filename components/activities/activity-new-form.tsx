@@ -23,10 +23,27 @@ import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
 import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 
-interface Project { id: string; title: string }
+// projectRequestId is the canonical, server-resolved provenance signal —
+// present on every /api/projects row already (a plain scalar column, never
+// select-limited there) — reused here verbatim to show/require the
+// request-origin fields below, never a client-invented flag.
+interface Project { id: string; title: string; projectRequestId: string | null }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface SubDepartmentOption { id: string; name: string }
 interface StatusOption { status: ActivityStatus; label: string; color: string }
+interface TaskTypeOption { id: string; name: string; cost: number }
+
+/** Whole calendar days between two date-only (YYYY-MM-DD) strings — a client-side PREVIEW only, purely for UX; mirrors wholeCalendarDaysBetween in lib/date-only.ts, but the server always recomputes and persists its own authoritative value. Returns null until both dates are present/valid. */
+function previewCalendarDays(startStr: string, finishStr: string): number | null {
+  if (!startStr || !finishStr) return null;
+  const start = new Date(startStr);
+  const finish = new Date(finishStr);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(finish.getTime())) return null;
+  const MS_PER_DAY = 24 * 60 * 60 * 1000;
+  const startUtcMidnight = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  const finishUtcMidnight = Date.UTC(finish.getUTCFullYear(), finish.getUTCMonth(), finish.getUTCDate());
+  return Math.round((finishUtcMidnight - startUtcMidnight) / MS_PER_DAY);
+}
 
 export interface CreatedActivity {
   id: string;
@@ -52,7 +69,7 @@ interface ActivityNewFormProps {
    * navigating away.
    */
   mode?: "standalone" | "inline";
-  /** Inline mode only — preselects this project (e.g. the Ticket's currently-selected project); still changeable within the same department's project list. */
+  /** Preselects this project — in inline mode, the Ticket's currently-selected project; in standalone mode, the ?projectId= the server page already resolved/validated (see app/(main)/activities/new/page.tsx). Still changeable afterward (the Project selector is never locked); changing it re-derives every Project-dependent field (request-origin block, eligible owner/related-users) from the newly-selected Project, the same way it already does on first load. */
   preselectedProjectId?: string | null;
   /**
    * Standalone mode only — whether the current user holds `project.create`
@@ -139,26 +156,42 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   const [statusOptions, setStatusOptions] = useState<StatusOption[]>([]);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
 
+  // Request-origin-only — only ever shown/required when the SELECTED
+  // Project itself originates from a Project Request (see `isRequestOrigin`
+  // below, derived from projectId + `projects`, never a flag of its own).
+  const [expectedStartDate, setExpectedStartDate] = useState("");
+  const [expectedFinishDate, setExpectedFinishDate] = useState("");
+  const [ownerId, setOwnerId] = useState("");
+  const [taskTypeId, setTaskTypeId] = useState("");
+  const [taskTypes, setTaskTypes] = useState<TaskTypeOption[]>([]);
+
   useEffect(() => {
     const assignableUrl = `/api/users?assignableFor=activity${departmentId ? `&departmentId=${departmentId}` : ""}`;
-    // Inline mode scopes the Project picker to the SAME department the
-    // activity itself will be created in — a cross-department project
-    // would just be rejected by POST /api/activities anyway (see its own
-    // "different department" check), this only avoids offering it in the
-    // first place. Standalone /activities/new keeps its existing, unscoped
-    // project list unchanged (a pre-existing, out-of-scope behavior — see
-    // the final report).
-    const projectsUrl = inline && departmentId ? `/api/projects?departmentId=${departmentId}&limit=100` : "/api/projects?limit=100";
+    // Inline mode (and standalone WITH a preselected Project — e.g. arriving
+    // from a Project's own "Add Activity" button) scopes the Project picker
+    // to the SAME department the activity itself will be created in — a
+    // cross-department project would just be rejected by POST
+    // /api/activities anyway (see its own "different department" check),
+    // this only avoids offering it in the first place. Scoping is also what
+    // GUARANTEES the preselected project is actually present in the fetched
+    // list: an unscoped `limit=100` fetch has no ordering guarantee that
+    // includes any specific project, which would silently defeat the
+    // preselection effect below (`projects.some(...)` would never find it).
+    // Plain standalone /activities/new (no preselection at all) keeps its
+    // existing, unscoped project list unchanged — unrelated to this fix.
+    const projectsUrl = (inline || preselectedProjectId) && departmentId ? `/api/projects?departmentId=${departmentId}&limit=100` : "/api/projects?limit=100";
     Promise.all([
       fetch(projectsUrl).then((r) => r.json()),
       fetch(assignableUrl).then((r) => (r.ok ? r.json() : [])),
       departmentId ? fetch(`/api/departments/${departmentId}/sub-departments`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
       departmentId ? fetch(`/api/departments/${departmentId}/activity-statuses`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
+      fetch("/api/activity-task-types").then((r) => (r.ok ? r.json() : [])),
     ])
-      .then(([p, u, sd, statuses]) => {
+      .then(([p, u, sd, statuses, taskTypeOptions]) => {
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setAssignableUsers(Array.isArray(u) ? u : []);
         setSubDepartments(Array.isArray(sd) ? sd : []);
+        setTaskTypes(Array.isArray(taskTypeOptions) ? taskTypeOptions : []);
         const options: StatusOption[] = Array.isArray(statuses) ? statuses.map((row: any) => ({ status: row.status, label: row.label, color: row.color })) : [];
         setStatusOptions(options);
         // Default to the department's own lowest-sortOrder enabled status
@@ -169,7 +202,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [departmentId, inline]);
+  }, [departmentId, inline, preselectedProjectId]);
 
   // Applies the preselected Project only once it's confirmed present in
   // `projects` — see the `projectId` state's own doc comment above for why
@@ -198,7 +231,10 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   }, [projects, pendingProjectSelection]);
 
   const handleProjectCreated = (project: { id: string; title: string }) => {
-    setProjects((prev) => (prev.some((p) => p.id === project.id) ? prev : [...prev, { id: project.id, title: project.title }]));
+    // Always a manual creation (the nested "+ New Project" dialog has no
+    // request-origin path of its own) — projectRequestId is genuinely null
+    // here, never a placeholder.
+    setProjects((prev) => (prev.some((p) => p.id === project.id) ? prev : [...prev, { id: project.id, title: project.title, projectRequestId: null }]));
     setPendingProjectSelection(project.id);
   };
 
@@ -207,6 +243,24 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
       prev.includes(userId) ? prev.filter((x) => x !== userId) : [...prev, userId]
     );
   };
+
+  // The ONLY place this is decided — a plain derived value from the
+  // currently SELECTED Project's own server-resolved projectRequestId,
+  // never a flag this form invents or sends. POST /api/activities
+  // independently re-derives the identical rule server-side from the
+  // Project row itself; this only drives which fields the UI shows/
+  // requires client-side.
+  const selectedProject = projects.find((p) => p.id === projectId);
+  const isRequestOrigin = !!selectedProject?.projectRequestId;
+  const selectedTaskType = taskTypes.find((t) => t.id === taskTypeId);
+  const previewExpectedDays = previewCalendarDays(expectedStartDate, expectedFinishDate);
+  // Client-side PREVIEW only (same convention as previewExpectedDays above)
+  // — POST /api/activities independently computes and returns the
+  // authoritative Estimated Cost (taskTypeCost × expectedDays) via
+  // computeActivityFinancials; this never gets sent, only shown ahead of
+  // creation so the number isn't a total surprise.
+  const previewEstimatedCost =
+    selectedTaskType && previewExpectedDays !== null ? selectedTaskType.cost * previewExpectedDays : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,6 +271,18 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
     if (inline && !departmentId) {
       toast.error("No department resolved for this activity.");
       return;
+    }
+    // Client-side UX guard only — POST /api/activities independently
+    // re-derives isRequestOrigin from the Project row itself and enforces
+    // the identical requirement; this just avoids a round-trip for the
+    // obvious case.
+    if (isRequestOrigin) {
+      if (!expectedStartDate) return toast.error("Expected Start is required for an Activity under a request-origin Project.");
+      if (!expectedFinishDate) return toast.error("Expected Finish is required for an Activity under a request-origin Project.");
+      if (new Date(expectedFinishDate) < new Date(expectedStartDate)) return toast.error("Expected Finish cannot be before Expected Start.");
+      if (!taskTypeId) return toast.error("Select a Task Type.");
+      if (!ownerId) return toast.error("Select an Owner.");
+      if (selectedUserIds.length === 0) return toast.error("Select at least one Related User.");
     }
     setSaving(true);
     try {
@@ -246,6 +312,14 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
             // requires it (never relies on the fallback, which is scoped to
             // the CALLER's active workspace, not necessarily the ticket's own).
             departmentId: departmentId || undefined,
+            ...(isRequestOrigin
+              ? {
+                  expectedStartDate,
+                  expectedFinishDate,
+                  ownerId,
+                  taskTypeId,
+                }
+              : {}),
           }),
         });
         if (!res.ok) {
@@ -451,10 +525,118 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
               </div>
             )}
 
+            {/* Request-origin-only — only ever shown when the SELECTED
+                Project itself originates from a Project Request (see
+                isRequestOrigin above). A normal/manual Project's Activity
+                creation never sees this block at all, never an empty
+                version of it. */}
+            {isRequestOrigin && (
+              <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+                <div>
+                  <h3 className="text-sm font-semibold">Project Request Setup</h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">Required for Activities created under a Project that originated from a Project Request.</p>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="expected-start">
+                      Expected Start <span className="text-destructive">*</span>
+                    </Label>
+                    <Input id="expected-start" type="date" value={expectedStartDate} onChange={(e) => setExpectedStartDate(e.target.value)} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="expected-finish">
+                      Expected Finish <span className="text-destructive">*</span>
+                    </Label>
+                    <Input id="expected-finish" type="date" value={expectedFinishDate} onChange={(e) => setExpectedFinishDate(e.target.value)} />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="expected-days">Expected Days</Label>
+                  {/* readOnly (never disabled) — same convention as
+                      Project.expectedTotalInitialDays's own create-time
+                      preview input (components/projects/project-form.tsx):
+                      full visual weight, never typable, never submitted —
+                      the server independently computes and persists its
+                      own authoritative value. */}
+                  <Input
+                    id="expected-days"
+                    type="text"
+                    inputMode="none"
+                    readOnly
+                    aria-readonly="true"
+                    tabIndex={-1}
+                    value={previewExpectedDays !== null ? `${previewExpectedDays} day${previewExpectedDays === 1 ? "" : "s"}` : ""}
+                    placeholder="Select both dates to calculate"
+                    className="cursor-default bg-muted/40"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="task-type">
+                    Task Type <span className="text-destructive">*</span>
+                  </Label>
+                  <Select value={taskTypeId} onValueChange={setTaskTypeId}>
+                    <SelectTrigger id="task-type">
+                      <SelectValue placeholder="Select a Task Type…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {taskTypes.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>
+                          {t.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {/* Informational only — never the authoritative value;
+                      the server independently loads the Task Type and
+                      snapshots ITS OWN current cost at creation time. */}
+                  {selectedTaskType && (
+                    <p className="text-xs text-muted-foreground">Cost: {selectedTaskType.cost.toFixed(2)} EUR (snapshotted at creation)</p>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="estimated-cost">Estimated Cost</Label>
+                  <Input
+                    id="estimated-cost"
+                    type="text"
+                    inputMode="none"
+                    readOnly
+                    aria-readonly="true"
+                    tabIndex={-1}
+                    value={previewEstimatedCost !== null ? `${previewEstimatedCost.toFixed(2)} EUR` : ""}
+                    placeholder="Select a Task Type and both dates to calculate"
+                    className="cursor-default bg-muted/40"
+                  />
+                  <p className="text-xs text-muted-foreground">Task Type cost × Expected Days. Calculated automatically.</p>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="owner">
+                    Owner <span className="text-destructive">*</span>
+                  </Label>
+                  <Select value={ownerId} onValueChange={setOwnerId}>
+                    <SelectTrigger id="owner">
+                      <SelectValue placeholder="Select an owner…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {assignableUsers.map((u) => (
+                        <SelectItem key={u.id} value={u.id}>
+                          {u.name ?? u.email}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+            )}
+
             <div className="space-y-2">
-              <Label>Assigned Users</Label>
+              <Label>{isRequestOrigin ? <>Related Users <span className="text-destructive">*</span></> : "Assigned Users"}</Label>
               <p className="text-xs text-muted-foreground">
-                Only users eligible for this workspace are listed.
+                {isRequestOrigin ? "At least one is required for an Activity under a request-origin Project." : "Only users eligible for this workspace are listed."}
               </p>
               {assignableUsers.length > 0 ? (
                 <div className="border rounded-md divide-y max-h-40 overflow-y-auto">

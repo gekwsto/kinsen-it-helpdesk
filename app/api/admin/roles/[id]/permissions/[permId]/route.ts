@@ -8,7 +8,7 @@ type RouteParams = { params: Promise<{ id: string; permId: string }> };
 // Department-scoped roles (DEPARTMENT or the shared BOTH scope) can never
 // reach system administration this way — Administrator stays the only path
 // to these, enforced here (not just hidden/disabled in the UI).
-const GLOBAL_ONLY_PERMISSION_KEYS = new Set(["admin.access", "user.manage", "role.manage"]);
+const GLOBAL_ONLY_PERMISSION_KEYS = new Set(["admin.access", "user.manage", "role.manage", "taskType.manage", "projectFeedback.view"]);
 
 // POST — assign permission to role
 export async function POST(_req: NextRequest, { params }: RouteParams) {

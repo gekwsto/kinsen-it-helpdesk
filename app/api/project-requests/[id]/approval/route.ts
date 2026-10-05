@@ -26,8 +26,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       session.user.role,
       session.user.customRoleId,
       parsed.data.decision,
-      parsed.data.businessAssessment,
-      parsed.data.projectOwnerId
+      parsed.data.businessAssessment
     );
     if (!result.ok) {
       switch (result.error.code) {
@@ -45,17 +44,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             apiError("invalid_assessment", "Business Assessment is required.", { field: "businessAssessment" }),
             { status: 422 }
           );
-        case "invalid_project_owner":
-          return NextResponse.json(
-            apiError("invalid_project_owner", "Select a real, active user who can own a Project in this department.", { field: "projectOwnerId" }),
-            { status: 422 }
-          );
         default:
           return internalErrorResponse();
       }
     }
 
-    return NextResponse.json({ ok: true, projectId: result.projectId });
+    return NextResponse.json({ ok: true });
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();
     console.error("[api/project-requests/[id]/approval] POST failed", error);

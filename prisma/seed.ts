@@ -146,6 +146,23 @@ const PERMISSIONS = [
   // to a custom role yet), but seeded as a real permission key rather than a
   // hardcoded role check so it fits the existing custom-role architecture.
   { key: "integration.manage", description: "Manage external integrations and their API keys", module: "admin" },
+  // Activity Task Types are global reference data (not department-scoped) —
+  // same GLOBAL-only tier as user.manage/role.manage (see
+  // GLOBAL_ONLY_PERMISSION_KEYS in
+  // app/api/admin/roles/[id]/permissions/[permId]/route.ts and
+  // app/(main)/admin/roles/page.tsx). Administrator-only in practice today,
+  // same rationale as integration.manage above.
+  { key: "taskType.manage", description: "Create, edit, and delete Activity Task Types", module: "admin" },
+  // Project Feedback — GLOBAL-only review capability, same tier as
+  // taskType.manage above (see GLOBAL_ONLY_PERMISSION_KEYS in
+  // app/api/admin/roles/[id]/permissions/[permId]/route.ts and
+  // app/(main)/admin/roles/page.tsx). Gates ONLY the Administration ->
+  // Feedback review surface (list/view) — it never grants the ability to
+  // submit feedback; that is restricted server-side to the original
+  // Project Request requester regardless of any permission a reviewer
+  // holds (see POST /api/projects/[id]/feedback). Administrator-only in
+  // practice today, same rationale as taskType.manage.
+  { key: "projectFeedback.view", description: "View submitted Project Feedback in Administration", module: "admin" },
   // Department (Phase 3) — department-scoped admin capabilities, granted via
   // DepartmentRole membership rather than the global Role/CustomRole system.
   { key: "department.view", description: "View department details", module: "department" },
@@ -605,6 +622,8 @@ async function main() {
     // user.manage already behave for that role.
     ADMIN: [
       "integration.manage",
+      "taskType.manage",
+      "projectFeedback.view",
       "organization.sync",
       "organization.tree.view",
       "company.create",

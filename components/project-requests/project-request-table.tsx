@@ -20,12 +20,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Check, FileText, X, Eye, FolderKanban } from "lucide-react";
+import { Check, FileText, X, Eye, FolderKanban, Wrench } from "lucide-react";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
-import { ProjectRequestDecisionDialog, type ProjectOwnerOption } from "@/components/project-requests/project-request-decision-dialog";
+import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { formatDateTime } from "@/lib/utils";
-import { formatEUR } from "@/lib/currency";
 import type { ProjectRequestStatus, IntermediateApprovalStatus } from "@prisma/client";
 
 export interface ProjectRequestRow {
@@ -34,8 +33,6 @@ export interface ProjectRequestRow {
   status: ProjectRequestStatus;
   description: string;
   importance: number;
-  /** A SNAPSHOT taken at submission time — never a live read of the type's own (possibly since-edited) cost. */
-  cost: number | null;
   teamConcerned: string;
   expectedBenefits: string;
   replacesExisting: boolean;
@@ -51,7 +48,7 @@ export interface ProjectRequestRow {
   legacyRequesterBusinessAssessment: string | null;
   /** Every requester-selected intermediate approver for this request and their individual decision — read-only informational display in Preview; the actual decision UI lives on the detail page. */
   intermediateApprovers: { id: string; status: IntermediateApprovalStatus; approver: { name: string | null; email: string } }[];
-  /** The Project auto-created from this request once it was approved (see decideApproval) — null until then. */
+  /** The Project created from this request's own request-origin setup flow (see createProjectFromApprovedRequest) — null until that's been completed. */
   project: { id: string; title: string } | null;
   /**
    * Server-computed (status === PENDING_APPROVAL AND effective
@@ -67,8 +64,6 @@ export interface ProjectRequestRow {
 interface ProjectRequestTableProps {
   requests: ProjectRequestRow[];
   emptyMessage: string;
-  /** Every active, project-assignable user for each department represented among `requests` — keyed by departmentId. Pre-fetched once per page load (never a per-row/on-open fetch — the SAME no-N+1 convention this table's own Approve/Reject already follows) so the owner picker has real data the instant a row's Approve dialog opens. */
-  assignableOwnersByDepartment: Record<string, ProjectOwnerOption[]>;
 }
 
 type Decision = "approve" | "reject";
@@ -83,7 +78,7 @@ type Decision = "approve" | "reject";
  * ApprovalActions uses — never a second/duplicated approval modal or a
  * second copy of the decision logic.
  */
-export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersByDepartment }: ProjectRequestTableProps) {
+export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTableProps) {
   const router = useRouter();
 
   const [previewTarget, setPreviewTarget] = useState<ProjectRequestRow | null>(null);
@@ -106,7 +101,7 @@ export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersBy
     setServerError(null);
   };
 
-  const submitDecision = async ({ businessAssessment, projectOwnerId }: { businessAssessment: string; projectOwnerId?: string }) => {
+  const submitDecision = async ({ businessAssessment }: { businessAssessment: string }) => {
     if (!decisionTarget) return;
     const { row, decision } = decisionTarget;
     setSubmitting(true);
@@ -115,7 +110,7 @@ export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersBy
       const res = await fetch(`/api/project-requests/${row.id}/approval`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, businessAssessment, projectOwnerId }),
+        body: JSON.stringify({ decision, businessAssessment }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -132,7 +127,16 @@ export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersBy
         }
         throw new Error(err.message ?? err.error ?? "Failed to submit decision");
       }
-      toast.success(decision === "approve" ? "Request approved" : "Request rejected");
+      if (decision === "approve") {
+        toast.success("Request approved — let's set up the Project.");
+        setDecisionTarget(null);
+        // A full navigation, same as the detail page's own post-approve
+        // redirect — Project setup is a dedicated page, not another modal
+        // stacked on this list.
+        router.push(`/projects/new?projectRequestId=${row.id}`);
+        return;
+      }
+      toast.success("Request rejected");
       setDecisionTarget(null);
       router.refresh();
     } catch (error: any) {
@@ -257,10 +261,6 @@ export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersBy
                   <span className="text-muted-foreground">Importance: </span>
                   <span className="font-medium">{PROJECT_PRIORITY_LABEL[previewTarget.importance] ?? String(previewTarget.importance)}</span>
                 </div>
-                <div>
-                  <span className="text-muted-foreground">Cost: </span>
-                  <span className="font-medium">{formatEUR(previewTarget.cost) ?? "Not set"}</span>
-                </div>
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto rounded-md border divide-y">
@@ -351,7 +351,6 @@ export function ProjectRequestTable({ requests, emptyMessage, assignableOwnersBy
         serverError={serverError}
         onCancel={cancelDecision}
         onConfirm={submitDecision}
-        ownerOptions={decisionTarget ? assignableOwnersByDepartment[decisionTarget.row.department.id] ?? [] : undefined}
       />
     </div>
   );

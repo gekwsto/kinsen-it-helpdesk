@@ -195,7 +195,8 @@ async function main() {
     console.log("\n=== PATCH /api/activities/[id]: the rollup is now awaited, not fire-and-forget ===\n");
     const routeSrc = await fs.readFile("app/api/activities/[id]/route.ts", "utf8");
     check("recalculateProjectRollup(...) is awaited (directly or via a collected Promise.all) before the route responds", /await Promise\.all\(rollups\)/.test(routeSrc));
-    check("...the response is returned strictly AFTER that await, never before", routeSrc.indexOf("await Promise.all(rollups)") < routeSrc.indexOf("return NextResponse.json({ ...activity, statusLabel"));
+    const awaitRollupsIdx = routeSrc.indexOf("await Promise.all(rollups)");
+    check("...the response is returned strictly AFTER that await, never before", awaitRollupsIdx < routeSrc.indexOf("return NextResponse.json({ ...activity, estimatedCost", awaitRollupsIdx));
   } finally {
     console.log("\nCleaning up test data...\n");
     const steps: Array<[string, () => Promise<unknown>]> = [

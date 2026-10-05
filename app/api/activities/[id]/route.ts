@@ -5,14 +5,17 @@ import { canActOnEntity, hasEffectiveEntityPermission } from "@/lib/services/dep
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
-import { updateActivitySchema } from "@/lib/validations";
+import { updateActivitySchema, requestOriginActivityMissingFields } from "@/lib/validations";
 import { recalculateProjectRollup, type ProjectRollupResult } from "@/lib/projects/progress-rollup";
 import { tryGetActivityProgressFromStatus, getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { getActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
-import { Role } from "@prisma/client";
+import { wholeCalendarDaysBetween, actualDaysFromCompletion } from "@/lib/date-only";
+import { computeActivityFinancials } from "@/lib/services/project-financials-service";
+import { getAppendSequenceLocked, normalizeProjectSequenceLocked, isRequestOriginProject } from "@/lib/services/activity-sequence-service";
+import { Role, ActivityStatus } from "@prisma/client";
 
 // Every field the Activity List (table) or Grid (card) view actually
 // renders, or that any real Activity-list page's filters/sorting/scope
@@ -47,10 +50,12 @@ export async function GET(
     const activity = await prisma.projectActivity.findUnique({
       where: { id },
       include: {
-        project: { select: { id: true, title: true } },
+        project: { select: { id: true, title: true, projectRequestId: true } },
         assignedUsers: { select: { id: true, name: true, email: true, image: true } },
         department: { select: { id: true, name: true } },
         businessUnit: { select: { id: true, name: true } },
+        owner: { select: { id: true, name: true, email: true, image: true } },
+        taskType: { select: { id: true, name: true } },
       },
     });
 
@@ -115,7 +120,13 @@ export async function GET(
     // themselves.
     const effectiveDepartmentId = activity.departmentId ?? (await getDefaultLegacyDepartmentId());
 
-    return NextResponse.json({ ...activity, progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, canCreateProjectInDept, canEditActivity, canDeleteActivity, effectiveDepartmentId });
+    // Estimated/Actual Cost — derived here (never stored), reusing the SAME
+    // computeActivityFinancials used by Project-level aggregation (see
+    // lib/services/project-financials-service.ts). Harmless for a manual
+    // Activity too (naturally €0/€0, since taskTypeCost is never set there).
+    const { estimatedCost, actualCost } = computeActivityFinancials(activity);
+
+    return NextResponse.json({ ...activity, estimatedCost: estimatedCost.toString(), actualCost: actualCost.toString(), progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, canCreateProjectInDept, canEditActivity, canDeleteActivity, effectiveDepartmentId });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -131,7 +142,17 @@ export async function PATCH(
 
     const existing = await prisma.projectActivity.findUnique({
       where: { id },
-      select: { departmentId: true, startDate: true, dueDate: true, status: true, projectId: true },
+      select: {
+        departmentId: true,
+        startDate: true,
+        dueDate: true,
+        status: true,
+        projectId: true,
+        expectedStartDate: true,
+        expectedFinishDate: true,
+        ownerId: true,
+        taskTypeId: true,
+      },
     });
     if (!existing) return NextResponse.json({ error: "Not found", code: "activity_not_found" }, { status: 404 });
 
@@ -183,7 +204,17 @@ export async function PATCH(
       }
     }
 
-    const { dueDate, startDate, isCompleted, assignedUserIds, ...rest } = data;
+    const {
+      dueDate,
+      startDate,
+      isCompleted,
+      assignedUserIds,
+      expectedStartDate,
+      expectedFinishDate,
+      ownerId,
+      taskTypeId,
+      ...rest
+    } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
 
     // Moving an activity into a different project (or clearing it back to
@@ -199,24 +230,59 @@ export async function PATCH(
     // (effective) department — cross-department moves are blocked outright,
     // never silently reparented.
     const projectChanged = data.projectId !== undefined && data.projectId !== existing.projectId;
+    // Set only in the "moving INTO a real project" branch below — used
+    // after this whole validation block to decide this Activity's new
+    // `sequence` (see the sequence computation further down).
+    let targetProjectIsRequestOrigin = false;
     if (projectChanged && data.projectId !== null) {
       const targetProject = await prisma.project.findUnique({
         where: { id: data.projectId! },
-        select: { id: true, departmentId: true },
+        select: { id: true, departmentId: true, projectRequestId: true },
       });
       if (!targetProject) {
         return NextResponse.json({ error: "Project not found", code: "project_not_found" }, { status: 404 });
       }
+      targetProjectIsRequestOrigin = targetProject.projectRequestId !== null;
       if (targetProject.departmentId !== effectiveDepartmentId) {
         return NextResponse.json(
           { error: "The selected project belongs to a different department.", code: "invalid_project_scope" },
           { status: 400 }
         );
       }
+
+      // Relinking an Activity INTO a request-origin Project must never
+      // bypass the same invariant creation enforces — block the relink
+      // (never silently relaxed) until the resulting Activity would have
+      // every required field, using THIS SAME request's own values where
+      // supplied (so an edit that moves the project AND fills in the
+      // missing metadata in one go is allowed) and the Activity's current
+      // stored values otherwise.
+      if (targetProject.projectRequestId !== null) {
+        const currentAssigneeCount = await prisma.projectActivity
+          .findUnique({ where: { id }, select: { _count: { select: { assignedUsers: true } } } })
+          .then((row) => row?._count.assignedUsers ?? 0);
+        const missing = requestOriginActivityMissingFields({
+          expectedStartDate: expectedStartDate !== undefined ? expectedStartDate : existing.expectedStartDate?.toISOString(),
+          expectedFinishDate: expectedFinishDate !== undefined ? expectedFinishDate : existing.expectedFinishDate?.toISOString(),
+          taskTypeId: taskTypeId !== undefined ? taskTypeId : existing.taskTypeId,
+          ownerId: ownerId !== undefined ? ownerId : existing.ownerId,
+          assignedUserIds: assignedUserIds !== undefined ? assignedUserIds : currentAssigneeCount > 0 ? ["__existing__"] : [],
+        });
+        if (missing.length > 0) {
+          return NextResponse.json(
+            {
+              error: "This Project originates from a Project Request — moving this Activity into it requires Expected Start, Expected Finish, Task Type, Owner, and at least one Related User. Supply the missing fields in the same request, or complete them first.",
+              code: "request_origin_fields_required",
+              missingFields: missing,
+            },
+            { status: 400 }
+          );
+        }
+      }
     }
 
     if (assignedUserIds && assignedUserIds.length > 0) {
-      for (const userId of assignedUserIds) {
+      for (const userId of Array.from(new Set(assignedUserIds))) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "activity", effectiveDepartmentId);
         if (!assignable) {
           return NextResponse.json(
@@ -226,6 +292,59 @@ export async function PATCH(
         }
       }
     }
+
+    // Owner — same eligibility rule as assignedUsers above, validated
+    // whenever a NEW (non-null) value is actually supplied.
+    if (ownerId) {
+      const ownerAssignable = await userHasAssignablePermissionForEntity(ownerId, "activity", effectiveDepartmentId);
+      if (!ownerAssignable) {
+        return NextResponse.json(
+          { error: "The selected Owner is not a valid user for Activities in this department.", code: "invalid_owner" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Task Type — only re-validated (must exist AND be active) when
+    // GENUINELY changing to a different id, the same "re-saving an
+    // already-set, since-deactivated reference value is fine; picking a
+    // NEW one must be active" rule this repo's Project Expense Type PATCH
+    // already established. Unchanged (including resending the same id, or
+    // omitting the field) never touches taskTypeCost's historical snapshot
+    // below.
+    let newTaskTypeCost: number | undefined;
+    const taskTypeChanging = taskTypeId !== undefined && taskTypeId !== existing.taskTypeId;
+    if (taskTypeChanging && taskTypeId !== null) {
+      const taskType = await prisma.activityTaskType.findUnique({ where: { id: taskTypeId! }, select: { id: true, isActive: true, cost: true } });
+      if (!taskType || !taskType.isActive) {
+        return NextResponse.json(
+          { error: "The selected Task Type does not exist or is not active.", code: "invalid_task_type" },
+          { status: 400 }
+        );
+      }
+      newTaskTypeCost = Number(taskType.cost);
+    }
+
+    // Expected Start/Finish — independently optional on edit (neither
+    // forces the other), finish>=start enforced only once BOTH effective
+    // values are real dates, exactly like Project's own
+    // expectedFinishDate>=expectedStartDate edit-time rule.
+    const effectiveExpectedStart =
+      expectedStartDate !== undefined ? (expectedStartDate ? new Date(expectedStartDate) : null) : existing.expectedStartDate;
+    const effectiveExpectedFinish =
+      expectedFinishDate !== undefined ? (expectedFinishDate ? new Date(expectedFinishDate) : null) : existing.expectedFinishDate;
+    if (effectiveExpectedStart && effectiveExpectedFinish && effectiveExpectedFinish < effectiveExpectedStart) {
+      return NextResponse.json(
+        { error: "Expected Finish cannot be before Expected Start.", code: "invalid_expected_dates" },
+        { status: 400 }
+      );
+    }
+    // Recomputed (NOT an immutable baseline, unlike Project.expectedTotalInitialDays)
+    // only when either date is actually touched by this request — reusing
+    // the same effective values the check above just computed, so the two
+    // can never disagree.
+    const expectedDaysChanging = expectedStartDate !== undefined || expectedFinishDate !== undefined;
+    const newExpectedDays = effectiveExpectedStart && effectiveExpectedFinish ? wholeCalendarDaysBetween(effectiveExpectedStart, effectiveExpectedFinish) : null;
 
     if (rest.subDepartmentId) {
       const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, effectiveDepartmentId);
@@ -267,25 +386,84 @@ export async function PATCH(
       throw err;
     }
 
-    const activity = await prisma.projectActivity.update({
-      where: { id },
-      data: {
-        ...rest,
-        progress: derivedProgress,
-        subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
-        startDate: startDate ? new Date(startDate) : startDate === null ? null : undefined,
-        dueDate: dueDate ? new Date(dueDate) : dueDate === null ? null : undefined,
-        isCompleted: isCompleted ?? undefined,
-        completedAt: isCompleted ? new Date() : isCompleted === false ? null : undefined,
-        ...(assignedUserIds !== undefined && {
-          assignedUsers: { set: assignedUserIds.map((uid) => ({ id: uid })) },
-        }),
-      },
-      include: {
-        project: { select: { id: true, title: true } },
-        assignedUsers: { select: { id: true, name: true, email: true, image: true } },
-      },
+    // THE authoritative COMPLETED-transition boundary — isCompleted and
+    // completedAt are derived HERE from the real status transition, never
+    // from the client-sent `isCompleted` flag (which updateActivitySchema
+    // still accepts, for the consistency pre-check above, but this write no
+    // longer trusts directly — see this route's own audit finding: the OLD
+    // behavior let isCompleted/completedAt silently drift out of sync with
+    // status whenever a caller, like the Activity edit form, sent `status`
+    // without also sending `isCompleted`). actualDays is computed ONLY at
+    // the moment of a genuine TODO/IN_PROGRESS/etc. -> COMPLETED transition
+    // (never retroactively just because expectedStartDate is edited while
+    // already completed), using Expected Start (never Expected Finish) and
+    // the server's own clock (never a client-submitted date). Reopening
+    // (COMPLETED -> anything else) clears it; completing again later
+    // recomputes it fresh from the NEW completion date — this repository's
+    // Activity domain does allow COMPLETED -> another status (no DB/service
+    // guard forbids it; see ActivityStatus's own enum and the quick-status
+    // dropdown, which offers every status unconditionally), so this project
+    // deliberately implements the reopen-clears/recompute-on-recomplete
+    // behavior rather than the "forbidden to reopen" alternative.
+    const justCompleted = existing.status !== ActivityStatus.COMPLETED && effectiveStatus === ActivityStatus.COMPLETED;
+    const justReopened = existing.status === ActivityStatus.COMPLETED && effectiveStatus !== ActivityStatus.COMPLETED;
+    const completionDate = justCompleted ? new Date() : null;
+    const newActualDays = justCompleted && effectiveExpectedStart ? actualDaysFromCompletion(effectiveExpectedStart, completionDate!) : null;
+
+    // Sequence — ONLY touched when the PROJECT itself is changing (a plain
+    // field edit, status change, etc. never alters it; reordering within a
+    // Project has its own dedicated PATCH /api/projects/[id]/activities/order
+    // endpoint, never this route). Moving INTO a request-origin Project
+    // appends to its end; moving OUT to Standalone or a manual Project
+    // clears it (sequence is meaningless there). `undefined` leaves the
+    // stored value untouched, matching every other field's convention on
+    // this route.
+    const newSequence: number | null | undefined = !projectChanged ? undefined : targetProjectIsRequestOrigin ? undefined : null;
+
+    const activity = await prisma.$transaction(async (tx) => {
+      // The lock + append-position computation happen in the SAME
+      // transaction as the write below, so two concurrent moves into the
+      // same Project can never land on the same position.
+      const appendSequence = projectChanged && targetProjectIsRequestOrigin ? await getAppendSequenceLocked(tx, data.projectId!) : undefined;
+      return tx.projectActivity.update({
+        where: { id },
+        data: {
+          ...rest,
+          progress: derivedProgress,
+          subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
+          startDate: startDate ? new Date(startDate) : startDate === null ? null : undefined,
+          dueDate: dueDate ? new Date(dueDate) : dueDate === null ? null : undefined,
+          isCompleted: effectiveStatus === ActivityStatus.COMPLETED,
+          completedAt: justCompleted ? completionDate : justReopened ? null : undefined,
+          actualDays: justCompleted ? newActualDays : justReopened ? null : undefined,
+          ownerId: ownerId !== undefined ? ownerId : undefined,
+          taskTypeId: taskTypeId !== undefined ? taskTypeId : undefined,
+          taskTypeCost: taskTypeId === null ? null : taskTypeChanging ? newTaskTypeCost : undefined,
+          expectedStartDate: expectedStartDate !== undefined ? effectiveExpectedStart : undefined,
+          expectedFinishDate: expectedFinishDate !== undefined ? effectiveExpectedFinish : undefined,
+          expectedDays: expectedDaysChanging ? newExpectedDays : undefined,
+          sequence: appendSequence ?? newSequence,
+          ...(assignedUserIds !== undefined && {
+            assignedUsers: { set: Array.from(new Set(assignedUserIds)).map((uid) => ({ id: uid })) },
+          }),
+        },
+        include: {
+          project: { select: { id: true, title: true } },
+          assignedUsers: { select: { id: true, name: true, email: true, image: true } },
+          owner: { select: { id: true, name: true, email: true, image: true } },
+          taskType: { select: { id: true, name: true } },
+        },
+      });
     });
+
+    // The OLD Project's own sequence must never show a gap once this
+    // Activity has moved out of it — normalized in its own transaction
+    // (separately from the move itself; eventual-consistency here is fine,
+    // same as the DELETE handler's own normalize-after-delete) right after
+    // the move has committed.
+    if (projectChanged && existing.projectId && (await isRequestOriginProject(existing.projectId))) {
+      await prisma.$transaction((tx) => normalizeProjectSequenceLocked(tx, existing.projectId!));
+    }
 
     // Roll the (now always in-sync) progress up into any affected project's
     // average — the old project (if the activity just moved out of it) and/or
@@ -349,7 +527,8 @@ export async function PATCH(
     }
 
     const statusDisplay = await getActivityStatusDisplay(effectiveDepartmentId, effectiveStatus);
-    return NextResponse.json({ ...activity, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, projectRollups });
+    const { estimatedCost, actualCost } = computeActivityFinancials(activity);
+    return NextResponse.json({ ...activity, estimatedCost: estimatedCost.toString(), actualCost: actualCost.toString(), statusLabel: statusDisplay.label, statusColor: statusDisplay.color, projectRollups });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
@@ -388,7 +567,19 @@ export async function DELETE(
     // Safe cascade behaviour (no migration needed):
     //   Ticket.activityId           → nullable, DB SetNull default
     //   _ActivityAssignees join rows → DB CASCADE (implicit M2M)
-    await prisma.projectActivity.delete({ where: { id } });
+    //
+    // Sequence renormalization (request-origin Projects only) happens in
+    // the SAME transaction as the delete — the remaining Activities must
+    // never show a gap (e.g. 1, 3, 4 after #2 is removed); locking the
+    // Project row first serializes this against a concurrent reorder/
+    // create/another delete on the same Project.
+    const deletedProjectWasRequestOrigin = activity.projectId ? await isRequestOriginProject(activity.projectId) : false;
+    await prisma.$transaction(async (tx) => {
+      await tx.projectActivity.delete({ where: { id } });
+      if (activity.projectId && deletedProjectWasRequestOrigin) {
+        await normalizeProjectSequenceLocked(tx, activity.projectId);
+      }
+    });
 
     // AWAITED — same rationale as the create/PATCH rollup calls above: the
     // realtime publish below (and the router.refresh() it triggers) must

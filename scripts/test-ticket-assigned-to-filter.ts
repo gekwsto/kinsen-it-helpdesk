@@ -45,7 +45,13 @@ const RUN_ID = Date.now();
 
 let currentSession: { user: { id: string; role: any; customRoleId: string | null } } | null = null;
 mock.module("@/lib/auth", { namedExports: { auth: async () => currentSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
-mock.module("next/headers", { namedExports: { cookies: async () => ({ get: () => undefined }), headers: async () => new Headers() } });
+// "ALL" (All Workspaces) — this file tests the assignedAgentId filter, a
+// concern orthogonal to workspace scoping (see this task's own workspace-
+// scoping fix: Tickets pages now default to the active Workspace instead
+// of the full union when no cookie is set). Safe for every session here —
+// see scripts/test-ticket-assigned-to-filter-all-pages.ts's identical fix
+// for the full rationale.
+mock.module("next/headers", { namedExports: { cookies: async () => ({ get: (name: string) => (name === "active_department_id" ? { value: "ALL" } : undefined) }), headers: async () => new Headers() } });
 
 function findElementsByType(node: any, type: any, results: any[] = []): any[] {
   if (node == null || typeof node !== "object") return results;

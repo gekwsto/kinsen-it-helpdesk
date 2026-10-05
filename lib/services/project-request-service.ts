@@ -3,10 +3,12 @@ import { getUserDepartmentMemberships } from "@/lib/services/department-membersh
 import { hasPermission, hasDepartmentPermission } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
+import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { listAccessibleWorkspaces, isAccessibleDepartment } from "@/lib/services/workspace-service";
 import { DEPARTMENT_ROLE_OPTIONS } from "@/lib/services/department-role-translation";
 import { ALL_WORKSPACES_VALUE } from "@/types/department";
 import { createInAppNotification, dispatchCreatedNotification } from "@/lib/notifications/create-notification";
+import { wholeCalendarDaysBetween } from "@/lib/date-only";
 import { Role, DepartmentRole, type ProjectRequestStatus, type Prisma } from "@prisma/client";
 
 const APPROVE_PERMISSION_KEY = "projectRequest.approve";
@@ -320,11 +322,10 @@ export type ApprovalActionError =
   | { code: "not_found" }
   | { code: "forbidden" }
   | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
-  | { code: "invalid_assessment" }
-  | { code: "invalid_project_owner" };
+  | { code: "invalid_assessment" };
 
 export type ApprovalActionResult =
-  | { ok: true; projectId?: string }
+  | { ok: true }
   | { ok: false; error: ApprovalActionError };
 
 const MAX_BUSINESS_ASSESSMENT_LENGTH = 5000;
@@ -349,19 +350,14 @@ const MAX_BUSINESS_ASSESSMENT_LENGTH = 5000;
  * only after a real commit) — the realtime publish + push dispatch happens
  * AFTER the transaction commits, via dispatchCreatedNotification.
  *
- * On APPROVE only, a Project is auto-created in the SAME transaction as the
- * status transition (never a separate step that could leave an approved
- * request with no Project, or a Project with no corresponding approval) —
- * pre-filled from the request (title/description/departmentId, and
- * priority from importance, which already shares the exact same 1/2/3
- * scale — see ProjectRequest.importance's own doc comment), owned by
- * `projectOwnerId`, the approver's own explicit choice at decision time —
- * re-verified here (a real, active, project-assignable user for THIS
- * request's own department, via userHasAssignablePermissionForEntity;
- * never trusted from the client beyond the id). Project.projectRequestId
- * is @unique, so even a theoretical double-create attempt could never
- * produce two Projects for one request — though the guarded `updateMany`
- * above already makes that structurally impossible on its own.
+ * This function is responsible ONLY for the approval decision itself — it
+ * does NOT create a Project. On a successful APPROVE, the acting approver
+ * is expected to be redirected to the dedicated request-origin Project
+ * setup flow (POST /api/project-requests/[id]/project,
+ * createProjectFromApprovedRequest below) — a deliberately separate step,
+ * since that flow collects its own required fields (Project Owner,
+ * Expected Start/Finish, Expense Type, Budget, Estimated Cost) that have no
+ * natural place in this decision's own dialog.
  */
 export async function decideApproval(
   requestId: string,
@@ -369,8 +365,7 @@ export async function decideApproval(
   role: Role,
   customRoleId: string | null | undefined,
   decision: "approve" | "reject",
-  businessAssessment: string,
-  projectOwnerId?: string
+  businessAssessment: string
 ): Promise<ApprovalActionResult> {
   const trimmedAssessment = businessAssessment.trim();
   if (trimmedAssessment.length === 0 || trimmedAssessment.length > MAX_BUSINESS_ASSESSMENT_LENGTH) {
@@ -379,7 +374,7 @@ export async function decideApproval(
 
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, description: true, importance: true, status: true, departmentId: true, requesterId: true },
+    select: { id: true, title: true, status: true, departmentId: true, requesterId: true },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
   if (existing.status !== "PENDING_APPROVAL") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
@@ -387,17 +382,10 @@ export async function decideApproval(
   const allowed = await hasEffectiveEntityPermission(userId, role, customRoleId, existing.departmentId, APPROVE_PERMISSION_KEY);
   if (!allowed) return { ok: false, error: { code: "forbidden" } };
 
-  if (decision === "approve") {
-    if (!projectOwnerId) return { ok: false, error: { code: "invalid_project_owner" } };
-    const ownerValid = await userHasAssignablePermissionForEntity(projectOwnerId, "project", existing.departmentId);
-    if (!ownerValid) return { ok: false, error: { code: "invalid_project_owner" } };
-  }
-
   const nextStatus: ProjectRequestStatus = decision === "approve" ? "APPROVED" : "REJECTED";
   const now = new Date();
 
   let notificationRow: { id: string; userId: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date } | null = null;
-  let createdProjectId: string | undefined;
 
   await prisma.$transaction(async (tx) => {
     const updateResult = await tx.projectRequest.updateMany({
@@ -420,21 +408,6 @@ export async function decideApproval(
         link: `/project-requests/${requestId}`,
       },
     });
-
-    if (decision === "approve" && projectOwnerId) {
-      const project = await tx.project.create({
-        data: {
-          title: existing.title,
-          description: existing.description,
-          priority: existing.importance,
-          departmentId: existing.departmentId,
-          ownerId: projectOwnerId,
-          projectRequestId: requestId,
-        },
-        select: { id: true },
-      });
-      createdProjectId = project.id;
-    }
   });
 
   if (!notificationRow) {
@@ -443,7 +416,159 @@ export async function decideApproval(
   }
 
   await dispatchCreatedNotification(notificationRow);
-  return { ok: true, projectId: createdProjectId };
+  return { ok: true };
+}
+
+// ─── Request-origin Project setup (a separate step, AFTER final approval) ──
+
+export type CreateProjectFromRequestError =
+  | { code: "not_found" }
+  | { code: "forbidden" }
+  | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
+  | { code: "invalid_project_owner" }
+  | { code: "invalid_expense_type" }
+  | { code: "invalid_sub_department" }
+  | { code: "invalid_member" };
+
+export type CreateProjectFromRequestResult =
+  | { ok: true; projectId: string; alreadyExisted: boolean }
+  | { ok: false; error: CreateProjectFromRequestError };
+
+/**
+ * Turns an APPROVED Project Request into a real Project — a deliberately
+ * SEPARATE step from decideApproval (see that function's own doc comment),
+ * with its own, narrower authorization boundary:
+ *
+ *   - the request must genuinely be APPROVED (never
+ *     PENDING_INTERMEDIATE_APPROVAL/PENDING_APPROVAL/REJECTED — Project
+ *     creation is only ever reachable from the terminal APPROVED state);
+ *   - the acting user must be the EXACT recorded final approver
+ *     (`existing.approverId === userId`) — not "anyone who currently holds
+ *     projectRequest.approve", and deliberately no ADMIN bypass here: this
+ *     is an identity/ownership check on a specific already-made decision,
+ *     not a permission grant, and this codebase's existing ADMIN bypass
+ *     convention (hasPermission()) only ever shortcuts PERMISSION checks,
+ *     never identity checks like this one. This intentionally does NOT
+ *     require (or grant) generic `project.create` — completing setup for
+ *     the one request this exact user just approved is a narrower
+ *     capability than being allowed to manually create arbitrary Projects
+ *     in that department.
+ *
+ * Idempotent/race-safe: acquires a `SELECT ... FOR UPDATE` row lock on the
+ * ProjectRequest as the first statement of the transaction (same
+ * established pattern as decideIntermediateApproval's own doc comment),
+ * re-checks for an already-linked Project INSIDE that lock, and only
+ * creates one if it's still genuinely missing. If a Project already exists
+ * (e.g. a duplicate submission, two open tabs, or a refresh after an
+ * earlier success), this returns `alreadyExisted: true` with that Project's
+ * own id — a clean, safe resolution, never a second Project and never a
+ * hard error. Project.projectRequestId's own `@unique` DB constraint is a
+ * second, structural backstop even if the row lock were somehow bypassed.
+ *
+ * Department is ALWAYS `existing.departmentId` — never accepted from the
+ * caller's input at all (see createProjectFromRequestSchema, which doesn't
+ * even have a departmentId field). Title/description/priority are
+ * pre-filled by the caller (the setup page) from the request but ARE
+ * ordinary editable Project fields here, same as any manual creation.
+ */
+export async function createProjectFromApprovedRequest(
+  requestId: string,
+  userId: string,
+  data: import("@/lib/validations").CreateProjectFromRequestInput
+): Promise<CreateProjectFromRequestResult> {
+  const existing = await prisma.projectRequest.findUnique({
+    where: { id: requestId },
+    select: { id: true, status: true, departmentId: true, approverId: true, project: { select: { id: true } } },
+  });
+  if (!existing) return { ok: false, error: { code: "not_found" } };
+  if (existing.status !== "APPROVED") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
+  if (existing.approverId !== userId) return { ok: false, error: { code: "forbidden" } };
+
+  if (existing.project) {
+    return { ok: true, projectId: existing.project.id, alreadyExisted: true };
+  }
+
+  const ownerValid = await userHasAssignablePermissionForEntity(data.projectOwnerId, "project", existing.departmentId);
+  if (!ownerValid) return { ok: false, error: { code: "invalid_project_owner" } };
+
+  const expenseType = await prisma.projectExpenseType.findUnique({ where: { id: data.expenseTypeId }, select: { id: true, isActive: true } });
+  if (!expenseType || !expenseType.isActive) return { ok: false, error: { code: "invalid_expense_type" } };
+
+  if (data.subDepartmentId) {
+    const valid = await validateSubDepartmentInDepartment(data.subDepartmentId, existing.departmentId);
+    if (!valid) return { ok: false, error: { code: "invalid_sub_department" } };
+  }
+
+  if (data.memberIds.length > 0) {
+    for (const memberId of data.memberIds) {
+      const assignable = await userHasAssignablePermissionForEntity(memberId, "project", existing.departmentId);
+      if (!assignable) return { ok: false, error: { code: "invalid_member" } };
+    }
+  }
+
+  // Computed ONCE here, server-side — the authoritative baseline. The
+  // client may show a live preview of the same arithmetic for UX, but this
+  // is the only value that is ever actually persisted; a client-submitted
+  // duration is never read (the field isn't even accepted by
+  // createProjectFromRequestSchema).
+  const expectedTotalInitialDays = wholeCalendarDaysBetween(new Date(data.expectedStartDate), new Date(data.expectedFinishDate));
+
+  let createdProjectId: string | null = null;
+  let alreadyExisted = false;
+
+  await prisma.$transaction(async (tx) => {
+    // See this function's own doc comment — serializes every concurrent
+    // setup submission for THIS request through one critical section.
+    await tx.$queryRaw`SELECT id FROM "ProjectRequest" WHERE id = ${requestId} FOR UPDATE`;
+
+    const stillUnlinked = await tx.projectRequest.findUnique({ where: { id: requestId }, select: { project: { select: { id: true } } } });
+    if (stillUnlinked?.project) {
+      createdProjectId = stillUnlinked.project.id;
+      alreadyExisted = true;
+      return;
+    }
+
+    const project = await tx.project.create({
+      data: {
+        title: data.title,
+        description: data.description,
+        status: data.status,
+        priority: data.priority,
+        departmentId: existing.departmentId,
+        subDepartmentId: data.subDepartmentId ?? undefined,
+        businessUnitId: data.businessUnitId,
+        ownerId: data.projectOwnerId,
+        startDate: data.startDate ? new Date(data.startDate) : undefined,
+        endDate: data.endDate ? new Date(data.endDate) : undefined,
+        successTarget: data.successTarget,
+        isGoal: data.isGoal,
+        members: data.memberIds.length ? { connect: data.memberIds.map((id) => ({ id })) } : undefined,
+        projectRequestId: requestId,
+        expectedStartDate: new Date(data.expectedStartDate),
+        expectedFinishDate: new Date(data.expectedFinishDate),
+        expectedTotalInitialDays,
+        expenseTypeId: data.expenseTypeId,
+        // Budget/Estimated Cost/Actual Cost are never written here — Budget
+        // was removed entirely, and Estimated/Actual Cost are now derived
+        // from this Project's Activities on every read (there are normally
+        // none yet at creation time, so they naturally start at €0) — see
+        // lib/services/project-financials-service.ts.
+        external: data.external,
+      },
+      select: { id: true },
+    });
+    createdProjectId = project.id;
+  });
+
+  if (!createdProjectId) {
+    // Structural backstop only — the row lock above already makes this
+    // unreachable in practice.
+    const fallback = await prisma.projectRequest.findUnique({ where: { id: requestId }, select: { project: { select: { id: true } } } });
+    if (fallback?.project) return { ok: true, projectId: fallback.project.id, alreadyExisted: true };
+    return { ok: false, error: { code: "not_found" } };
+  }
+
+  return { ok: true, projectId: createdProjectId, alreadyExisted };
 }
 
 /**
@@ -478,7 +603,7 @@ export async function decideApproval(
  *
  * Never mutates ProjectRequest.approver/approvedAt/rejectedAt/
  * businessAssessment (those remain the FINAL stage's own, separate audit
- * trail) or ProjectRequest.cost — this stage only ever writes to its own
+ * trail) — this stage only ever writes to its own
  * ProjectRequestIntermediateApprover rows and, on a terminal outcome, the
  * parent's `status`/`rejectedAt`.
  *

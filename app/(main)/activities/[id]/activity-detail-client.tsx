@@ -54,9 +54,24 @@ interface Activity {
   startDate?: string | null;
   dueDate?: string | null;
   createdAt: string;
-  project?: { id: string; title: string } | null;
+  project?: { id: string; title: string; projectRequestId?: string | null } | null;
   assignedUsers: { id: string; name?: string | null; email: string; image?: string | null }[];
   department?: { id: string; name: string } | null;
+  // Request-origin-only — only ever populated for an Activity whose parent
+  // Project itself originates from a Project Request (project.projectRequestId
+  // non-null). See app/api/activities/[id]/route.ts.
+  expectedStartDate?: string | null;
+  expectedFinishDate?: string | null;
+  expectedDays?: number | null;
+  actualDays?: number | null;
+  owner?: { id: string; name: string | null; email: string; image?: string | null } | null;
+  taskType?: { id: string; name: string } | null;
+  /** Prisma.Decimal serializes to a STRING over JSON — converted with Number() before display. */
+  taskTypeCost?: string | number | null;
+  /** Server-derived (GET /api/activities/[id] via computeActivityFinancials) — taskTypeCost × expectedDays. Never stored. */
+  estimatedCost?: string | number | null;
+  /** Server-derived — taskTypeCost × actualDays (0 unless currently COMPLETED). Never stored. */
+  actualCost?: string | number | null;
   /** Whether the current user holds activity.edit here — governs the Notes composer AND the quick-status dropdown. POST /api/activities/[id]/notes and PATCH /api/activities/[id] independently re-check this; this is only a UI hint. */
   canEditActivity?: boolean;
   /** Whether the current user holds activity.delete here — a SEPARATE, independently-grantable permission from activity.edit (see prisma/seed.ts). Governs the Delete control. DELETE /api/activities/[id] independently re-checks this; this is only a UI hint. */
@@ -245,6 +260,8 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
             progressConfigError: null,
             isCompleted: updated.isCompleted,
             completedAt: updated.completedAt,
+            actualDays: updated.actualDays,
+            actualCost: updated.actualCost,
           }
         : prev
     );
@@ -289,8 +306,8 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
     if (!activity) return;
     setToggling(true);
     try {
-      const { isCompleted, status, progress } = await toggleActivityComplete(id, activity.isCompleted);
-      setActivity((prev) => (prev ? { ...prev, isCompleted, status: status as ActivityStatus, progress } : prev));
+      const { isCompleted, status, progress, actualDays, actualCost } = await toggleActivityComplete(id, activity.isCompleted);
+      setActivity((prev) => (prev ? { ...prev, isCompleted, status: status as ActivityStatus, progress, actualDays, actualCost } : prev));
       toast.success(isCompleted ? "Activity completed!" : "Activity reopened");
     } catch (error: any) {
       toast.error(error.message ?? "Failed to update activity");
@@ -474,6 +491,68 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
           </div>
         </CardContent>
       </Card>
+      {/* Request-origin-only metadata — only ever rendered for an Activity
+          whose parent Project originates from a Project Request
+          (project.projectRequestId non-null). A manual Project's Activity
+          never shows this section at all, never an empty version of it. */}
+      {activity.project?.projectRequestId && (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">Project Request Setup</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-4 text-sm">
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Expected Start</p>
+                <p className="font-medium">{activity.expectedStartDate ? formatDate(activity.expectedStartDate) : "Not set"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Expected Finish</p>
+                <p className="font-medium">{activity.expectedFinishDate ? formatDate(activity.expectedFinishDate) : "Not set"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Expected Days</p>
+                <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} day(s)` : "Not set"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Actual Days</p>
+                <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Task Type</p>
+                <p className="font-medium">
+                  {activity.taskType?.name ?? "Not set"}
+                  {activity.taskTypeCost !== null && activity.taskTypeCost !== undefined && (
+                    <span className="text-muted-foreground font-normal"> — {Number(activity.taskTypeCost).toFixed(2)} EUR (snapshot)</span>
+                  )}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
+                <p className="font-medium">{activity.estimatedCost !== null && activity.estimatedCost !== undefined ? `${Number(activity.estimatedCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
+                <p className="font-medium">{activity.actualCost !== null && activity.actualCost !== undefined ? `${Number(activity.actualCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
+              </div>
+              <div>
+                <p className="text-xs text-muted-foreground mb-1">Owner</p>
+                {activity.owner ? (
+                  <div className="flex items-center gap-1.5">
+                    <Avatar className="h-5 w-5">
+                      <AvatarImage src={activity.owner.image ?? undefined} />
+                      <AvatarFallback className="text-[9px]">{getInitials(activity.owner.name)}</AvatarFallback>
+                    </Avatar>
+                    <span className="font-medium">{activity.owner.name ?? activity.owner.email}</span>
+                  </div>
+                ) : (
+                  <p className="font-medium">Not set</p>
+                )}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
       {/* Dependencies */}
       <Card>
         <CardHeader className="pb-3">

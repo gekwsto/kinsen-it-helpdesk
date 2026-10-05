@@ -1,24 +1,41 @@
 /**
- * Regression coverage for the new "final approval auto-creates a Project"
- * feature — confirmed with the user: once a Project Request's FINAL
- * approval completes, a real Project row is created automatically,
- * pre-filled from the request (title/description/departmentId, priority
- * from importance — same 1/2/3 scale), owned by whoever the approver
- * explicitly chose at decision time (never the requester, never the
- * approver themselves by default) — see decideApproval in
- * lib/services/project-request-service.ts.
+ * Regression coverage for the request-origin Project SETUP flow — the
+ * NEW business flow, confirmed with the user:
  *
- * This file does not re-prove what the retrofitted sibling test files
- * already cover incidentally (the final-stage gate, the intermediate
- * stage's own behavior, cost/replacement-description untouched) — it
- * focuses on the Project-creation feature's OWN behavior: owner validation
- * (department-scoped, fail-closed), field mapping, idempotency/uniqueness,
- * reject never creating one, and that the created row is a REAL,
- * first-class Project (shows up in the normal Projects list/API).
+ *   FINAL approval (decideApproval) no longer auto-creates a Project at
+ *   all. Instead, the acting approver is redirected to a dedicated setup
+ *   page (/projects/new?projectRequestId=...), which collects the
+ *   existing Project fields PLUS new request-origin-only metadata
+ *   (Project Owner, Expected Start/Finish, Expense Type, Budget,
+ *   Estimated Cost, Actual Cost, External) and submits to its OWN
+ *   dedicated mutation, POST /api/project-requests/[id]/project
+ *   (createProjectFromApprovedRequest in
+ *   lib/services/project-request-service.ts) — a DIFFERENT authorization
+ *   path from both the approval decision itself and from normal/manual
+ *   Project creation (POST /api/projects).
+ *
+ * This file supersedes the OLD version of itself, which tested the
+ * previous "approval auto-creates the Project inline" design — rewritten
+ * deliberately, per this feature's own explicit instruction, rather than
+ * left describing obsolete behavior.
+ *
+ * This file does NOT re-prove what sibling test files already cover
+ * (the approval decision's own guarantees — see
+ * test-project-request-workflow.ts/test-project-request-business-assessment.ts;
+ * the intermediate stage — test-project-request-intermediate-approval.ts).
+ * It focuses on THIS flow's own behavior: the narrow authorization
+ * boundary (the exact recorded final approver, never generic
+ * project.create, never a broader ADMIN bypass), idempotency/race safety,
+ * field mapping/provenance (including that manual creation can't be
+ * abused to forge it), new-field validation (including the server-only
+ * Expected Total Initial Days calculation), Expense Type admin lifecycle,
+ * and legacy-row safety.
  *
  * Usage: node --require ./scripts/test-support-server-only-stub.cjs --experimental-test-module-mocks --import tsx scripts/test-project-request-project-creation.ts
  */
 import { mock } from "node:test";
+import * as React from "react";
+(globalThis as any).React = React;
 import fs from "fs/promises";
 
 let passed = 0;
@@ -50,30 +67,96 @@ async function runCleanup(steps: [string, () => Promise<unknown>][]) {
 
 let currentSession: { user: { id: string; role: any; customRoleId: string | null } } | null = null;
 mock.module("@/lib/auth", { namedExports: { auth: async () => currentSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
+mock.module("next/headers", {
+  namedExports: {
+    cookies: async () => ({ get: () => undefined }),
+    headers: async () => new Headers(),
+  },
+});
 
 const RUN_ID = Date.now();
 
 async function main() {
-  // ══════════════════════ SECTION A — schema + shared dialog source checks ══════════════════════
-  console.log("\n=== SECTION A — projectOwnerId required exactly on approve; dialog shows/hides the owner picker correctly ===\n");
-  const { projectRequestApprovalDecisionSchema } = await import("@/lib/validations");
-  const dialogSrc = await fs.readFile("components/project-requests/project-request-decision-dialog.tsx", "utf8");
+  // ══════════════════════ SECTION A — schema/source checks (no DOM, no DB) ══════════════════════
+  console.log("\n=== SECTION A — schema shape, isolation from manual creation, client-side gates ===\n");
+  const { createProjectFromRequestSchema, createProjectSchema, projectRequestApprovalDecisionSchema } = await import("@/lib/validations");
 
   check(
-    "1. decision:'approve' WITHOUT projectOwnerId -> rejected",
-    !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "Looks good." }).success
+    "1. projectRequestApprovalDecisionSchema no longer accepts/requires projectOwnerId at all — Project setup moved to its own separate step",
+    !("projectOwnerId" in (projectRequestApprovalDecisionSchema as any).shape)
+  );
+
+  check(
+    "1/36. createProjectSchema (manual/normal creation) has NONE of the request-origin-only fields — malicious caller can't forge provenance into the generic create API by sending them",
+    !("projectOwnerId" in createProjectSchema.shape) &&
+      !("expectedStartDate" in createProjectSchema.shape) &&
+      !("expectedFinishDate" in createProjectSchema.shape) &&
+      !("expectedTotalInitialDays" in createProjectSchema.shape) &&
+      !("expenseTypeId" in createProjectSchema.shape) &&
+      !("budget" in createProjectSchema.shape) &&
+      !("estimatedCost" in createProjectSchema.shape) &&
+      !("actualCost" in createProjectSchema.shape) &&
+      !("external" in createProjectSchema.shape)
+  );
+
+  const basePayload = {
+    title: "A valid title",
+    description: "A description.",
+    projectOwnerId: "cmx0000000000000000000001",
+    expectedStartDate: "2026-10-01",
+    expectedFinishDate: "2026-10-05",
+    expenseTypeId: "cmx0000000000000000000002",
+  };
+  check("22. Missing expectedStartDate -> rejected", !createProjectFromRequestSchema.safeParse({ ...basePayload, expectedStartDate: undefined }).success);
+  check("23. Missing expectedFinishDate -> rejected", !createProjectFromRequestSchema.safeParse({ ...basePayload, expectedFinishDate: undefined }).success);
+  check("24. Finish BEFORE Start -> rejected", !createProjectFromRequestSchema.safeParse({ ...basePayload, expectedStartDate: "2026-10-05", expectedFinishDate: "2026-10-01" }).success);
+  check("...Finish EQUAL TO Start (0 days) -> accepted (0 is a valid duration)", createProjectFromRequestSchema.safeParse({ ...basePayload, expectedStartDate: "2026-10-01", expectedFinishDate: "2026-10-01" }).success);
+  check("26. expectedTotalInitialDays is not even a field on this schema — a client-submitted value is simply never read", !("expectedTotalInitialDays" in createProjectFromRequestSchema.innerType().shape));
+  check("27. Missing expenseTypeId -> rejected", !createProjectFromRequestSchema.safeParse({ ...basePayload, expenseTypeId: undefined }).success);
+  check("28. Budget/Estimated Cost/Actual Cost are not even fields on this schema any more — Project Estimated/Actual Cost are now fully derived from Activities, never client-submitted at creation", !("budget" in createProjectFromRequestSchema.innerType().shape) && !("estimatedCost" in createProjectFromRequestSchema.innerType().shape) && !("actualCost" in createProjectFromRequestSchema.innerType().shape));
+  check("29. A payload that still forges budget/estimatedCost/actualCost validates fine (unknown keys silently stripped, never an error)", createProjectFromRequestSchema.safeParse({ ...basePayload, budget: 1000, estimatedCost: 900, actualCost: 500 } as any).success);
+  check("31. external is OPTIONAL and defaults to false when omitted", (createProjectFromRequestSchema.safeParse({ ...basePayload }) as any).data.external === false);
+  check("31. ...and an explicit true is honored", (createProjectFromRequestSchema.safeParse({ ...basePayload, external: true }) as any).data.external === true);
+  check("...departmentId is not even a field on this schema — always server-resolved from the request, never client input", !("departmentId" in createProjectFromRequestSchema.innerType().shape));
+
+  // UI/editability pass — Project edit must accept exactly these 4
+  // request-origin fields (and no more) — Budget was removed entirely and
+  // Estimated/Actual Cost are now derived, never editable — with
+  // expectedTotalInitialDays permanently excluded (the creation-time
+  // baseline, immutable by PATCH).
+  const { updateProjectRequestOriginFieldsSchema } = await import("@/lib/validations");
+  const EDITABLE_REQUEST_ORIGIN_FIELDS = ["expectedStartDate", "expectedFinishDate", "expenseTypeId", "external"];
+  check(
+    "11. updateProjectRequestOriginFieldsSchema exposes exactly the 4 request-origin fields the edit page offers",
+    EDITABLE_REQUEST_ORIGIN_FIELDS.every((f) => f in updateProjectRequestOriginFieldsSchema.shape) &&
+      Object.keys(updateProjectRequestOriginFieldsSchema.shape).length === EDITABLE_REQUEST_ORIGIN_FIELDS.length
   );
   check(
-    "1. decision:'approve' WITH a real projectOwnerId -> accepted",
-    projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "Looks good.", projectOwnerId: "cmx0000000000000000000001" }).success
+    "...and budget/estimatedCost/actualCost are NOT among them — removed/derived, never editable via PATCH",
+    !("budget" in updateProjectRequestOriginFieldsSchema.shape) &&
+      !("estimatedCost" in updateProjectRequestOriginFieldsSchema.shape) &&
+      !("actualCost" in updateProjectRequestOriginFieldsSchema.shape)
   );
-  check(
-    "1. decision:'reject' NEVER needs a projectOwnerId (no Project is ever created from a rejection)",
-    projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success
-  );
-  check("2. The dialog only requires an owner when decision==='approve' AND ownerOptions was actually provided", /const needsOwner = decision === "approve" && ownerOptions !== undefined;/.test(dialogSrc));
-  check("...and blocks confirm (never calls onConfirm) when an approve needs an owner but none was picked", /if \(needsOwner && !ownerId\) return;/.test(dialogSrc));
-  check("...the owner select element only renders when needsOwner is true (never shown for reject or the intermediate stage)", /\{needsOwner && \(/.test(dialogSrc));
+  check("...expectedTotalInitialDays is NOT one of them — immutable baseline, never PATCH-able", !("expectedTotalInitialDays" in updateProjectRequestOriginFieldsSchema.shape));
+
+  const formSrc = await fs.readFile("components/projects/project-form.tsx", "utf8");
+  check("15. The request-origin-only fields block is rendered ONLY in fromRequest mode", /\{fromRequest && \(/.test(formSrc));
+  check("...and POSTs to the dedicated route, never /api/projects, in that mode", /`\/api\/project-requests\/\$\{fromRequestId\}\/project`/.test(formSrc));
+  check("UI pass: Expected Total Initial Days now renders as a real readOnly input (not a muted <p> aside)", /id="expected-total-initial-days"[\s\S]{0,200}readOnly/.test(formSrc));
+
+  const editPageSrc = await fs.readFile("app/(main)/projects/[id]/edit/page.tsx", "utf8");
+  check("12. The edit page also shows Expected Total Initial Days as a readOnly input", /id="expectedTotalInitialDays"[\s\S]{0,200}readOnly/.test(editPageSrc));
+  check("...and never submits it in the PATCH body (no such key anywhere in the fetch payload)", !/expectedTotalInitialDays[,:]/.test(editPageSrc.split("handleSubmit")[1]?.split("};")[0] ?? ""));
+
+  const detailPageSrc = await fs.readFile("app/(main)/projects/[id]/page.tsx", "utf8");
+  check("6. Project Details and Project Request Setup are wired as peer cards in one responsive grid wrapper", /project\.projectRequest \? "grid gap-6 sm:grid-cols-2" : undefined/.test(detailPageSrc));
+  check("8. The Edit control in the Project Request Setup card is gated on canEditProject (the same existing permission, no new one)", /\{canEditProject && \(/.test(detailPageSrc) && /aria-label="Edit Project Request Setup"/.test(detailPageSrc));
+  check("10. It links to the existing Project edit route — no second edit page", /href=\{`\/projects\/\$\{project\.id\}\/edit`\}/.test(detailPageSrc));
+  check("2. The Edit control is rendered inside the card's CardHeader (top, beside the title) — not a footer", /<CardHeader className="pb-3 flex flex-row flex-wrap items-center justify-between gap-2">[\s\S]{0,800}aria-label="Edit Project Request Setup"/.test(detailPageSrc));
+  check("3. The old bottom CardFooter Edit block is gone — no CardFooter use left on this page at all", !/CardFooter/.test(detailPageSrc));
+
+  const newPageSrc = await fs.readFile("app/(main)/projects/new/page.tsx", "utf8");
+  check("11. The setup page re-resolves the request SERVER-SIDE (never trusts the query param as authorization)", /approverId !== session\.user\.id/.test(newPageSrc) && /status !== "APPROVED"/.test(newPageSrc));
 
   let prisma: typeof import("@/lib/prisma").prisma;
   try {
@@ -99,7 +182,16 @@ async function main() {
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
-  const projectsGET = (await import("@/app/api/projects/route")).GET;
+  const setupPOST = (await import("@/app/api/project-requests/[id]/project/route")).POST;
+  const projectsPOST = (await import("@/app/api/projects/route")).POST;
+  const projectsGET = (await import("@/app/api/projects/[id]/route")).GET;
+  const projectsPATCH = (await import("@/app/api/projects/[id]/route")).PATCH;
+  const { default: NewProjectPage } = await import("@/app/(main)/projects/new/page");
+  const expenseTypesAdminPOST = (await import("@/app/api/admin/project-expense-types/route")).POST;
+  const expenseTypesAdminPATCH = (await import("@/app/api/admin/project-expense-types/[id]/route")).PATCH;
+  const expenseTypesAdminDELETE = (await import("@/app/api/admin/project-expense-types/[id]/route")).DELETE;
+  const expenseTypesAdminGET = (await import("@/app/api/admin/project-expense-types/route")).GET;
+  const expenseTypesActiveGET = (await import("@/app/api/project-expense-types/route")).GET;
 
   const deptIds: string[] = [];
   const userIds: string[] = [];
@@ -108,8 +200,10 @@ async function main() {
   const customRoleIds: string[] = [];
   const customRoleKeys: string[] = [];
   const projectIds: string[] = [];
+  const expenseTypeIds: string[] = [];
 
-  const jsonReq = (body?: unknown) => new NextRequest("http://localhost/x", { method: "POST", headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
+  const jsonReq = (body?: unknown, method = "POST") =>
+    new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
   async function makeUser(email: string, customRoleId: string | null = null, role: "USER" | "ADMIN" = "USER") {
     const u = await prisma.user.create({ data: { email, role: role as any, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId } });
@@ -133,49 +227,45 @@ async function main() {
   }
 
   try {
-    const deptA = await createDepartment({ name: `PR Creation Dept A ${RUN_ID}`, slug: `pr-creation-dept-a-${RUN_ID}` });
-    const deptB = await createDepartment({ name: `PR Creation Dept B ${RUN_ID}`, slug: `pr-creation-dept-b-${RUN_ID}` });
-    deptIds.push(deptA.id, deptB.id);
+    const dept = await createDepartment({ name: `PR Creation Dept ${RUN_ID}`, slug: `pr-creation-dept-${RUN_ID}` });
+    const otherDept = await createDepartment({ name: `PR Creation OtherDept ${RUN_ID}`, slug: `pr-creation-otherdept-${RUN_ID}` });
+    deptIds.push(dept.id, otherDept.id);
     const type = await prisma.projectRequestType.create({ data: { name: `PR Creation Type ${RUN_ID}` } });
     typeIds.push(type.id);
 
     const requester = await makeUser(`pr-creation-requester-${RUN_ID}@kinsen.gr`);
-    await addMembership(requester.id, deptA.id);
+    await addMembership(requester.id, dept.id);
 
-    // Intermediate approver — self-contained, this file is about the FINAL
-    // stage's Project-creation side effect, so intermediate is only ever
-    // cleared as fixture setup.
     const intermediateRole = await makeRole("INTERMEDIATE", "GLOBAL", ["projectRequest.intermediateApprove"]);
     const intermediateApprover = await makeUser(`pr-creation-intermediate-${RUN_ID}@kinsen.gr`, intermediateRole.id);
 
-    // Final approver for deptA — holds projectRequest.approve but NOT
-    // project.assignable, so they can decide the request but are not
-    // themselves automatically a valid Project owner choice.
+    // Holds ONLY projectRequest.approve — deliberately NOT project.create,
+    // NOT project.assignable. The core regression this feature must avoid:
+    // this exact user must still be able to complete Project setup for the
+    // ONE request they approve, without ever being granted (or needing)
+    // generic Project-creation rights.
     const finalApproverRole = await makeRole("FINALAPPROVER", "DEPARTMENT", ["projectRequest.approve"]);
     const finalApprover = await makeUser(`pr-creation-finalapprover-${RUN_ID}@kinsen.gr`);
-    await addMembership(finalApprover.id, deptA.id, finalApproverRole.id);
+    await addMembership(finalApprover.id, dept.id, finalApproverRole.id);
 
-    // A real, deptA-scoped project.assignable holder — the valid owner
-    // choice. Also project.view, so section 4's "shows up in GET
-    // /api/projects for its owner" check can actually list it (owning a
-    // project doesn't itself grant list access — that's project.view,
-    // checked completely independently by buildProjectListWhere).
+    // A SECOND user who also holds projectRequest.approve in the SAME
+    // department — eligible to decide OTHER requests, but never the
+    // recorded approver of the ones finalApprover decides.
+    const unrelatedApproverRole = await makeRole("UNRELATEDAPPROVER", "DEPARTMENT", ["projectRequest.approve"]);
+    const unrelatedApprover = await makeUser(`pr-creation-unrelated-${RUN_ID}@kinsen.gr`);
+    await addMembership(unrelatedApprover.id, dept.id, unrelatedApproverRole.id);
+
     const ownerRole = await makeRole("OWNER", "DEPARTMENT", ["project.assignable", "project.view"]);
     const ownerUser = await makeUser(`pr-creation-owner-${RUN_ID}@kinsen.gr`);
-    await addMembership(ownerUser.id, deptA.id, ownerRole.id);
+    await addMembership(ownerUser.id, dept.id, ownerRole.id);
 
-    // A project.assignable holder, but scoped to deptB only — must be
-    // rejected as an owner choice for a deptA request (department-scoped,
-    // never global-by-accident).
     const otherDeptOwnerRole = await makeRole("OTHERDEPTOWNER", "DEPARTMENT", ["project.assignable"]);
     const otherDeptOwnerUser = await makeUser(`pr-creation-otherdeptowner-${RUN_ID}@kinsen.gr`);
-    await addMembership(otherDeptOwnerUser.id, deptB.id, otherDeptOwnerRole.id);
+    await addMembership(otherDeptOwnerUser.id, otherDept.id, otherDeptOwnerRole.id);
 
-    // An ADMIN — globally bypasses every permission check, so always a
-    // valid owner choice regardless of department membership.
     const adminUser = await makeUser(`pr-creation-admin-${RUN_ID}@kinsen.gr`, null, "ADMIN");
 
-    const basePayload = {
+    const basePRPayload = {
       title: `PR Creation Request ${RUN_ID}`,
       description: "A description that is definitely long enough.",
       importance: 3,
@@ -186,99 +276,466 @@ async function main() {
       intermediateApproverIds: [intermediateApprover.id],
     };
 
-    async function submitAndClearIntermediate(title: string) {
+    /** Submits, clears intermediate, and (optionally) runs the FINAL decision — returns the real DB row afterward. */
+    async function submitThrough(title: string, finalDecision: "approve" | "reject" | null, decidingUser: { id: string }) {
       currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
-      const res = await requestsPOST(jsonReq({ ...basePayload, title }));
+      const res = await requestsPOST(jsonReq({ ...basePRPayload, title }));
       const body = await res.json();
       requestIds.push(body.id);
       currentSession = { user: { id: intermediateApprover.id, role: Role.USER, customRoleId: intermediateRole.id } };
       const clearRes = await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: body.id }) });
       if (clearRes.status !== 200) throw new Error(`Fixture setup failed: intermediate approval returned ${clearRes.status}`);
-      return body.id as string;
+      if (finalDecision) {
+        currentSession = { user: decidingUser, role: Role.USER, customRoleId: null } as any;
+        currentSession = { user: { id: decidingUser.id, role: Role.USER, customRoleId: null } };
+        const decideRes = await approvalPOST(jsonReq({ decision: finalDecision, businessAssessment: "Fixture decision." }), { params: Promise.resolve({ id: body.id }) });
+        if (decideRes.status !== 200) throw new Error(`Fixture setup failed: final ${finalDecision} returned ${decideRes.status}`);
+      }
+      return prisma.projectRequest.findUniqueOrThrow({ where: { id: body.id } });
     }
 
-    // ══════════════════════ 3. Owner must be a REAL, department-scoped project.assignable holder — fail closed ══════════════════════
-    console.log("\n=== 3. The approver's chosen Project owner is re-verified server-side — fail closed on anything invalid ===\n");
-    const ownerCheckRequestId = await submitAndClearIntermediate(`PR Creation OwnerCheck ${RUN_ID}`);
+    const validSetupPayload = () => ({
+      title: `PR Creation Setup ${RUN_ID}`,
+      description: "Setup description.",
+      memberIds: [],
+      isGoal: false,
+      projectOwnerId: ownerUser.id,
+      expectedStartDate: "2026-10-01",
+      expectedFinishDate: "2026-10-05",
+      expenseTypeId: expenseTypeActiveId,
+    });
+
+    // ══════════════════════ Fixture: two Expense Types (active + inactive) ══════════════════════
+    console.log("\n=== 37. Admin can create/edit/activate/deactivate Expense Types ===\n");
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const createETRes = await expenseTypesAdminPOST(jsonReq({ name: `PR Creation ExpenseType Active ${RUN_ID}` }));
+    check("Admin creates an Expense Type -> 201", createETRes.status === 201);
+    const expenseTypeActive = await createETRes.json();
+    expenseTypeIds.push(expenseTypeActive.id);
+    const expenseTypeActiveId: string = expenseTypeActive.id;
+
+    const createET2Res = await expenseTypesAdminPOST(jsonReq({ name: `PR Creation ExpenseType Inactive ${RUN_ID}`, isActive: false }));
+    const expenseTypeInactive = await createET2Res.json();
+    expenseTypeIds.push(expenseTypeInactive.id);
+
+    const renameRes = await expenseTypesAdminPATCH(jsonReq({ name: `PR Creation ExpenseType Renamed ${RUN_ID}` }, "PATCH"), { params: Promise.resolve({ id: expenseTypeActive.id }) });
+    check("Admin renames it -> 200, name updated", renameRes.status === 200 && (await renameRes.json()).name === `PR Creation ExpenseType Renamed ${RUN_ID}`);
+
+    const adminListRes = await expenseTypesAdminGET();
+    const adminList = await adminListRes.json();
+    check("Admin listing (GET /api/admin/project-expense-types) shows BOTH active and inactive", adminList.some((t: any) => t.id === expenseTypeActive.id) && adminList.some((t: any) => t.id === expenseTypeInactive.id));
+
+    console.log("\n=== 38. New request-origin Project creation only offers ACTIVE Expense Types ===\n");
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
+    const activeOnlyRes = await expenseTypesActiveGET();
+    const activeOnlyList = await activeOnlyRes.json();
+    check("GET /api/project-expense-types (active-only) includes the active type", activeOnlyList.some((t: any) => t.id === expenseTypeActive.id));
+    check("...and EXCLUDES the inactive one", !activeOnlyList.some((t: any) => t.id === expenseTypeInactive.id));
+
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
+    const nonAdminETRes = await expenseTypesAdminGET();
+    check("A non-admin.access user gets 403 from the admin Expense Type endpoint", nonAdminETRes.status === 403);
+
+    // ══════════════════════ 7/8/9/10. Authorization boundary ══════════════════════
+    console.log("\n=== 7/8/9/10. Setup authorization: exactly the recorded final approver, no generic project.create, no broad bypass ===\n");
+    const authRequest = await submitThrough(`PR Creation Auth ${RUN_ID}`, "approve", finalApprover);
+    check("Fixture: request reached APPROVED with finalApprover as the recorded approver", authRequest.status === "APPROVED" && authRequest.approverId === finalApprover.id);
+
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
+    const requesterSetupRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: authRequest.id }) });
+    check("10. The REQUESTER (not the approver) attempting setup -> 403", requesterSetupRes.status === 403);
+
+    currentSession = { user: { id: unrelatedApprover.id, role: Role.USER, customRoleId: null } };
+    const unrelatedSetupRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: authRequest.id }) });
+    check("...a DIFFERENT user who also holds projectRequest.approve in the same department -> still 403 (must be THIS exact request's recorded approver, not merely 'someone with the permission')", unrelatedSetupRes.status === 403);
+
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const adminSetupRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: authRequest.id }) });
+    check("...even an ADMIN cannot complete setup on someone else's approved request — no identity bypass invented for this boundary", adminSetupRes.status === 403);
+    check("...zero Project rows created by any of the three forbidden attempts", (await prisma.project.count({ where: { projectRequestId: authRequest.id } })) === 0);
 
     currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
-    const nonexistentOwnerRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks good.", projectOwnerId: "cmx0000000000000000000099" }), { params: Promise.resolve({ id: ownerCheckRequestId }) });
-    check("3a. A nonexistent projectOwnerId -> 422 invalid_project_owner", nonexistentOwnerRes.status === 422);
-    const afterNonexistent = await prisma.projectRequest.findUniqueOrThrow({ where: { id: ownerCheckRequestId } });
-    check("...status untouched, still PENDING_APPROVAL (never consumed by the failed attempt — can be retried)", afterNonexistent.status === "PENDING_APPROVAL");
+    const ownSetupRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: authRequest.id }) });
+    check("8. The EXACT recorded final approver -> 200/201, succeeds WITHOUT ever holding generic project.create", ownSetupRes.status === 201);
+    const ownSetupBody = await ownSetupRes.json();
+    projectIds.push(ownSetupBody.id);
 
-    const wrongDeptOwnerRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks good.", projectOwnerId: otherDeptOwnerUser.id }), { params: Promise.resolve({ id: ownerCheckRequestId }) });
-    check("3b. A project.assignable holder scoped to a DIFFERENT department -> 422 invalid_project_owner (department-scoped, not global-by-accident)", wrongDeptOwnerRes.status === 422);
-    check("...still no Project created from the rejected attempt", (await prisma.project.count({ where: { projectRequestId: ownerCheckRequestId } })) === 0);
+    const manualCreateRes = await projectsPOST(jsonReq({ title: `PR Creation Manual Attempt ${RUN_ID}`, departmentId: dept.id }));
+    check("9. That SAME finalApprover still CANNOT manually create an arbitrary Project in this department (POST /api/projects) — completing ONE request's setup never granted generic creation rights", manualCreateRes.status !== 201);
 
-    const selfOwnerRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks good.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: ownerCheckRequestId }) });
-    check("3c. The approver themselves, who holds projectRequest.approve but NOT project.assignable -> 422 (approving ≠ automatically a valid owner)", selfOwnerRes.status === 422);
-
-    const requesterOwnerRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks good.", projectOwnerId: requester.id }), { params: Promise.resolve({ id: ownerCheckRequestId }) });
-    check("3d. The requester, who holds no project.assignable grant either -> 422", requesterOwnerRes.status === 422);
-
-    const emptyStringOwnerRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks good.", projectOwnerId: "" }), { params: Promise.resolve({ id: ownerCheckRequestId }) });
-    check("3e. An empty-string projectOwnerId is rejected at the SCHEMA layer -> 422", emptyStringOwnerRes.status === 422);
-
-    const adminOwnerRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks good, approving.", projectOwnerId: adminUser.id }), { params: Promise.resolve({ id: ownerCheckRequestId }) });
-    check("3f. An ADMIN user (global bypass) IS a valid owner choice regardless of department membership -> 200", adminOwnerRes.status === 200);
-    const adminOwnedProject = await prisma.project.findUnique({ where: { projectRequestId: ownerCheckRequestId } });
-    if (adminOwnedProject) projectIds.push(adminOwnedProject.id);
-    check("...the created Project's owner really is the chosen admin user", adminOwnedProject?.ownerId === adminUser.id);
-
-    // ══════════════════════ 4. Field mapping + first-class Project (shows up in the real Projects list) ══════════════════════
-    console.log("\n=== 4. The auto-created Project is pre-filled correctly and is a REAL, first-class Project row ===\n");
-    const mappingRequestId = await submitAndClearIntermediate(`PR Creation Mapping ${RUN_ID}`);
-    const requestRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: mappingRequestId } });
-
+    // ══════════════════════ 11/12. Status gating ══════════════════════
+    console.log("\n=== 11/12. Setup is only reachable from a genuinely APPROVED request ===\n");
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
+    const pendingRequest = await submitThrough(`PR Creation Pending ${RUN_ID}`, null, finalApprover);
+    check("Fixture: request is at PENDING_APPROVAL (final decision not yet made)", pendingRequest.status === "PENDING_APPROVAL");
     currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
-    const mappingApproveRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Approved, proceed.", projectOwnerId: ownerUser.id }), { params: Promise.resolve({ id: mappingRequestId }) });
-    check("4. A valid, deptA-scoped project.assignable owner -> 200", mappingApproveRes.status === 200);
-    const mappingApproveBody = await mappingApproveRes.json();
-    check("...the response includes the new Project's id", typeof mappingApproveBody.projectId === "string" && mappingApproveBody.projectId.length > 0);
+    const pendingSetupRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: pendingRequest.id }) });
+    check("11. Setup attempted BEFORE final approval -> 409 (never reachable while PENDING_APPROVAL)", pendingSetupRes.status === 409);
 
-    const mappedProject = await prisma.project.findUnique({ where: { projectRequestId: mappingRequestId } });
-    if (mappedProject) projectIds.push(mappedProject.id);
-    check("...the Project's id matches what the API returned", mappedProject?.id === mappingApproveBody.projectId);
-    check("4. title === request.title", mappedProject?.title === requestRow.title);
-    check("4. description === request.description", mappedProject?.description === requestRow.description);
-    check("4. departmentId === request.departmentId", mappedProject?.departmentId === deptA.id);
-    check("4. priority === request.importance (same 1/2/3 scale, verbatim)", mappedProject?.priority === requestRow.importance);
-    check("4. ownerId === the approver's own chosen owner, never the requester or the approver themselves", mappedProject?.ownerId === ownerUser.id && mappedProject?.ownerId !== requester.id && mappedProject?.ownerId !== finalApprover.id);
-    check("4. status defaults to PLANNING, exactly like any manually-created Project", mappedProject?.status === "PLANNING");
-    check("4. progress defaults to 0", mappedProject?.progress === 0);
+    const rejectedRequest = await submitThrough(`PR Creation Rejected ${RUN_ID}`, "reject", finalApprover);
+    check("Fixture: request is REJECTED, with finalApprover still recorded as its approver", rejectedRequest.status === "REJECTED" && rejectedRequest.approverId === finalApprover.id);
+    const rejectedSetupRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: rejectedRequest.id }) });
+    check("12. A REJECTED request can never enter Project setup, even attempted by its own recorded approver", rejectedSetupRes.status === 409);
+    check("...zero Project rows created for the rejected request", (await prisma.project.count({ where: { projectRequestId: rejectedRequest.id } })) === 0);
 
-    console.log("\n-- The new Project is a REAL, first-class row — it shows up in the normal GET /api/projects listing for its owner --\n");
-    currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
-    const listRes = await projectsGET(new NextRequest(`http://localhost/x?departmentId=${deptA.id}`));
-    check("GET /api/projects (as the new owner) -> 200", listRes.status === 200);
-    const listBody = await listRes.json();
-    check("...the auto-created Project appears in the owner's own normal Projects list, indistinguishable from a manually-created one", listBody.projects?.some((p: any) => p.id === mappedProject?.id));
+    // ══════════════════════ 13/14/15/16. Provenance, idempotency, race safety, resumability ══════════════════════
+    console.log("\n=== 13. Created Project receives the exact projectRequestId ===\n");
+    check("13. Project.projectRequestId === the real request's id", ownSetupBody.id && (await prisma.project.findUnique({ where: { id: ownSetupBody.id } }))?.projectRequestId === authRequest.id);
 
-    // ══════════════════════ 5. A REJECTED request never gets a Project ══════════════════════
-    console.log("\n=== 5. Rejecting a request never creates a Project ===\n");
-    const rejectRequestId = await submitAndClearIntermediate(`PR Creation Reject ${RUN_ID}`);
+    console.log("\n=== 14/16. Resubmitting setup for an already-set-up request resolves to the SAME Project, never a duplicate ===\n");
+    const resubmitRes = await setupPOST(jsonReq(validSetupPayload()), { params: Promise.resolve({ id: authRequest.id }) });
+    check("A second setup submission -> 200 (not 201) and alreadyExisted:true", resubmitRes.status === 200);
+    const resubmitBody = await resubmitRes.json();
+    check("...returns the SAME Project id as the first submission", resubmitBody.id === ownSetupBody.id && resubmitBody.alreadyExisted === true);
+    check("14. At most one Project exists for this request — never two", (await prisma.project.count({ where: { projectRequestId: authRequest.id } })) === 1);
+
+    console.log("\n-- 16. Reopening the setup PAGE for an already-set-up request resolves safely (redirects) to the existing Project --\n");
+    let resumeRedirectTarget: string | null = null;
+    try {
+      await NewProjectPage({ searchParams: Promise.resolve({ projectRequestId: authRequest.id }) } as any);
+    } catch (err: any) {
+      resumeRedirectTarget = String(err?.digest ?? "").split(";")[2] ?? null;
+    }
+    check("16. Reopening the setup page for an already-linked request redirects straight to the existing Project — never a second create, never a confusing re-form", resumeRedirectTarget === `/projects/${ownSetupBody.id}`);
+
+    console.log("\n=== 15. Duplicate/concurrent setup submissions cannot produce duplicate Projects ===\n");
+    const raceRequest = await submitThrough(`PR Creation Race ${RUN_ID}`, "approve", finalApprover);
     currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
-    const rejectDecisionRes = await approvalPOST(jsonReq({ decision: "reject", businessAssessment: "Not viable at this time." }), { params: Promise.resolve({ id: rejectRequestId }) });
-    check("5. Reject -> 200 (projectOwnerId was never required for reject)", rejectDecisionRes.status === 200);
-    const rejectedProject = await prisma.project.findUnique({ where: { projectRequestId: rejectRequestId } });
-    check("...no Project row was created for the rejected request", rejectedProject === null);
+    const [raceA, raceB] = await Promise.all([
+      setupPOST(jsonReq({ ...validSetupPayload(), title: `PR Creation Race ${RUN_ID}` }), { params: Promise.resolve({ id: raceRequest.id }) }),
+      setupPOST(jsonReq({ ...validSetupPayload(), title: `PR Creation Race ${RUN_ID}` }), { params: Promise.resolve({ id: raceRequest.id }) }),
+    ]);
+    check("15. Both concurrent submissions succeed (200/201), never one hard-failing the other", raceA.status < 300 && raceB.status < 300);
+    const raceABody = await raceA.json();
+    const raceBBody = await raceB.json();
+    check("...and they resolve to the EXACT SAME Project id", raceABody.id === raceBBody.id);
+    check("...exactly ONE Project row exists for the race request, never two", (await prisma.project.count({ where: { projectRequestId: raceRequest.id } })) === 1);
+    if (raceABody.id) projectIds.push(raceABody.id);
 
-    // ══════════════════════ 6. @unique projectRequestId — a second decide on an already-decided request can never produce a duplicate Project ══════════════════════
-    console.log("\n=== 6. A request can never end up with two Projects (idempotency) ===\n");
-    const secondAttemptRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Trying again.", projectOwnerId: ownerUser.id }), { params: Promise.resolve({ id: mappingRequestId }) });
-    check("6. Deciding an already-APPROVED request again -> 409, never a second Project", secondAttemptRes.status === 409);
-    const projectCountForMapping = await prisma.project.count({ where: { projectRequestId: mappingRequestId } });
-    check("...exactly ONE Project still exists for that request, never two", projectCountForMapping === 1);
+    // ══════════════════════ 17/18/19/20/21. Field mapping & department authority ══════════════════════
+    console.log("\n=== 17/18/19/20/21. Field mapping, department authority, owner department-scoping ===\n");
+    const mappingRequest = await submitThrough(`PR Creation Mapping ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+
+    const wrongDeptOwnerRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: mappingRequest.title, projectOwnerId: otherDeptOwnerUser.id }), { params: Promise.resolve({ id: mappingRequest.id }) });
+    check("21. An owner who is project.assignable in a DIFFERENT department -> 422 invalid_project_owner (department-scoped, not global-by-accident)", wrongDeptOwnerRes.status === 422);
+
+    // Forged departmentId in the raw body — not even a field on the schema,
+    // so it's silently stripped; the server never reads it from the client
+    // at all.
+    const mappingRes = await setupPOST(
+      jsonReq({ ...validSetupPayload(), title: mappingRequest.title, description: mappingRequest.description, priority: mappingRequest.importance, departmentId: otherDept.id } as any),
+      { params: Promise.resolve({ id: mappingRequest.id }) }
+    );
+    check("Valid setup (title/description matching the request's own pre-fill) -> 201", mappingRes.status === 201);
+    const mappingBody = await mappingRes.json();
+    projectIds.push(mappingBody.id);
+    const mappingProject = await prisma.project.findUniqueOrThrow({ where: { id: mappingBody.id } });
+    check("17. title pre-fills/persists correctly", mappingProject.title === mappingRequest.title);
+    check("18. description pre-fills/persists correctly", mappingProject.description === mappingRequest.description);
+    check("19. importance maps to priority correctly (same 1/2/3 scale)", mappingProject.priority === mappingRequest.importance);
+    check("20. Department is the REQUEST's own — the forged departmentId in the body was completely ignored", mappingProject.departmentId === dept.id && mappingProject.departmentId !== otherDept.id);
+
+    console.log("\n-- Title/description ARE still ordinary, editable fields (only the department is immutable) --\n");
+    const editableRequest = await submitThrough(`PR Creation Editable ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    const editableRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: "A deliberately different, user-edited title" }), { params: Promise.resolve({ id: editableRequest.id }) });
+    check("A title different from the request's own original -> still 201 (the approver may tweak it)", editableRes.status === 201);
+    const editableBody = await editableRes.json();
+    projectIds.push(editableBody.id);
+    const editableProject = await prisma.project.findUniqueOrThrow({ where: { id: editableBody.id } });
+    check("...the submitted (edited) title is what persists, never silently reverted to the request's own", editableProject.title === "A deliberately different, user-edited title");
+
+    // ══════════════════════ 25/26. Expected Total Initial Days — server-computed, immutable baseline ══════════════════════
+    console.log("\n=== 25/26. Expected Total Initial Days is computed server-side; a forged client value is ignored ===\n");
+    check("25. 2026-10-01 -> 2026-10-05 = 4 whole calendar days", mappingProject.expectedTotalInitialDays === 4);
+
+    const zeroDaysRequest = await submitThrough(`PR Creation ZeroDays ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    const zeroDaysRes = await setupPOST(
+      jsonReq({ ...validSetupPayload(), title: zeroDaysRequest.title, expectedStartDate: "2026-10-01", expectedFinishDate: "2026-10-01", expectedTotalInitialDays: 9999 } as any),
+      { params: Promise.resolve({ id: zeroDaysRequest.id }) }
+    );
+    check("Same-day Expected Start/Finish -> still 201", zeroDaysRes.status === 201);
+    const zeroDaysBody = await zeroDaysRes.json();
+    projectIds.push(zeroDaysBody.id);
+    const zeroDaysProject = await prisma.project.findUniqueOrThrow({ where: { id: zeroDaysBody.id } });
+    check("25. ...persists as 0 days, the server's own calculation", zeroDaysProject.expectedTotalInitialDays === 0);
+    check("26. ...and the forged client value (9999) was completely ignored — the field isn't even on the schema", zeroDaysProject.expectedTotalInitialDays !== 9999);
+
+    // ══════════════════════ 27. Expense Type must be ACTIVE at creation time ══════════════════════
+    console.log("\n=== 27/39. Expense Type must be ACTIVE for a NEW setup; an already-referencing Project keeps displaying a since-deactivated one ===\n");
+    const inactiveETRequest = await submitThrough(`PR Creation InactiveET ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    const inactiveETRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: inactiveETRequest.title, expenseTypeId: expenseTypeInactive.id }), { params: Promise.resolve({ id: inactiveETRequest.id }) });
+    check("27. Selecting an INACTIVE Expense Type at setup time -> 422 invalid_expense_type", inactiveETRes.status === 422);
+
+    // 39: deactivate the type the earlier `mappingProject` already uses, and
+    // confirm GET /api/projects/[id] still shows it correctly.
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const deactivateUsedETRes = await expenseTypesAdminPATCH(jsonReq({ isActive: false }, "PATCH"), { params: Promise.resolve({ id: expenseTypeActiveId }) });
+    check("(fixture) Admin deactivates the Expense Type an existing Project already references -> 200", deactivateUsedETRes.status === 200);
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const getMappingProjectRes = await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: mappingProject.id }) });
+    const getMappingProjectBody = await getMappingProjectRes.json();
+    check("39. The existing Project continues displaying its (now-inactive) Expense Type by name, not just a dangling id", getMappingProjectBody.expenseType?.id === expenseTypeActiveId && getMappingProjectBody.expenseType?.name && getMappingProjectBody.expenseType?.isActive === false);
+
+    // 14. UI/editability pass: an unrelated edit (title) must still save
+    // cleanly while the Project's Expense Type stays the now-inactive one —
+    // inactive values must remain usable as the CURRENT selection, just not
+    // selectable as a NEW one (already proven at check 27 above).
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const unrelatedEditRes = await projectsPATCH(jsonReq({ title: "Mapping Project Renamed" }, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("14. An unrelated edit (title) saves fine while expenseTypeId is the now-inactive type — not blocked", unrelatedEditRes.status === 200);
+    const unrelatedEditBody = await unrelatedEditRes.json();
+    check("...and the inactive Expense Type was NOT cleared or changed by that unrelated save", unrelatedEditBody.expenseType?.id === expenseTypeActiveId && unrelatedEditBody.expenseType?.isActive === false);
+
+    // 13. Editing Expected Start/Finish later must NOT recalculate or
+    // overwrite expectedTotalInitialDays — it stays the creation-time
+    // baseline (4, from check 25 above: 2026-10-01 -> 2026-10-05) no matter
+    // what new dates are PATCHed in.
+    const baselineBeforeDateEdit = mappingProject.expectedTotalInitialDays;
+    const dateEditRes = await projectsPATCH(
+      jsonReq({ expectedStartDate: "2026-01-01", expectedFinishDate: "2026-06-01" }, "PATCH"),
+      { params: Promise.resolve({ id: mappingProject.id }) }
+    );
+    check("13. PATCHing Expected Start/Finish to very different dates -> 200", dateEditRes.status === 200);
+    const dateEditBody = await dateEditRes.json();
+    check(
+      "13. ...expectedTotalInitialDays is UNCHANGED (still the creation-time baseline, never recomputed on edit)",
+      dateEditBody.expectedTotalInitialDays === baselineBeforeDateEdit && dateEditBody.expectedTotalInitialDays !== null
+    );
+    check("...while the dates themselves DID update — proving this isn't just a no-op PATCH", new Date(dateEditBody.expectedStartDate).toISOString().startsWith("2026-01-01"));
+
+    // ══════════════════════ Follow-up pass: edit-time optionality + null-clearing semantics ══════════════════════
+    console.log("\n=== Follow-up: Project Request Setup fields are OPTIONAL (and explicitly clearable) on edit, while creation stays strictly required ===\n");
+
+    // 6-10: creation-time requiredness is UNCHANGED — re-proven live through
+    // the real route (not just schema.safeParse), one field omitted at a
+    // time, against a freshly-approved request so a prior success can't mask
+    // a later regression.
+    const reqReqFields: ["expectedStartDate", "expectedFinishDate", "expenseTypeId"] = [
+      "expectedStartDate",
+      "expectedFinishDate",
+      "expenseTypeId",
+    ];
+    const stillRequiredNumbers: Record<string, number> = { 6: 0, 7: 1, 8: 2 };
+    for (const [checkNum, idx] of Object.entries(stillRequiredNumbers)) {
+      const field = reqReqFields[idx];
+      const omitRequest = await submitThrough(`PR Creation StillRequired ${field} ${RUN_ID}`, "approve", finalApprover);
+      currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+      const payload = { ...validSetupPayload(), title: omitRequest.title } as Record<string, unknown>;
+      delete payload[field];
+      const omitRes = await setupPOST(jsonReq(payload), { params: Promise.resolve({ id: omitRequest.id }) });
+      check(`${checkNum}. Initial request-origin creation STILL requires ${field} -> rejected when omitted`, omitRes.status === 400 || omitRes.status === 422);
+    }
+
+    // 11/12/13/14/15/16/18/19/20/21/23/25/26/27: a real, live edit sequence
+    // against mappingProject, each step building on the last.
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+
+    // 18: only Expected Start supplied (Finish omitted) -> valid, and the
+    // missing counterpart is NOT force-required.
+    const onlyStartRes = await projectsPATCH(jsonReq({ expectedStartDate: "2026-02-01" }, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("18. PATCH with ONLY Expected Start supplied (Finish omitted) -> 200, valid", onlyStartRes.status === 200);
+
+    // 19: only Expected Finish supplied (Start omitted this time) -> valid.
+    const onlyFinishRes = await projectsPATCH(jsonReq({ expectedFinishDate: "2026-07-01" }, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("19. PATCH with ONLY Expected Finish supplied (Start omitted) -> 200, valid", onlyFinishRes.status === 200);
+
+    // 20: BOTH supplied together with Finish < Start -> rejected, and the
+    // previously-saved values are untouched by the rejected attempt.
+    const bothInvalidRes = await projectsPATCH(
+      jsonReq({ expectedStartDate: "2026-08-01", expectedFinishDate: "2026-01-01" }, "PATCH"),
+      { params: Promise.resolve({ id: mappingProject.id }) }
+    );
+    check("20. Both dates supplied with Finish < Start -> rejected (400)", bothInvalidRes.status === 400);
+    const afterRejectedRes = await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: mappingProject.id }) });
+    const afterRejectedBody = await afterRejectedRes.json();
+    check("...the rejected attempt did NOT partially apply — dates are still what they were before it", new Date(afterRejectedBody.expectedStartDate).toISOString().startsWith("2026-02-01"));
+
+    // 21: both valid dates together -> saves successfully.
+    const bothValidRes = await projectsPATCH(
+      jsonReq({ expectedStartDate: "2026-03-01", expectedFinishDate: "2026-03-15" }, "PATCH"),
+      { params: Promise.resolve({ id: mappingProject.id }) }
+    );
+    check("21. Both dates supplied, Finish >= Start -> 200, saves successfully", bothValidRes.status === 200);
+
+    // 11/12/25/26: clear BOTH dates in one PATCH (explicit null, not
+    // omission) -> valid ("neither supplied" case), and the immutable
+    // creation-time baseline is untouched by any of this.
+    const clearBothDatesRes = await projectsPATCH(
+      jsonReq({ expectedStartDate: null, expectedFinishDate: null }, "PATCH"),
+      { params: Promise.resolve({ id: mappingProject.id }) }
+    );
+    check("11. Existing Project can save with Expected Start explicitly cleared to null -> 200", clearBothDatesRes.status === 200);
+    const clearBothDatesBody = await clearBothDatesRes.json();
+    check("11. ...expectedStartDate really persisted as null, not left at its old value", clearBothDatesBody.expectedStartDate === null);
+    check("12. ...and Expected Finish explicitly cleared to null too -> persisted as null", clearBothDatesBody.expectedFinishDate === null);
+    check(
+      "25/26. Expected Total Initial Days is STILL the original creation-time baseline after all of the above date edits (including clearing both)",
+      clearBothDatesBody.expectedTotalInitialDays === baselineBeforeDateEdit && clearBothDatesBody.expectedTotalInitialDays !== null
+    );
+
+    // 27: PATCH cannot directly alter it even with both dates cleared AND a forged value present.
+    const forgedBaselineRes = await projectsPATCH(
+      jsonReq({ title: "Mapping Project Renamed Again", expectedTotalInitialDays: 777 } as any, "PATCH"),
+      { params: Promise.resolve({ id: mappingProject.id }) }
+    );
+    check("27. A forged expectedTotalInitialDays in a PATCH body -> silently ignored (not even a field on the schema)", forgedBaselineRes.status === 200);
+    const forgedBaselineBody = await forgedBaselineRes.json();
+    check("...it is STILL the real baseline, not 777", forgedBaselineBody.expectedTotalInitialDays === baselineBeforeDateEdit && forgedBaselineBody.expectedTotalInitialDays !== 777);
+
+    // 13/14/15/16/17: Budget no longer exists and Estimated/Actual Cost are
+    // now fully derived from this Project's own Activities (none exist on
+    // mappingProject here) — a client still sending these keys has them
+    // silently stripped by Zod (unknown keys), never persisted; the GET/
+    // PATCH response's estimatedCost/actualCost are the SERVER-computed
+    // totals (via withProjectFinancials), never echoing back what was sent.
+    const forgedMoneyRes = await projectsPATCH(jsonReq({ budget: 1000, estimatedCost: 900, actualCost: 250 } as any, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("14/15/16. PATCHing budget/estimatedCost/actualCost -> still 200 (silently stripped, never an error)", forgedMoneyRes.status === 200);
+    const forgedMoneyBody = await forgedMoneyRes.json();
+    check("17. ...estimatedCost/actualCost in the response are the DERIVED totals (€0, since mappingProject has no Activities), never the forged 900/250", forgedMoneyBody.estimatedCost === "0" && forgedMoneyBody.actualCost === "0");
+    check("...and `budget` isn't even present on the response — the column no longer exists", !("budget" in forgedMoneyBody));
+
+    // 23/24: clear the (now-inactive) Expense Type, then prove a genuinely
+    // NEW inactive selection is rejected — the edit-time rule now matches
+    // creation's "must be active" rule for an actual NEW choice, while an
+    // untouched re-save of an already-set inactive value (proven at check
+    // 14 above, before clearing) remains unaffected.
+    const clearExpenseTypeRes = await projectsPATCH(jsonReq({ expenseTypeId: null }, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("13. Existing Project can save with Expense Type explicitly cleared to null -> 200", clearExpenseTypeRes.status === 200);
+    const clearExpenseTypeBody = await clearExpenseTypeRes.json();
+    check("23. ...Expense Type really persisted as null/absent, not left at its old value", clearExpenseTypeBody.expenseType === null || clearExpenseTypeBody.expenseType === undefined);
+
+    const newInactiveSelectionRes = await projectsPATCH(jsonReq({ expenseTypeId: expenseTypeInactive.id }, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("24. Choosing a BRAND NEW inactive Expense Type on edit (never before set on this Project) -> rejected, same rule as creation", newInactiveSelectionRes.status === 400);
+    const afterRejectedSelectionRes = await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("...and it was NOT applied — Expense Type is still cleared, not the rejected inactive id", (await afterRejectedSelectionRes.json()).expenseTypeId === null);
+
+    // 22: re-confirm, now that clearing/re-selecting has been exercised,
+    // that an UNRELATED edit on a Project whose Expense Type is untouched
+    // (left at whatever it currently is) still saves fine — the general
+    // guarantee already proven at check 14 earlier in this file holds
+    // throughout this whole sequence, not just once.
+    const finalUnrelatedEditRes = await projectsPATCH(jsonReq({ title: "Mapping Project Final Title" }, "PATCH"), { params: Promise.resolve({ id: mappingProject.id }) });
+    check("22. An unrelated edit still saves fine after all this field churn", finalUnrelatedEditRes.status === 200);
+
+    // 28: a legacy request-origin Project with every new field left null can
+    // still have an unrelated field edited successfully, without being
+    // forced to backfill the Project Request Setup fields first.
+    const legacySetupProject = await prisma.project.create({
+      data: { title: `PR Creation Legacy Setup Null ${RUN_ID}`, departmentId: dept.id, ownerId: ownerUser.id, projectRequestId: null },
+    });
+    projectIds.push(legacySetupProject.id);
+    const legacySetupPatchRes = await projectsPATCH(jsonReq({ title: "Legacy Setup Project Renamed" }, "PATCH"), { params: Promise.resolve({ id: legacySetupProject.id }) });
+    check("28. A legacy request-origin Project with null Project Request Setup fields can edit an unrelated field (title) successfully", legacySetupPatchRes.status === 200);
+
+    // ══════════════════════ 40. A referenced Expense Type cannot be destructively deleted ══════════════════════
+    console.log("\n=== 40. DELETE on a referenced Expense Type is blocked; an unused one deletes cleanly ===\n");
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const deleteReferencedRes = await expenseTypesAdminDELETE(jsonReq(undefined, "DELETE"), { params: Promise.resolve({ id: expenseTypeActiveId }) });
+    check("40. DELETE on an Expense Type still referenced by a Project -> 409 item_in_use", deleteReferencedRes.status === 409);
+    check("...it was NOT deleted — still present", (await prisma.projectExpenseType.findUnique({ where: { id: expenseTypeActiveId } })) !== null);
+    check("...and no Project was cascade-deleted by the blocked attempt", (await prisma.project.findUnique({ where: { id: mappingProject.id } })) !== null);
+
+    const unusedETRes = await expenseTypesAdminPOST(jsonReq({ name: `PR Creation ExpenseType Unused ${RUN_ID}` }));
+    const unusedET = await unusedETRes.json();
+    const deleteUnusedRes = await expenseTypesAdminDELETE(jsonReq(undefined, "DELETE"), { params: Promise.resolve({ id: unusedET.id }) });
+    check("An Expense Type with NO Project referencing it deletes cleanly -> 204", deleteUnusedRes.status === 204);
+
+    // ══════════════════════ 33/34/35. Scope isolation — manual creation totally unaffected ══════════════════════
+    console.log("\n=== 33/34/35. Normal /projects/new (manual) is completely unaffected ===\n");
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const manualOwnerCreateRes = await projectsPOST(jsonReq({ title: `PR Creation Manual Normal ${RUN_ID}`, departmentId: dept.id }));
+    check("33/34. A normal manual creation (no request-origin fields at all) still works exactly as before", manualOwnerCreateRes.status === 201);
+    const manualProject = await manualOwnerCreateRes.json();
+    projectIds.push(manualProject.id);
+    check("34. ...and requires none of the new metadata — every new field is simply null/default on a manual Project", manualProject.projectRequestId === undefined || manualProject.projectRequestId === null);
+
+    console.log("\n-- 36. A forged attempt to fake request-origin provenance through the GENERIC create API is a no-op, not an escalation --\n");
+    const forgedManualRes = await projectsPOST(
+      jsonReq({
+        title: `PR Creation Forged Provenance ${RUN_ID}`,
+        departmentId: dept.id,
+        projectRequestId: authRequest.id,
+        expectedStartDate: "2026-01-01",
+        expectedFinishDate: "2026-01-02",
+        budget: 999999,
+        projectOwnerId: ownerUser.id,
+      } as any)
+    );
+    check("36. The forged payload still succeeds as an ORDINARY manual Project -> 201 (the extra keys are simply stripped, not an error)", forgedManualRes.status === 201);
+    const forgedManualProject = await forgedManualRes.json();
+    projectIds.push(forgedManualProject.id);
+    const forgedManualRow = await prisma.project.findUniqueOrThrow({ where: { id: forgedManualProject.id } });
+    check("...projectRequestId was NEVER set from the forged body — it's still null", forgedManualRow.projectRequestId === null);
+    check("...expectedStartDate was NEVER set either — createProjectSchema simply doesn't declare that field (budget isn't even a column any more)", forgedManualRow.expectedStartDate === null);
+    check("...the REAL already-approved request (authRequest) was completely unaffected by this forged attempt — still linked only to its own real Project", (await prisma.project.count({ where: { projectRequestId: authRequest.id } })) === 1);
+
+    console.log("\n-- The plain /projects/new page (no projectRequestId) still renders the ordinary manual form --\n");
+    const plainPageEl = await NewProjectPage({ searchParams: Promise.resolve({}) } as any);
+    check("35. The plain manual-creation page renders without throwing, and is a distinct code path from fromRequest mode", plainPageEl !== undefined);
+
+    // ══════════════════════ 41/42/43. Legacy safety ══════════════════════
+    console.log("\n=== 41/42/43. Legacy Projects (manual, and pre-this-feature auto-created) remain fully readable/editable ===\n");
+    const legacyAutoCreatedProject = await prisma.project.create({
+      data: {
+        title: `PR Creation Legacy AutoCreated ${RUN_ID}`,
+        departmentId: dept.id,
+        ownerId: ownerUser.id,
+        projectRequestId: null, // a real pre-feature row would reference its own old request; null here is sufficient to prove the null-new-fields case
+      },
+    });
+    projectIds.push(legacyAutoCreatedProject.id);
+    check("41. A legacy row with every new field left null is created without error", legacyAutoCreatedProject.expectedStartDate === null);
+
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const legacyGetRes = await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: legacyAutoCreatedProject.id }) });
+    check("41. GET on the legacy row -> 200, reads back cleanly", legacyGetRes.status === 200);
+
+    const legacyPatchRes = await projectsPATCH(jsonReq({ title: "Legacy Project Renamed" }, "PATCH"), { params: Promise.resolve({ id: legacyAutoCreatedProject.id }) });
+    check("42. PATCH touching only an unrelated field (title) succeeds WITHOUT requiring any of the new fields to be backfilled first", legacyPatchRes.status === 200);
+
+    const legacyFillInRes = await projectsPATCH(jsonReq({ expectedStartDate: "2026-05-01" }, "PATCH"), { params: Promise.resolve({ id: legacyAutoCreatedProject.id }) });
+    check("43. A legacy row can have a previously-null new field filled in LATER via the normal edit route", legacyFillInRes.status === 200 && (await legacyFillInRes.json()).expectedStartDate !== null);
+
+    // ══════════════════════ UI pass: 4/5/8/9 — detail-page rendering + the pencil's permission gate ══════════════════════
+    console.log("\n=== UI pass 4/5/8/9: detail page renders for both provenances; the Edit control's gate is the SAME canEditProject the rest of the page already uses ===\n");
+    const { default: ProjectDetailPage } = await import("@/app/(main)/projects/[id]/page");
+    const { hasEffectiveEntityPermission } = await import("@/lib/services/department-scope-service");
+
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const requestOriginDetailEl = await ProjectDetailPage({ params: Promise.resolve({ id: mappingProject.id }) } as any);
+    check("4. The request-origin Project's detail page renders without throwing", requestOriginDetailEl !== undefined);
+
+    const manualDetailEl = await ProjectDetailPage({ params: Promise.resolve({ id: manualProject.id }) } as any);
+    check("5. A manual Project's detail page renders without throwing too (same code path, projectRequest simply null)", manualDetailEl !== undefined);
+
+    // 8/9: the JSX wraps the Edit control in exactly `{canEditProject && (...)}`
+    // (already asserted structurally above) — so proving that boolean is
+    // correct for an authorized vs. an unauthorized role IS proving the
+    // control's visibility, the same way this page's pre-existing
+    // canEditProject/canDeleteProject gates are proven elsewhere in this
+    // suite. No new permission was introduced — this re-checks the existing
+    // project.edit grant used by every other edit affordance on this page.
+    const viewerOnlyUser = await makeUser(`pr-creation-viewer-${RUN_ID}@kinsen.gr`);
+    userIds.push(viewerOnlyUser.id);
+    await addMembership(viewerOnlyUser.id, dept.id); // base VIEWER role: project.view only, no project.edit (see prisma/seed.ts)
+    const adminCanEdit = await hasEffectiveEntityPermission(adminUser.id, Role.ADMIN, null, dept.id, "project.edit");
+    const viewerCanEdit = await hasEffectiveEntityPermission(viewerOnlyUser.id, Role.USER, null, dept.id, "project.edit");
+    check("8. An authorized user (project.edit) -> canEditProject is true, so the pencil/Edit control renders", adminCanEdit === true);
+    check("9. An unauthorized user (view-only) -> canEditProject is false, so the pencil/Edit control does NOT render", viewerCanEdit === false);
   } finally {
     console.log("\nCleaning up test data...\n");
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
-      ["projects (auto-created, explicitly tracked)", () => prisma.project.deleteMany({ where: { id: { in: projectIds } } })],
-      ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
+      ["projects (explicitly tracked)", () => prisma.project.deleteMany({ where: { id: { in: projectIds } } })],
+      ["projects (auto-linked from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["intermediate approver rows", () => prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project expense types", () => prisma.projectExpenseType.deleteMany({ where: { id: { in: expenseTypeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

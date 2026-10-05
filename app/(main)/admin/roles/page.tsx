@@ -55,7 +55,7 @@ const MODULE_LABELS: Record<string, string> = {
 // these server-side for DEPARTMENT/BOTH-scope roles (defense in depth, not
 // just a UI hint); department-scoped roles can never reach system
 // administration this way.
-const GLOBAL_ONLY_PERMISSION_KEYS = new Set(["admin.access", "user.manage", "role.manage"]);
+const GLOBAL_ONLY_PERMISSION_KEYS = new Set(["admin.access", "user.manage", "role.manage", "taskType.manage", "projectFeedback.view"]);
 
 export default function RolesAdminPage() {
   const [loading, setLoading] = useState(true);

@@ -61,7 +61,17 @@ const RUN_ID = Date.now();
 
 let currentSession: { user: { id: string; role: any; customRoleId: string | null } } | null = null;
 mock.module("@/lib/auth", { namedExports: { auth: async () => currentSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
-mock.module("next/headers", { namedExports: { cookies: async () => ({ get: () => undefined }), headers: async () => new Headers() } });
+// "ALL" (All Workspaces) for every session — this file tests the
+// assignedAgentId filter across pages, a concern orthogonal to workspace
+// scoping (see this task's own workspace-scoping fix: Tickets pages now
+// default to the active Workspace instead of the full union when no
+// cookie is set, which would otherwise scope ADMIN's bare queries here to
+// an arbitrary, unrelated department). For a non-canViewAllDepartments
+// session (deptAOnlyViewer/me/agentX below), "ALL" simply doesn't match
+// any real department id and falls through to their own membership-based
+// default, exactly as an absent cookie already did — so this is a safe,
+// behavior-preserving default for every session in this file, not just ADMIN.
+mock.module("next/headers", { namedExports: { cookies: async () => ({ get: (name: string) => (name === "active_department_id" ? { value: "ALL" } : undefined) }), headers: async () => new Headers() } });
 
 function findElementsByType(node: any, type: any, results: any[] = []): any[] {
   if (node == null || typeof node !== "object") return results;

@@ -27,16 +27,11 @@ export default async function NewProjectRequestPage() {
   const departments = workspace.departments;
   const defaultDepartmentId = workspace.isAllSelected ? undefined : workspace.departmentId ?? undefined;
 
-  const activeTypesRaw = await prisma.projectRequestType.findMany({
+  const activeTypes = await prisma.projectRequestType.findMany({
     where: { isActive: true },
     orderBy: { name: "asc" },
-    select: { id: true, name: true, cost: true },
+    select: { id: true, name: true },
   });
-  // Prisma.Decimal is a class instance, not a plain serializable value — it
-  // cannot cross the Server -> Client Component boundary as-is. Converted
-  // to a plain `number | null` here, once, before handing off to
-  // <ProjectRequestForm>.
-  const activeTypes = activeTypesRaw.map((t) => ({ ...t, cost: t.cost ? Number(t.cost) : null }));
 
   // Every real, currently-eligible intermediate approver, system-wide —
   // never department-scoped. This stage is mandatory (fail closed): if

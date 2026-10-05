@@ -5,9 +5,9 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Loader2, Check, X, FolderKanban } from "lucide-react";
+import { Loader2, Check, X, FolderKanban, Wrench } from "lucide-react";
 import type { ProjectRequestStatus } from "@prisma/client";
-import { ProjectRequestDecisionDialog, type ProjectOwnerOption } from "@/components/project-requests/project-request-decision-dialog";
+import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
 
 interface ApprovalActionsProps {
   requestId: string;
@@ -19,10 +19,10 @@ interface ApprovalActionsProps {
   rejectedAt: Date | null;
   /** The approver's OWN mandatory justification for the decision — written only at decision time, never the requester's text (see legacyRequesterBusinessAssessment on the detail page for that). */
   businessAssessment: string | null;
-  /** Every active, project-assignable user for this request's own department — offered to the approver to pick the owner of the Project that gets auto-created on approve (see decideApproval). */
-  ownerOptions: ProjectOwnerOption[];
-  /** The Project auto-created from this request once it was approved — null until then. */
+  /** The Project created from this request's own request-origin setup flow — null until that's been completed. */
   project: { id: string; title: string } | null;
+  /** True exactly when the CURRENT viewer is the recorded final approver for this request — the only person who may complete (or resume) its Project setup. Never derived from any broader permission; see createProjectFromApprovedRequest's own doc comment for why. */
+  viewerIsRecordedApprover: boolean;
 }
 
 /**
@@ -37,14 +37,21 @@ interface ApprovalActionsProps {
  * path. Any user who holds effective projectRequest.approve for this
  * request's department may act — never tied to the requester's own
  * manager/org-chart in any way.
+ *
+ * A successful APPROVE does not create a Project — it immediately
+ * redirects the acting approver to the dedicated request-origin Project
+ * setup page (/projects/new?projectRequestId=...) instead. If they ever
+ * leave before finishing (closed the tab, lost connection, refreshed), this
+ * same component offers "Complete Project Setup" to resume — see
+ * viewerIsRecordedApprover.
  */
-export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, ownerOptions, project }: ApprovalActionsProps) {
+export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, project, viewerIsRecordedApprover }: ApprovalActionsProps) {
   const router = useRouter();
   const [pendingDecision, setPendingDecision] = useState<"approve" | "reject" | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [serverError, setServerError] = useState<string | null>(null);
 
-  const submit = async ({ businessAssessment: assessment, projectOwnerId }: { businessAssessment: string; projectOwnerId?: string }) => {
+  const submit = async ({ businessAssessment: assessment }: { businessAssessment: string }) => {
     if (!pendingDecision) return;
     setSubmitting(true);
     setServerError(null);
@@ -52,13 +59,22 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
       const res = await fetch(`/api/project-requests/${requestId}/approval`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision: pendingDecision, businessAssessment: assessment, projectOwnerId }),
+        body: JSON.stringify({ decision: pendingDecision, businessAssessment: assessment }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.message ?? err.error ?? "Failed to submit decision");
       }
-      toast.success(pendingDecision === "approve" ? "Request approved" : "Request rejected");
+      if (pendingDecision === "approve") {
+        toast.success("Request approved — let's set up the Project.");
+        // Never a client-trusted shortcut: the setup page itself
+        // re-resolves this request's state (status/approver) server-side
+        // before rendering anything — this query param only tells it WHICH
+        // request to look up.
+        router.push(`/projects/new?projectRequestId=${requestId}`);
+        return;
+      }
+      toast.success("Request rejected");
       setPendingDecision(null);
       router.refresh();
     } catch (error: any) {
@@ -85,11 +101,20 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
         </p>
         {approvedAt && <p className="text-muted-foreground">{approvedAt.toLocaleString()}</p>}
         {businessAssessment && <p className="whitespace-pre-wrap mt-1">{businessAssessment}</p>}
-        {project && (
+        {project ? (
           <Link href={`/projects/${project.id}`} className="inline-flex items-center gap-1.5 mt-2 text-primary hover:underline">
             <FolderKanban className="h-3.5 w-3.5" />
             View Project
           </Link>
+        ) : viewerIsRecordedApprover ? (
+          <Button size="sm" className="mt-2" asChild>
+            <Link href={`/projects/new?projectRequestId=${requestId}`}>
+              <Wrench className="h-3.5 w-3.5 mr-1.5" />
+              Complete Project Setup
+            </Link>
+          </Button>
+        ) : (
+          <p className="text-xs text-muted-foreground mt-2">Project setup is still pending, from the approver who gave final approval.</p>
         )}
       </div>
     );
@@ -124,14 +149,7 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
         </Button>
       </div>
 
-      <ProjectRequestDecisionDialog
-        decision={pendingDecision}
-        submitting={submitting}
-        serverError={serverError}
-        onCancel={cancel}
-        onConfirm={submit}
-        ownerOptions={ownerOptions}
-      />
+      <ProjectRequestDecisionDialog decision={pendingDecision} submitting={submitting} serverError={serverError} onCancel={cancel} onConfirm={submit} />
     </>
   );
 }

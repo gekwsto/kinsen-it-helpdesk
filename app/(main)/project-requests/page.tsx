@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 import { parsePageParam, parsePageSizeParam, computePagination } from "@/lib/pagination";
 import { resolveApprovalScope, buildAwaitingMyApprovalWhere, buildAwaitingMyIntermediateApprovalWhere, buildHistoryWhere } from "@/lib/services/project-request-service";
-import { getAssignableUsersForProject, type AssignableUserSummary } from "@/lib/services/assignment-eligibility-service";
 import { ProjectRequestTable } from "@/components/project-requests/project-request-table";
 import { cn } from "@/lib/utils";
 import type { Prisma } from "@prisma/client";
@@ -83,18 +82,6 @@ export default async function ProjectRequestsPage({
 
   const pagination = computePagination(total, requestedPage, pageSize);
 
-  // Every candidate Project owner for each department actually represented
-  // on this page — pre-fetched ONCE per distinct department (never a
-  // per-row/on-open fetch), so the inline Approve dialog's owner picker has
-  // real data the instant it opens.
-  const distinctDepartmentIds = Array.from(new Set(requests.map((r) => r.departmentId)));
-  const assignableOwnersByDepartment: Record<string, AssignableUserSummary[]> = {};
-  await Promise.all(
-    distinctDepartmentIds.map(async (departmentId) => {
-      assignableOwnersByDepartment[departmentId] = await getAssignableUsersForProject(departmentId);
-    })
-  );
-
   const tabHref = (key: TabKey) => `/project-requests?tab=${key}`;
   const pageHref = (page: number) => `/project-requests?tab=${tab}&page=${page}`;
 
@@ -108,9 +95,6 @@ export default async function ProjectRequestsPage({
   // SQL.
   const rowsWithActions = requests.map((r) => ({
     ...r,
-    // Prisma.Decimal is a class instance, not a plain serializable value —
-    // it cannot cross the Server -> Client Component boundary as-is.
-    cost: r.cost ? Number(r.cost) : null,
     canDecideNow: r.status === "PENDING_APPROVAL" && (scope.hasGlobalApprove || scope.approveDepartmentIds.includes(r.departmentId)),
   }));
 
@@ -146,7 +130,6 @@ export default async function ProjectRequestsPage({
 
       <ProjectRequestTable
         requests={rowsWithActions}
-        assignableOwnersByDepartment={assignableOwnersByDepartment}
         emptyMessage={
           tab === "mine"
             ? "You haven't submitted any Project Requests yet."

@@ -15,12 +15,6 @@ export default async function ProjectRequestTypesAdminPage() {
     orderBy: { createdAt: "asc" },
     include: { _count: { select: { projectRequests: true } } },
   });
-  // Prisma.Decimal is a class instance, not a plain serializable value — it
-  // cannot cross the Server -> Client Component boundary as-is (React
-  // Server Components only support plain objects/primitives/Date/etc.).
-  // Converted to a plain `number | null` here, once, before handing off to
-  // the client component below.
-  const typesForClient = types.map((t) => ({ ...t, cost: t.cost ? Number(t.cost) : null }));
 
   return (
     <div className="space-y-6">
@@ -30,7 +24,7 @@ export default async function ProjectRequestTypesAdminPage() {
           Manage the Project Type options offered on the Project Request Form.
         </p>
       </div>
-      <ProjectRequestTypeManagement types={typesForClient} />
+      <ProjectRequestTypeManagement types={types} />
     </div>
   );
 }

@@ -5,9 +5,11 @@ import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-se
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
-import { updateProjectSchema } from "@/lib/validations";
+import { updateProjectSchema, updateProjectRequestOriginFieldsSchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
+import { computeProjectFinancials } from "@/lib/services/project-financials-service";
+import { notifyRequesterOfProjectCompletion } from "@/lib/services/project-feedback-service";
 import { Role } from "@prisma/client";
 
 // Every field the Project List (table) or Grid (card) view actually
@@ -35,6 +37,12 @@ const PROJECT_INCLUDE = {
   department: { select: { id: true, name: true } },
   businessUnit: { select: { id: true, name: true } },
   members: { select: { id: true, name: true, email: true, image: true } },
+  // Included unconditionally (even for a Project with no expenseTypeId at
+  // all — Prisma simply returns null) so a now-INACTIVE type a
+  // request-origin Project already references still displays by name
+  // (never just its bare id) — see this feature's own "existing Project
+  // continues displaying a now-inactive Expense Type" requirement.
+  expenseType: { select: { id: true, name: true, isActive: true } },
   activities: {
     orderBy: { createdAt: "desc" as const },
     include: {
@@ -42,6 +50,20 @@ const PROJECT_INCLUDE = {
     },
   },
 };
+
+// Project.budget/estimatedCost/actualCost no longer exist as DB columns —
+// Estimated/Actual Cost are injected here instead, computed fresh from this
+// SAME request's already-loaded `project.activities` (no extra query) via
+// the single authoritative aggregation (lib/services/project-financials-
+// service.ts). Harmless to compute for a manual Project too (naturally
+// €0/€0, since a manual Activity never has taskTypeCost set) — the UI only
+// ever renders these inside its own projectRequest-gated section.
+function withProjectFinancials<T extends { activities: { taskTypeCost: any; expectedDays: number | null; actualDays: number | null }[] }>(
+  project: T
+): T & { estimatedCost: string; actualCost: string } {
+  const { estimatedCost, actualCost } = computeProjectFinancials(project.activities);
+  return { ...project, estimatedCost: estimatedCost.toString(), actualCost: actualCost.toString() };
+}
 
 export async function GET(
   _req: NextRequest,
@@ -67,7 +89,7 @@ export async function GET(
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    return NextResponse.json(project);
+    return NextResponse.json(withProjectFinancials(project));
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -81,7 +103,10 @@ export async function PATCH(
     const { id } = await params;
     const session = await requireAuth();
 
-    const existing = await prisma.project.findUnique({ where: { id }, select: { departmentId: true, status: true, title: true } });
+    const existing = await prisma.project.findUnique({
+      where: { id },
+      select: { departmentId: true, status: true, title: true, expectedStartDate: true, expectedFinishDate: true, expenseTypeId: true, projectRequestId: true },
+    });
     if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     const canEdit = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, existing.departmentId, "project.edit");
@@ -90,7 +115,57 @@ export async function PATCH(
     }
 
     const body = await req.json();
-    const data = updateProjectSchema.parse(body);
+    // Merged with the request-origin-only editable fields (Expected
+    // Start/Finish, Expense Type, Budget, Estimated Cost, Actual Cost,
+    // External) — see that schema's own doc comment for why
+    // expectedTotalInitialDays is deliberately never accepted here
+    // (creation-time baseline, immutable). Accepted for ANY Project being
+    // edited, not just ones with projectRequestId set — the UI only ever
+    // OFFERS this block for request-origin Projects (see
+    // app/(main)/projects/[id]/edit/page.tsx), but there's no extra
+    // security boundary being bypassed by also allowing it here: editing
+    // these fields still requires the SAME project.edit this route already
+    // re-checks above, on a real, already-existing Project.
+    const data = updateProjectSchema.merge(updateProjectRequestOriginFieldsSchema).parse(body);
+
+    // expectedStartDate/expectedFinishDate are now `string | null | undefined`
+    // (see updateProjectRequestOriginFieldsSchema's doc comment): `undefined`
+    // means "untouched, use whatever's already stored"; `null` (or an empty
+    // string, belt-and-suspenders) means "explicitly cleared — there is no
+    // date". `new Date(null)` would silently coerce to the 1970 epoch rather
+    // than "no date", so that case is handled explicitly instead of ever
+    // reaching `new Date(...)`. Both dates are independently optional on
+    // edit — the finish>=start rule only applies once BOTH are non-null.
+    const effectiveExpectedStart =
+      data.expectedStartDate !== undefined ? (data.expectedStartDate ? new Date(data.expectedStartDate) : null) : existing.expectedStartDate;
+    const effectiveExpectedFinish =
+      data.expectedFinishDate !== undefined ? (data.expectedFinishDate ? new Date(data.expectedFinishDate) : null) : existing.expectedFinishDate;
+    if (effectiveExpectedStart && effectiveExpectedFinish && effectiveExpectedFinish < effectiveExpectedStart) {
+      return NextResponse.json(
+        { error: "Expected Finish Date cannot be before Expected Start Date.", code: "invalid_expected_dates" },
+        { status: 400 }
+      );
+    }
+
+    // expenseTypeId is also `string | null | undefined` on edit — `null`
+    // (explicitly cleared) or re-sending the SAME id already on this
+    // Project skips validation entirely (the second case is what lets an
+    // already-set, since-deactivated Expense Type remain settable/
+    // re-settable — e.g. re-saving the edit form without touching this
+    // field, or saving an unrelated field while it stays as-is). Only a
+    // genuinely NEW selection (a different id than what's already stored)
+    // is validated — and, unlike the old behavior, that validation now
+    // matches creation time's own rule: it must exist AND be active. This
+    // is what stops a since-deactivated Expense Type from being newly
+    // chosen on a DIFFERENT Project (or re-chosen after having been
+    // cleared) via edit, while still never blocking the Project that
+    // already legitimately references it.
+    if (data.expenseTypeId !== undefined && data.expenseTypeId !== null && data.expenseTypeId !== existing.expenseTypeId) {
+      const expenseType = await prisma.projectExpenseType.findUnique({ where: { id: data.expenseTypeId }, select: { id: true, isActive: true } });
+      if (!expenseType || !expenseType.isActive) {
+        return NextResponse.json({ error: "The selected Expense Type does not exist or is not active.", code: "invalid_expense_type" }, { status: 400 });
+      }
+    }
 
     // Moving a project into a different department requires standing there too.
     if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== existing.departmentId) {
@@ -105,7 +180,7 @@ export async function PATCH(
       }
     }
 
-    const { memberIds, startDate, endDate, ...rest } = data;
+    const { memberIds, startDate, endDate, expectedStartDate, expectedFinishDate, ...rest } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
 
     if (memberIds && memberIds.length > 0) {
@@ -142,6 +217,12 @@ export async function PATCH(
         subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
         startDate: startDate ? new Date(startDate) : undefined,
         endDate: endDate ? new Date(endDate) : undefined,
+        // undefined (key omitted) -> leave untouched; null/"" (explicitly
+        // cleared) -> persist NULL; a real value -> the parsed Date. Reuses
+        // the exact same effective values already computed above for the
+        // finish>=start check, so the two can never disagree.
+        expectedStartDate: expectedStartDate === undefined ? undefined : effectiveExpectedStart,
+        expectedFinishDate: expectedFinishDate === undefined ? undefined : effectiveExpectedFinish,
         members: memberIds
           ? { set: memberIds.map((memberId) => ({ id: memberId })) }
           : undefined,
@@ -177,7 +258,17 @@ export async function PATCH(
       publishActivityListInvalidation();
     }
 
-    return NextResponse.json(project);
+    // Notify the original requester the moment THIS save is what just
+    // completed a request-origin Project — never on an unrelated edit of
+    // an already-COMPLETED Project, never for a manual one (no
+    // projectRequestId). createInAppNotification never throws (failures
+    // are only logged), so this can never turn an otherwise-successful
+    // PATCH into an error response.
+    if (existing.status !== "COMPLETED" && project.status === "COMPLETED" && existing.projectRequestId) {
+      await notifyRequesterOfProjectCompletion({ id: project.id, title: project.title, projectRequestId: existing.projectRequestId });
+    }
+
+    return NextResponse.json(withProjectFinancials(project));
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

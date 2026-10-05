@@ -5,12 +5,10 @@ import Link from "next/link";
 import { ChevronLeft } from "lucide-react";
 import { canViewProjectRequest } from "@/lib/services/project-request-service";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
-import { getAssignableUsersForProject } from "@/lib/services/assignment-eligibility-service";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
 import { ApprovalActions } from "@/components/project-requests/approval-actions";
 import { IntermediateApprovalActions } from "@/components/project-requests/intermediate-approval-actions";
-import { formatEUR } from "@/lib/currency";
 
 export default async function ProjectRequestDetailPage({
   params,
@@ -50,12 +48,6 @@ export default async function ProjectRequestDetailPage({
     request.status === "PENDING_APPROVAL" &&
     (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, request.departmentId, "projectRequest.approve"));
 
-  // Every candidate owner for the Project that gets auto-created if this
-  // request is approved (see decideApproval) — only meaningfully needed
-  // while canDecideNow, but a single cheap query either way, never a
-  // per-click fetch.
-  const ownerOptions = canDecideNow ? await getAssignableUsersForProject(request.departmentId) : [];
-
   // THIS viewer's own intermediate-approver row, only if the requester
   // explicitly selected them for THIS request — never derived any other way.
   const myIntermediateRow = request.intermediateApprovers.find((r) => r.approver.id === session.user.id) ?? null;
@@ -82,10 +74,6 @@ export default async function ProjectRequestDetailPage({
       <div className="rounded-lg border divide-y">
         <Field label="Description" value={request.description} multiline />
         <Field label="Importance level" value={PROJECT_PRIORITY_LABEL[request.importance] ?? String(request.importance)} />
-        {/* The SNAPSHOT taken at submission time — never a live read of
-            request.projectType.cost, which may have since been edited by an
-            admin. See POST /api/project-requests for where this is frozen. */}
-        <Field label="Cost" value={formatEUR(request.cost ? Number(request.cost) : null) ?? "Not set"} />
         <Field label="Team concerned" value={request.teamConcerned} />
         <Field label="Expected benefits" value={request.expectedBenefits} multiline />
         <Field label="Replaces an existing solution/project" value={request.replacesExisting ? "Yes" : "No"} />
@@ -121,8 +109,8 @@ export default async function ProjectRequestDetailPage({
               approvedAt={request.approvedAt}
               rejectedAt={request.rejectedAt}
               businessAssessment={request.businessAssessment}
-              ownerOptions={ownerOptions}
               project={request.project}
+              viewerIsRecordedApprover={request.approver?.id === session.user.id}
             />
           )}
         </div>

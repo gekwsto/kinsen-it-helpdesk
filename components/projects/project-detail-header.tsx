@@ -55,11 +55,17 @@ interface ProjectDetailHeaderProps {
  * detail page (app/(main)/projects/[id]/page.tsx) — just the title row's
  * status pill plus the action button bar, which must share one `status`
  * state so the pill and the quick-status dropdown can never disagree (see
- * the "one source of truth" requirement). Everything else on the page
- * (activities list, related tickets, notes, sidebar) stays server-rendered
- * and untouched; Project.status has no effect on any of that derived data,
- * so no router.refresh() is needed on THIS page for this change. The
- * /projects list page is a different matter — PATCH /api/projects/[id]
+ * the "one source of truth" requirement) — both update INSTANTLY from the
+ * mutation's own response, never waiting on a refresh. The rest of the
+ * page (activities list, related tickets, notes, sidebar) stays server-
+ * rendered — most of it has nothing to do with Project.status, but the
+ * Project Feedback card's own eligibility DOES depend on it
+ * (Project.status === COMPLETED; see getProjectFeedbackEligibility in
+ * app/(main)/projects/[id]/page.tsx), so ProjectQuickStatus's own
+ * handleSelect calls router.refresh() after a successful change — that
+ * server-rendered content would otherwise stay stale (e.g. a still-visible
+ * Feedback form after the Project just moved away from COMPLETED) until a
+ * manual reload. The /projects list page is a different matter — PATCH /api/projects/[id]
  * publishes a project-list-changed realtime signal after a committed status
  * change (see lib/realtime/project-list-invalidation.ts) so an already-open
  * Projects list picks it up on its own, with no action needed here.
@@ -107,7 +113,12 @@ export function ProjectDetailHeader({
           onChanged={(newStatus) => setStatus(newStatus as ProjectStatus)}
         />
         <Button asChild>
-          <Link href={`/activities?projectId=${projectId}`}>
+          {/* Straight to the CREATE page with the Project pre-selected —
+              previously linked to /activities?projectId=... (the filtered
+              LIST page), whose own "New Activity" link then dropped
+              projectId entirely, losing the Project context twice over
+              before the user ever reached a create form. */}
+          <Link href={`/activities/new?projectId=${projectId}`}>
             <Plus className="h-4 w-4 mr-2" />
             Add Activity
           </Link>

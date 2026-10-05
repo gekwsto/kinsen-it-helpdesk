@@ -168,11 +168,11 @@ async function main() {
     // ══════════════ Project Type dropdown uses DB-backed active options ══════════════
     console.log("\n=== 1. Project Type dropdown sources ONLY DB-backed, ACTIVE options ===\n");
     currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
-    const typeActiveRes = await typesPOST(jsonReq("POST", { name: `Active Type ${RUN_ID}`, cost: 500 }));
+    const typeActiveRes = await typesPOST(jsonReq("POST", { name: `Active Type ${RUN_ID}` }));
     check("Admin creates an active Project Request Type -> 201", typeActiveRes.status === 201);
     const typeActive = await typeActiveRes.json();
     typeIds.push(typeActive.id);
-    const typeInactiveRes = await typesPOST(jsonReq("POST", { name: `Inactive Type ${RUN_ID}`, isActive: false, cost: 100 }));
+    const typeInactiveRes = await typesPOST(jsonReq("POST", { name: `Inactive Type ${RUN_ID}`, isActive: false }));
     const typeInactive = await typeInactiveRes.json();
     typeIds.push(typeInactive.id);
 
@@ -434,21 +434,18 @@ async function main() {
     check("Dept-B-scoped approver's History tab includes the Dept-B request they approved", historyIds.includes(validMulti.id));
     check("...but does NOT include the Dept-A request they have no involvement in", !historyIds.includes(submitted.id));
 
-    // ══════════════ 12. Final approval auto-creates a Project, pre-filled from the request ══════════════
-    // Full dedicated coverage (owner validation, idempotency, field
-    // mapping, reject never creating one) lives in
-    // scripts/test-project-request-project-creation.ts — this is a single
-    // end-to-end confirmation using THIS file's own already-approved
-    // `submitted` request from section 5 above.
-    console.log("\n=== 12. Final APPROVED status auto-creates a real Project row, pre-filled from the request ===\n");
-    const autoProject = await prisma.project.findUnique({ where: { projectRequestId: submitted.id } });
-    check("A Project was auto-created, linked back to the request via projectRequestId", autoProject !== null);
-    check("...title matches the request's own title", autoProject?.title === created.title);
-    check("...departmentId matches the request's own department", autoProject?.departmentId === deptA.id);
-    check("...priority matches the request's importance (same 1/2/3 scale)", autoProject?.priority === created.importance);
-    check("...ownerId is the approver's own choice at decision time (projectOwnerId), never the requester or the approver themselves", autoProject?.ownerId === admin.id);
+    // ══════════════ 12. Final approval never creates a Project — that's a separate, later step ══════════════
+    // Full dedicated coverage of the request-origin Project setup flow
+    // itself (owner validation, idempotency, field mapping, authorization,
+    // reject never entering it) lives in
+    // scripts/test-project-request-project-creation.ts — this is just
+    // confirming decideApproval's OWN boundary using THIS file's own
+    // already-approved `submitted` request from section 5 above.
+    console.log("\n=== 12. Final APPROVED status does NOT auto-create a Project — that's now a deliberate, separate follow-up step ===\n");
+    const noAutoProject = await prisma.project.findUnique({ where: { projectRequestId: submitted.id } });
+    check("decideApproval itself creates no Project row for the just-approved request", noAutoProject === null);
     const rejectedProject = await prisma.project.findUnique({ where: { projectRequestId: rejectSubmit.id } });
-    check("A REJECTED request never gets a Project auto-created for it", rejectedProject === null);
+    check("A REJECTED request never gets a Project either (unchanged)", rejectedProject === null);
 
     console.log("\n=== 13. project.create and other Project permissions are completely unaffected ===\n");
     check("hasPermission(USER, 'project.create') is unchanged (false by default, same as before this feature)", (await hasPermission(Role.USER, "project.create", null)) === false);

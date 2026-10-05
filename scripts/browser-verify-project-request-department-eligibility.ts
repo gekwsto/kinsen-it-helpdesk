@@ -134,7 +134,7 @@ async function main() {
     check(`The active workspace "${targetDept.name}" is pre-selected as the picker's default value`, deptTriggerText.includes(targetDept.name));
 
     console.log("\n=== 4. Submitting now succeeds outright — no manager dependency anywhere in this flow ===\n");
-    const typeRes = await page.request.post(`${BASE_URL}/api/admin/project-request-types`, { data: { name: `BV Elig Type ${RUN_ID}`, cost: 500 } });
+    const typeRes = await page.request.post(`${BASE_URL}/api/admin/project-request-types`, { data: { name: `BV Elig Type ${RUN_ID}` } });
     check("Fixture: created an active Project Request Type", typeRes.status() === 201);
     const createdType = await typeRes.json();
     typeIds.push(createdType.id);

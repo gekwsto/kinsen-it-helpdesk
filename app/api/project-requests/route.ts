@@ -6,9 +6,9 @@ import { apiError, zodErrorResponse, unauthorizedResponse, internalErrorResponse
 import { resolveDepartmentForRequest, resolveIntermediateApprovers, notifyIntermediateApprovers } from "@/lib/services/project-request-service";
 
 // POST — submit a new Project Request. Every trust-sensitive field
-// (requesterId, department membership, status, cost) is resolved/verified
+// (requesterId, department membership, status) is resolved/verified
 // SERVER-SIDE only — the client never supplies, and the server never
-// trusts, an id (or a cost) for any of them. Submission itself needs no special
+// trusts, an id for any of them. Submission itself needs no special
 // permission beyond an active department membership (or, for a
 // global-scope role, canViewAllDepartments) — ANY authenticated user may
 // submit a request; approval is a separate, department-scoped permission
@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
     // from the client beyond its id. A forged id for an inactive or
     // nonexistent type is rejected outright (fail closed), never silently
     // accepted or substituted.
-    const projectType = await prisma.projectRequestType.findUnique({ where: { id: data.projectTypeId }, select: { id: true, isActive: true, cost: true } });
+    const projectType = await prisma.projectRequestType.findUnique({ where: { id: data.projectTypeId }, select: { id: true, isActive: true } });
     if (!projectType || !projectType.isActive) {
       return NextResponse.json(apiError("invalid_project_type", "The selected Project Type is not available.", { field: "projectTypeId" }), { status: 400 });
     }
@@ -88,14 +88,6 @@ export async function POST(req: NextRequest) {
           description: data.description,
           importance: data.importance,
           projectTypeId: data.projectTypeId,
-          // A SNAPSHOT of the type's authoritative cost, taken HERE,
-          // server-side, from the row just re-fetched above — never from
-          // anything the client sent. A client-supplied `cost` in the
-          // request body is simply discarded (createProjectRequestSchema
-          // never accepts that key at all). This value is frozen forever: a
-          // later edit to ProjectRequestType.cost must never retroactively
-          // change this request's own cost.
-          cost: projectType.cost,
           teamConcerned: data.teamConcerned,
           expectedBenefits: data.expectedBenefits,
           replacesExisting: data.replacesExisting,

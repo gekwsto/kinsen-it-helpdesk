@@ -10,11 +10,14 @@ import {
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
-import { createActivitySchema } from "@/lib/validations";
+import { createActivitySchema, requestOriginActivityMissingFields } from "@/lib/validations";
 import { getActivityProgressFromStatus, ActivityProgressConfigurationError } from "@/lib/activities/activity-progress";
 import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
+import { wholeCalendarDaysBetween, actualDaysFromCompletion } from "@/lib/date-only";
+import { computeActivityFinancials } from "@/lib/services/project-financials-service";
+import { getAppendSequenceLocked } from "@/lib/services/activity-sequence-service";
 import { ActivityStatus } from "@prisma/client";
 
 export async function GET(req: NextRequest) {
@@ -69,10 +72,16 @@ export async function POST(req: NextRequest) {
     // inherit it if the caller didn't specify one, reject a mismatch if
     // they did (same rule as ticket -> project).
     let effectiveRequestedDepartmentId = data.departmentId;
+    // The authoritative, server-resolved provenance check this entire
+    // feature hinges on — NEVER a client flag. Every Activity creation path
+    // goes through this one route (see lib/validations.ts's
+    // createActivitySchema doc comment), so this is the single place the
+    // rule needs to live.
+    let isRequestOriginProject = false;
     if (data.projectId) {
       const project = await prisma.project.findUnique({
         where: { id: data.projectId },
-        select: { departmentId: true },
+        select: { departmentId: true, projectRequestId: true },
       });
       if (!project) {
         return NextResponse.json({ error: "Project not found" }, { status: 404 });
@@ -84,6 +93,21 @@ export async function POST(req: NextRequest) {
         );
       }
       effectiveRequestedDepartmentId = data.departmentId ?? project.departmentId ?? undefined;
+      isRequestOriginProject = project.projectRequestId !== null;
+    }
+
+    if (isRequestOriginProject) {
+      const missing = requestOriginActivityMissingFields(data);
+      if (missing.length > 0) {
+        return NextResponse.json(
+          {
+            error: "This Activity's parent Project originates from a Project Request — Expected Start, Expected Finish, Task Type, Owner, and at least one Related User are required.",
+            code: "request_origin_fields_required",
+            missingFields: missing,
+          },
+          { status: 400 }
+        );
+      }
     }
 
     // Still nothing explicit — fall back to the caller's active workspace
@@ -106,7 +130,18 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { dueDate, startDate, assignedUserIds, departmentId: _ignoredDepartmentId, ...rest } = data;
+    const {
+      dueDate,
+      startDate,
+      assignedUserIds,
+      departmentId: _ignoredDepartmentId,
+      isCompleted: _ignoredIsCompleted,
+      expectedStartDate,
+      expectedFinishDate,
+      ownerId,
+      taskTypeId,
+      ...rest
+    } = data;
 
     if (rest.subDepartmentId) {
       const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, deptResolution.departmentId);
@@ -119,7 +154,13 @@ export async function POST(req: NextRequest) {
     }
 
     if (assignedUserIds.length > 0) {
-      for (const userId of assignedUserIds) {
+      // Deduplicated server-side — the dropdown already prevents picking the
+      // same user twice, but a caller going around the UI must not be able
+      // to send e.g. the same id 3 times and have it connect() 3 times (a
+      // no-op for a many-to-many relation, but validated here regardless so
+      // the eligibility loop below never does redundant work).
+      const uniqueAssignedUserIds = Array.from(new Set(assignedUserIds));
+      for (const userId of uniqueAssignedUserIds) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "activity", deptResolution.departmentId);
         if (!assignable) {
           return NextResponse.json(
@@ -129,6 +170,53 @@ export async function POST(req: NextRequest) {
         }
       }
     }
+
+    // Owner — the SAME eligibility rule as assignedUsers/Related Users
+    // above (userHasAssignablePermissionForEntity), never a bare id lookup.
+    // Validated whenever supplied, not only for a request-origin Project —
+    // a manual Project's Activity may optionally set it too, with the same
+    // server-side guarantee.
+    if (ownerId) {
+      const ownerAssignable = await userHasAssignablePermissionForEntity(ownerId, "activity", deptResolution.departmentId);
+      if (!ownerAssignable) {
+        return NextResponse.json(
+          { error: "The selected Owner is not a valid user for Activities in this department.", code: "invalid_owner" },
+          { status: 400 }
+        );
+      }
+    }
+
+    // Task Type — must exist AND be currently active (same creation-time
+    // rule as Project's own Expense Type at setup time; see
+    // createProjectFromApprovedRequest). The resolved row's CURRENT cost is
+    // what gets snapshotted below — never a client-submitted value.
+    let taskTypeCostSnapshot: number | undefined;
+    if (taskTypeId) {
+      const taskType = await prisma.activityTaskType.findUnique({ where: { id: taskTypeId }, select: { id: true, isActive: true, cost: true } });
+      if (!taskType || !taskType.isActive) {
+        return NextResponse.json(
+          { error: "The selected Task Type does not exist or is not active.", code: "invalid_task_type" },
+          { status: 400 }
+        );
+      }
+      taskTypeCostSnapshot = Number(taskType.cost);
+    }
+
+    if (expectedStartDate && expectedFinishDate && new Date(expectedFinishDate) < new Date(expectedStartDate)) {
+      return NextResponse.json(
+        { error: "Expected Finish cannot be before Expected Start.", code: "invalid_expected_dates" },
+        { status: 400 }
+      );
+    }
+
+    // Server-authoritative, never a client-submitted value (expectedDays
+    // isn't even a field on createActivitySchema). Null unless BOTH dates
+    // are present — a legacy/partial record with only one of the two never
+    // gets a fabricated duration.
+    const expectedDays =
+      expectedStartDate && expectedFinishDate
+        ? wholeCalendarDaysBetween(new Date(expectedStartDate), new Date(expectedFinishDate))
+        : null;
 
     // Computed BEFORE the create, and never caught-and-substituted: a
     // missing/disabled ActivityProgressConfig row for this department+status
@@ -147,22 +235,59 @@ export async function POST(req: NextRequest) {
       throw err;
     }
 
-    const activity = await prisma.projectActivity.create({
-      data: {
-        ...rest,
-        progress,
-        departmentId: deptResolution.departmentId,
-        startDate: startDate ? new Date(startDate) : undefined,
-        dueDate: dueDate ? new Date(dueDate) : undefined,
-        createdById: session.user.id,
-        assignedUsers: assignedUserIds.length
-          ? { connect: assignedUserIds.map((id) => ({ id })) }
-          : undefined,
-      },
-      include: {
-        project: { select: { id: true, title: true } },
-        assignedUsers: { select: { id: true, name: true, email: true, image: true } },
-      },
+    // isCompleted/completedAt/actualDays are derived HERE from `rest.status`
+    // alone — never from a client-sent isCompleted (which createActivitySchema
+    // still accepts but this route now ignores for this purpose; see
+    // PATCH /api/activities/[id]'s own identical fix for why: a client flag
+    // and the real status could otherwise silently drift apart). An Activity
+    // CAN be created directly in COMPLETED status (e.g. logging already-done
+    // work) — this is the authoritative transition boundary for that case
+    // too, not just for a later PATCH.
+    const createdAsCompleted = rest.status === ActivityStatus.COMPLETED;
+    const completionDate = createdAsCompleted ? new Date() : null;
+    const actualDays =
+      createdAsCompleted && expectedStartDate ? actualDaysFromCompletion(new Date(expectedStartDate), completionDate!) : null;
+
+    // Sequence (request-origin Projects only) — the server-derived APPEND
+    // position, never client-authoritative (createActivitySchema doesn't
+    // even accept a sequence field). Locking the Project row and computing
+    // the append position happen in the SAME transaction as the create
+    // itself, so two concurrent creates under the same Project can never
+    // both land on the same position — the second always sees the first's
+    // already-committed row once its own lock is granted. A Standalone
+    // Activity or one under a manual Project simply never gets a sequence
+    // at all (stays null, exactly like today).
+    const activity = await prisma.$transaction(async (tx) => {
+      const sequence = isRequestOriginProject && data.projectId ? await getAppendSequenceLocked(tx, data.projectId) : undefined;
+      return tx.projectActivity.create({
+        data: {
+          ...rest,
+          progress,
+          departmentId: deptResolution.departmentId,
+          startDate: startDate ? new Date(startDate) : undefined,
+          dueDate: dueDate ? new Date(dueDate) : undefined,
+          createdById: session.user.id,
+          ownerId: ownerId || undefined,
+          taskTypeId: taskTypeId || undefined,
+          taskTypeCost: taskTypeCostSnapshot,
+          expectedStartDate: expectedStartDate ? new Date(expectedStartDate) : undefined,
+          expectedFinishDate: expectedFinishDate ? new Date(expectedFinishDate) : undefined,
+          expectedDays,
+          isCompleted: createdAsCompleted,
+          completedAt: completionDate,
+          actualDays,
+          sequence,
+          assignedUsers: assignedUserIds.length
+            ? { connect: Array.from(new Set(assignedUserIds)).map((id) => ({ id })) }
+            : undefined,
+        },
+        include: {
+          project: { select: { id: true, title: true } },
+          assignedUsers: { select: { id: true, name: true, email: true, image: true } },
+          owner: { select: { id: true, name: true, email: true, image: true } },
+          taskType: { select: { id: true, name: true } },
+        },
+      });
     });
 
     // AWAITED (not fire-and-forget) — same fix/rationale as PATCH
@@ -190,7 +315,8 @@ export async function POST(req: NextRequest) {
       publishProjectListInvalidation();
     }
 
-    return NextResponse.json(activity, { status: 201 });
+    const { estimatedCost, actualCost } = computeActivityFinancials(activity);
+    return NextResponse.json({ ...activity, estimatedCost: estimatedCost.toString(), actualCost: actualCost.toString() }, { status: 201 });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

@@ -286,6 +286,11 @@ export default async function ProjectsPage({
     projects.map((p) => p.departmentId).filter((id): id is string => !!id)
   );
   const now = new Date();
+  // Project.budget/estimatedCost/actualCost no longer exist as DB columns
+  // at all (removed — see
+  // prisma/migrations/20261005090000_remove_project_budget_and_cost_columns);
+  // the Decimal-crossing-the-RSC-boundary conversion this spread used to
+  // need for them is gone along with the columns themselves.
   const projectsWithOverdue = projects.map((p) => ({
     ...p,
     overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(terminalConfigs, p.departmentId, p.status), now),

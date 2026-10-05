@@ -31,7 +31,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
       data: parsed.data,
       include: { _count: { select: { projectRequests: true } } },
     });
-    return NextResponse.json({ ...type, cost: type.cost ? Number(type.cost) : null });
+    return NextResponse.json(type);
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();
     if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Project Request Types.");

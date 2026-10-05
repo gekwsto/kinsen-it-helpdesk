@@ -23,13 +23,11 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Search, Plus, Loader2, Pencil, Trash2, Tag } from "lucide-react";
-import { formatEUR } from "@/lib/currency";
 
 interface TypeRow {
   id: string;
   name: string;
   isActive: boolean;
-  cost: number | null;
   _count: { projectRequests: number };
 }
 
@@ -45,11 +43,9 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createName, setCreateName] = useState("");
-  const [createCost, setCreateCost] = useState("");
 
   const [editTarget, setEditTarget] = useState<TypeRow | null>(null);
   const [editName, setEditName] = useState("");
-  const [editCost, setEditCost] = useState("");
   const [saving, setSaving] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TypeRow | null>(null);
@@ -57,24 +53,14 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
 
   const filtered = types.filter((t) => t.name.toLowerCase().includes(search.toLowerCase()));
 
-  // A valid, non-negative number — mirrors projectRequestTypeCostSchema's
-  // own client-side-reachable checks (the server independently re-validates
-  // regardless; this is purely for disabling the submit button on obviously
-  // invalid input).
-  const isValidCost = (raw: string) => {
-    if (raw.trim() === "") return false;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0;
-  };
-
   const handleCreate = async () => {
-    if (!createName.trim() || !isValidCost(createCost)) return;
+    if (!createName.trim()) return;
     setCreating(true);
     try {
       const res = await fetch("/api/admin/project-request-types", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: createName, cost: Number(createCost) }),
+        body: JSON.stringify({ name: createName }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -85,7 +71,6 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
       toast.success("Project Request Type created");
       setCreateOpen(false);
       setCreateName("");
-      setCreateCost("");
       router.refresh();
     } catch (error: any) {
       toast.error(error.message ?? "Failed to create type");
@@ -97,17 +82,16 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
   const openEdit = (type: TypeRow) => {
     setEditTarget(type);
     setEditName(type.name);
-    setEditCost(type.cost !== null ? String(type.cost) : "");
   };
 
   const handleSaveEdit = async () => {
-    if (!editTarget || !editName.trim() || !isValidCost(editCost)) return;
+    if (!editTarget || !editName.trim()) return;
     setSaving(true);
     try {
       const res = await fetch(`/api/admin/project-request-types/${editTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: editName, cost: Number(editCost) }),
+        body: JSON.stringify({ name: editName }),
       });
       if (!res.ok) {
         const err = await res.json();
@@ -184,7 +168,6 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
           <TableHeader>
             <TableRow className="bg-muted/50">
               <TableHead>Name</TableHead>
-              <TableHead>Cost</TableHead>
               <TableHead>Requests</TableHead>
               <TableHead className="w-24">Status</TableHead>
               <TableHead className="w-28"></TableHead>
@@ -193,7 +176,7 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
           <TableBody>
             {filtered.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-10">
+                <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-10">
                   No Project Request Types match your search.
                 </TableCell>
               </TableRow>
@@ -207,9 +190,6 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
                     </div>
                     <span className="text-sm font-medium">{type.name}</span>
                   </div>
-                </TableCell>
-                <TableCell className="text-sm">
-                  {formatEUR(type.cost) ?? <span className="text-muted-foreground italic">Not set</span>}
                 </TableCell>
                 <TableCell className="text-sm text-muted-foreground">{type._count.projectRequests}</TableCell>
                 <TableCell>
@@ -236,7 +216,7 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
         </Table>
       </div>
 
-      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) { setCreateName(""); setCreateCost(""); } }}>
+      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) setCreateName(""); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Project Request Type</DialogTitle>
@@ -246,29 +226,10 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
               <Label>Name</Label>
               <Input placeholder="e.g. New Product" value={createName} onChange={(e) => setCreateName(e.target.value)} />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="create-type-cost">
-                Cost (EUR) <span className="text-destructive">*</span>
-              </Label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
-                <Input
-                  id="create-type-cost"
-                  type="number"
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.00"
-                  className="pl-7"
-                  value={createCost}
-                  onChange={(e) => setCreateCost(e.target.value)}
-                />
-              </div>
-            </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setCreateOpen(false); setCreateName(""); setCreateCost(""); }}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={creating || !createName.trim() || !isValidCost(createCost)}>
+            <Button variant="outline" onClick={() => { setCreateOpen(false); setCreateName(""); }}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={creating || !createName.trim()}>
               {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Create Type
             </Button>
@@ -286,29 +247,10 @@ export function ProjectRequestTypeManagement({ types: initialTypes }: ProjectReq
               <Label>Name</Label>
               <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-type-cost">
-                Cost (EUR) <span className="text-destructive">*</span>
-              </Label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
-                <Input
-                  id="edit-type-cost"
-                  type="number"
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.00"
-                  className="pl-7"
-                  value={editCost}
-                  onChange={(e) => setEditCost(e.target.value)}
-                />
-              </div>
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTarget(null)}>Cancel</Button>
-            <Button onClick={handleSaveEdit} disabled={saving || !editName.trim() || !isValidCost(editCost)}>
+            <Button onClick={handleSaveEdit} disabled={saving || !editName.trim()}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Save Changes
             </Button>

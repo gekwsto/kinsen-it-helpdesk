@@ -108,7 +108,16 @@ async function main() {
   check("A6b. Same for Activity", (activityFormSrc.match(/onContinue=\{finish\}/g) ?? []).length === 1);
   check("A7. `finish` calls onCreated for inline / router.push for standalone — a single branch point, not two separate implementations", /const finish = \(\) => \{\s*if \(inline\) \{/.test(projectFormSrc) && /const finish = \(\) => \{\s*if \(inline\) \{/.test(activityFormSrc));
 
-  check("A8. The dialog's create request is fired from ONE place only (attachments.submit's createFn) — Retry/Continue never re-invoke it (no second fetch(\"/api/projects\"/\"/api/activities\") call site)", (projectFormSrc.match(/fetch\("\/api\/projects"/g) ?? []).length === 1 && (activityFormSrc.match(/fetch\("\/api\/activities"/g) ?? []).length === 1);
+  // Project's own create call now branches by mode (standalone/inline POST
+  // /api/projects vs fromRequest POST /api/project-requests/[id]/project —
+  // see this feature's own request-origin setup flow), so the create URL
+  // is a variable, not the literal string "/api/projects" — the invariant
+  // under test (exactly ONE call site, never re-invoked by Retry/Continue)
+  // still holds; only the exact source pattern it matches needed updating.
+  check(
+    "A8. The dialog's create request is fired from ONE place only (attachments.submit's createFn) — Retry/Continue never re-invoke it (no second fetch(...) call site)",
+    (projectFormSrc.match(/await fetch\(url, \{/g) ?? []).length === 1 && (activityFormSrc.match(/fetch\("\/api\/activities"/g) ?? []).length === 1
+  );
 
   check("A9. ProjectCreateDialog blocks Radix's own close attempts while locked (Escape/backdrop/X all route through this ONE guarded onOpenChange)", /const guardedOnOpenChange = \(next: boolean\) => \{\s*if \(!next && locked\) return;/.test(projectDialogSrc));
   check("A9b. Same for ActivityCreateDialog", /const guardedOnOpenChange = \(next: boolean\) => \{\s*if \(!next && locked\) return;/.test(activityDialogSrc));

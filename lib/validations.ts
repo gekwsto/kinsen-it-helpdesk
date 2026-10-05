@@ -171,6 +171,149 @@ export const createProjectSchema = z.object({
 
 export const updateProjectSchema = createProjectSchema.partial();
 
+// A plain number from the client — never trusted as-is for currency storage
+// without re-validating precision here: non-negative, at most 2 decimal
+// places (the refine check tolerates tiny floating-point representation
+// error, e.g. 19.99 * 100 landing at 1998.9999999999998, rather than
+// requiring exact binary equality), and capped well above any realistic
+// amount (matches Decimal(10,2)'s own storage ceiling). Reused as-is (not
+// duplicated) for Activity Task Type cost below — kept as its own factory
+// (not a shared const) so every caller gets its own field-specific error
+// messages.
+function moneyAmountSchema(label: string) {
+  return z
+    .number({ invalid_type_error: `${label} must be a number` })
+    .finite(`${label} must be a finite number`)
+    .nonnegative(`${label} cannot be negative`)
+    .max(99999999.99, `${label} is too large`)
+    .refine((v) => Math.abs(Math.round(v * 100) - v * 100) < 1e-6, `${label} supports at most 2 decimal places`);
+}
+
+// The request-origin Project creation payload — POST
+// /api/project-requests/[id]/project only (see
+// createProjectFromApprovedRequest in lib/services/project-request-service.ts).
+// Deliberately a SEPARATE schema from createProjectSchema, never merged
+// into it: createProjectSchema must stay exactly as it is so normal/manual
+// Project creation never requires (or even accepts) any of these fields —
+// see this feature's own "UI visibility rule" and "malicious caller can't
+// forge provenance into the generic create API" requirements.
+//
+// departmentId is deliberately OMITTED (not just optional) — the
+// department is always the Project Request's own, authoritative and
+// server-resolved, never a client choice in this flow.
+export const createProjectFromRequestSchema = createProjectSchema
+  .omit({ departmentId: true })
+  .extend({
+    // The approver's own explicit choice of who should own the new
+    // Project — re-verified server-side (a real, active,
+    // project-assignable user for the request's own department) regardless
+    // of what the client sent.
+    projectOwnerId: z.string().trim().min(1, "Select who should own this Project."),
+    expectedStartDate: z.string().min(1, "Expected Start Date is required."),
+    expectedFinishDate: z.string().min(1, "Expected Finish Date is required."),
+    // Server-computed only — expectedTotalInitialDays is deliberately NOT a
+    // field on this schema at all, so a client-submitted value (forged or
+    // not) is simply never read; see createProjectFromApprovedRequest's own
+    // doc comment for the authoritative calculation.
+    expenseTypeId: z.string().trim().min(1, "Select an Expense Type."),
+    // Budget was REMOVED entirely (no replacement) — see
+    // prisma/migrations/20261005090000_remove_project_budget_and_cost_columns.
+    // Estimated Cost / Actual Cost are no longer client-submitted at all,
+    // at creation or edit — both are now fully derived from the Project's
+    // own Activities (lib/services/project-financials-service.ts), so
+    // neither is a field on this schema any more.
+    external: z.boolean().default(false),
+  })
+  .superRefine((data, ctx) => {
+    const start = new Date(data.expectedStartDate);
+    const finish = new Date(data.expectedFinishDate);
+    if (!Number.isNaN(start.getTime()) && !Number.isNaN(finish.getTime()) && finish < start) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedFinishDate"], message: "Expected Finish Date cannot be before Expected Start Date." });
+    }
+  });
+
+// The subset of request-origin-only fields a Project may have maintained
+// LATER through the normal edit workflow (PATCH /api/projects/[id]) — never
+// expectedTotalInitialDays (the creation-time baseline, never client-
+// editable) and never projectOwnerId (ownership reassignment, if ever
+// needed, is a separate concern outside this feature's scope). Every field
+// here is optional on its own — a PATCH touching only, say, actualCost must
+// still work without resupplying every other field — so the
+// expectedFinishDate >= expectedStartDate invariant is re-checked against
+// the EXISTING stored values at the route level instead of here (a pure
+// schema-level refine can't see what's already in the database).
+//
+// Unlike createProjectFromRequestSchema (which stays strictly REQUIRED —
+// this schema intentionally never weakens that), every field here is both
+// OPTIONAL (the key may be omitted — "leave this field untouched") AND
+// NULLABLE (the key may be explicitly `null` — "clear this field"). The
+// route (PATCH /api/projects/[id]) relies on telling those two states
+// apart: `undefined` passed through to Prisma leaves a column untouched,
+// `null` sets it to NULL. external stays a plain boolean (no null) — it
+// already defaults to false and the task this schema was last revised for
+// explicitly asked not to introduce tri-state for it.
+export const updateProjectRequestOriginFieldsSchema = z.object({
+  expectedStartDate: z.string().min(1).nullable().optional(),
+  expectedFinishDate: z.string().min(1).nullable().optional(),
+  expenseTypeId: z.string().trim().min(1).nullable().optional(),
+  // Budget/Estimated Cost/Actual Cost are no longer editable fields at all
+  // — see createProjectFromRequestSchema's own doc comment above. A client
+  // sending any of these three keys now has them silently stripped by Zod
+  // (unknown keys), never persisted.
+  external: z.boolean().optional(),
+});
+
+export const projectExpenseTypeSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
+  isActive: z.boolean().optional(),
+});
+
+// ─── Project Feedback Schema ────────────────────────────────────────────────────
+// The ORIGINAL Project Request requester's one-time evaluation of a
+// delivered, request-origin Project — see prisma/schema.prisma's
+// ProjectFeedback model and POST /api/projects/[id]/feedback's own
+// authorization checks (requester identity, Project completion, request-
+// origin provenance, and no existing row are ALL re-verified server-side;
+// this schema only validates the two fields the client actually sends).
+// submittedByUserId/projectId/projectRequestId are never fields here —
+// they're never accepted from the client at all, only ever set server-side
+// from the authenticated session and the already-verified Project row.
+export const projectFeedbackSchema = z.object({
+  // Integer 1-10 inclusive. z.coerce is deliberately NOT used — this repo's
+  // other rating-shaped inputs (Project priority, Activity priority) are
+  // sent as real numbers by their own client components, not form-encoded
+  // strings, and this one follows the same convention (a decimal or
+  // string value is a genuine client bug, not something to silently round
+  // or coerce).
+  satisfactionScore: z.number().int("Rating must be a whole number.").min(1, "Rating must be at least 1.").max(10, "Rating must be at most 10."),
+  // Optional — an empty/whitespace-only string normalizes to undefined
+  // (never persisted as an empty string), same convention as this
+  // feature's own comments field is documented to use in the Prisma
+  // schema. 2000 chars is a deliberately smaller ceiling than
+  // createNoteSchema's 10,000 — feedback comments are a short evaluation,
+  // not a running discussion thread.
+  comments: z
+    .string()
+    .trim()
+    .max(2000, "Comments must not exceed 2,000 characters.")
+    .optional()
+    .transform((v) => (v === "" ? undefined : v)),
+});
+
+export type ProjectFeedbackInput = z.infer<typeof projectFeedbackSchema>;
+
+// ─── Activity Sequence (reorder) Schema ─────────────────────────────────────────
+// The full, ordered list of Activity ids for a request-origin Project's
+// vertical sequence — see lib/services/activity-sequence-service.ts's
+// reorderProjectActivities for the authoritative server-side validation
+// (every id must belong to THIS Project, no duplicates, no partial list —
+// re-verified there, never trusted from this shape check alone).
+export const reorderActivitiesSchema = z.object({
+  activityIds: z.array(z.string().trim().min(1)).min(1, "At least one Activity id is required."),
+});
+
+export type ReorderActivitiesInput = z.infer<typeof reorderActivitiesSchema>;
+
 // ─── Activity Schemas ──────────────────────────────────────────────────────────
 
 export const createActivitySchema = z.object({
@@ -182,6 +325,11 @@ export const createActivitySchema = z.object({
   projectId: z.string().nullable().optional(),
   status: z.nativeEnum(ActivityStatus).default(ActivityStatus.TODO),
   priority: z.nativeEnum(ActivityPriority).default(ActivityPriority.MEDIUM),
+  // "Related Users" (request-origin requirement: at least one required) —
+  // this reuses the SAME field/relation every other Activity assignment
+  // already uses; see this field's own canonical relation
+  // (assignedUsers/"ActivityAssignees") in prisma/schema.prisma. No
+  // separate "related users" relation was added.
   assignedUserIds: z.array(z.string()).default([]),
   departmentId: z.string().optional(),
   subDepartmentId: z.string().nullable().optional(),
@@ -195,9 +343,61 @@ export const createActivitySchema = z.object({
   // write, never manually editable. Any progress a client sends is simply
   // dropped by Zod before it ever reaches the route handler.
   isMilestone: z.boolean().optional(),
+  // ─── Request-origin-only Activity metadata ────────────────────────────
+  // Every field below is OPTIONAL at the schema level — this is the SAME
+  // single schema used for every Activity, manual or request-origin alike
+  // (there is only one Activity creation endpoint, unlike Project's two
+  // separate create paths). Requiredness for a request-origin parent
+  // Project is enforced in the ROUTE (POST /api/activities and PATCH
+  // .../[id]), AFTER resolving the parent Project server-side and checking
+  // project.projectRequestId — never here, and never from a client flag.
+  // expectedDays/actualDays/taskTypeCost are deliberately NOT fields on
+  // this schema at all — every one of them is server-computed only.
+  expectedStartDate: z.string().nullable().optional(),
+  expectedFinishDate: z.string().nullable().optional(),
+  // Owner — a NEW single-user field (see prisma/schema.prisma's
+  // ProjectActivity.ownerId doc comment for why this isn't a reuse of the
+  // legacy, unused singular `assignedUser`).
+  ownerId: z.string().trim().min(1).nullable().optional(),
+  taskTypeId: z.string().trim().min(1).nullable().optional(),
 });
 
 export const updateActivitySchema = createActivitySchema.partial();
+
+// The exact set of request-origin-only fields required at INITIAL Activity
+// creation when the parent Project itself originates from a Project Request
+// — re-checked in the route against the ALREADY-PARSED createActivitySchema
+// output (not a separate schema merge) because, unlike Project's two
+// distinct create endpoints, Activity has only ONE — see this schema's own
+// doc comment above.
+export function requestOriginActivityMissingFields(data: {
+  expectedStartDate?: string | null;
+  expectedFinishDate?: string | null;
+  taskTypeId?: string | null;
+  ownerId?: string | null;
+  assignedUserIds?: string[];
+}): string[] {
+  const missing: string[] = [];
+  if (!data.expectedStartDate) missing.push("expectedStartDate");
+  if (!data.expectedFinishDate) missing.push("expectedFinishDate");
+  if (!data.taskTypeId) missing.push("taskTypeId");
+  if (!data.ownerId) missing.push("ownerId");
+  if (!data.assignedUserIds || data.assignedUserIds.length === 0) missing.push("assignedUserIds");
+  return missing;
+}
+
+// Global reference data (see ActivityTaskType in prisma/schema.prisma) —
+// cost is REQUIRED on create (every Task Type must have a real,
+// authoritative cost), optional only via .partial() below for PATCH, where
+// an isActive-only toggle or a name-only rename must still work without
+// resupplying cost every time. Reuses moneyAmountSchema verbatim — the same
+// exact-money convention as Project Budget/Estimated/Actual Cost, never a
+// duplicated factory.
+export const activityTaskTypeSchema = z.object({
+  name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
+  isActive: z.boolean().optional(),
+  cost: moneyAmountSchema("Cost"),
+});
 
 // ─── Notes Schemas ─────────────────────────────────────────────────────────────
 // Shared by ProjectNote and ActivityNote — deliberately just a plain-text
@@ -663,25 +863,15 @@ export const createProjectRequestSchema = z
 // Request text field. Trimmed here so a whitespace-only value is rejected
 // by min(1), never silently accepted as "blank but technically present".
 //
-// projectOwnerId is required EXACTLY when decision is "approve" — the
-// approving user's own choice of who should own the Project that gets
-// auto-created from this request (see decideApproval in
-// lib/services/project-request-service.ts). Never required on reject, since
-// no Project is ever created from a rejection. Re-verified server-side
-// (a real, active, project-assignable user for this request's own
-// department) regardless of what the client sent — see decideApproval's own
-// doc comment.
-export const projectRequestApprovalDecisionSchema = z
-  .object({
-    decision: z.enum(["approve", "reject"]),
-    businessAssessment: z.string().trim().min(1, "Business Assessment is required").max(5000),
-    projectOwnerId: z.string().trim().min(1).optional(),
-  })
-  .superRefine((data, ctx) => {
-    if (data.decision === "approve" && !data.projectOwnerId) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["projectOwnerId"], message: "Select who should own the new Project." });
-    }
-  });
+// FINAL approval is responsible ONLY for the approval decision itself —
+// it no longer creates a Project (that moved to a dedicated follow-up step,
+// see POST /api/project-requests/[id]/project and
+// createProjectFromApprovedRequest in lib/services/project-request-service.ts),
+// so this schema no longer accepts/requires a projectOwnerId at all.
+export const projectRequestApprovalDecisionSchema = z.object({
+  decision: z.enum(["approve", "reject"]),
+  businessAssessment: z.string().trim().min(1, "Business Assessment is required").max(5000),
+});
 
 // The intermediate stage deliberately does NOT require a Business
 // Assessment (confirmed with the user: only the FINAL decision needs one) —
@@ -694,28 +884,16 @@ export const projectRequestIntermediateApprovalDecisionSchema = z.object({
   businessAssessment: z.string().trim().max(5000).optional(),
 });
 
-// A plain number from the client (a <input type="number"> value) — never
-// trusted as-is for currency storage without re-validating precision here:
-// non-negative, at most 2 decimal places (the refine check tolerates tiny
-// floating-point representation error, e.g. 19.99 * 100 landing at
-// 1998.9999999999998, rather than requiring exact binary equality), and
-// capped well above any realistic project cost (matches Decimal(10,2)'s own
-// storage ceiling).
-const projectRequestTypeCostSchema = z
-  .number({ invalid_type_error: "Cost must be a number" })
-  .finite("Cost must be a finite number")
-  .nonnegative("Cost cannot be negative")
-  .max(99999999.99, "Cost is too large")
-  .refine((v) => Math.abs(Math.round(v * 100) - v * 100) < 1e-6, "Cost supports at most 2 decimal places");
-
+// Cost was deliberately REMOVED from Project Request Type (and its
+// ProjectRequest submission-time snapshot) — Project Request Types now
+// represent identity/name + lifecycle (isActive) only. See
+// prisma/migrations/20261004090000_add_activity_task_type_and_request_origin_fields
+// for the destructive column-drop this change required, and Task Type's own
+// `activityTaskTypeSchema` below for the unrelated, NEW Activity-level cost
+// concept this must never be confused with.
 export const projectRequestTypeSchema = z.object({
   name: z.string().trim().min(2, "Name must be at least 2 characters").max(100),
   isActive: z.boolean().optional(),
-  // Required when creating a NEW type (every type going forward must have a
-  // real, authoritative cost) — optional only via .partial() below for
-  // PATCH, where an isActive-only toggle or a name-only rename must still
-  // work without resupplying cost every time.
-  cost: projectRequestTypeCostSchema,
 });
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -737,3 +915,6 @@ export type CreateProjectRequestInput = z.infer<typeof createProjectRequestSchem
 export type ProjectRequestApprovalDecisionInput = z.infer<typeof projectRequestApprovalDecisionSchema>;
 export type ProjectRequestIntermediateApprovalDecisionInput = z.infer<typeof projectRequestIntermediateApprovalDecisionSchema>;
 export type ProjectRequestTypeInput = z.infer<typeof projectRequestTypeSchema>;
+export type ActivityTaskTypeInput = z.infer<typeof activityTaskTypeSchema>;
+export type CreateProjectFromRequestInput = z.infer<typeof createProjectFromRequestSchema>;
+export type ProjectExpenseTypeInput = z.infer<typeof projectExpenseTypeSchema>;

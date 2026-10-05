@@ -223,6 +223,16 @@ async function main() {
     ticketIds.push(ticketA.id, ticketB.id, ticketC.id, ticketD.id);
 
     currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    // "All Workspaces" — this file tests STATUS-filter determinism, a
+    // concern orthogonal to workspace scoping (see this task's own
+    // workspace-scoping fix: a bare `callList({})` now defaults to the
+    // active Workspace rather than the full union). Every check below that
+    // passes an explicit `departmentId:` already represents "viewing that
+    // specific workspace" and is unaffected by this; the few bare
+    // (no-departmentId) checks need the genuine full union to test what
+    // they were always testing, so ADMIN (a real canViewAllDepartments
+    // role) explicitly selects "All Workspaces" for this whole file.
+    currentCookieIsAllWorkspaces = true;
 
     // ── 1-2. Finance contains an In Progress ticket; Finance + In Progress returns it ──
     // Explicit departmentId=finance.id (not a cookie) is what represents

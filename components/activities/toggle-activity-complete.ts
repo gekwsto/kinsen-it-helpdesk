@@ -11,7 +11,7 @@ import type { ProjectRollupResult } from "@/lib/projects/progress-rollup";
  * drift apart (PATCH /api/activities/[id] also rejects a mismatched pair —
  * see the consistency guard there).
  */
-export async function toggleActivityComplete(activityId: string, currentlyCompleted: boolean): Promise<{ isCompleted: boolean; status: string; progress: number; statusLabel: string; statusColor: string; projectRollups: ProjectRollupResult[] }> {
+export async function toggleActivityComplete(activityId: string, currentlyCompleted: boolean): Promise<{ isCompleted: boolean; status: string; progress: number; statusLabel: string; statusColor: string; projectRollups: ProjectRollupResult[]; actualDays: number | null; actualCost: string | null }> {
   const res = await fetch(`/api/activities/${activityId}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -35,5 +35,13 @@ export async function toggleActivityComplete(activityId: string, currentlyComple
   // current/previous project — see the route's own doc comment) — callers
   // that render a parent Project's progress/counters (the Project detail
   // page) apply this directly instead of re-fetching anything.
-  return { isCompleted: updated.isCompleted, status: updated.status, progress: updated.progress, statusLabel: updated.statusLabel, statusColor: updated.statusColor, projectRollups: updated.projectRollups ?? [] };
+  // actualDays — server-derived on this SAME transition (see
+  // app/api/activities/[id]/route.ts); surfaced here the same way
+  // progress/statusLabel/statusColor already are, so a caller that renders
+  // it (the Activity detail page) never goes stale.
+  // actualCost — server-derived on this SAME transition (taskTypeCost ×
+  // actualDays, see computeActivityFinancials) — a reopen clears it back to
+  // "0" immediately here, re-completing returns the freshly-recalculated
+  // amount, never the previous one.
+  return { isCompleted: updated.isCompleted, status: updated.status, progress: updated.progress, statusLabel: updated.statusLabel, statusColor: updated.statusColor, projectRollups: updated.projectRollups ?? [], actualDays: typeof updated.actualDays === "number" ? updated.actualDays : null, actualCost: typeof updated.actualCost === "string" ? updated.actualCost : null };
 }

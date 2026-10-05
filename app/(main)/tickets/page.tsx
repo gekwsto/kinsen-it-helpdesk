@@ -173,24 +173,29 @@ export default async function AllTicketsPage({
   // primary sort value.
   const orderBy = resolveListSort(TICKET_SORT_KEYS, TICKET_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder).orderBy;
 
-  // The list's actual scope: an EXPLICIT ?departmentId= is the ONLY thing
-  // that ever narrows it. A prior "Phase 2B" version of this page
-  // substituted the user's active workspace department here whenever no
-  // explicit filter was present — meaning "All Tickets" silently meant
-  // "tickets in my current active workspace department" instead of "every
-  // department I'm authorized to see," and re-evaluating that substitution
-  // on every render (including a background live-refresh triggered by a
-  // ticket change in a COMPLETELY different department — see
-  // TicketListLiveRefresh below) made the list visibly collapse to one
-  // department at unpredictable moments, even though the user never chose
-  // to filter. buildTicketListWhere/getTicketFilterOptions already resolve
-  // an absent departmentId to the correct union of every department this
-  // user may view tickets in on their own (see their own doc comments) —
-  // the active workspace must never be substituted here. It's still used
-  // below ONLY to detect "this user has zero accessible departments at
-  // all" (a real onboarding-incomplete state, unrelated to filtering).
+  // The list's scope: an EXPLICIT ?departmentId= wins outright; absent one,
+  // it defaults to the active Workspace — UNLESS "All Workspaces" is
+  // selected (only reachable by a canViewAllDepartments role), which
+  // explicitly expands to the full accessible union. Same precedence rule
+  // as app/(main)/projects/page.tsx and app/(main)/activities/page.tsx —
+  // one shared understanding of "workspace vs explicit filter vs All"
+  // across every list page, confirmed with the user (see this task's own
+  // audit) rather than re-derived independently here.
+  //
+  // A PRIOR version of this page never substituted the active workspace at
+  // all (only an explicit ?departmentId= ever narrowed it), specifically to
+  // avoid "All Tickets" silently meaning "my current workspace" for a user
+  // who holds ticket.view.all (or multiple memberships) across several
+  // departments. That guarantee still holds here: switching to "All
+  // Workspaces" (or explicitly clearing the Department filter back to "All
+  // Departments" — see ticket-filters.tsx) is always still a real, correct
+  // full-union view — this change only makes the DEFAULT (no explicit
+  // choice made yet) follow the active workspace, instead of always being
+  // the union regardless of which workspace is active, matching how
+  // Projects/Activities already behave and the product's own stated
+  // expectation that switching workspace actually re-scopes this list.
   const activeWorkspace = await getActiveWorkspace(session.user.id, role);
-  const effectiveDepartmentId = params.departmentId;
+  const effectiveDepartmentId = params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
   if (activeWorkspace.departments.length === 0) {
     return <NoWorkspaceState />;
