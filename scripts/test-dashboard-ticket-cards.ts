@@ -248,7 +248,7 @@ async function main() {
     check("Each card link has a descriptive aria-label", kpiCardsSource.includes("aria-label={card.ariaLabel}"));
     check("Each card link has a visible focus-visible ring (not just a mouse hover state)", kpiCardsSource.includes("focus-visible:ring-2"));
     check("Total Tickets card links to ?status=all", kpiCardsSource.includes('href: "/tickets?status=all"'));
-    check("Open card links to ?status=open", kpiCardsSource.includes('href: "/tickets?status=open"'));
+    check("Open card links directly to the dedicated /tickets/open page", kpiCardsSource.includes('href: "/tickets/open"'));
     check("In Progress card links to ?status=in_progress", kpiCardsSource.includes('href: "/tickets?status=in_progress"'));
     check("Closed card links directly to the dedicated /tickets/closed page", kpiCardsSource.includes('href: "/tickets/closed"'));
     check("From Email card links to ?source=EMAIL", kpiCardsSource.includes('href: "/tickets?source=EMAIL"'));

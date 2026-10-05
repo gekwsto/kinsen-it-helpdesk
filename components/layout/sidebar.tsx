@@ -94,6 +94,11 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
     // PendingTicket lifecycle (PENDING -> REJECTED, recoverable into
     // ACCEPTED), not a separate permission concept.
     { label: "Rejected Tickets", href: "/tickets/rejected", visible: navFlags.canViewPendingTickets },
+    // Same gate as "All Tickets" itself (canViewAllTickets) — Open is only
+    // ever a filtered SLICE of what that page's own default view already
+    // shows, never a new category of information, so it never needs the
+    // separate (elevated) canViewClosedTickets Closed Tickets requires.
+    { label: "Open Tickets", href: "/tickets/open", visible: navFlags.canViewAllTickets },
     { label: "Closed Tickets", href: "/tickets/closed", visible: navFlags.canViewClosedTickets },
   ];
 

@@ -18,12 +18,13 @@ interface KpiCardsProps {
 
 // Each href's `status`/`source` value is a legacy/deep-link-only contract
 // app/(main)/tickets/page.tsx still recognizes (see its SearchParams doc
-// comment) — only "all" (lifts the default non-closed scope) and "closed"
-// (redirects to the dedicated /tickets/closed page below) still change
-// behavior there; this card's own COUNT still comes from the same
-// lib/services/ticket-status-groups.ts helper the Dashboard always used,
-// unaffected by the All Tickets list no longer offering a matching manual
-// dropdown for every group.
+// comment) — only "all" (lifts the default non-closed scope) still changes
+// behavior there; "Open" and "Closed" instead point at their own dedicated
+// canonical pages (app/(main)/tickets/open/page.tsx and
+// app/(main)/tickets/closed/page.tsx), same precedent. This card's own
+// COUNT still comes from the same lib/services/ticket-status-groups.ts
+// helper the Dashboard always used, unaffected by the All Tickets list no
+// longer offering a matching manual dropdown for every group.
 const CARDS = [
   {
     key: "total" as const,
@@ -42,7 +43,7 @@ const CARDS = [
     iconClass: "text-blue-600",
     bgClass: "bg-blue-50",
     sub: "Not yet closed",
-    href: "/tickets?status=open",
+    href: "/tickets/open",
     ariaLabel: "View open tickets",
   },
   {

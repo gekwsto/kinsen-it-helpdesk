@@ -49,6 +49,7 @@ const MODULE_LABELS: Record<string, string> = {
   goals: "Goals",
   admin: "Administration",
   department: "Department",
+  projectRequests: "Project Requests",
 };
 
 // Global-role-only permissions — the permission-grant route also rejects
