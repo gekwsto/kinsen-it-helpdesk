@@ -3,14 +3,21 @@
  * being only a ROUTING address (recipient matching after a message already
  * landed in the single hardcoded GRAPH_USER_EMAIL mailbox) rather than a
  * mailbox Graph itself actually polled. See:
- *   - lib/microsoft-graph.ts (getUnreadMessages/markAsRead/moveMessage now
- *     take an explicit `mailbox` parameter — no hidden single-mailbox
- *     dependency)
+ *   - lib/microsoft-graph.ts (getMessagesSince now takes an explicit
+ *     `mailbox` parameter — no hidden single-mailbox dependency; markAsRead/
+ *     moveMessage were REMOVED entirely — see the next point)
  *   - lib/services/inbound-mailbox-service.ts (mailbox discovery: central +
- *     every active department's own inboundEmail, deduped/normalized)
+ *     every active department's own inboundEmail, deduped/normalized; ALSO
+ *     the per-mailbox MailboxPollCursor read/advance helpers — this app no
+ *     longer marks an inbound email read or moves it out of the Inbox for
+ *     ANY outcome, successful or not, because some users only have Outlook
+ *     access to these shared mailboxes and must see every email exactly as
+ *     a normal, untouched Inbox. "What's already been looked at" is tracked
+ *     entirely via each mailbox's own persisted, receivedDateTime-based
+ *     cursor instead of Outlook's isRead flag)
  *   - lib/ticket-email-service.ts's processInboundEmails (per-mailbox
  *     independent processing, deterministic department routing, P2002-safe
- *     concurrent dedup)
+ *     concurrent dedup, cursor-advance-on-success/freeze-on-failure)
  *
  * Every Graph call is a mocked `global.fetch`, dispatched by which mailbox
  * appears in the request URL — matching this repo's established
@@ -98,8 +105,8 @@ function makeMessage(overrides: Partial<GraphMailMessage> & { id: string }): Gra
 /**
  * Installs a fetch mock that:
  *  - answers the OAuth token endpoint unconditionally
- *  - for a `/mailFolders/Inbox/messages` GET, returns `unreadByMailbox[mailbox]` (or [] if absent, or throws if `failFor` matches)
- *  - for PATCH (markAsRead) / POST .../move (moveMessage) / POST .../mailFolders (folder lookup/create), just records the call and succeeds
+ *  - for a `/mailFolders/Inbox/messages` GET, returns `unreadByMailbox[mailbox]` (or [] if absent, or throws if `failFor` matches) — regardless of the `$filter` value, so it transparently supports both the old isRead-based query shape and the current receivedDateTime-cursor one
+ *  - for PATCH (the old markAsRead) / POST .../move (the old moveMessage) / POST .../mailFolders (folder lookup/create), still responds successfully if ever hit — but the app no longer calls ANY of these (see this file's own header comment), so a test asserting zero such calls is really asserting "the app never touches Outlook's read state or folder layout," not just checking mock plumbing.
  * `calls` accumulates { mailbox, kind } for assertions about which mailbox/operation was hit.
  */
 function installMailboxRouterMock(
@@ -172,6 +179,11 @@ async function cleanup(deptIds: string[], pendingTicketIds: string[], ticketIds:
     await prisma.ticket.deleteMany({ where: { id: { in: ticketIds } } }).catch(() => {});
   }
   await prisma.emailProcessingLog.deleteMany({ where: { fromEmail: { contains: `${RUN_ID}` } } }).catch(() => {});
+  // The RUN_ID-scoped department mailboxes each got their own
+  // MailboxPollCursor row — CENTRAL's own row is deliberately left alone
+  // (a fixed, real-looking address reused across every run of this test,
+  // same as production would persist one cursor per real mailbox forever).
+  await prisma.mailboxPollCursor.deleteMany({ where: { mailbox: { contains: `${RUN_ID}` } } }).catch(() => {});
   if (userEmails.length > 0) await prisma.user.deleteMany({ where: { email: { in: userEmails } } }).catch(() => {});
   if (deptIds.length > 0) {
     await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
@@ -274,14 +286,20 @@ async function main() {
     check("   Direct email to Department B's mailbox -> PendingTicket.departmentId = Department B", ptB?.departmentId === deptB.id);
     check("11. Central mailbox with NO recipient match -> departmentId null (unchanged recipient-routing behaviour)", ptCentral?.departmentId === null);
 
-    console.log("\n=== 9. Successful message is marked read/moved in the EXACT mailbox it was fetched from ===\n");
+    console.log("\n=== 9. Successfully processed messages are NEVER marked read or moved — some users only have Outlook access ===\n");
     const markReadCalls = calls.filter((c) => c.kind === "markAsRead");
     const moveCalls = calls.filter((c) => c.kind === "move");
-    check("markAsRead was called against the central mailbox", markReadCalls.some((c) => c.mailbox === CENTRAL));
-    check("markAsRead was called against Department A's OWN mailbox (not central)", markReadCalls.some((c) => c.mailbox === deptAEmail));
-    check("markAsRead was called against Department B's OWN mailbox (not central)", markReadCalls.some((c) => c.mailbox === deptBEmail));
-    check("moveMessage (Processed folder) was called against Department A's own mailbox", moveCalls.some((c) => c.mailbox === deptAEmail));
-    check("moveMessage (Processed folder) was called against Department B's own mailbox", moveCalls.some((c) => c.mailbox === deptBEmail));
+    check("9. markAsRead was NEVER called, for any mailbox", markReadCalls.length === 0);
+    check("9. moveMessage (the old 'Processed' folder move) was NEVER called, for any mailbox", moveCalls.length === 0);
+
+    console.log("\n=== Each mailbox's own poll cursor advanced past the message it just successfully processed ===\n");
+    const { prisma: prismaForCursor } = await import("@/lib/prisma");
+    const cursorCentral = await prismaForCursor.mailboxPollCursor.findUnique({ where: { mailbox: CENTRAL } });
+    const cursorA = await prismaForCursor.mailboxPollCursor.findUnique({ where: { mailbox: deptAEmail } });
+    const cursorB = await prismaForCursor.mailboxPollCursor.findUnique({ where: { mailbox: deptBEmail } });
+    check("Central mailbox's poll cursor advanced past the epoch default", !!cursorCentral && cursorCentral.lastReceivedAt.getTime() > 0);
+    check("Department A's poll cursor advanced too (its own cursor, independent of central's)", !!cursorA && cursorA.lastReceivedAt.getTime() > 0);
+    check("Department B's poll cursor advanced too", !!cursorB && cursorB.lastReceivedAt.getTime() > 0);
     restoreFetch();
 
     console.log("\n=== 11. Central/alias recipient-routing still works (recipient matches a department's inboundEmail) ===\n");

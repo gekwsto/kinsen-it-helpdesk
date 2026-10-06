@@ -339,66 +339,42 @@ export function getCentralMailbox(): string {
 
 export const microsoftGraph = {
   /**
-   * Fetch unread messages from a specific mailbox's Inbox. `mailbox` is
-   * always an explicit, caller-supplied address now — never an implicit
-   * global (see docs/roadmap-handoff-register.md's inbound-email multi-
-   * mailbox fix): the central support mailbox and every configured
+   * Fetch messages received on/after `sinceIso` from a specific mailbox's
+   * Inbox, oldest first — regardless of their Outlook read/unread state.
+   * `mailbox` is always an explicit, caller-supplied address now — never an
+   * implicit global (see docs/roadmap-handoff-register.md's inbound-email
+   * multi-mailbox fix): the central support mailbox and every configured
    * Department.inboundEmail are all genuinely pollable mailboxes, not just
    * the one hardcoded address this used to be limited to.
+   *
+   * Deliberately NOT filtered by `isRead` (that was this function's
+   * original design, replaced for a real reason — see
+   * lib/ticket-email-service.ts's processInboundEmails and
+   * MailboxPollCursor for the full rationale): some users only have
+   * Outlook access to these shared mailboxes, never this app, so this app
+   * must never mark anything read or move anything out of the Inbox on
+   * their behalf — Outlook's own read/unread state is no longer used as
+   * this app's "have we already looked at this" signal at all. `sinceIso`
+   * is each mailbox's own persisted MailboxPollCursor instead.
+   *
+   * `ge` (inclusive), not `gt` — the cursor is set to the LAST message's
+   * own receivedDateTime after a successful batch, so an exclusive `gt`
+   * would silently skip any OTHER message that happens to share that exact
+   * same timestamp. The resulting "refetch the boundary message again next
+   * time" is harmless: it's always caught by the existing messageId-based
+   * dedup in processInboundEmails, never creates a duplicate Ticket/
+   * PendingTicket.
    */
-  async getUnreadMessages(mailbox: string, top = 25): Promise<GraphMailMessage[]> {
+  async getMessagesSince(mailbox: string, sinceIso: string, top = 50): Promise<GraphMailMessage[]> {
     const select = [
       "id", "subject", "bodyPreview", "body", "from", "toRecipients",
       "internetMessageId", "conversationId", "receivedDateTime",
       "hasAttachments", "isRead", "internetMessageHeaders",
     ].join(",");
     const data = await graphRequest<{ value: GraphMailMessage[] }>(
-      `/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages?$filter=isRead eq false&$top=${top}&$orderby=receivedDateTime asc&$select=${select}&$expand=attachments`
+      `/users/${encodeURIComponent(mailbox)}/mailFolders/Inbox/messages?$filter=receivedDateTime ge ${sinceIso}&$top=${top}&$orderby=receivedDateTime asc&$select=${select}&$expand=attachments`
     );
     return data.value;
-  },
-
-  /**
-   * Mark a message as read — in the EXACT mailbox it was fetched from
-   * (Graph message IDs are scoped to their owning mailbox, so this must
-   * match the `mailbox` passed to the getUnreadMessages call that returned
-   * this message).
-   */
-  async markAsRead(mailbox: string, messageId: string): Promise<void> {
-    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${messageId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ isRead: true }),
-    });
-  },
-
-  /**
-   * Move a message to a specific folder (e.g., Processed) — in the same
-   * mailbox it was fetched from, same reasoning as markAsRead above.
-   */
-  async moveMessage(mailbox: string, messageId: string, destinationFolderName: string): Promise<void> {
-    const folders = await graphRequest<{ value: Array<{ id: string; displayName: string }> }>(
-      `/users/${encodeURIComponent(mailbox)}/mailFolders?$filter=displayName eq '${destinationFolderName}'`
-    );
-
-    let folderId: string;
-
-    if (folders.value.length === 0) {
-      const newFolder = await graphRequest<{ id: string }>(
-        `/users/${encodeURIComponent(mailbox)}/mailFolders`,
-        {
-          method: "POST",
-          body: JSON.stringify({ displayName: destinationFolderName }),
-        }
-      );
-      folderId = newFolder.id;
-    } else {
-      folderId = folders.value[0].id;
-    }
-
-    await graphRequest(`/users/${encodeURIComponent(mailbox)}/messages/${messageId}/move`, {
-      method: "POST",
-      body: JSON.stringify({ destinationId: folderId }),
-    });
   },
 
   /**
@@ -410,8 +386,7 @@ export const microsoftGraph = {
    * regardless of which folder it currently sits in (e.g. "Processed").
    * Built for narrowly-scoped historical-body recovery (see
    * scripts/repair-flattened-table-layout-bodies.ts) — NOT used by the
-   * normal inbound-polling path above, which only ever reads unread Inbox
-   * messages. Returns null (not a thrown error) when no message with this
+   * normal inbound-polling path above (getMessagesSince). Returns null (not a thrown error) when no message with this
    * ID exists in this mailbox — a genuinely unexceptional "not found," e.g.
    * the message was permanently deleted or purged by mailbox retention.
    */

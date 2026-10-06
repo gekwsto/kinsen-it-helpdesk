@@ -2218,6 +2218,26 @@ model EmailProcessingLog {
   @@index([mailbox])
 }
 
+/**
+ * Per-mailbox inbound-polling cursor — the receivedDateTime boundary up to
+ * which processInboundEmails (lib/ticket-email-service.ts) has already
+ * looked at every message in that mailbox's Inbox, regardless of its
+ * Outlook read/unread state. Replaces the old isRead-based "what's new"
+ * signal: this app no longer marks any inbound email read or moves it out
+ * of the Inbox (see getMessagesSince, lib/microsoft-graph.ts), because some
+ * users only have Outlook access to these shared mailboxes and must see
+ * every email exactly as a normal, untouched Inbox. A mailbox with no row
+ * here yet has never been polled — getMailboxPollCursor
+ * (lib/services/inbound-mailbox-service.ts) defaults it to the Unix epoch,
+ * never silently skipping a pre-existing backlog.
+ */
+model MailboxPollCursor {
+  /** Normalized (trim + lowercase) mailbox address — same normalization inbound-mailbox-service.ts already applies to every mailbox it discovers. */
+  mailbox        String   @id
+  lastReceivedAt DateTime
+  updatedAt      DateTime @updatedAt
+}
+
 model EmailPollRun {
   id             String    @id @default(cuid())
   startedAt      DateTime  @default(now())

@@ -9,7 +9,7 @@ import { formatTicketNumber } from "@/lib/utils";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { EmailLogAction, Prisma } from "@prisma/client";
 import { matchDepartmentForRecipients, createPendingTicketFromEmail } from "@/lib/services/pending-ticket-service";
-import { getMailboxesToPoll, type MailboxToPoll } from "@/lib/services/inbound-mailbox-service";
+import { getMailboxesToPoll, getMailboxPollCursor, advanceMailboxPollCursor, type MailboxToPoll } from "@/lib/services/inbound-mailbox-service";
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
 import path from "path";
@@ -99,6 +99,15 @@ function isUniqueConstraintViolation(err: unknown): boolean {
  * processed in the same run. See lib/services/inbound-mailbox-service.ts
  * for the mailbox-discovery/dedup rules and MailboxToPoll's `kind`, which
  * drives routing below.
+ *
+ * Never marks a message read or moves it out of the Inbox — some users
+ * only have Outlook access to these shared mailboxes, never this app, so
+ * every email must stay exactly where Outlook delivered it, visibly
+ * unread. "What's already been looked at" is tracked entirely via each
+ * mailbox's own persisted MailboxPollCursor (receivedDateTime-based),
+ * never via Outlook's isRead flag — see getMailboxPollCursor/
+ * advanceMailboxPollCursor (inbound-mailbox-service.ts) and
+ * microsoftGraph.getMessagesSince.
  */
 export async function processInboundEmails(): Promise<{
   created: number;
@@ -149,9 +158,10 @@ export async function processInboundEmails(): Promise<{
       errors: 0,
     };
 
-    let messages: Awaited<ReturnType<typeof microsoftGraph.getUnreadMessages>> = [];
+    let messages: Awaited<ReturnType<typeof microsoftGraph.getMessagesSince>> = [];
+    const cursorBefore = await getMailboxPollCursor(mailbox.email);
     try {
-      messages = await microsoftGraph.getUnreadMessages(mailbox.email, 50);
+      messages = await microsoftGraph.getMessagesSince(mailbox.email, cursorBefore.toISOString(), 50);
       mailboxResult.fetched = messages.length;
     } catch (err) {
       // This mailbox is inaccessible/misconfigured — record it and move on
@@ -167,6 +177,25 @@ export async function processInboundEmails(): Promise<{
       continue;
     }
 
+    // Tracks how far this mailbox's poll cursor should advance once the
+    // batch below finishes — every message up to (and including) this one
+    // was handled WITHOUT a processing error. Deliberately frozen the
+    // moment a message fails (never advanced past it) so that message, and
+    // everything chronologically after it in this same batch, is retried
+    // on the next poll — the direct replacement for the old "leave it
+    // unread so it's refetched" retry mechanism, now that Outlook's
+    // read/unread state is no longer used for that at all. A message
+    // already-successfully-handled-then-retried is always a safe no-op:
+    // the existing messageId-based dedup below skips it again.
+    let cursorAdvanceTo: Date | null = null;
+    let stopAdvancingCursor = false;
+    // Single shared exit point for every "this message is fully, successfully
+    // handled" path below (loop-skip, duplicate-skip, create/append) — see
+    // cursorAdvanceTo's own doc comment above for the full rule.
+    const markHandled = (receivedDateTime: string) => {
+      if (!stopAdvancingCursor) cursorAdvanceTo = new Date(receivedDateTime);
+    };
+
     for (const message of messages) {
       let parsed: ParsedEmail | null = null;
 
@@ -176,7 +205,7 @@ export async function processInboundEmails(): Promise<{
         // ── Loop / auto-reply protection ──────────────────────────────────
         if (isLoopEmail(parsed)) {
           await logEmail(run.id, mailbox.email, parsed, "SKIPPED_LOOP");
-          await microsoftGraph.markAsRead(mailbox.email, message.id);
+          markHandled(message.receivedDateTime);
           skipped++;
           mailboxResult.skipped++;
           continue;
@@ -197,7 +226,7 @@ export async function processInboundEmails(): Promise<{
         ]);
         if (duplicateMessage || duplicatePending) {
           await logEmail(run.id, mailbox.email, parsed, "SKIPPED_DUPLICATE");
-          await microsoftGraph.markAsRead(mailbox.email, message.id);
+          markHandled(message.receivedDateTime);
           skipped++;
           mailboxResult.skipped++;
           continue;
@@ -275,12 +304,18 @@ export async function processInboundEmails(): Promise<{
           }
         }
 
-        // ── Move processed email — in the EXACT mailbox it was fetched from ──
-        await microsoftGraph.markAsRead(mailbox.email, message.id);
-        await microsoftGraph.moveMessage(mailbox.email, message.id, "Processed");
+        // Successfully handled (created or appended) — never marks the
+        // message read or moves it; it stays in the Inbox, unread, exactly
+        // as Outlook delivered it. See markHandled's own doc comment above.
+        markHandled(message.receivedDateTime);
       } catch (err) {
         // One email failure must not abort the whole mailbox (or the whole
-        // batch). Leave the email UNREAD so it is retried on the next poll.
+        // batch) — processing continues with the NEXT message. But this
+        // mailbox's poll cursor must never advance past this failed
+        // message, so it (and everything chronologically after it in this
+        // batch) is retried on the next poll — the direct replacement for
+        // the old "leave it unread" retry mechanism.
+        stopAdvancingCursor = true;
         const errMsg = err instanceof Error ? err.message : String(err);
         lastError = errMsg;
         errors++;
@@ -303,6 +338,10 @@ export async function processInboundEmails(): Promise<{
 
         console.error(`[email] Failed to process message ${message.id} from mailbox ${mailbox.email}:`, err);
       }
+    }
+
+    if (cursorAdvanceTo) {
+      await advanceMailboxPollCursor(mailbox.email, cursorAdvanceTo);
     }
 
     mailboxResults.push(mailboxResult);

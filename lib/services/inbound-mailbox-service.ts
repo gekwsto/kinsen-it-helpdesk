@@ -30,7 +30,7 @@ import { prisma } from "@/lib/prisma";
 import { getCentralMailbox } from "@/lib/microsoft-graph";
 
 export interface MailboxToPoll {
-  /** Normalized (trim + lowercase) mailbox address to pass to microsoftGraph.getUnreadMessages/markAsRead/moveMessage. */
+  /** Normalized (trim + lowercase) mailbox address to pass to microsoftGraph.getMessagesSince / getMailboxPollCursor / advanceMailboxPollCursor. */
   email: string;
   kind: "central" | "department";
   departmentId: string | null;
@@ -39,6 +39,62 @@ export interface MailboxToPoll {
 
 function normalizeMailbox(email: string): string {
   return email.trim().toLowerCase();
+}
+
+/**
+ * This mailbox's own persisted polling cursor (see MailboxPollCursor's
+ * schema doc comment for the full rationale) — the receivedDateTime
+ * boundary processInboundEmails already looked past, regardless of
+ * Outlook's own read/unread state. A mailbox never polled before has no
+ * row yet: defaults to the Unix epoch, so the very first poll sees
+ * whatever's currently in that mailbox's Inbox (bounded by
+ * getMessagesSince's own `top`) rather than silently skipping a
+ * pre-existing backlog.
+ */
+export async function getMailboxPollCursor(mailbox: string): Promise<Date> {
+  const row = await prisma.mailboxPollCursor.findUnique({
+    where: { mailbox: normalizeMailbox(mailbox) },
+    select: { lastReceivedAt: true },
+  });
+  return row?.lastReceivedAt ?? new Date(0);
+}
+
+/**
+ * Advances (never rewinds — see the explicit max() below) this mailbox's
+ * poll cursor to `newCursor`. Called by processInboundEmails only up to
+ * the receivedDateTime of the last message it handled WITHOUT hitting a
+ * processing error in this run — a failed message, and everything
+ * chronologically after it in the same batch, is deliberately left for the
+ * next poll to retry (see that function's own doc comment for the exact
+ * rule). The max()-against-current-value guard additionally protects
+ * against two overlapping poll runs for the same mailbox ever moving this
+ * cursor backward.
+ */
+export async function advanceMailboxPollCursor(mailbox: string, newCursor: Date): Promise<void> {
+  const normalized = normalizeMailbox(mailbox);
+  // GREATEST(existing, new) semantics via plain Prisma Client calls — never
+  // raw SQL here: a Date bound through $executeRaw against this column
+  // (TIMESTAMP(3), no time zone) was observed to land shifted by the
+  // server's local UTC offset instead of the exact UTC instant, a real bug
+  // caught by this file's own test. updateMany's `lt` guard only ever
+  // touches a row whose current value is OLDER than newCursor, so two
+  // overlapping poll runs for the same mailbox can never move this cursor
+  // backward — whichever commits second simply matches zero rows.
+  const { count } = await prisma.mailboxPollCursor.updateMany({
+    where: { mailbox: normalized, lastReceivedAt: { lt: newCursor } },
+    data: { lastReceivedAt: newCursor },
+  });
+  if (count === 0) {
+    // Either this mailbox has no row yet (create it), or it does but its
+    // value is already >= newCursor (confirmed by updateMany above
+    // matching zero rows) — upsert's `update` branch is then a deliberate
+    // no-op, never regressing an already-newer cursor.
+    await prisma.mailboxPollCursor.upsert({
+      where: { mailbox: normalized },
+      create: { mailbox: normalized, lastReceivedAt: newCursor },
+      update: {},
+    });
+  }
 }
 
 /**
