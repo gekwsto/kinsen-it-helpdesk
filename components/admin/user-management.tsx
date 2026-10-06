@@ -440,6 +440,7 @@ export function UserManagement({
       router.refresh();
     } catch (error: any) {
       toast.error(error.message ?? "Failed to delete user");
+    } finally {
       setDeleting(false);
     }
   };

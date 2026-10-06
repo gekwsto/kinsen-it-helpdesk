@@ -21,7 +21,6 @@ import {
 } from "@/components/ui/select";
 import { Check, Loader2, Paperclip, Plus } from "lucide-react";
 import { AttachmentDropzone } from "@/components/tickets/attachment-dropzone";
-import { LiveSupportPanel } from "@/components/tickets/live-support-panel";
 import { SimpleCommentBox } from "@/components/tickets/simple-comment-box";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
@@ -114,12 +113,6 @@ const createTicketFormSchema = createTicketSchema.extend({
 });
 type CreateTicketFormValues = z.infer<typeof createTicketFormSchema>;
 
-interface Agent {
-  id: string;
-  name: string | null;
-  image: string | null;
-}
-
 interface TicketFormProject {
   id: string;
   title: string;
@@ -141,7 +134,6 @@ interface CreateTicketFormProps {
   departments: Array<{ id: string; name: string }>;
   /** Active workspace's department — pre-selected as the default destination, but always changeable via the always-rendered Department field above. */
   defaultDepartmentId?: string | null;
-  itAgents: Agent[];
   /**
    * Same underlying permission (ticket.linkProjectActivity) as the Ticket
    * detail page and the generic PATCH route, resolved the same
@@ -185,7 +177,6 @@ export function CreateTicketForm({
   priorities,
   departments,
   defaultDepartmentId,
-  itAgents,
   hasGlobalLinkPermission,
   linkPermissionDepartmentIds,
   projectCreateDepartmentIds,
@@ -848,9 +839,6 @@ export function CreateTicketForm({
               "Submit Ticket"
             )}
           </Button>
-
-          {/* Live support panel */}
-          <LiveSupportPanel agents={itAgents} />
         </div>
       </div>
     </form>

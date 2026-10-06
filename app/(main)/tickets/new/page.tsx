@@ -4,7 +4,6 @@ import { hasPermission } from "@/lib/permissions";
 import { getAccessibleDepartmentSummaries, getTicketDestinationDepartments, getNavVisibilityFlags, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
-import { Role } from "@prisma/client";
 import { CreateTicketForm } from "@/components/tickets/ticket-form";
 import { redirect } from "next/navigation";
 import Link from "next/link";
@@ -120,7 +119,7 @@ export default async function NewTicketPage() {
   // in is resolved here — reused as-is by the shared
   // getAccessibleDepartmentSummaries department-permission helper, not a
   // new/parallel permission check.
-  const [categories, priorities, itAgents, projectCreateDepartments, activityCreateDepartments] =
+  const [categories, priorities, projectCreateDepartments, activityCreateDepartments] =
     await Promise.all([
       prisma.ticketCategory.findMany({
         where: scopedWhere,
@@ -131,12 +130,6 @@ export default async function NewTicketPage() {
         where: scopedWhere,
         orderBy: { level: "desc" },
         select: { id: true, name: true, color: true, level: true, departmentId: true },
-      }),
-      prisma.user.findMany({
-        where: { role: { in: [Role.IT_AGENT, Role.ADMIN] }, isActive: true },
-        orderBy: { name: "asc" },
-        select: { id: true, name: true, image: true },
-        take: 6,
       }),
       // Only a user with ticket.linkProjectActivity SOMEWHERE can ever link
       // a ticket to a Project/Activity at all (see canLinkProjectActivityAnywhere
@@ -198,7 +191,6 @@ export default async function NewTicketPage() {
         priorities={priorities}
         departments={destinationDepartments}
         defaultDepartmentId={activeWorkspace.departmentId}
-        itAgents={itAgents}
         hasGlobalLinkPermission={hasGlobalLinkPermission}
         linkPermissionDepartmentIds={linkPermissionDepartmentIds}
         projectCreateDepartmentIds={projectCreateDepartments.map((d) => d.id)}

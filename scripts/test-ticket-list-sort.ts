@@ -124,7 +124,12 @@ async function main() {
   const expectedSortable = ["ticketNumber", "title", "requester", "status", "priority", "category", "assignedAgent", "createdAt"];
   check("Ticket #, Title, Requester, Status, Priority, Category, Assigned To, Created are sortable", expectedSortable.every((k) => new RegExp(`sortKey="${k}"`).test(ticketTableSrc)));
   check("Source, Project, Dept. changed by, and the row action column are left NON-sortable (not in TICKET_SORT_KEYS, not given a sortKey)", !/sortKey="source"/.test(ticketTableSrc) && !/sortKey="project"/.test(ticketTableSrc) && !/sortKey="departmentChangedBy"/.test(ticketTableSrc) && !/sortKey="actions"/.test(ticketTableSrc));
-  check("No Department column exists in TicketTable at all, so none was made sortable (Department is filter/scope-only, never a rendered list column)", !/<TableHead>Department<\/TableHead>|sortKey="department"/.test(ticketTableSrc));
+  // A "Department" column (the Ticket's CURRENT department, display-only)
+  // was added immediately before "Dept. changed by" by a later task — it
+  // deliberately stays NON-sortable, same as its neighbor, matching this
+  // suite's own "existing Department/workspace filters remain unchanged,
+  // no new sorting added just because a column now exists" constraint.
+  check("Department column exists (added, display-only) but is NOT sortable — no sortKey=\"department\" was introduced", /<TableHead>Department<\/TableHead>/.test(ticketTableSrc) && !/sortKey="department"/.test(ticketTableSrc));
 
   const sortableHeadSrc = await fs.readFile("components/ui/sortable-table-head.tsx", "utf8");
   check("SortableTableHead's own props stay fully generic — sortKey: string, no per-domain union type added for Tickets", /sortKey:\s*string/.test(sortableHeadSrc));

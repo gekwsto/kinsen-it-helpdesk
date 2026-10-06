@@ -90,6 +90,7 @@ export function TicketTable({
               <SortableTableHead sortKey="category">Category</SortableTableHead>
               <TableHead>Project</TableHead>
               <SortableTableHead sortKey="assignedAgent">Assigned To</SortableTableHead>
+              <TableHead>Department</TableHead>
               <TableHead>Dept. changed by</TableHead>
               <SortableTableHead sortKey="createdAt">Created</SortableTableHead>
               <TableHead className="w-16"></TableHead>
@@ -99,7 +100,7 @@ export function TicketTable({
             {tickets.length === 0 && (
               <TableRow>
                 <TableCell
-                  colSpan={showRequester ? 12 : 11}
+                  colSpan={showRequester ? 13 : 12}
                   className="py-20"
                 >
                   <div className="flex flex-col items-center gap-2 text-muted-foreground">
@@ -208,6 +209,18 @@ export function TicketTable({
                   ) : (
                     <span className="text-xs text-muted-foreground">Unassigned</span>
                   )}
+                </TableCell>
+                <TableCell>
+                  {/* The Ticket's CURRENT department — independent of
+                      Dept. changed by (history) and never derived from the
+                      active Workspace, so it reads correctly in "All
+                      Workspaces" too (see this component's own data
+                      contract: `department` comes straight from the
+                      server's Ticket query, same relation every list page
+                      already selects). */}
+                  <span className="text-sm text-muted-foreground truncate max-w-[120px] block">
+                    {ticket.department?.name ?? "—"}
+                  </span>
                 </TableCell>
                 <TableCell>
                   {ticket.departmentChangedBy ? (
