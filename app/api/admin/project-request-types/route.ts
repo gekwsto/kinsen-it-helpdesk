@@ -6,16 +6,15 @@ import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, in
 
 // Project Request Types are a single GLOBAL reference list (no department
 // scope at all — every department's requesters share the same dropdown),
-// structurally the same shape as Company/BusinessUnit. Gated by the
-// existing `admin.access` permission (not a new bespoke
-// projectRequestType.* trio) per the task's own "reuse an existing settings
-// permission" instruction — admin.access is currently held ONLY by ADMIN
-// (via its blanket bootstrap grant; no other role lists it in
-// prisma/seed.ts), so this is real RBAC, not a hardcoded role check, while
-// behaving identically to admin-only today.
-async function requireSettingsAccess() {
+// structurally the same shape as Activity Task Types. Gated by its OWN
+// dedicated `projectRequestType.manage` permission — NOT bare
+// `admin.access` — same normalization taskType.manage itself already
+// received; see GLOBAL_ONLY_PERMISSION_KEYS in
+// app/api/admin/roles/[id]/permissions/[permId]/route.ts and
+// app/(main)/admin/roles/page.tsx.
+async function requireProjectRequestTypeManageAccess() {
   const session = await requireAuth();
-  const allowed = await hasPermission(session.user.role, "admin.access", session.user.customRoleId);
+  const allowed = await hasPermission(session.user.role, "projectRequestType.manage", session.user.customRoleId);
   if (!allowed) throw new Error("Forbidden");
   return session;
 }
@@ -24,7 +23,7 @@ async function requireSettingsAccess() {
 // form's own active-only dropdown — see /api/project-request-types).
 export async function GET() {
   try {
-    await requireSettingsAccess();
+    await requireProjectRequestTypeManageAccess();
     const types = await prisma.projectRequestType.findMany({
       orderBy: { createdAt: "asc" },
       include: { _count: { select: { projectRequests: true } } },
@@ -40,7 +39,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    await requireSettingsAccess();
+    await requireProjectRequestTypeManageAccess();
     const body = await req.json();
     const parsed = projectRequestTypeSchema.safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);

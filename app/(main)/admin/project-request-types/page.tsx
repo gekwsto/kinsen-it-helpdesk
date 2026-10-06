@@ -8,7 +8,10 @@ export default async function ProjectRequestTypesAdminPage() {
   const session = await auth();
   if (!session?.user) redirect("/login");
 
-  const allowed = await hasPermission(session.user.role, "admin.access", session.user.customRoleId);
+  // Its OWN dedicated permission (projectRequestType.manage) — NOT bare
+  // admin.access. Hiding this page is not authorization by itself; the API
+  // routes independently re-check the same permission on every mutation.
+  const allowed = await hasPermission(session.user.role, "projectRequestType.manage", session.user.customRoleId);
   if (!allowed) redirect("/dashboard");
 
   const types = await prisma.projectRequestType.findMany({

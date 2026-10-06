@@ -20,7 +20,7 @@ import {
   applyMarkAllRead,
   applyDeleted,
   applyClearAll,
-  applyReconcile,
+  applyReconcileExcluding,
   type NotificationState,
 } from "@/lib/notifications/notification-state";
 import {
@@ -44,6 +44,14 @@ export function NotificationDropdown() {
   const [loading, setLoading] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
   const [clearingAll, setClearingAll] = useState(false);
+
+  // Ids with an in-flight single-item DELETE, and whether a Clear All
+  // DELETE is in flight — see applyReconcileExcluding's own doc comment
+  // for the race this guards against. Refs, not state: they must be
+  // readable synchronously inside fetchNotifications without retriggering
+  // a render themselves.
+  const pendingDeletedIds = useRef<Set<string>>(new Set());
+  const pendingClearAll = useRef(false);
 
   const [pushSupported, setPushSupported] = useState(false);
   const [pushEnabled, setPushEnabled] = useState(false);
@@ -104,7 +112,13 @@ export function NotificationDropdown() {
       const res = await fetch("/api/notifications");
       if (res.ok) {
         const data = await res.json();
-        setState(applyReconcile({ items: data.notifications ?? [], unreadCount: data.unreadCount ?? 0 }));
+        setState(
+          applyReconcileExcluding(
+            { items: data.notifications ?? [], unreadCount: data.unreadCount ?? 0 },
+            pendingDeletedIds.current,
+            pendingClearAll.current
+          )
+        );
       }
     } finally {
       setLoading(false);
@@ -336,20 +350,27 @@ export function NotificationDropdown() {
     }
   };
 
-  /** Dismisses a single notification — stops the click from bubbling to the row's own markRead/navigation (the "x" sits inside a clickable row, and for a linked notification, inside a <Link> too). Optimistic: the row disappears immediately, so there's nothing left to show a per-row loading state on. */
+  /** Dismisses a single notification — stops the click from bubbling to the row's own markRead/navigation (the "x" sits inside a clickable row, and for a linked notification, inside a <Link> too). Optimistic: the row disappears immediately, so there's nothing left to show a per-row loading state on. Tracked in pendingDeletedIds for the duration of the request so a reconcile fetch racing against this DELETE can't resurrect it (see applyReconcileExcluding). */
   const deleteNotification = async (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     e.stopPropagation();
+    pendingDeletedIds.current.add(id);
     setState((prev) => applyDeleted(prev, id));
-    await fetch(`/api/notifications/${id}`, { method: "DELETE" });
+    try {
+      await fetch(`/api/notifications/${id}`, { method: "DELETE" });
+    } finally {
+      pendingDeletedIds.current.delete(id);
+    }
   };
 
   const clearAll = async () => {
     setClearingAll(true);
+    pendingClearAll.current = true;
     try {
       setState((prev) => applyClearAll(prev));
       await fetch("/api/notifications/clear-all", { method: "DELETE" });
     } finally {
+      pendingClearAll.current = false;
       setClearingAll(false);
     }
   };

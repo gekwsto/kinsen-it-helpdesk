@@ -81,3 +81,28 @@ export function applyClearAll(_state: NotificationState): NotificationState {
 export function applyReconcile(fetched: NotificationState): NotificationState {
   return fetched;
 }
+
+/**
+ * Same as applyReconcile, but masks out items whose delete/clear-all is
+ * still in flight on the client — fixes a real race: the dropdown refetches
+ * on every open (a "staleness guard"), and opening it is usually the very
+ * action right before dismissing an item. If that GET started before the
+ * item's own DELETE committed server-side, a plain applyReconcile would
+ * resurrect the just-dismissed item from the stale response — looking
+ * "stuck" until a manual page refresh re-syncs. `excludeIds` is the set of
+ * notification ids with an in-flight DELETE (component clears each id once
+ * its own request settles); `excludeAll` is true while a Clear All DELETE
+ * is in flight. unreadCount is always recomputed from the filtered items,
+ * never trusted from the (possibly stale) server payload, so it can never
+ * drift from what's actually displayed.
+ */
+export function applyReconcileExcluding(
+  fetched: NotificationState,
+  excludeIds: ReadonlySet<string>,
+  excludeAll: boolean
+): NotificationState {
+  if (excludeAll) return EMPTY_NOTIFICATION_STATE;
+  if (excludeIds.size === 0) return fetched;
+  const items = fetched.items.filter((n) => !excludeIds.has(n.id));
+  return { items, unreadCount: items.filter((n) => !n.isRead).length };
+}

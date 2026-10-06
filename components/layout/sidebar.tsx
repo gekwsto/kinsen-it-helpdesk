@@ -195,7 +195,22 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
       label: "Administration",
       href: "/admin",
       icon: Settings,
-      visible: userRole === "ADMIN" || navFlags.canViewAdminSubDepartments,
+      // Pre-existing gap this task's own permission-driven entries would
+      // otherwise fall into: a child's own `visible` only matters if this
+      // PARENT is also visible (see canAccess/children filtering below) — a
+      // non-ADMIN custom role holding e.g. ONLY projectRequestType.manage
+      // would have that child correctly computed as visible yet never see
+      // it, because this parent gate never considered anything but ADMIN/
+      // canViewAdminSubDepartments. Extended to every independently-
+      // grantable Administration permission this parent gates a child for,
+      // same fix shape projectFeedback.view already needed.
+      visible:
+        userRole === "ADMIN" ||
+        navFlags.canViewAdminSubDepartments ||
+        navFlags.canViewProjectFeedback ||
+        navFlags.canManageProjectRequestTypes ||
+        navFlags.canManageProjectExpenseTypes ||
+        navFlags.canManageTaskTypes,
       children: [
         { label: "Users", href: "/admin/users", roles: ["ADMIN"] as Role[] },
         { label: "Role Permissions", href: "/admin/roles", roles: ["ADMIN"] as Role[] },
@@ -204,9 +219,13 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
         { label: "Departments", href: "/admin/departments", roles: ["ADMIN"] as Role[] },
         { label: "Sub Departments", href: "/admin/sub-departments", visible: navFlags.canViewAdminSubDepartments },
         { label: "Microsoft Mappings", href: "/admin/microsoft-mappings", roles: ["ADMIN"] as Role[] },
-        { label: "Project Request Types", href: "/admin/project-request-types", roles: ["ADMIN"] as Role[] },
-        { label: "Project Expense Types", href: "/admin/project-expense-types", roles: ["ADMIN"] as Role[] },
-        { label: "Task Types", href: "/admin/activity-task-types", roles: ["ADMIN"] as Role[] },
+        // Permission-gated (each resource's own `.manage` key), NOT a
+        // hardcoded roles:["ADMIN"] — see navFlags.canManageProjectRequestTypes/
+        // canManageProjectExpenseTypes/canManageTaskTypes's own doc comment
+        // (lib/services/department-scope-service.ts).
+        { label: "Project Request Types", href: "/admin/project-request-types", visible: navFlags.canManageProjectRequestTypes },
+        { label: "Project Expense Types", href: "/admin/project-expense-types", visible: navFlags.canManageProjectExpenseTypes },
+        { label: "Task Types", href: "/admin/activity-task-types", visible: navFlags.canManageTaskTypes },
         // Permission-gated (projectFeedback.view), NOT a hardcoded
         // roles:["ADMIN"] — see navFlags.canViewProjectFeedback's own doc
         // comment (lib/services/department-scope-service.ts) for why this

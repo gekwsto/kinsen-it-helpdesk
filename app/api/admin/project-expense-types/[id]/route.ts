@@ -4,16 +4,16 @@ import { requireAuth, hasPermission } from "@/lib/permissions";
 import { projectExpenseTypeSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 
-async function requireSettingsAccess() {
+async function requireProjectExpenseTypeManageAccess() {
   const session = await requireAuth();
-  const allowed = await hasPermission(session.user.role, "admin.access", session.user.customRoleId);
+  const allowed = await hasPermission(session.user.role, "projectExpenseType.manage", session.user.customRoleId);
   if (!allowed) throw new Error("Forbidden");
   return session;
 }
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireSettingsAccess();
+    await requireProjectExpenseTypeManageAccess();
     const { id } = await params;
     const body = await req.json();
     const parsed = projectExpenseTypeSchema.partial().safeParse(body);
@@ -49,7 +49,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 // themselves.
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireSettingsAccess();
+    await requireProjectExpenseTypeManageAccess();
     const { id } = await params;
 
     const existing = await prisma.projectExpenseType.findUnique({

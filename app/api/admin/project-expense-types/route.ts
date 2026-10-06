@@ -7,11 +7,14 @@ import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, in
 // Project Expense Types are a single GLOBAL reference list (no department
 // scope — every request-origin Project's setup form shares the same
 // dropdown), structurally the same shape as Project Request Types. Gated
-// by the existing `admin.access` permission, same rationale as
-// /api/admin/project-request-types.
-async function requireSettingsAccess() {
+// by its OWN dedicated `projectExpenseType.manage` permission — NOT bare
+// `admin.access` — same normalization taskType.manage itself already
+// received; see GLOBAL_ONLY_PERMISSION_KEYS in
+// app/api/admin/roles/[id]/permissions/[permId]/route.ts and
+// app/(main)/admin/roles/page.tsx.
+async function requireProjectExpenseTypeManageAccess() {
   const session = await requireAuth();
-  const allowed = await hasPermission(session.user.role, "admin.access", session.user.customRoleId);
+  const allowed = await hasPermission(session.user.role, "projectExpenseType.manage", session.user.customRoleId);
   if (!allowed) throw new Error("Forbidden");
   return session;
 }
@@ -20,7 +23,7 @@ async function requireSettingsAccess() {
 // setup form's own active-only dropdown — see /api/project-expense-types).
 export async function GET() {
   try {
-    await requireSettingsAccess();
+    await requireProjectExpenseTypeManageAccess();
     const types = await prisma.projectExpenseType.findMany({
       orderBy: { createdAt: "asc" },
       include: { _count: { select: { projects: true } } },
@@ -36,7 +39,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
-    await requireSettingsAccess();
+    await requireProjectExpenseTypeManageAccess();
     const body = await req.json();
     const parsed = projectExpenseTypeSchema.safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);
