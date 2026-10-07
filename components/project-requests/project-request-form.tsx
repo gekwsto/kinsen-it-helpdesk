@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -18,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
 import { Loader2 } from "lucide-react";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 
@@ -81,6 +82,20 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
     setValue("intermediateApproverIds", next, { shouldValidate: true });
   };
 
+  // Client-side filter over the already-loaded, already-eligible
+  // `intermediateApproverOptions` — never widens who's offered. Completely
+  // separate from `intermediateApproverIds` (the actual react-hook-form
+  // selection state): a selected approver who scrolls out of view because
+  // of a search stays selected and still submits, since the checkbox's
+  // `checked` state below is always read from the UNFILTERED
+  // `intermediateApproverIds`, not from this filtered display list.
+  const [approverSearch, setApproverSearch] = useState("");
+  const approverSearchResults = useMemo(() => {
+    const q = approverSearch.trim().toLowerCase();
+    if (!q) return intermediateApproverOptions;
+    return intermediateApproverOptions.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  }, [intermediateApproverOptions, approverSearch]);
+
   const onSubmit = async (data: CreateProjectRequestInput) => {
     setSubmitting(true);
     try {
@@ -112,18 +127,28 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
               <Label htmlFor="departmentId">
                 Department <span className="text-destructive">*</span>
               </Label>
-              <Select value={departmentId} onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}>
-                <SelectTrigger id="departmentId">
-                  <SelectValue placeholder="Select a department" />
-                </SelectTrigger>
-                <SelectContent>
-                  {departments.map((d) => (
-                    <SelectItem key={d.id} value={d.id}>
-                      {d.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <WorkspaceCombobox
+                id="departmentId"
+                workspaces={departments}
+                value={departmentId ?? ""}
+                onChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
+                placeholder="Select a department"
+                // `departments` here is the active-workspace resolver's
+                // own take-bounded initial list (WORKSPACE_LIST_TAKE, see
+                // lib/services/workspace-service.ts) — a Department beyond
+                // that bound wouldn't otherwise be reachable at all. Reuses
+                // the EXACT same listAccessibleWorkspaces call (via the
+                // pre-existing /api/workspace/search endpoint the header
+                // workspace switcher already relies on) that built
+                // `departments` in the first place — same eligibility rule,
+                // no new endpoint, no authorization change.
+                remoteSearch={async (q) => {
+                  const res = await fetch(`/api/workspace/search?q=${encodeURIComponent(q)}`);
+                  if (!res.ok) return [];
+                  const data = await res.json().catch(() => null);
+                  return Array.isArray(data?.workspaces) ? data.workspaces : [];
+                }}
+              />
               {errors.departmentId && <p className="text-xs text-destructive">{errors.departmentId.message}</p>}
             </div>
           )}
@@ -207,13 +232,19 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
             <p id="intermediateApproverIds-helper" className="text-xs text-muted-foreground">
               Select everyone who must approve this request before it goes to final approval — all of them must approve.
             </p>
+            <Input
+              placeholder="Search approvers by name or email..."
+              value={approverSearch}
+              onChange={(e) => setApproverSearch(e.target.value)}
+              className="h-8 text-sm"
+            />
             <div
               id="intermediateApproverIds"
               role="group"
               aria-describedby={errors.intermediateApproverIds ? "intermediateApproverIds-helper intermediateApproverIds-error" : "intermediateApproverIds-helper"}
               className="max-h-48 overflow-y-auto rounded-md border divide-y"
             >
-              {intermediateApproverOptions.map((u) => (
+              {approverSearchResults.map((u) => (
                 <label key={u.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-muted/50">
                   <input
                     type="checkbox"
@@ -224,6 +255,9 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
                   <span>{u.name ?? u.email}</span>
                 </label>
               ))}
+              {approverSearchResults.length === 0 && (
+                <p className="text-xs text-muted-foreground px-3 py-2">No approvers match &quot;{approverSearch}&quot;.</p>
+              )}
             </div>
             {errors.intermediateApproverIds && (
               <p id="intermediateApproverIds-error" className="text-xs text-destructive">

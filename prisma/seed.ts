@@ -30,6 +30,15 @@ const PERMISSIONS = [
   { key: "activity.delete", description: "Delete activities", module: "activities" },
   { key: "activity.assign", description: "Assign activities to users", module: "activities" },
   { key: "activity.assignable", description: "Can be assigned to activities", module: "activities" },
+  // Dependencies are a GLOBAL, cross-department relation between two
+  // Activities (no departmentId of their own — see ActivityDependency in
+  // prisma/schema.prisma) — same "global-only, system administration"
+  // rationale as taskType.manage/projectExpenseType.manage below, not a
+  // per-entity hasEffectiveEntityPermission check. Was previously a bare
+  // isAdmin(role) check in app/api/dependencies/**; this makes it
+  // delegable to a custom (GLOBAL-scope) role instead of hardcoded to
+  // Role.ADMIN only.
+  { key: "activity.dependency.manage", description: "Create and delete dependencies between activities", module: "activities" },
   // Projects
   { key: "project.view", description: "View projects", module: "projects" },
   { key: "project.create", description: "Create projects", module: "projects" },
@@ -631,6 +640,7 @@ async function main() {
     // user.manage already behave for that role.
     ADMIN: [
       "integration.manage",
+      "activity.dependency.manage",
       "taskType.manage",
       "projectRequestType.manage",
       "projectExpenseType.manage",

@@ -721,6 +721,13 @@ model User {
   pendingTicketsRejected              PendingTicket[]                      @relation("PendingTicketRejected")
   ownedProjects                       Project[]                            @relation("ProjectOwner")
   projectMemberships                  Project[]                            @relation("ProjectMembers")
+  // The FULL, authoritative request-origin Owner set — see Project.owners'
+  // own doc comment for the exact "primary vs. full set" relationship with
+  // ownedProjects/ownerId above.
+  projectOwnerships                   Project[]                            @relation("ProjectOwners")
+  // Request-origin Projects this user follows (NOT a Member, NOT an Owner)
+  // — see Project.audience's own doc comment.
+  projectAudienceOf                   Project[]                            @relation("ProjectAudience")
   projectRequestsSubmitted            ProjectRequest[]                     @relation("ProjectRequestRequester")
   projectRequestsApproved             ProjectRequest[]                     @relation("ProjectRequestApprover")
   submittedProjectFeedback            ProjectFeedback[]                    @relation("ProjectFeedbackSubmitter")
@@ -1228,6 +1235,15 @@ model Project {
   status           ProjectStatus   @default(PLANNING)
   priority         Int             @default(2)
   progress         Int             @default(0)
+  // The single CANONICAL/PRIMARY owner — kept for every pre-existing
+  // consumer that only ever needed one (filters, the owner-grouped
+  // dashboard chart, list/detail display, seed data): NEVER nullable,
+  // NEVER auto-derived. For a manual Project this is (as always) the
+  // creator. For a request-origin Project this is simply the FIRST user
+  // the creator explicitly selected in Owner(s) at Project Setup — always
+  // a member of `owners` below, never a user who wasn't explicitly chosen.
+  // `owners` (not this field) is the authoritative FULL owner set — see
+  // its own doc comment for why both exist and how they relate.
   owner            User            @relation("ProjectOwner", fields: [ownerId], references: [id])
   ownerId          String
   department       Department?     @relation(fields: [departmentId], references: [id])
@@ -1290,6 +1306,29 @@ model Project {
   external                 Boolean             @default(false)
 
   members      User[]              @relation("ProjectMembers")
+  // The AUTHORITATIVE full Owner set — always contains `ownerId` (the
+  // canonical/primary one, see its own doc comment above). For EVERY
+  // Project (manual or request-origin) this mirrors reality exactly: a
+  // manual Project always has exactly one entry (the same single creator/
+  // owner it always had — nothing observable changes for manual Projects,
+  // this is purely an internal consistency invariant so "owners always
+  // contains ownerId" holds universally, with no per-origin special-
+  // casing needed anywhere that reads it). A request-origin Project has
+  // whichever one-or-more users the creator explicitly selected at Project
+  // Setup (see createProjectFromApprovedRequest) — NEVER auto-assigned,
+  // NEVER silently derived. Deliberately NOT `members` — an Owner is not
+  // automatically a Member, and vice versa (see PROJECT_OWNER_AUDIENCE
+  // feature's own spec: "Do not use Members as storage for Owners").
+  owners       User[]              @relation("ProjectOwners")
+  // Users who may follow/view a request-origin Project's progress without
+  // being a Member or an Owner — see hasProjectViewAccess
+  // (lib/services/project-access-service.ts), the ONLY place Audience
+  // membership has any effect: it extends READ access to the Project
+  // detail/notes/attachments surfaces, nothing else — never edit/delete,
+  // never Member/Owner status. Always empty for a manual Project (never
+  // written to outside the request-origin creation path). Zero or more,
+  // system-wide (never Department/Workspace-scoped, unlike `members`).
+  audience     User[]              @relation("ProjectAudience")
   activities   ProjectActivity[]
   tickets      Ticket[]
   yearlyGoals  YearlyGoal[]        @relation("GoalProjects")

@@ -36,7 +36,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           );
         case "invalid_project_owner":
           return NextResponse.json(
-            apiError("invalid_project_owner", "Select a real, active user who can own a Project in this department.", { field: "projectOwnerId" }),
+            apiError("invalid_project_owner", "Select at least one real, active user to own this Project.", { field: "ownerIds" }),
+            { status: 422 }
+          );
+        case "invalid_audience":
+          return NextResponse.json(
+            apiError("invalid_audience", "One or more selected Audience users are not real, active users.", { field: "audienceIds" }),
             { status: 422 }
           );
         case "invalid_expense_type":

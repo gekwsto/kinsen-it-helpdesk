@@ -124,7 +124,7 @@ async function main() {
       jsonReq({
         title: `${TAG} request`,
         description: "Activity request-origin fixture.",
-        projectOwnerId: adminUser.id,
+        ownerIds: [adminUser.id],
         expectedStartDate: "2026-04-01",
         expectedFinishDate: "2026-04-10",
         expenseTypeId: expenseType.id,

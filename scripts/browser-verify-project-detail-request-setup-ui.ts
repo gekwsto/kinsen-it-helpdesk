@@ -118,7 +118,7 @@ async function main() {
       jsonReq({
         title: `${TAG} request`,
         description: "Project Request Setup UI fixture — description long enough.",
-        projectOwnerId: admin.id,
+        ownerIds: [admin.id],
         expectedStartDate: "2026-03-01",
         expectedFinishDate: "2026-03-11", // 10 whole calendar days — a stable, checkable baseline
         expenseTypeId: expenseType.id,

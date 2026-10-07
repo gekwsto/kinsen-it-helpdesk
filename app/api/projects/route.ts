@@ -9,8 +9,9 @@ import {
 } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
+import { resolveActiveDepartmentMemberIds } from "@/lib/services/department-membership-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
-import { createProjectSchema } from "@/lib/validations";
+import { createProjectSchema, createProjectMemberEligibilitySchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 
 export async function GET(req: NextRequest) {
@@ -80,6 +81,7 @@ export async function POST(req: NextRequest) {
 
     const body = await req.json();
     const data = createProjectSchema.parse(body);
+    const { memberEligibilitySource } = createProjectMemberEligibilitySchema.parse(body);
 
     // No explicit departmentId in the body — fall back to the caller's
     // active workspace (Phase 2B) before resolveDepartmentForCreate's own
@@ -115,14 +117,34 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Two DIFFERENT, mutually exclusive Member-eligibility rules, picked by
+    // the request itself (see createProjectMemberEligibilitySchema's own
+    // doc comment) — never both, never a silent fallback between them:
+    // "workspaceMembership" (the standalone manual-creation form only)
+    // requires an active DepartmentMembership in this exact department;
+    // "assignable" (the default, every other caller) requires the
+    // historical `project.assignable` permission. Whichever rule applies,
+    // every id is still independently re-validated server-side — the
+    // client's own eligibilitySource choice only selects WHICH check runs,
+    // never whether one runs at all.
     if (memberIds.length > 0) {
-      for (const userId of memberIds) {
-        const assignable = await userHasAssignablePermissionForEntity(userId, "project", deptResolution.departmentId);
-        if (!assignable) {
+      if (memberEligibilitySource === "workspaceMembership") {
+        const validatedMemberIds = await resolveActiveDepartmentMemberIds(deptResolution.departmentId, memberIds);
+        if (validatedMemberIds === null) {
           return NextResponse.json(
-            { error: "One or more selected members cannot be assigned to projects in this department.", code: "assignee_not_assignable" },
+            { error: "One or more selected members are not active members of this workspace.", code: "assignee_not_assignable" },
             { status: 400 }
           );
+        }
+      } else {
+        for (const userId of memberIds) {
+          const assignable = await userHasAssignablePermissionForEntity(userId, "project", deptResolution.departmentId);
+          if (!assignable) {
+            return NextResponse.json(
+              { error: "One or more selected members cannot be assigned to projects in this department.", code: "assignee_not_assignable" },
+              { status: 400 }
+            );
+          }
         }
       }
     }
@@ -132,6 +154,14 @@ export async function POST(req: NextRequest) {
         ...rest,
         departmentId: deptResolution.departmentId,
         ownerId: session.user.id,
+        // Mirrors the single canonical owner into the authoritative
+        // multi-owner relation too — see Project.owners' own schema doc
+        // comment for why this invariant ("owners always contains
+        // ownerId") holds for every Project, manual or request-origin.
+        // Purely internal consistency: nothing about normal/manual Project
+        // behavior changes — no UI, no permission check, reads this
+        // relation differently for a manual Project.
+        owners: { connect: [{ id: session.user.id }] },
         startDate: startDate ? new Date(startDate) : undefined,
         endDate: endDate ? new Date(endDate) : undefined,
         members: memberIds.length

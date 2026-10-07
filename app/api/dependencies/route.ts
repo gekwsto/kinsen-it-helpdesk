@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { isAdmin } from "@/lib/permissions";
+import { hasPermission } from "@/lib/permissions";
 import { buildActivityListWhere, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { createDependencySchema } from "@/lib/validations";
 
@@ -53,11 +53,15 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/dependencies
-// Admin-only: create a new dependency with cycle detection
+// Gated by its own dedicated `activity.dependency.manage` permission (GLOBAL
+// role/custom-role grant — dependencies have no departmentId of their own,
+// see ActivityDependency in prisma/schema.prisma) — not bare Role.ADMIN:
+// create a new dependency with cycle detection.
 export async function POST(req: NextRequest) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  if (!isAdmin(session.user.role)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+  const allowed = await hasPermission(session.user.role, "activity.dependency.manage", session.user.customRoleId);
+  if (!allowed) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
   const body = await req.json();
   const parsed = createDependencySchema.safeParse(body);

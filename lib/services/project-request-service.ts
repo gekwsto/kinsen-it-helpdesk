@@ -426,9 +426,28 @@ export type CreateProjectFromRequestError =
   | { code: "forbidden" }
   | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
   | { code: "invalid_project_owner" }
+  | { code: "invalid_audience" }
   | { code: "invalid_expense_type" }
   | { code: "invalid_sub_department" }
   | { code: "invalid_member" };
+
+/**
+ * Validates a set of user ids for Owner(s)/Audience — deliberately NEVER
+ * Department/Workspace-scoped, unlike Members' own
+ * userHasAssignablePermissionForEntity: both are explicitly "ANY active
+ * user in the entire system" per this feature's own spec (no requirement
+ * the user belongs to the Project's department, holds any particular
+ * permission, or is already a Member). Deduplicates, rejects blank
+ * entries, and returns null if ANY id doesn't resolve to a real, currently
+ * active User — never silently drops an invalid one and proceeds with the
+ * rest (fail closed, same philosophy as the Member-eligibility loop below).
+ */
+async function resolveSystemWideActiveUserIds(ids: string[]): Promise<string[] | null> {
+  const deduped = Array.from(new Set(ids.map((id) => id.trim()).filter((id) => id.length > 0)));
+  if (deduped.length === 0) return deduped;
+  const activeCount = await prisma.user.count({ where: { id: { in: deduped }, isActive: true } });
+  return activeCount === deduped.length ? deduped : null;
+}
 
 export type CreateProjectFromRequestResult =
   | { ok: true; projectId: string; alreadyExisted: boolean }
@@ -488,8 +507,18 @@ export async function createProjectFromApprovedRequest(
     return { ok: true, projectId: existing.project.id, alreadyExisted: true };
   }
 
-  const ownerValid = await userHasAssignablePermissionForEntity(data.projectOwnerId, "project", existing.departmentId);
-  if (!ownerValid) return { ok: false, error: { code: "invalid_project_owner" } };
+  // System-wide, NEVER Department-scoped — see resolveSystemWideActiveUserIds'
+  // own doc comment. At least one Owner is required; ownerIds[0] becomes
+  // the canonical Project.ownerId below (the FIRST explicitly-selected
+  // owner — never auto-derived, never the requester/approver/creator by
+  // default).
+  const ownerIds = await resolveSystemWideActiveUserIds(data.ownerIds);
+  if (!ownerIds || ownerIds.length === 0) return { ok: false, error: { code: "invalid_project_owner" } };
+
+  // Audience is optional (zero or more) — an empty array is valid; only a
+  // genuinely INVALID (non-existent/inactive) submitted id fails this.
+  const audienceIds = await resolveSystemWideActiveUserIds(data.audienceIds ?? []);
+  if (audienceIds === null) return { ok: false, error: { code: "invalid_audience" } };
 
   const expenseType = await prisma.projectExpenseType.findUnique({ where: { id: data.expenseTypeId }, select: { id: true, isActive: true } });
   if (!expenseType || !expenseType.isActive) return { ok: false, error: { code: "invalid_expense_type" } };
@@ -537,7 +566,22 @@ export async function createProjectFromApprovedRequest(
         departmentId: existing.departmentId,
         subDepartmentId: data.subDepartmentId ?? undefined,
         businessUnitId: data.businessUnitId,
-        ownerId: data.projectOwnerId,
+        // The canonical/primary owner — the FIRST of the creator's
+        // explicitly-selected Owner(s), never auto-derived (see
+        // Project.ownerId's own schema doc comment).
+        ownerId: ownerIds[0],
+        // The AUTHORITATIVE full Owner set for this request-origin Project
+        // — see Project.owners' own schema doc comment. Always includes
+        // ownerIds[0] (it's the same array), so "owners always contains
+        // ownerId" holds here too, same as the backfilled invariant for
+        // every pre-existing Project.
+        owners: { connect: ownerIds.map((id) => ({ id })) },
+        // Optional — zero or more system-wide users who may follow this
+        // Project's progress without being a Member or an Owner. Never
+        // Members (deliberately a separate relation — see
+        // hasProjectViewAccess, lib/services/project-access-service.ts,
+        // for the ONLY effect Audience membership has).
+        audience: audienceIds.length ? { connect: audienceIds.map((id) => ({ id })) } : undefined,
         startDate: data.startDate ? new Date(data.startDate) : undefined,
         endDate: data.endDate ? new Date(data.endDate) : undefined,
         successTarget: data.successTarget,

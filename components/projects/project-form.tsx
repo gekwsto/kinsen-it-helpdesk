@@ -24,6 +24,7 @@ import { ProjectStatus } from "@prisma/client";
 import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
 import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
+import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
 
 interface AssignableUser {
   id: string;
@@ -149,7 +150,15 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   // different zod schemas). Client-side checks below are a UX convenience
   // only — createProjectFromRequestSchema at the server boundary is the
   // real authority. ───
-  const [projectOwnerId, setProjectOwnerId] = useState("");
+  // Owner(s) and Audience are BOTH system-wide (never Department-scoped,
+  // unlike Members' own `assignableUsers`) — fed from the plain
+  // `GET /api/users` endpoint (every active user, no `assignableFor`
+  // narrowing), a completely separate fetch/list from assignableUsers.
+  const [systemWideUsers, setSystemWideUsers] = useState<AssignableUser[]>([]);
+  const [selectedOwnerIds, setSelectedOwnerIds] = useState<Set<string>>(new Set());
+  const [selectedAudienceIds, setSelectedAudienceIds] = useState<Set<string>>(new Set());
+  const [ownerSearch, setOwnerSearch] = useState("");
+  const [audienceSearch, setAudienceSearch] = useState("");
   const [expectedStartDate, setExpectedStartDate] = useState("");
   const [expectedFinishDate, setExpectedFinishDate] = useState("");
   const [expenseTypeId, setExpenseTypeId] = useState("");
@@ -170,6 +179,45 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
       .then((types) => setExpenseTypes(Array.isArray(types) ? types : []))
       .catch(() => {});
   }, [fromRequest]);
+
+  // Fetched ONCE (not re-fetched on department change, unlike
+  // assignableUsers below) — Owner(s)/Audience eligibility never depends on
+  // the selected workspace at all, per this feature's own spec ("no
+  // Department restriction, no Workspace restriction").
+  useEffect(() => {
+    if (!fromRequest) return;
+    fetch("/api/users")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((users) => setSystemWideUsers(Array.isArray(users) ? users : []))
+      .catch(() => {});
+  }, [fromRequest]);
+
+  const toggleOwner = (userId: string) => {
+    setSelectedOwnerIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
+  const toggleAudienceMember = (userId: string) => {
+    setSelectedAudienceIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
+  const ownerSearchResults = useMemo(() => {
+    const q = ownerSearch.trim().toLowerCase();
+    if (!q) return systemWideUsers;
+    return systemWideUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  }, [systemWideUsers, ownerSearch]);
+  const audienceSearchResults = useMemo(() => {
+    const q = audienceSearch.trim().toLowerCase();
+    if (!q) return systemWideUsers;
+    return systemWideUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  }, [systemWideUsers, audienceSearch]);
 
   // Reports "safe to silently dismiss the dialog right now" to the inline
   // dialog shell — locked from the moment creation succeeded WITH
@@ -218,13 +266,60 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
 
   // Eligible members depend on the selected workspace — re-fetched whenever
   // it changes, not loaded once and filtered in the browser.
+  //
+  // standalone (manual Project creation, the ONLY mode this branch applies
+  // to): Members means "active users who belong to the selected Workspace/
+  // Department" — the plain DepartmentMembership relation itself, via
+  // GET /api/departments/[id]/members, with NO project.view/project.edit/
+  // project.assignable/admin permission filtering layered on top (that
+  // permission-based notion is a DIFFERENT concept — "who can be assigned
+  // project work" — see getAssignableUsersForEntity's own doc comment).
+  // With no Workspace selected yet there is no membership to show at all —
+  // never system-wide users.
+  //
+  // inline/fromRequest keep the PRE-EXISTING, unchanged, permission-based
+  // `assignableFor=project` eligibility: inline is a separate embedded form
+  // (ticket-linking dialog) outside this task's scope, and fromRequest's
+  // own Members rule is explicitly unchanged by the Owner(s)/Audience
+  // feature (see scripts/test-project-request-project-creation.ts's own
+  // "Members stays Department-scoped" contrast check).
   useEffect(() => {
-    const url = `/api/users?assignableFor=project${departmentId ? `&departmentId=${departmentId}` : ""}`;
-    fetch(url)
+    if (inline || fromRequest) {
+      const url = `/api/users?assignableFor=project${departmentId ? `&departmentId=${departmentId}` : ""}`;
+      fetch(url)
+        .then((r) => (r.ok ? r.json() : []))
+        .then((users) => setAssignableUsers(Array.isArray(users) ? users : []))
+        .catch(() => {});
+      return;
+    }
+    if (!departmentId) {
+      setAssignableUsers([]);
+      return;
+    }
+    fetch(`/api/departments/${departmentId}/members`)
       .then((r) => (r.ok ? r.json() : []))
       .then((users) => setAssignableUsers(Array.isArray(users) ? users : []))
-      .catch(() => {});
-  }, [departmentId]);
+      .catch(() => setAssignableUsers([]));
+  }, [departmentId, inline, fromRequest]);
+
+  // Switching Workspace (standalone only) invalidates any previously
+  // selected Members — the old Workspace's members aren't implicitly valid
+  // for the new one, so the selection is reset rather than silently carried
+  // over as a now-stale memberId the user never re-confirmed. A no-op for
+  // inline/fromRequest, whose departmentId is fixed for the form's whole
+  // lifetime anyway.
+  useEffect(() => {
+    if (inline || fromRequest) return;
+    setSelectedMemberIds(new Set());
+    setValue("memberIds", []);
+  }, [departmentId, inline, fromRequest, setValue]);
+
+  const [memberSearch, setMemberSearch] = useState("");
+  const memberSearchResults = useMemo(() => {
+    const q = memberSearch.trim().toLowerCase();
+    if (!q) return assignableUsers;
+    return assignableUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  }, [assignableUsers, memberSearch]);
 
   // Sub-departments are scoped to the selected workspace — cleared and
   // re-fetched whenever the workspace changes, since a sub-department from
@@ -266,7 +361,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
     // every one of these regardless. Budget/Estimated Cost/Actual Cost are
     // no longer among them — none is a user-entered field any more.
     if (fromRequest) {
-      if (!projectOwnerId) return toast.error("Select who should own this Project.");
+      if (selectedOwnerIds.size === 0) return toast.error("Select at least one Owner for this Project.");
       if (!expectedStartDate || !expectedFinishDate) return toast.error("Expected Start and Finish dates are required.");
       if (new Date(expectedFinishDate) < new Date(expectedStartDate)) return toast.error("Expected Finish Date cannot be before Expected Start Date.");
       if (!expenseTypeId) return toast.error("Select an Expense Type.");
@@ -286,13 +381,26 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
           ? {
               ...restData,
               memberIds: Array.from(selectedMemberIds),
-              projectOwnerId,
+              ownerIds: Array.from(selectedOwnerIds),
+              audienceIds: Array.from(selectedAudienceIds),
               expectedStartDate,
               expectedFinishDate,
               expenseTypeId,
               external,
             }
-          : { ...restData, departmentId: effectiveDepartmentId, memberIds: Array.from(selectedMemberIds) };
+          : {
+              ...restData,
+              departmentId: effectiveDepartmentId,
+              memberIds: Array.from(selectedMemberIds),
+              // Tells POST /api/projects which Member-eligibility rule to
+              // enforce (see createProjectMemberEligibilitySchema's own doc
+              // comment in lib/validations.ts) — "workspaceMembership" only
+              // for standalone, whose Members picker above is itself now
+              // Workspace-membership-based; inline (ticket-linking) keeps
+              // sending "assignable", preserving its own pre-existing,
+              // permission-based eligibility untouched.
+              memberEligibilitySource: inline ? "assignable" : "workspaceMembership",
+            };
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -430,21 +538,11 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             <Label>
               Workspace <span className="text-destructive">*</span>
             </Label>
-            <Select
+            <WorkspaceCombobox
+              workspaces={departments}
               value={departmentId ?? ""}
-              onValueChange={(v) => setValue("departmentId", v, { shouldValidate: true })}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Choose a workspace…" />
-              </SelectTrigger>
-              <SelectContent>
-                {departments.map((d) => (
-                  <SelectItem key={d.id} value={d.id}>
-                    {d.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={(id) => setValue("departmentId", id, { shouldValidate: true })}
+            />
             <p className="text-xs text-muted-foreground">
               This project will belong to the selected workspace.
             </p>
@@ -530,23 +628,86 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="project-owner">
-                  Project Owner <span className="text-destructive">*</span>
+                <Label htmlFor="project-owners">
+                  Owner(s) <span className="text-destructive">*</span>
                 </Label>
-                <Select value={projectOwnerId} onValueChange={setProjectOwnerId}>
-                  <SelectTrigger id="project-owner">
-                    <SelectValue placeholder="Select an owner…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {assignableUsers.map((u) => (
-                      <SelectItem key={u.id} value={u.id}>
-                        {u.name ?? u.email}
-                      </SelectItem>
+                <p id="project-owners-helper" className="text-xs text-muted-foreground">
+                  Any active user in the system — not limited to this department. At least one is required.
+                </p>
+                <Input
+                  placeholder="Search by name or email…"
+                  value={ownerSearch}
+                  onChange={(e) => setOwnerSearch(e.target.value)}
+                  className="h-8 text-sm"
+                />
+                {systemWideUsers.length > 0 ? (
+                  <div
+                    id="project-owners"
+                    role="group"
+                    aria-describedby="project-owners-helper"
+                    className="border rounded-md divide-y max-h-48 overflow-y-auto"
+                  >
+                    {ownerSearchResults.map((u) => (
+                      <label
+                        key={u.id}
+                        className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded"
+                          checked={selectedOwnerIds.has(u.id)}
+                          onChange={() => toggleOwner(u.id)}
+                        />
+                        <span className="text-sm">{u.name ?? u.email}</span>
+                      </label>
                     ))}
-                  </SelectContent>
-                </Select>
-                {assignableUsers.length === 0 && (
-                  <p className="text-xs text-destructive">No one in this department can currently own a Project. Contact an administrator.</p>
+                    {ownerSearchResults.length === 0 && (
+                      <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{ownerSearch}&quot;.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-destructive border rounded-md px-3 py-2">No active users exist. Contact an administrator.</p>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="project-audience">Audience</Label>
+                <p id="project-audience-helper" className="text-xs text-muted-foreground">
+                  Optional — users who should be able to follow this Project&apos;s progress without being a Member or an Owner. Any active user in the system.
+                </p>
+                <Input
+                  placeholder="Search by name or email…"
+                  value={audienceSearch}
+                  onChange={(e) => setAudienceSearch(e.target.value)}
+                  className="h-8 text-sm"
+                />
+                {systemWideUsers.length > 0 ? (
+                  <div
+                    id="project-audience"
+                    role="group"
+                    aria-describedby="project-audience-helper"
+                    className="border rounded-md divide-y max-h-48 overflow-y-auto"
+                  >
+                    {audienceSearchResults.map((u) => (
+                      <label
+                        key={u.id}
+                        className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded"
+                          checked={selectedAudienceIds.has(u.id)}
+                          onChange={() => toggleAudienceMember(u.id)}
+                        />
+                        <span className="text-sm">{u.name ?? u.email}</span>
+                      </label>
+                    ))}
+                    {audienceSearchResults.length === 0 && (
+                      <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{audienceSearch}&quot;.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
                 )}
               </div>
 
@@ -681,29 +842,50 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
           <div className="space-y-2">
             <Label>Members</Label>
             <p className="text-xs text-muted-foreground">
-              Only users eligible for this workspace are listed.
+              {!inline && !fromRequest
+                ? "Active users who belong to the selected workspace."
+                : "Only users eligible for this workspace are listed."}
             </p>
-            {assignableUsers.length > 0 ? (
-              <div className="border rounded-md divide-y max-h-48 overflow-y-auto">
-                {assignableUsers.map((u) => (
-                  <label
-                    key={u.id}
-                    className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 rounded"
-                      checked={selectedMemberIds.has(u.id)}
-                      onChange={() => toggleMember(u.id)}
-                    />
-                    <span className="text-sm">{u.name ?? u.email}</span>
-                  </label>
-                ))}
-              </div>
-            ) : (
+            {!inline && !fromRequest && !departmentId ? (
               <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">
-                No eligible users for this workspace yet.
+                Select a workspace to see its members.
               </p>
+            ) : (
+              <>
+                {!inline && !fromRequest && assignableUsers.length > 0 && (
+                  <Input
+                    placeholder="Search members by name or email…"
+                    value={memberSearch}
+                    onChange={(e) => setMemberSearch(e.target.value)}
+                    className="h-8 text-sm"
+                  />
+                )}
+                {assignableUsers.length > 0 ? (
+                  <div className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                    {memberSearchResults.map((u) => (
+                      <label
+                        key={u.id}
+                        className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                      >
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 rounded"
+                          checked={selectedMemberIds.has(u.id)}
+                          onChange={() => toggleMember(u.id)}
+                        />
+                        <span className="text-sm">{u.name ?? u.email}</span>
+                      </label>
+                    ))}
+                    {memberSearchResults.length === 0 && (
+                      <p className="text-xs text-muted-foreground px-3 py-2">No members match &quot;{memberSearch}&quot;.</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">
+                    No eligible users for this workspace yet.
+                  </p>
+                )}
+              </>
             )}
           </div>
 
@@ -717,6 +899,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                 ? "You don't have permission to attach files to a Project in this department."
                 : "You don't have permission to attach files to a Project in the selected workspace."
             }
+            neutralMessage={!inline && !fromRequest ? "Select a workspace to enable project attachments." : undefined}
           />
 
           <div className="flex justify-end gap-3 pt-2">

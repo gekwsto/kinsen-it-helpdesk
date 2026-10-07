@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { createNoteSchema } from "@/lib/validations";
 import { resolveEligibleMentionUsers } from "@/lib/services/mention-service";
 import {
@@ -30,17 +31,15 @@ export async function GET(
 
     const project = await prisma.project.findUnique({
       where: { id },
-      select: { id: true, departmentId: true },
+      select: { id: true, departmentId: true, projectRequestId: true },
     });
     if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    // Same department-aware visibility rule the Project detail page itself
-    // uses — read access to Notes follows project.view, no separate
-    // `project.note` permission is introduced.
-    // hasEffectiveEntityPermission (global grant OR this entity's own department
-    // grant) — bare canActOnEntity ignored a global role/custom-role project.view.
-    // Department is the real row's, never the workspace or the client.
-    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
+    // Same visibility rule the Project detail page itself uses — read
+    // access to Notes follows project.view (Department-scoped), OR —
+    // request-origin only — an explicitly-selected Owner/Audience user.
+    // No separate `project.note` permission is introduced.
+    const canView = await hasProjectViewAccess(session.user.id, session.user.role, session.user.customRoleId, project);
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const notes = await prisma.projectNote.findMany({

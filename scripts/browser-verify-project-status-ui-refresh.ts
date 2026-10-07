@@ -114,7 +114,7 @@ async function main() {
     await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
-      jsonReq({ title: `${TAG} request`, description: "fixture", projectOwnerId: admin.id, expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-05", expenseTypeId: expenseType.id }),
+      jsonReq({ title: `${TAG} request`, description: "fixture", ownerIds: [admin.id], expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-05", expenseTypeId: expenseType.id }),
       { params: Promise.resolve({ id: submitted.id }) }
     );
     const project = await setupRes.json();

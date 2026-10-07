@@ -1,6 +1,7 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -39,6 +40,12 @@ export default async function ProjectDetailPage({
     where: { id },
     include: {
       owner: { select: { id: true, name: true, email: true, image: true } },
+      // Request-origin Projects only (always empty for a manual one except
+      // `owners`, which always mirrors the single `owner` above — see both
+      // relations' own schema doc comments) — rendered in the Project
+      // Request Setup card below, never on a manual Project.
+      owners: { select: { id: true, name: true, email: true, image: true } },
+      audience: { select: { id: true, name: true, email: true, image: true } },
       department: { select: { id: true, name: true } },
       businessUnit: { select: { id: true, name: true } },
       members: { select: { id: true, name: true, email: true, image: true } },
@@ -57,12 +64,13 @@ export default async function ProjectDetailPage({
 
   if (!project) notFound();
 
-  // Department-scoped, not just "can this role ever view projects" — this
-  // page previously had no per-project check at all beyond that global gate.
-  // hasEffectiveEntityPermission (global grant OR this entity's own department
-  // grant) — bare canActOnEntity ignored a global role/custom-role project.view.
-  // Department is the real row's, never the workspace or the client.
-  const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
+  // Department-scoped (global grant OR this Project's own Department
+  // grant), OR — for a request-origin Project only — an explicitly-
+  // selected Owner/Audience user, who may hold no Department permission
+  // here at all (both are system-wide, see hasProjectViewAccess's own doc
+  // comment). Still never grants project.edit/project.delete — those stay
+  // exactly the Department-scoped checks below, completely untouched.
+  const canView = await hasProjectViewAccess(session.user.id, session.user.role, session.user.customRoleId, project);
   if (!canView) redirect("/dashboard");
 
   // project.edit — computed server-side and passed down as a boolean, used
@@ -348,6 +356,55 @@ export default async function ProjectDetailPage({
                   {project.projectRequest.title}
                 </Link>
               </div>
+
+              {/* Owner(s) — the authoritative full set (project.owners),
+                  never just the single canonical project.owner — a
+                  request-origin Project's real owner set may have more
+                  than one explicitly-selected user. Distinct from Members
+                  below: an Owner is never implicitly a Member. */}
+              <Separator />
+              <div>
+                <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                  <Users className="h-3 w-3" /> Owner{project.owners.length === 1 ? "" : "(s)"}
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {project.owners.map((o) => (
+                    <div key={o.id} className="flex items-center gap-1.5 text-xs">
+                      <Avatar className="h-5 w-5">
+                        <AvatarImage src={o.image ?? undefined} />
+                        <AvatarFallback className="text-[9px]">{getInitials(o.name)}</AvatarFallback>
+                      </Avatar>
+                      {o.name}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Audience — optional, zero or more; distinct from both
+                  Owner(s) above and Members below. Only ever rendered when
+                  non-empty, same "no empty placeholder" convention Members
+                  already uses. */}
+              {project.audience.length > 0 && (
+                <>
+                  <Separator />
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                      <Users className="h-3 w-3" /> Audience
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {project.audience.map((a) => (
+                        <div key={a.id} className="flex items-center gap-1.5 text-xs">
+                          <Avatar className="h-5 w-5">
+                            <AvatarImage src={a.image ?? undefined} />
+                            <AvatarFallback className="text-[9px]">{getInitials(a.name)}</AvatarFallback>
+                          </Avatar>
+                          {a.name}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
 
               {(project.expectedStartDate || project.expectedFinishDate) && (
                 <>

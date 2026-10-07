@@ -4,6 +4,7 @@ import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { isSafeStoredFilename, resolvesInsideDir, entityAttachmentDir } from "@/lib/attachment-policy";
 
 function projectUploadDir(projectId: string): string {
@@ -29,14 +30,13 @@ export async function GET(
 
     const project = await prisma.project.findUnique({
       where: { id: projectId },
-      select: { departmentId: true },
+      select: { departmentId: true, projectRequestId: true },
     });
     if (!project) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    // hasEffectiveEntityPermission (global grant OR this entity's own department
-    // grant) — bare canActOnEntity ignored a global role/custom-role project.view.
-    // Department is the real row's, never the workspace or the client.
-    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
+    // Department-scoped, OR (request-origin only) an explicitly-selected
+    // Owner/Audience user — see hasProjectViewAccess's own doc comment.
+    const canView = await hasProjectViewAccess(session.user.id, session.user.role, session.user.customRoleId, { id: projectId, ...project });
     if (!canView) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const attachment = await prisma.projectAttachment.findUnique({ where: { id: attachmentId } });

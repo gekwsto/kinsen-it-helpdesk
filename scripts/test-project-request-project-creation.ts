@@ -102,7 +102,7 @@ async function main() {
   const basePayload = {
     title: "A valid title",
     description: "A description.",
-    projectOwnerId: "cmx0000000000000000000001",
+    ownerIds: ["cmx0000000000000000000001"],
     expectedStartDate: "2026-10-01",
     expectedFinishDate: "2026-10-05",
     expenseTypeId: "cmx0000000000000000000002",
@@ -299,7 +299,8 @@ async function main() {
       description: "Setup description.",
       memberIds: [],
       isGoal: false,
-      projectOwnerId: ownerUser.id,
+      ownerIds: [ownerUser.id],
+      audienceIds: [],
       expectedStartDate: "2026-10-01",
       expectedFinishDate: "2026-10-05",
       expenseTypeId: expenseTypeActiveId,
@@ -413,12 +414,27 @@ async function main() {
     if (raceABody.id) projectIds.push(raceABody.id);
 
     // ══════════════════════ 17/18/19/20/21. Field mapping & department authority ══════════════════════
-    console.log("\n=== 17/18/19/20/21. Field mapping, department authority, owner department-scoping ===\n");
+    console.log("\n=== 17/18/19/20/21. Field mapping, department authority, Owner(s) are system-wide (NOT department-scoped) ===\n");
+
+    // A DEDICATED request (never mappingRequest below — createProjectFromApprovedRequest
+    // is idempotent per-request, one Project per request forever, so this
+    // must not consume mappingRequest's own single setup slot).
+    const crossDeptOwnerRequest = await submitThrough(`PR Creation CrossDeptOwner ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    // REVISED per this feature's own spec: Owner(s) are explicitly "ANY
+    // active user in the entire system" — no Department restriction at
+    // all. An owner from a completely DIFFERENT department (otherDeptOwnerUser,
+    // who holds no permission in `dept` whatsoever) must be ACCEPTED, not
+    // rejected — the exact opposite of this test's old assertion.
+    const crossDeptOwnerRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: crossDeptOwnerRequest.title, ownerIds: [otherDeptOwnerUser.id] }), { params: Promise.resolve({ id: crossDeptOwnerRequest.id }) });
+    check("21. An owner from a COMPLETELY DIFFERENT department (no permission in this one at all) -> 201, accepted (Owner(s) are system-wide, never Department-scoped)", crossDeptOwnerRes.status === 201);
+    const crossDeptOwnerBody = await crossDeptOwnerRes.json();
+    if (crossDeptOwnerBody.id) projectIds.push(crossDeptOwnerBody.id);
+    const crossDeptOwnerProject = crossDeptOwnerBody.id ? await prisma.project.findUnique({ where: { id: crossDeptOwnerBody.id }, select: { ownerId: true } }) : null;
+    check("...and that cross-department user really did become the Project's canonical owner", crossDeptOwnerProject?.ownerId === otherDeptOwnerUser.id);
+
     const mappingRequest = await submitThrough(`PR Creation Mapping ${RUN_ID}`, "approve", finalApprover);
     currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
-
-    const wrongDeptOwnerRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: mappingRequest.title, projectOwnerId: otherDeptOwnerUser.id }), { params: Promise.resolve({ id: mappingRequest.id }) });
-    check("21. An owner who is project.assignable in a DIFFERENT department -> 422 invalid_project_owner (department-scoped, not global-by-accident)", wrongDeptOwnerRes.status === 422);
 
     // Forged departmentId in the raw body — not even a field on the schema,
     // so it's silently stripped; the server never reads it from the client
@@ -662,7 +678,7 @@ async function main() {
         expectedStartDate: "2026-01-01",
         expectedFinishDate: "2026-01-02",
         budget: 999999,
-        projectOwnerId: ownerUser.id,
+        ownerIds: [ownerUser.id],
       } as any)
     );
     check("36. The forged payload still succeeds as an ORDINARY manual Project -> 201 (the extra keys are simply stripped, not an error)", forgedManualRes.status === 201);
@@ -726,6 +742,101 @@ async function main() {
     const viewerCanEdit = await hasEffectiveEntityPermission(viewerOnlyUser.id, Role.USER, null, dept.id, "project.edit");
     check("8. An authorized user (project.edit) -> canEditProject is true, so the pencil/Edit control renders", adminCanEdit === true);
     check("9. An unauthorized user (view-only) -> canEditProject is false, so the pencil/Edit control does NOT render", viewerCanEdit === false);
+
+    // ══════════════════════ Owner(s) + Audience — the new feature's own acceptance criteria ══════════════════════
+    console.log("\n=== Owner(s) + Audience: multi-owner, system-wide eligibility, independent persistence, view-only authorization ===\n");
+    const { hasProjectViewAccess } = await import("@/lib/services/project-access-service");
+
+    // expenseTypeActiveId was deactivated earlier (check 39, "an
+    // already-referencing Project keeps displaying a since-deactivated
+    // one") — validSetupPayload()'s default expenseTypeId is no longer
+    // usable for a NEW setup from this point on, so every call below
+    // overrides it with this section's own freshly-created, still-active one.
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const freshExpenseType = await expenseTypesAdminPOST(jsonReq({ name: `PR Creation Owners/Audience ExpenseType ${RUN_ID}` }));
+    const freshExpenseTypeBody = await freshExpenseType.json();
+    expenseTypeIds.push(freshExpenseTypeBody.id);
+    const freshExpenseTypeId: string = freshExpenseTypeBody.id;
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+
+    // Users with ZERO department membership anywhere — proves Owner(s)/
+    // Audience genuinely need no department tie at all, not just "a
+    // DIFFERENT department" (already proven at check 21 above).
+    const secondOwnerNoMembership = await makeUser(`pr-creation-secondowner-nomembership-${RUN_ID}@kinsen.gr`);
+    const audienceNoMembership1 = await makeUser(`pr-creation-audience1-${RUN_ID}@kinsen.gr`);
+    const audienceNoMembership2 = await makeUser(`pr-creation-audience2-${RUN_ID}@kinsen.gr`);
+    const inactiveUser = await prisma.user.create({ data: { email: `pr-creation-inactive-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: false } });
+    userIds.push(inactiveUser.id);
+
+    const multiRequest = await submitThrough(`PR Creation Multi ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+
+    console.log("\n-- 4/14. Submission without any Owner is rejected server-side --\n");
+    const noOwnerRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: multiRequest.title, expenseTypeId: freshExpenseTypeId, ownerIds: [] }), { params: Promise.resolve({ id: multiRequest.id }) });
+    check("4. ownerIds: [] (no Owner at all) -> rejected (422, Zod min(1) validation_failed)", noOwnerRes.status === 422);
+    check("...zero Project rows created by the rejected attempt", (await prisma.project.count({ where: { projectRequestId: multiRequest.id } })) === 0);
+
+    console.log("\n-- Invalid/inactive user ids in ownerIds/audienceIds are rejected, never silently dropped --\n");
+    const invalidOwnerRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: multiRequest.title, expenseTypeId: freshExpenseTypeId, ownerIds: [ownerUser.id, inactiveUser.id] }), { params: Promise.resolve({ id: multiRequest.id }) });
+    check("An INACTIVE user among ownerIds -> 422 invalid_project_owner (fails closed, never silently drops just that one)", invalidOwnerRes.status === 422);
+    const invalidOwnerRes2 = await setupPOST(jsonReq({ ...validSetupPayload(), title: multiRequest.title, expenseTypeId: freshExpenseTypeId, ownerIds: ["cmnonexistentuser00000000000"] }), { params: Promise.resolve({ id: multiRequest.id }) });
+    check("A NON-EXISTENT user id among ownerIds -> 422 invalid_project_owner", invalidOwnerRes2.status === 422);
+    const invalidAudienceRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: multiRequest.title, expenseTypeId: freshExpenseTypeId, audienceIds: [inactiveUser.id] }), { params: Promise.resolve({ id: multiRequest.id }) });
+    check("An INACTIVE user among audienceIds -> 422 invalid_audience", invalidAudienceRes.status === 422);
+    check("...none of the three rejected attempts created a Project", (await prisma.project.count({ where: { projectRequestId: multiRequest.id } })) === 0);
+
+    console.log("\n-- 1/2/3/5/6/7. Multiple Owners (incl. a user with NO department membership anywhere) + Audience, duplicates deduplicated --\n");
+    const multiRes = await setupPOST(
+      jsonReq({
+        ...validSetupPayload(),
+        title: multiRequest.title,
+        expenseTypeId: freshExpenseTypeId,
+        // Duplicate id included deliberately — must be deduplicated, never
+        // stored twice / never rejected for "being a duplicate".
+        ownerIds: [ownerUser.id, secondOwnerNoMembership.id, ownerUser.id],
+        audienceIds: [audienceNoMembership1.id, audienceNoMembership2.id],
+      }),
+      { params: Promise.resolve({ id: multiRequest.id }) }
+    );
+    check("1/2. Multiple Owners, one with NO department membership anywhere -> 201, accepted", multiRes.status === 201);
+    const multiBody = await multiRes.json();
+    projectIds.push(multiBody.id);
+    const multiProject = await prisma.project.findUniqueOrThrow({
+      where: { id: multiBody.id },
+      include: { owners: { select: { id: true } }, audience: { select: { id: true } }, members: { select: { id: true } } },
+    });
+    check("5. No Owner was automatically assigned beyond what was explicitly submitted — ownerId is the FIRST explicitly-selected one, never the approver/requester/creator", multiProject.ownerId === ownerUser.id && multiProject.ownerId !== finalApprover.id && multiProject.ownerId !== requester.id);
+    check("6. Every selected Owner was explicitly chosen — the full owners set is EXACTLY {ownerUser, secondOwnerNoMembership}, no more, no fewer", multiProject.owners.length === 2 && multiProject.owners.some((o) => o.id === ownerUser.id) && multiProject.owners.some((o) => o.id === secondOwnerNoMembership.id));
+    check("...duplicate ownerId submitted twice was deduplicated, not stored twice", multiProject.owners.filter((o) => o.id === ownerUser.id).length === 1);
+    check("3/7. Audience persists independently — EXACTLY {audienceNoMembership1, audienceNoMembership2}", multiProject.audience.length === 2 && multiProject.audience.some((a) => a.id === audienceNoMembership1.id) && multiProject.audience.some((a) => a.id === audienceNoMembership2.id));
+    check("7. Audience is NOT Members — Members is empty here (none were submitted), completely independent of the Owner(s)/Audience sets", multiProject.members.length === 0);
+    check("...and Audience is NOT Owners either — zero overlap between the two sets for this Project", !multiProject.audience.some((a) => multiProject.owners.some((o) => o.id === a.id)));
+
+    console.log("\n-- 8/9. Every selected Owner (not just the primary) is recognized by hasProjectViewAccess; Audience gets the SAME read access but never project.edit --\n");
+    const multiProjectForAccess = { id: multiProject.id, departmentId: multiProject.departmentId, projectRequestId: multiProject.projectRequestId };
+    const primaryOwnerCanView = await hasProjectViewAccess(ownerUser.id, Role.USER, null, multiProjectForAccess);
+    const secondOwnerCanView = await hasProjectViewAccess(secondOwnerNoMembership.id, Role.USER, null, multiProjectForAccess);
+    check("8. The PRIMARY owner (ownerId) can view, via their own project.assignable grant (unchanged Department path)", primaryOwnerCanView === true);
+    check("8. The SECOND owner (NOT project.ownerId, no Department permission anywhere) can STILL view — the full `owners` set is recognized, not just the canonical ownerId", secondOwnerCanView === true);
+    const audienceCanView = await hasProjectViewAccess(audienceNoMembership1.id, Role.USER, null, multiProjectForAccess);
+    check("9. An Audience user (no Department permission anywhere) CAN view/follow the Project through the canonical authorization path", audienceCanView === true);
+    const audienceCanEdit = await hasEffectiveEntityPermission(audienceNoMembership1.id, Role.USER, null, multiProject.departmentId, "project.edit");
+    check("9. ...but that SAME Audience user does NOT gain project.edit merely from Audience membership — still governed by the unchanged, Department-scoped check", audienceCanEdit === false);
+    const secondOwnerCanEdit = await hasEffectiveEntityPermission(secondOwnerNoMembership.id, Role.USER, null, multiProject.departmentId, "project.edit");
+    check("...the second (non-canonical) Owner likewise does NOT get project.edit merely from being an Owner — ownership never implicitly grants mutation rights beyond the existing Department-scoped grant", secondOwnerCanEdit === false);
+
+    console.log("\n-- 11. A manual Project's hasProjectViewAccess behaves IDENTICALLY to the unchanged hasEffectiveEntityPermission — no bypass for a stranger --\n");
+    const strangerUser = await makeUser(`pr-creation-stranger-${RUN_ID}@kinsen.gr`);
+    const manualProjectForAccess = { id: manualProject.id, departmentId: manualProject.departmentId, projectRequestId: null };
+    const strangerDirectCheck = await hasEffectiveEntityPermission(strangerUser.id, Role.USER, null, manualProject.departmentId, "project.view");
+    const strangerViaWrapper = await hasProjectViewAccess(strangerUser.id, Role.USER, null, manualProjectForAccess);
+    check("11. A manual Project: hasProjectViewAccess === hasEffectiveEntityPermission for an uninvolved stranger (both false) — no Owner(s)/Audience bypass path exists for a manual Project", strangerDirectCheck === false && strangerViaWrapper === false && strangerDirectCheck === strangerViaWrapper);
+
+    console.log("\n-- Members stays Department-scoped (genuinely unchanged) — contrast with Owner(s)/Audience above --\n");
+    const crossDeptMemberRequest = await submitThrough(`PR Creation CrossDeptMember ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    const crossDeptMemberRes = await setupPOST(jsonReq({ ...validSetupPayload(), title: crossDeptMemberRequest.title, expenseTypeId: freshExpenseTypeId, memberIds: [otherDeptOwnerUser.id] }), { params: Promise.resolve({ id: crossDeptMemberRequest.id }) });
+    check("A Member candidate who is only project.assignable in a DIFFERENT department -> still 400 invalid_member (Members' own eligibility is genuinely UNCHANGED — the contrast that proves Owner(s)/Audience are a deliberate, scoped exception, not an accidental global loosening)", crossDeptMemberRes.status === 400);
   } finally {
     console.log("\nCleaning up test data...\n");
     await runCleanup([

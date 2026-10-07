@@ -73,7 +73,15 @@ async function main() {
   const listRoutePath = path.join(process.cwd(), "app/api/projects/[id]/attachments/route.ts");
   const listRouteSrc = await fs.readFile(listRoutePath, "utf8");
   check("A1. List (GET) requires authentication via requireAuth()", /requireAuth\s*\(/.test(listRouteSrc));
-  check("A2. List (GET) checks hasEffectiveEntityPermission(...) with 'project.view' (global grant OR the project's own department grant)", /hasEffectiveEntityPermission\([^)]*"project\.view"/.test(listRouteSrc));
+  // hasProjectViewAccess (lib/services/project-access-service.ts) — the
+  // canonical Project read gate as of the Owner(s)/Audience feature: wraps
+  // hasEffectiveEntityPermission(..., "project.view") as its FIRST branch
+  // (global grant OR the project's own department grant, byte-for-byte
+  // unchanged for any non-Owner/Audience caller), extended with a
+  // request-origin-only Owner(s)/Audience fallback. See that function's
+  // own doc comment for why this was never folded into
+  // hasEffectiveEntityPermission itself (shared by Tickets/Activities too).
+  check("A2. List (GET) checks hasProjectViewAccess(...) — the canonical Project read gate (wraps hasEffectiveEntityPermission's project.view union, extended for request-origin Owner(s)/Audience)", /hasProjectViewAccess\(/.test(listRouteSrc));
   check("A3. Upload (POST) checks hasEffectiveEntityPermission(...) with 'project.edit' (a stricter gate than list)", /hasEffectiveEntityPermission\([^)]*"project\.edit"/.test(listRouteSrc));
   check("A4. Upload reuses the shared attachment policy (MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, entityAttachmentDir) rather than inventing new constants", /from "@\/lib\/attachment-policy"/.test(listRouteSrc) && /entityAttachmentDir\("projects"/.test(listRouteSrc));
   check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("fs.writeFile"));
@@ -82,7 +90,7 @@ async function main() {
 
   const itemRoutePath = path.join(process.cwd(), "app/api/projects/[id]/attachments/[attachmentId]/route.ts");
   const itemRouteSrc = await fs.readFile(itemRoutePath, "utf8");
-  check("A7. Download (GET) checks hasEffectiveEntityPermission(...) with 'project.view' (same union as A2)", /hasEffectiveEntityPermission\([^)]*"project\.view"/.test(itemRouteSrc));
+  check("A7. Download (GET) checks hasProjectViewAccess(...) (same canonical read gate as A2)", /hasProjectViewAccess\(/.test(itemRouteSrc));
   check("A8. Delete (DELETE) checks hasEffectiveEntityPermission(...) with 'project.edit' (not project.view — write, not read)", /export async function DELETE/.test(itemRouteSrc) && /hasEffectiveEntityPermission\([^)]*"project\.edit"/.test(itemRouteSrc.slice(itemRouteSrc.indexOf("export async function DELETE"))));
   check("A9. Download applies the SAME path-traversal guards as the Activity/Ticket attachment download route (isSafeStoredFilename + resolvesInsideDir)", /isSafeStoredFilename/.test(itemRouteSrc) && /resolvesInsideDir/.test(itemRouteSrc));
   check("A10. Download validates the attachment row belongs to THIS projectId before serving (cross-project isolation)", /attachment\.projectId !== projectId/.test(itemRouteSrc));

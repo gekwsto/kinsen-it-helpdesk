@@ -171,6 +171,26 @@ export const createProjectSchema = z.object({
 
 export const updateProjectSchema = createProjectSchema.partial();
 
+// POST /api/projects ONLY — deliberately never merged into
+// createProjectSchema/updateProjectSchema itself (so PATCH /api/projects/[id]
+// never accepts or has to strip this field; see that route's own `rest`
+// spread straight into prisma.project.update, which has no matching
+// column). Selects which Member-eligibility RULE this request enforces —
+// never which users are actually accepted; every id is independently
+// re-validated against whichever rule applies, same as always.
+// "assignable" (the default — every pre-existing caller, in particular
+// inline/ticket-linking Project creation, keeps sending this implicitly by
+// simply omitting the field) preserves the historical `project.assignable`
+// permission check untouched. "workspaceMembership" is sent ONLY by the
+// standalone manual-creation form (components/projects/project-form.tsx),
+// whose Members picker is itself now Workspace-DepartmentMembership-based
+// (see GET /api/departments/[id]/members) — this keeps write-time
+// validation honest with what that UI actually offered, without touching
+// the semantics any other caller relies on.
+export const createProjectMemberEligibilitySchema = z.object({
+  memberEligibilitySource: z.enum(["assignable", "workspaceMembership"]).optional().default("assignable"),
+});
+
 // A plain number from the client — never trusted as-is for currency storage
 // without re-validating precision here: non-negative, at most 2 decimal
 // places (the refine check tolerates tiny floating-point representation
@@ -205,10 +225,16 @@ export const createProjectFromRequestSchema = createProjectSchema
   .omit({ departmentId: true })
   .extend({
     // The approver's own explicit choice of who should own the new
-    // Project — re-verified server-side (a real, active,
-    // project-assignable user for the request's own department) regardless
-    // of what the client sent.
-    projectOwnerId: z.string().trim().min(1, "Select who should own this Project."),
+    // Project — one or more, re-verified server-side (every id must be a
+    // real, active user — system-wide, NEVER Department-scoped, see
+    // resolveSystemWideActiveUserIds in project-request-service.ts)
+    // regardless of what the client sent. ownerIds[0] becomes the
+    // canonical Project.ownerId; the full array becomes Project.owners.
+    ownerIds: z.array(z.string().trim().min(1)).min(1, "Select at least one Owner."),
+    // Optional — zero or more users who may follow this Project's progress
+    // without being a Member or an Owner. Same system-wide (never
+    // Department-scoped) re-verification as ownerIds above.
+    audienceIds: z.array(z.string().trim().min(1)).default([]),
     expectedStartDate: z.string().min(1, "Expected Start Date is required."),
     expectedFinishDate: z.string().min(1, "Expected Finish Date is required."),
     // Server-computed only — expectedTotalInitialDays is deliberately NOT a

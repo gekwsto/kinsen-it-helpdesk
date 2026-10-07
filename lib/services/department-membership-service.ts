@@ -82,6 +82,58 @@ export async function getDepartmentMemberships(departmentId: string): Promise<De
   }));
 }
 
+export interface DepartmentMemberUserSummary {
+  id: string;
+  name: string | null;
+  email: string;
+  image: string | null;
+}
+
+/**
+ * Active users with an active DepartmentMembership in this department — the
+ * canonical membership relation itself, with NO permission filtering
+ * layered on top. Deliberately distinct from
+ * getAssignableUsersForEntity("project", departmentId) in
+ * lib/services/assignment-eligibility-service.ts, which additionally
+ * requires `project.assignable` (a narrower, separate notion — "can be
+ * assigned project WORK," e.g. deliberately withheld from AGENT_ASSIGNEE/
+ * IT_AGENT by default, see that permission's own seed comment). This is the
+ * eligibility source for a MANUAL Project's plain Members picker (see
+ * GET /api/departments/[id]/members, components/projects/project-form.tsx)
+ * — "who's in this workspace," full stop, not "who's allowed to be
+ * assigned work."
+ */
+export async function getActiveDepartmentMemberUsers(departmentId: string): Promise<DepartmentMemberUserSummary[]> {
+  return prisma.user.findMany({
+    where: { isActive: true, departmentMemberships: { some: { departmentId, isActive: true } } },
+    select: memberUserSelect,
+    orderBy: { name: "asc" },
+  });
+}
+
+/**
+ * Write-time counterpart to getActiveDepartmentMemberUsers above — never
+ * trusts a client-submitted memberId list as-is. Dedupes/trims first, then
+ * requires EVERY id to resolve to a real, currently-active User with an
+ * active DepartmentMembership in `departmentId` specifically (an id valid
+ * for some OTHER department is rejected same as a nonexistent one). Fails
+ * closed: returns `null` if any id doesn't resolve, the deduplicated array
+ * otherwise. Same "every id must be real" contract as
+ * resolveSystemWideActiveUserIds in project-request-service.ts, just
+ * scoped to one Department's membership instead of system-wide — used by
+ * POST /api/projects when (and only when) the request declares
+ * memberEligibilitySource: "workspaceMembership" (see
+ * createProjectMemberEligibilitySchema in lib/validations.ts).
+ */
+export async function resolveActiveDepartmentMemberIds(departmentId: string, ids: string[]): Promise<string[] | null> {
+  const deduped = Array.from(new Set(ids.map((id) => id.trim()).filter((id) => id.length > 0)));
+  if (deduped.length === 0) return deduped;
+  const activeCount = await prisma.user.count({
+    where: { id: { in: deduped }, isActive: true, departmentMemberships: { some: { departmentId, isActive: true } } },
+  });
+  return activeCount === deduped.length ? deduped : null;
+}
+
 export async function getMembership(userId: string, departmentId: string): Promise<DepartmentMembershipView | null> {
   // findFirst (not findUnique) because we need to additionally filter on the
   // related Department's isActive — findUnique only accepts the unique key

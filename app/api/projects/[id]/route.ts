@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasDepartmentPermission } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
@@ -81,10 +82,9 @@ export async function GET(
       return NextResponse.json({ error: "Not found" }, { status: 404 });
     }
 
-    // hasEffectiveEntityPermission (global grant OR this entity's own department
-    // grant) — bare canActOnEntity ignored a global role/custom-role project.view.
-    // Department is the real row's, never the workspace or the client.
-    const canView = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.view");
+    // Department-scoped, OR (request-origin only) an explicitly-selected
+    // Owner/Audience user — see hasProjectViewAccess's own doc comment.
+    const canView = await hasProjectViewAccess(session.user.id, session.user.role, session.user.customRoleId, project);
     if (!canView) {
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }

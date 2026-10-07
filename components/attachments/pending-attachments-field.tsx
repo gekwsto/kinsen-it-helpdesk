@@ -17,13 +17,27 @@ interface PendingAttachmentsFieldProps {
    * Server-computed only — this component never decides eligibility itself,
    * it just renders what the caller already determined via
    * hasEffectiveEntityPermission (see the two creation forms). `null` means
-   * "not yet resolvable" (e.g. no department chosen), `false` means
-   * "resolved, but this user cannot upload for the current selection" —
-   * both hide the picker; only `true` shows it.
+   * "not yet resolvable" (e.g. no department/workspace chosen), `false`
+   * means "resolved, but this user cannot upload for the current
+   * selection" — both hide the FILE PICKER itself; only `true` shows it.
+   * They are NOT the same for messaging purposes though — see
+   * unavailableMessage/neutralMessage below.
    */
   canUpload: boolean | null;
-  /** Shown in place of the picker when `canUpload` is false — e.g. "You don't have permission to attach files to a Project in this workspace." */
+  /**
+   * Shown in place of the picker when `canUpload` is `false` (resolved,
+   * denied) — e.g. "You don't have permission to attach files to a Project
+   * in this workspace." Never shown for `null` — a permission that hasn't
+   * been evaluated yet is not a denial (see neutralMessage).
+   */
   unavailableMessage?: string;
+  /**
+   * Shown in place of the picker when `canUpload` is `null` (not yet
+   * resolvable — e.g. no workspace selected) — e.g. "Select a workspace to
+   * enable project attachments." Omit to render nothing for this state
+   * (the pre-existing default for every caller that doesn't need one).
+   */
+  neutralMessage?: string;
 }
 
 /**
@@ -36,7 +50,7 @@ interface PendingAttachmentsFieldProps {
  * (Paperclip/Upload icons, Card layout) as the detail-page
  * EntityAttachments panel this was modeled on.
  */
-export function PendingAttachmentsField({ files, onFilesChange, disabled, canUpload, unavailableMessage }: PendingAttachmentsFieldProps) {
+export function PendingAttachmentsField({ files, onFilesChange, disabled, canUpload, unavailableMessage, neutralMessage }: PendingAttachmentsFieldProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
   const addFiles = (list: FileList | null) => {
@@ -61,12 +75,20 @@ export function PendingAttachmentsField({ files, onFilesChange, disabled, canUpl
   };
 
   if (canUpload !== true) {
-    if (!canUpload && unavailableMessage) {
+    // `false` (resolved, denied) and `null` (not yet resolvable — e.g. no
+    // workspace selected) are deliberately NOT the same message: `!canUpload`
+    // alone would be true for both (JS: `!null === true`), which previously
+    // showed the DENIAL message before a workspace was even selected — a
+    // real, visible bug (see this component's own canUpload doc comment,
+    // and the Project/Activity creation forms' already-correct "null, not
+    // false" derivation that this was silently undermining).
+    const message = canUpload === false ? unavailableMessage : canUpload === null ? neutralMessage : undefined;
+    if (message) {
       return (
         <div className="space-y-2">
           <p className="text-xs text-muted-foreground flex items-center gap-1.5">
             <Paperclip className="h-3.5 w-3.5" />
-            {unavailableMessage}
+            {message}
           </p>
         </div>
       );

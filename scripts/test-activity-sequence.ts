@@ -117,7 +117,7 @@ async function main() {
       await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
       await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
       const setupRes = await setupPOST(
-        jsonReq({ title: `${TAG} ${tag} request`, description: "fixture", projectOwnerId: adminUser.id, expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-05", expenseTypeId: expenseType.id }),
+        jsonReq({ title: `${TAG} ${tag} request`, description: "fixture", ownerIds: [adminUser.id], expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-05", expenseTypeId: expenseType.id }),
         { params: Promise.resolve({ id: submitted.id }) }
       );
       if (setupRes.status !== 201) throw new Error(`Fixture setup failed: ${setupRes.status}: ${JSON.stringify(await setupRes.json())}`);

@@ -135,7 +135,7 @@ async function main() {
       jsonReq({
         title: `${TAG} request`,
         description: "fixture",
-        projectOwnerId: admin.id,
+        ownerIds: [admin.id],
         expectedStartDate: "2026-07-01",
         expectedFinishDate: "2026-07-10",
         expenseTypeId: expenseType.id,

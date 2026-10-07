@@ -133,10 +133,15 @@ const DEP_TYPE_LABELS: Record<string, string> = {
 
 interface Props {
   id: string;
-  isAdmin: boolean;
+  // Gates the Dependencies section only (add/remove predecessor, fetching
+  // the full activity list for the picker) — see
+  // activity.dependency.manage in app/api/dependencies/route.ts. Despite
+  // the name, this is unrelated to any OTHER admin-only behavior on this
+  // page (there is none today).
+  canManageDependencies: boolean;
 }
 
-export function ActivityDetailClient({ id, isAdmin }: Props) {
+export function ActivityDetailClient({ id, canManageDependencies }: Props) {
   const router = useRouter();
   const [activity, setActivity] = useState<Activity | null>(null);
   const [relatedTickets, setRelatedTickets] = useState<RelatedTicket[]>([]);
@@ -184,7 +189,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
       fetch(`/api/activities/${id}/notes`).then((r) => (r.ok ? r.json() : [])),
       fetch(`/api/activities/${id}/attachments`).then((r) => (r.ok ? r.json() : [])),
     ];
-    if (isAdmin) {
+    if (canManageDependencies) {
       fetches.push(fetch("/api/activities?limit=200").then((r) => (r.ok ? r.json() : [])));
     }
     Promise.all(fetches)
@@ -246,7 +251,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
         }
       })
       .finally(() => setLoading(false));
-  }, [id, isAdmin]);
+  }, [id, canManageDependencies]);
 
   const handleStatusChanged = (updated: ActivityStatusUpdate) => {
     setActivity((prev) =>
@@ -583,7 +588,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
                       </Link>
                       <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
                     </div>
-                    {isAdmin && (
+                    {canManageDependencies && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -603,7 +608,7 @@ export function ActivityDetailClient({ id, isAdmin }: Props) {
             </div>
           )}
 
-          {isAdmin && (
+          {canManageDependencies && (
             <div className="pt-1 space-y-2">
               <p className="text-xs font-medium text-muted-foreground">Add predecessor</p>
               <div className="flex gap-2">
