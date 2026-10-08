@@ -1,6 +1,6 @@
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { buildProjectListWhere, getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
+import { getAccessibleDepartmentSummaries, getNavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/workspace-gate";
 import { ViewToggle } from "@/components/ui/view-toggle";
@@ -15,96 +15,24 @@ import { Plus, FolderKanban } from "lucide-react";
 import { getProjectTerminalConfigsForDepartments, resolveProjectTerminal } from "@/lib/status-terminal";
 import { isProjectOverdue } from "@/lib/overdue";
 import {
-  buildProjectSearchCondition,
-  resolveProjectStatusGroupWhere,
-  resolveProjectOverdueWhere,
-  resolveProjectActivityWhere,
+  buildProjectListQuery,
   getProjectOwnerOptions,
   getProjectMemberOptions,
+  type ProjectListFilterParams,
 } from "@/lib/services/project-query-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
-import { resolveListSort, type SortKeyDef } from "@/lib/list-sort";
-import { ProjectStatus } from "@prisma/client";
+import { ExportProjectsButton } from "@/components/projects/export-projects-button";
 
-// Whitelist for the List view's clickable column headers (Name, Department,
-// Status, Priority, Date range) — the ONLY `sortBy` values ever accepted;
-// anything else falls back to the canonical default below untouched. See
-// lib/list-sort.ts's own doc comment for why this is never a dynamic
-// `{ [sortBy]: order }` object.
-//   - status/priority sort on the raw Prisma enum column: both ProjectStatus
-//     and ActivityPriority are native Postgres enums whose DECLARATION order
-//     (see prisma/schema.prisma) is already the app's own canonical business
-//     order elsewhere (e.g. ALL_PROJECT_STATUSES in project-detail-header.tsx
-//     reads `Object.values(ProjectStatus)` for the exact same reason) — so
-//     ascending sort here reuses that existing order rather than inventing one.
-//   - department is a nullable relation; see the entry below for why it
-//     relies on Postgres's own default null ordering instead of `nulls`.
-const PROJECT_SORT_KEYS: Record<string, SortKeyDef> = {
-  title: (order) => ({ title: order }),
-  // Prisma does not accept a `nulls` modifier on a nested RELATION field's
-  // orderBy (only on a scalar column of the model being directly queried —
-  // confirmed against the real query engine, not just the generated
-  // types). department is a nullable relation, so this relies on
-  // Postgres's own deterministic default instead: NULLS LAST for ASC,
-  // NULLS FIRST for DESC — never random, never an error, just not
-  // independently forced to "last" in both directions the way the
-  // scalar date columns below are.
-  department: (order) => ({ department: { name: order } }),
-  status: (order) => ({ status: order }),
-  priority: (order) => ({ priority: order }),
-  startDate: (order) => ({ startDate: { sort: order, nulls: "last" } }),
-  // Never null, so no `nulls` modifier needed — same as title/status/priority.
-  createdAt: (order) => ({ createdAt: order }),
-};
-const PROJECT_DEFAULT_ORDER_BY = [{ createdAt: "desc" as const }, { id: "asc" as const }];
-
-interface SearchParams {
+// Pagination/view-only params — every FILTER/sort param (search, status,
+// origin, date ranges, etc.) comes from ProjectListFilterParams, the SAME
+// shape lib/services/project-query-service.ts's buildProjectListQuery
+// accepts and the Excel export route (app/api/projects/export/route.ts)
+// re-reads from its own request — never duplicated here.
+interface SearchParams extends ProjectListFilterParams {
   page?: string;
   pageSize?: string;
   view?: string;
-  /** Whitelisted against PROJECT_SORT_KEYS below — see lib/list-sort.ts. Only meaningful in List view; clicking a column header sets both. */
-  sortBy?: string;
-  sortOrder?: string;
-  search?: string;
-  /** Exact ProjectStatus enum value — distinct from statusGroup below. */
-  status?: string;
-  /** Terminal-status GROUP ("active" | "completed") — see lib/services/project-query-service.ts. Same semantics as the Projects Dashboard's Active/Completed KPI cards. */
-  statusGroup?: string;
-  /** "true" only — same rule as the Projects Dashboard's Overdue Projects card (lib/overdue.ts + ProjectStatusConfig terminal resolution). */
-  overdue?: string;
-  priority?: string;
-  /** "request" | "manual" — canonical source of truth is Project.projectRequestId (never inferred from title/members/owner count). */
-  origin?: string;
-  ownerId?: string;
-  memberId?: string;
   departmentId?: string;
-  subDepartmentId?: string;
-  startDateAfter?: string;
-  startDateBefore?: string;
-  dueDateAfter?: string;
-  dueDateBefore?: string;
-  createdAfter?: string;
-  createdBefore?: string;
-  hasActivities?: string;
-  /** "completed" | "incomplete" */
-  activityStatus?: string;
-  activityOverdue?: string;
-}
-
-const PROJECT_STATUS_VALUES = new Set<string>(Object.values(ProjectStatus));
-
-/** Strict — rejects anything but exactly YYYY-MM-DD (the native `<input type="date">` format); never silently truncates garbage like a lenient `new Date()` call would. */
-function parseStrictDate(raw: string | undefined): Date | undefined {
-  if (!raw || !/^\d{4}-\d{2}-\d{2}$/.test(raw)) return undefined;
-  const d = new Date(raw);
-  return isNaN(d.getTime()) ? undefined : d;
-}
-
-/** Strict — rejects non-digit-only strings (e.g. "2abc"), never a lenient parseInt() truncation. */
-function parseStrictIntIn(raw: string | undefined, allowed: readonly number[]): number | undefined {
-  if (!raw || !/^\d+$/.test(raw)) return undefined;
-  const n = Number(raw);
-  return allowed.includes(n) ? n : undefined;
 }
 
 function buildCanonicalUrl(params: SearchParams, page: number): string {
@@ -153,12 +81,12 @@ export default async function ProjectsPage({
 
   // Same resolution order as app/(main)/tickets/page.tsx: an explicit
   // ?departmentId= wins as an "explicit scoped view," validated against real
-  // permission by buildProjectListWhere below (never trusted as-is) — a
+  // permission inside buildProjectListQuery below (never trusted as-is) — a
   // query param can narrow results, it can never widen access.
   const effectiveDepartmentId = params.departmentId ?? (activeWorkspace.isAllSelected ? undefined : activeWorkspace.departmentId);
 
-  const scope = await buildProjectListWhere(session.user.id, session.user.role, effectiveDepartmentId);
-  if ("denied" in scope) {
+  const query = await buildProjectListQuery(session.user.id, session.user.role, effectiveDepartmentId, params);
+  if (query.denied) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] text-center gap-4">
         <FolderKanban className="h-12 w-12 text-muted-foreground" />
@@ -167,80 +95,19 @@ export default async function ProjectsPage({
       </div>
     );
   }
+  const { where, orderBy, scope } = query;
 
-  // ── Flat filters (everything except the terminal-status-dependent ones) ──
-  const andConditions: Record<string, unknown>[] = [scope as Record<string, unknown>];
-
-  if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
-  if (params.search) andConditions.push(buildProjectSearchCondition(params.search));
-
-  const exactStatus = params.status && PROJECT_STATUS_VALUES.has(params.status) ? (params.status as ProjectStatus) : undefined;
-  if (exactStatus) andConditions.push({ status: exactStatus });
-
-  const priority = parseStrictIntIn(params.priority, [1, 2, 3]);
-  if (priority !== undefined) andConditions.push({ priority });
-
-  if (params.ownerId) andConditions.push({ ownerId: params.ownerId });
-  if (params.memberId) andConditions.push({ members: { some: { id: params.memberId } } });
-
-  // Origin — canonical source of truth is Project.projectRequestId, never
-  // inferred from title/members/owner count/anything else.
-  const origin = params.origin === "request" || params.origin === "manual" ? params.origin : undefined;
-  if (origin === "request") andConditions.push({ projectRequestId: { not: null } });
-  else if (origin === "manual") andConditions.push({ projectRequestId: null });
-
-  const startDateAfter = parseStrictDate(params.startDateAfter);
-  const startDateBefore = parseStrictDate(params.startDateBefore);
-  if (startDateAfter || startDateBefore) {
-    andConditions.push({ startDate: { ...(startDateAfter ? { gte: startDateAfter } : {}), ...(startDateBefore ? { lte: startDateBefore } : {}) } });
-  }
-  const dueDateAfter = parseStrictDate(params.dueDateAfter);
-  const dueDateBefore = parseStrictDate(params.dueDateBefore);
-  if (dueDateAfter || dueDateBefore) {
-    andConditions.push({ endDate: { ...(dueDateAfter ? { gte: dueDateAfter } : {}), ...(dueDateBefore ? { lte: dueDateBefore } : {}) } });
-  }
-  const createdAfter = parseStrictDate(params.createdAfter);
-  const createdBefore = parseStrictDate(params.createdBefore);
-  if (createdAfter || createdBefore) {
-    andConditions.push({ createdAt: { ...(createdAfter ? { gte: createdAfter } : {}), ...(createdBefore ? { lte: createdBefore } : {}) } });
-  }
-
-  // A snapshot (spread copy), not a live reference — andConditions.push()
-  // below must never retroactively change what an EARLIER resolve* call in
-  // this same block already saw, or two terminal-dependent filters combined
-  // together would silently narrow each other in push order rather than
-  // being independently resolved against the same flat-filter base (the
-  // Projects Dashboard's own KPI cards are likewise computed independently
-  // against one shared projectWhere, never chained off each other).
-  const flatWhere = { AND: [...andConditions] };
-
-  // ── Terminal-status-dependent filters — resolved against the flat filters
-  // above via the shared helpers also used by the Projects Dashboard, so a
-  // dashboard card's count and this list's result count for the same
-  // condition can never disagree. ──
-  if (params.overdue === "true") {
-    andConditions.push(await resolveProjectOverdueWhere(flatWhere));
-  }
-  const statusGroup = params.statusGroup === "active" || params.statusGroup === "completed" ? params.statusGroup : undefined;
-  if (statusGroup) {
-    andConditions.push(await resolveProjectStatusGroupWhere(flatWhere, statusGroup === "completed"));
-  }
-  if (params.hasActivities === "true") {
-    andConditions.push(await resolveProjectActivityWhere(flatWhere, "has"));
-  }
-  const activityStatus = params.activityStatus === "completed" || params.activityStatus === "incomplete" ? params.activityStatus : undefined;
-  if (activityStatus) {
-    andConditions.push(await resolveProjectActivityWhere(flatWhere, activityStatus));
-  }
-  if (params.activityOverdue === "true") {
-    andConditions.push(await resolveProjectActivityWhere(flatWhere, "overdue"));
-  }
-
-  const where = { AND: andConditions };
+  // "No projects yet" (empty state, nothing to filter) vs "No projects
+  // match your filters" (data exists, current filters just exclude it all)
+  // — andConditions itself now lives inside buildProjectListQuery, so the
+  // distinction is re-derived here from the raw filter params instead.
+  const hasActiveFilters = Object.entries(params).some(([key, value]) => {
+    if (key === "page" || key === "pageSize" || key === "view" || key === "departmentId") return false;
+    return typeof value === "string" && value.length > 0;
+  });
 
   const requestedPage = parsePageParam(params.page);
   const pageSize = parsePageSizeParam(params.pageSize);
-  const sort = resolveListSort(PROJECT_SORT_KEYS, PROJECT_DEFAULT_ORDER_BY, params.sortBy, params.sortOrder);
 
   // Only the two queries that must see an identical snapshot (rows + the
   // total they're paginated against) go inside $transaction, matching
@@ -256,11 +123,11 @@ export default async function ProjectsPage({
         // id as a secondary sort key guarantees a fully deterministic order
         // even when two projects share the exact same primary sort value —
         // required for stable pagination (no row ever skipped or duplicated
-        // across pages purely due to a value collision). sort.orderBy is
-        // either this exact canonical default (no/invalid ?sortBy=) or one
-        // whitelisted column from PROJECT_SORT_KEYS above, always with the
-        // same id tie-breaker — see lib/list-sort.ts.
-        orderBy: sort.orderBy,
+        // across pages purely due to a value collision). orderBy is either
+        // the canonical default (no/invalid ?sortBy=) or one whitelisted
+        // column (PROJECT_SORT_KEYS in project-query-service.ts), always
+        // with the same id tie-breaker — see lib/list-sort.ts.
+        orderBy,
         skip: (requestedPage - 1) * pageSize,
         take: pageSize,
         include: {
@@ -292,8 +159,8 @@ export default async function ProjectsPage({
     // own doc comment). Independent of `where` (which also carries status/
     // priority/date/etc. filters) so the option lists stay stable as those
     // OTHER filters change — only Department narrows them, per spec.
-    getProjectOwnerOptions(scope as Record<string, unknown>),
-    getProjectMemberOptions(scope as Record<string, unknown>),
+    getProjectOwnerOptions(scope),
+    getProjectMemberOptions(scope),
   ]);
 
   const pagination = computePagination(totalCount, requestedPage, pageSize);
@@ -330,6 +197,7 @@ export default async function ProjectsPage({
         </div>
         <div className="flex items-center gap-2">
           <ViewToggle defaultView="list" />
+          <ExportProjectsButton />
           {canCreate && (
             <Button asChild>
               <Link href="/projects/new">
@@ -347,7 +215,7 @@ export default async function ProjectsPage({
         <div className="text-center py-20">
           <FolderKanban className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
           <p className="text-muted-foreground">
-            {totalCount === 0 && andConditions.length <= 1 ? "No projects yet." : "No projects match your filters."}
+            {totalCount === 0 && !hasActiveFilters ? "No projects yet." : "No projects match your filters."}
           </p>
           <Button asChild className="mt-4">
             <Link href="/projects/new">Create First Project</Link>

@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Pencil, Plus } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 import { ProjectDeleteButton } from "@/components/projects/project-delete-button";
+import { ExportProjectButton } from "@/components/projects/export-project-button";
 import { ProjectQuickStatus } from "@/components/projects/project-quick-status";
 import type { QuickStatusOption } from "@/components/status/quick-status-select";
 
@@ -98,6 +99,7 @@ export function ProjectDetailHeader({
         {description && <p className="text-muted-foreground">{description}</p>}
       </div>
       <div className="flex flex-wrap items-center gap-2">
+        <ExportProjectButton projectId={projectId} />
         <Button asChild variant="outline">
           <Link href={`/projects/${projectId}/edit`}>
             <Pencil className="h-4 w-4 mr-2" />
