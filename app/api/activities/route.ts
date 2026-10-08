@@ -96,12 +96,20 @@ export async function POST(req: NextRequest) {
       isRequestOriginProject = project.projectRequestId !== null;
     }
 
+    // Task Type (see TaskType in prisma/schema.prisma) is REQUIRED for
+    // EVERY Activity, manual or request-origin alike — enforced by
+    // createActivitySchema itself (a missing/empty taskTypeId already
+    // fails .parse() above with a 422, before this line is ever reached).
+    // Task Sub Type/Owner/dates/Related Users remain conditionally
+    // required ONLY for request-origin Activities, via
+    // requestOriginActivityMissingFields below — completely unchanged by
+    // this feature.
     if (isRequestOriginProject) {
       const missing = requestOriginActivityMissingFields(data);
       if (missing.length > 0) {
         return NextResponse.json(
           {
-            error: "This Activity's parent Project originates from a Project Request — Expected Start, Expected Finish, Task Type, Owner, and at least one Related User are required.",
+            error: "This Activity's parent Project originates from a Project Request — Expected Start, Expected Finish, Task Sub Type, Owner, and at least one Related User are required.",
             code: "request_origin_fields_required",
             missingFields: missing,
           },
@@ -140,6 +148,8 @@ export async function POST(req: NextRequest) {
       expectedFinishDate,
       ownerId,
       taskTypeId,
+      taskSubTypeId,
+      manualEstimatedCost,
       ...rest
     } = data;
 
@@ -186,20 +196,51 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Task Type — must exist AND be currently active (same creation-time
-    // rule as Project's own Expense Type at setup time; see
-    // createProjectFromApprovedRequest). The resolved row's CURRENT cost is
-    // what gets snapshotted below — never a client-submitted value.
-    let taskTypeCostSnapshot: number | undefined;
-    if (taskTypeId) {
-      const taskType = await prisma.activityTaskType.findUnique({ where: { id: taskTypeId }, select: { id: true, isActive: true, cost: true } });
-      if (!taskType || !taskType.isActive) {
+    // Task Type (the NEW classification — see TaskType in
+    // prisma/schema.prisma) — REQUIRED (createActivitySchema already
+    // guarantees a non-empty string reached this line), must exist AND be
+    // currently active. Never trusted from the client beyond its id. Has
+    // NO cost of its own — nothing to snapshot here.
+    const taskType = await prisma.taskType.findUnique({ where: { id: taskTypeId }, select: { id: true, isActive: true } });
+    if (!taskType || !taskType.isActive) {
+      return NextResponse.json(
+        { error: "The selected Task Type does not exist or is not active.", code: "invalid_task_type" },
+        { status: 400 }
+      );
+    }
+
+    // Task Sub Type (the RENAMED former "Task Type" — see TaskSubType in
+    // prisma/schema.prisma) — must exist AND be currently active, same
+    // creation-time rule as Project's own Expense Type at setup time (see
+    // createProjectFromApprovedRequest). Cost resolution: when the
+    // resolved row has a CONFIGURED cost, that value is always what gets
+    // snapshotted — never a client-submitted value, never overridable via
+    // manualEstimatedCost (silently ignored in that case). When the
+    // resolved row has NO configured cost (cost === null — e.g. "Others"/
+    // "External"), a manualEstimatedCost is REQUIRED and becomes this
+    // Activity's own snapshot instead — validated as a real, non-negative
+    // Decimal by createActivitySchema already, never trusted beyond that.
+    // This manual value is NEVER written back to TaskSubType.cost — it
+    // belongs only to this Activity.
+    let taskSubTypeCostSnapshot: number | null | undefined;
+    if (taskSubTypeId) {
+      const taskSubType = await prisma.taskSubType.findUnique({ where: { id: taskSubTypeId }, select: { id: true, isActive: true, cost: true } });
+      if (!taskSubType || !taskSubType.isActive) {
         return NextResponse.json(
-          { error: "The selected Task Type does not exist or is not active.", code: "invalid_task_type" },
+          { error: "The selected Task Sub Type does not exist or is not active.", code: "invalid_task_sub_type" },
           { status: 400 }
         );
       }
-      taskTypeCostSnapshot = Number(taskType.cost);
+      if (taskSubType.cost !== null) {
+        taskSubTypeCostSnapshot = Number(taskSubType.cost);
+      } else if (manualEstimatedCost !== undefined) {
+        taskSubTypeCostSnapshot = manualEstimatedCost;
+      } else {
+        return NextResponse.json(
+          { error: "Enter an Estimated Cost — the selected Task Sub Type has no fixed configured cost.", code: "estimated_cost_required" },
+          { status: 400 }
+        );
+      }
     }
 
     if (expectedStartDate && expectedFinishDate && new Date(expectedFinishDate) < new Date(expectedStartDate)) {
@@ -268,8 +309,9 @@ export async function POST(req: NextRequest) {
           dueDate: dueDate ? new Date(dueDate) : undefined,
           createdById: session.user.id,
           ownerId: ownerId || undefined,
-          taskTypeId: taskTypeId || undefined,
-          taskTypeCost: taskTypeCostSnapshot,
+          taskTypeId,
+          taskSubTypeId: taskSubTypeId || undefined,
+          taskSubTypeCost: taskSubTypeCostSnapshot,
           expectedStartDate: expectedStartDate ? new Date(expectedStartDate) : undefined,
           expectedFinishDate: expectedFinishDate ? new Date(expectedFinishDate) : undefined,
           expectedDays,
@@ -286,6 +328,7 @@ export async function POST(req: NextRequest) {
           assignedUsers: { select: { id: true, name: true, email: true, image: true } },
           owner: { select: { id: true, name: true, email: true, image: true } },
           taskType: { select: { id: true, name: true } },
+          taskSubType: { select: { id: true, name: true } },
         },
       });
     });

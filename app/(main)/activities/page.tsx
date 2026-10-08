@@ -17,6 +17,7 @@ import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "
 import { getActivityTerminalConfigsForDepartments, resolveActivityTerminal } from "@/lib/status-terminal";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { isActivityOverdue } from "@/lib/overdue";
+import { computeActivityFinancials } from "@/lib/services/project-financials-service";
 import {
   buildActivitySearchCondition,
   resolveActivityStatusGroupWhere,
@@ -48,6 +49,8 @@ const ACTIVITY_SORT_KEYS: Record<string, SortKeyDef> = {
   startDate: (order) => ({ startDate: { sort: order, nulls: "last" } }),
   dueDate: (order) => ({ dueDate: { sort: order, nulls: "last" } }),
   progress: (order) => ({ progress: order }),
+  // Never null, so no `nulls` modifier needed.
+  createdAt: (order) => ({ createdAt: order }),
 };
 const ACTIVITY_DEFAULT_ORDER_BY = [{ createdAt: "desc" as const }, { id: "asc" as const }];
 
@@ -69,6 +72,8 @@ interface SearchParams {
   assignedUserId?: string;
   unassigned?: string;
   priority?: string;
+  /** "request" | "manual" — canonical rule: activity.project.projectRequestId != null (see lib/services/activity-sequence-service.ts's isRequestOriginProject). A standalone Activity (no Project) is "manual", same as every existing isRequestOrigin derivation in this app. */
+  origin?: string;
   departmentId?: string;
   subDepartmentId?: string;
   startDateAfter?: string;
@@ -177,6 +182,18 @@ export default async function ActivitiesPage({
     andConditions.push({ dueDate: { ...(dueDateAfter ? { gte: dueDateAfter } : {}), ...(dueDateBefore ? { lte: dueDateBefore } : {}) } });
   }
 
+  // Origin — canonical rule is activity.project.projectRequestId != null,
+  // the SAME relation path every existing isRequestOrigin derivation in
+  // this app already uses (activity-new-form.tsx, activity-edit-client.tsx,
+  // isRequestOriginProject in activity-sequence-service.ts). A standalone
+  // Activity (projectId null) is "manual" too — never treated as
+  // request-origin by any of those call sites, so "Manual" here must
+  // include it rather than excluding it the way a bare
+  // `project: { projectRequestId: null }` relation filter would.
+  const origin = params.origin === "request" || params.origin === "manual" ? params.origin : undefined;
+  if (origin === "request") andConditions.push({ project: { projectRequestId: { not: null } } });
+  else if (origin === "manual") andConditions.push({ OR: [{ projectId: null }, { project: { projectRequestId: null } }] });
+
   // A snapshot (spread copy), not a live reference — see
   // app/(main)/projects/page.tsx's identical comment: an earlier
   // terminal-dependent push here must never retroactively change what a
@@ -216,6 +233,13 @@ export default async function ActivitiesPage({
           project: { select: { id: true, title: true } },
           department: { select: { id: true, name: true } },
           assignedUsers: { select: { id: true, name: true, email: true, image: true } },
+          // Preview-only relations below — cheap, bounded (same cost
+          // profile as assignedUsers above), added so the list preview
+          // never needs a second per-row fetch. owner/taskType/
+          // taskSubType are each a single nullable to-one relation.
+          owner: { select: { id: true, name: true, email: true } },
+          taskType: { select: { id: true, name: true } },
+          taskSubType: { select: { id: true, name: true } },
         },
       }),
       prisma.projectActivity.count({ where }),
@@ -251,27 +275,42 @@ export default async function ActivitiesPage({
   const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(activityDepartmentIds);
   const now = new Date();
 
-  const serializedActivities: SerializedActivity[] = activities.map((a) => ({
-    id: a.id,
-    title: a.title,
-    status: a.status,
-    statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
-    statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
-    priority: a.priority,
-    isCompleted: a.isCompleted,
-    startDate: a.startDate?.toISOString() ?? null,
-    dueDate: a.dueDate?.toISOString() ?? null,
-    progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
-    overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(terminalConfigs, a.departmentId, a.status), now),
-    project: a.project,
-    department: a.department,
-    assignedUsers: a.assignedUsers.map((u) => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      image: u.image,
-    })),
-  }));
+  const serializedActivities: SerializedActivity[] = activities.map((a) => {
+    const { estimatedCost, actualCost } = computeActivityFinancials(a);
+    return {
+      id: a.id,
+      title: a.title,
+      status: a.status,
+      statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
+      statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
+      priority: a.priority,
+      isCompleted: a.isCompleted,
+      startDate: a.startDate?.toISOString() ?? null,
+      dueDate: a.dueDate?.toISOString() ?? null,
+      progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
+      createdAt: a.createdAt.toISOString(),
+      overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(terminalConfigs, a.departmentId, a.status), now),
+      project: a.project,
+      department: a.department,
+      assignedUsers: a.assignedUsers.map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        image: u.image,
+      })),
+      description: a.description,
+      owner: a.owner,
+      expectedStartDate: a.expectedStartDate?.toISOString() ?? null,
+      expectedFinishDate: a.expectedFinishDate?.toISOString() ?? null,
+      expectedDays: a.expectedDays,
+      actualDays: a.actualDays,
+      taskType: a.taskType,
+      taskSubType: a.taskSubType,
+      taskSubTypeCost: a.taskSubTypeCost !== null ? Number(a.taskSubTypeCost) : null,
+      estimatedCost: a.taskSubTypeCost !== null && a.expectedDays !== null ? Number(estimatedCost) : null,
+      actualCost: a.taskSubTypeCost !== null && a.actualDays !== null ? Number(actualCost) : null,
+    };
+  });
 
   return (
     <div className="space-y-6">

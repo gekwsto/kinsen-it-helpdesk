@@ -92,7 +92,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `BV List Dept ${RUN_ID}`, slug: `bv-list-dept-${RUN_ID}` });
     deptIds.push(dept.id);
-    const type = await prisma.projectRequestType.create({ data: { name: `BV List Type ${RUN_ID}` } });
+    const type = await prisma.taskType.create({ data: { name: `BV List Type ${RUN_ID}` } });
     typeIds.push(type.id);
 
     const requesterUser = await prisma.user.findFirstOrThrow({ where: { email: REQUESTER_EMAIL } });
@@ -133,8 +133,8 @@ async function main() {
     await requesterPage.fill("#title", `BV List Approve Target ${RUN_ID}`);
     await requesterPage.fill("#description", "A description that is definitely long enough for validation.");
     await selectDepartmentIfNeeded(requesterPage);
-    await requesterPage.locator("#projectTypeId").click();
-    await requesterPage.getByRole("option", { name: new RegExp(`BV List Type ${RUN_ID}`) }).click({ timeout: 5000 });
+    // Project Type was removed from the Project Request Form entirely —
+    // see TaskType in prisma/schema.prisma. No field to interact with here.
     await requesterPage.fill("#teamConcerned", "Engineering");
     await requesterPage.fill("#expectedBenefits", "Benefits text that is definitely long enough for validation.");
     check("Create form has NO Business Assessment field at all", (await requesterPage.locator("#businessAssessment").count()) === 0);
@@ -151,8 +151,6 @@ async function main() {
     await requesterPage.fill("#title", `BV List Reject Target ${RUN_ID}`);
     await requesterPage.fill("#description", "A description that is definitely long enough for validation.");
     await selectDepartmentIfNeeded(requesterPage);
-    await requesterPage.locator("#projectTypeId").click();
-    await requesterPage.getByRole("option", { name: new RegExp(`BV List Type ${RUN_ID}`) }).click({ timeout: 5000 });
     await requesterPage.fill("#teamConcerned", "Engineering");
     await requesterPage.fill("#expectedBenefits", "Benefits text that is definitely long enough for validation.");
     const [rejectTargetRes] = await Promise.all([
@@ -274,7 +272,7 @@ async function main() {
     await runCleanup([
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } })],
       ["ticket categories", () => prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } })],
       ["ticket priorities", () => prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } })],

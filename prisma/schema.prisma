@@ -1337,8 +1337,8 @@ model Project {
   attachments  ProjectAttachment[]
   // At most one — see ProjectFeedback's own doc comment for the full
   // eligibility/uniqueness rule (request-origin Projects only, one
-  // immutable row per Project, enforced via @unique on
-  // ProjectFeedback.projectId).
+  // editable-by-its-original-requester row per Project, enforced via
+  // @unique on ProjectFeedback.projectId).
   feedback     ProjectFeedback?
 
   createdAt DateTime @default(now())
@@ -1359,10 +1359,19 @@ model Project {
 // delivered, request-origin Project — applies ONLY to a Project where
 // Project.projectRequestId != null (enforced at the application boundary,
 // POST /api/projects/[id]/feedback — never trusted from this schema
-// alone). At most one row per Project (@unique below). Deliberately
-// immutable once created — no updatedAt, no edit/delete route — this is a
-// historical record of what the requester evaluated at completion time,
-// not a living document; reopening the Project later never deletes it.
+// alone). At most one row per Project (@unique below) — the original
+// requester may UPDATE their own existing row rather than ever creating a
+// second one (see upsertProjectFeedback in
+// lib/services/project-feedback-service.ts); reopening the Project later
+// never deletes an already-submitted row, it only blocks further edits
+// until the Project is COMPLETED again.
+//
+// Replaced a single 1-10 satisfactionScore with five independent 1-5
+// ratings + a separate explicit requirementsDelivered boolean (see
+// projectFeedbackSchema in lib/validations.ts and the Greek-labeled
+// ProjectFeedbackCard form) — see legacySatisfactionScore below for how
+// pre-existing historical rows are preserved, never fabricated into the
+// new five-rating shape.
 model ProjectFeedback {
   id String @id @default(cuid())
 
@@ -1373,7 +1382,7 @@ model ProjectFeedback {
   // the Administration review list (app/(main)/admin/project-feedback)
   // join straight to the originating request without going through
   // Project first. Set ONCE, by the same server check that verifies
-  // eligibility (createProjectFeedback) — never re-derived afterward.
+  // eligibility (upsertProjectFeedback) — never re-derived afterward.
   // @unique here too (not just on projectId) because it's transitively
   // true anyway (Project.projectRequestId is itself @unique, so one
   // Project Request has at most one Project, which has at most one
@@ -1382,23 +1391,51 @@ model ProjectFeedback {
   projectRequest   ProjectRequest @relation(fields: [projectRequestId], references: [id])
   projectRequestId String         @unique
 
-  // The original Project Request's own requesterId at submission time —
-  // the ONLY identity ever allowed to create this row. Never
-  // client-supplied: set from the authenticated session only after the
-  // server has independently confirmed session.user.id ===
-  // projectRequest.requesterId.
+  // The original Project Request's own requesterId — the ONLY identity
+  // ever allowed to create OR update this row. Never client-supplied: set
+  // from the authenticated session only after the server has independently
+  // confirmed session.user.id === projectRequest.requesterId.
   submittedByUser   User   @relation("ProjectFeedbackSubmitter", fields: [submittedByUserId], references: [id])
   submittedByUserId String
 
-  // 1-10 inclusive, integer — see projectFeedbackSchema in
-  // lib/validations.ts. Re-validated server-side on every write; never
-  // trusted from the DB type alone.
-  satisfactionScore Int
+  // The FIVE independent 1-5 ratings (see projectFeedbackSchema in
+  // lib/validations.ts for the exact integer 1-5 constraint, re-validated
+  // server-side on every write — never trusted from the DB type alone).
+  // Nullable at the DB level ONLY because a pre-existing row submitted
+  // under the old single-score model can never be safely backfilled with
+  // fabricated per-dimension values — required at the application
+  // boundary for every NEW submission going forward, the same
+  // "nullable at DB, required at creation" pattern this schema already
+  // uses throughout (e.g. TaskSubType.cost, ProjectActivity.taskTypeId).
+  deliverySpeedRating Int?
+  communicationRating Int?
+  functionalityRating Int?
+  easeOfUseRating     Int?
+  overallRating       Int?
+  // A separate, explicit boolean answer — never derived from the five
+  // ratings above. Same DB-nullable/application-required rationale as the
+  // five ratings.
+  requirementsDelivered Boolean?
+
   // Optional free text, trimmed server-side; an empty/whitespace-only
-  // submission normalizes to null rather than an empty string.
-  comments          String? @db.Text
+  // submission normalizes to null rather than an empty string. Unchanged
+  // by the replacement — the SAME field/meaning the old model already
+  // used, reused as-is by the new form.
+  comments String? @db.Text
+
+  // The OLD 1-10 satisfactionScore, renamed and made nullable — preserves
+  // every historical submission's real value forever (never dropped, never
+  // reinterpreted as one of the five new ratings, since no truthful
+  // per-dimension breakdown can be derived from a single historical
+  // score). Every row created under the new model leaves this null
+  // forever; it is never written to by upsertProjectFeedback.
+  legacySatisfactionScore Int?
 
   createdAt DateTime @default(now())
+  // NEW — feedback is now an editable record (the original requester may
+  // update their own submission while the Project is COMPLETED), not a
+  // permanently immutable one-shot answer.
+  updatedAt DateTime @updatedAt
 
   @@index([submittedByUserId])
 }
@@ -1468,14 +1505,36 @@ model ProjectActivity {
   // if the Activity is reopened away from COMPLETED, and recomputed from
   // the NEW completion date if completed again later.
   actualDays         Int?
-  taskType           ActivityTaskType?    @relation(fields: [taskTypeId], references: [id])
+  // The NEW Task Type classification (formerly ProjectRequestType /
+  // "Project Type" on ProjectRequest — see TaskType's own doc comment for
+  // the full move). REQUIRED at the application boundary for every NEW
+  // Activity creation (see createActivitySchema in lib/validations.ts and
+  // POST /api/activities's own server-side re-validation) — nullable here
+  // ONLY because every Activity created before this field existed can
+  // never be safely backfilled with a fabricated choice, the same
+  // "nullable at DB, required at creation" pattern every other
+  // request-origin-only field on this model already uses. Has NO cost of
+  // its own (see TaskType — unlike TaskSubType below, which does).
+  taskType           TaskType?    @relation(fields: [taskTypeId], references: [id])
   taskTypeId         String?
-  // A HISTORICAL SNAPSHOT of taskType.cost at the moment it was set on this
-  // Activity (at creation, or whenever Task Type is CHANGED during edit) —
-  // never recalculated just because the admin later changes the Task
-  // Type's own current cost. Mirrors the same snapshot principle this
-  // repository previously used for Project Request Type cost.
-  taskTypeCost       Decimal?             @db.Decimal(10, 2)
+  // The RENAMED former "Task Type" (now Task Sub Type — see TaskSubType's
+  // own doc comment) — same field, same meaning, same historical values,
+  // only the column/relation NAME changed (was taskType/taskTypeId) to
+  // free that name up for the brand-new, unrelated field above. Business
+  // semantics (required only for request-origin Activities) are
+  // completely unchanged by this rename.
+  taskSubType        TaskSubType? @relation(fields: [taskSubTypeId], references: [id])
+  taskSubTypeId      String?
+  // A HISTORICAL SNAPSHOT of taskSubType.cost at the moment it was set on
+  // this Activity (at creation, or whenever Task Sub Type is CHANGED
+  // during edit) — never recalculated just because the admin later
+  // changes the Task Sub Type's own current cost (renamed from
+  // taskTypeCost, same values, same semantics). When the selected Task
+  // Sub Type has NO configured cost (cost = null), this snapshot is also
+  // null — NEVER coerced to 0; see
+  // lib/services/project-financials-service.ts for how financial totals
+  // treat a null snapshot as "no fixed calculable cost," not a zero cost.
+  taskSubTypeCost    Decimal?     @db.Decimal(10, 2)
   // The user-controlled execution/priority ORDER of this Activity within
   // its parent Project's vertical sequence — request-origin Projects only
   // (Project.projectRequestId != null; see
@@ -1507,6 +1566,7 @@ model ProjectActivity {
   @@index([subDepartmentId])
   @@index([ownerId])
   @@index([taskTypeId])
+  @@index([taskSubTypeId])
   // Matches Ticket's own @@index([createdAt]) — app/(main)/activities/page.tsx
   // orders by createdAt desc, id asc, the same pattern Ticket already has
   // this index for.
@@ -1516,22 +1576,50 @@ model ProjectActivity {
   @@index([projectId, sequence])
 }
 
-// Global reference data (not department-scoped) defining the configured
-// COST of a kind of task — see ProjectExpenseType for the identical
-// reference-data shape/pattern this mirrors (id, name, isActive,
-// timestamps). Managed through its own dedicated permission (taskType.manage,
-// see prisma/seed.ts's PERMISSIONS), never bare "admin access".
-model ActivityTaskType {
+// Global reference data (not department-scoped) — formerly named
+// "ActivityTaskType" / surfaced as "Task Type"; renamed to "Task Sub Type"
+// once the UNRELATED, former ProjectRequestType concept took over the name
+// "Task Type" for Activities (see TaskType below). Same reference-data
+// shape/pattern ProjectExpenseType mirrors (id, name, isActive,
+// timestamps). Managed through its own dedicated permission (the KEY
+// itself, `taskType.manage`, is intentionally UNCHANGED by this rename —
+// renaming a Permission.key would silently orphan every existing
+// RolePermission grant referencing that exact string; only its
+// human-readable description was updated — see prisma/seed.ts's
+// PERMISSIONS), never bare "admin access".
+//
+// cost is now OPTIONAL (was required before this rename) — some Task Sub
+// Types (e.g. "Others", "External") genuinely have no fixed predefined
+// cost; `null` means exactly that, never coerced to 0 anywhere downstream
+// (see ProjectActivity.taskSubTypeCost's own doc comment, and
+// lib/services/project-financials-service.ts).
+model TaskSubType {
   id         String            @id @default(cuid())
   name       String            @unique
-  // REQUIRED (unlike Project's optional Expense Type) — every Task Type
-  // must have a configured cost; see taskTypeCostSchema in
-  // lib/validations.ts.
-  cost       Decimal           @db.Decimal(10, 2)
+  cost       Decimal?          @db.Decimal(10, 2)
   isActive   Boolean           @default(true)
   createdAt  DateTime          @default(now())
   updatedAt  DateTime          @updatedAt
   activities ProjectActivity[]
+}
+
+// Global reference data (not department-scoped) — formerly named
+// "ProjectRequestType" / surfaced as "Project Type" on ProjectRequest; this
+// concept moved OFF ProjectRequest entirely and became an Activity
+// classification instead (see ProjectActivity.taskType below). The
+// `projectRequests` back-relation is kept ONLY for historical rows already
+// submitted before this change (see ProjectRequest.projectTypeId's own doc
+// comment) — a NEW Project Request never sets it. Permission key
+// `projectRequestType.manage` is intentionally UNCHANGED for the same
+// orphaned-grant reason as TaskSubType above; only its description changed.
+model TaskType {
+  id              String            @id @default(cuid())
+  name            String            @unique
+  isActive        Boolean           @default(true)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  projectRequests ProjectRequest[]
+  activities      ProjectActivity[]
 }
 
 // A ProjectNote is an authenticated user's plain internal collaboration note
@@ -1669,36 +1757,16 @@ model ProjectAttachment {
 // ─── Project Request Form (separate business entity — NEVER auto-creates a
 // real Project; see the "Create Project from approved request" note below) ──
 
-// A configurable classification a Project Request is filed under (e.g.
-// "New Product", "Process Improvement") — NOT department-scoped (a single,
-// global, admin-managed list every department's requesters choose from; see
-// components/admin/project-request-type-management.tsx). Deliberately
-// separate from ProjectRequest's own audit trail: deactivating a type here
-// only hides it from the create form's dropdown (see the isActive filter in
-// the GET handler) — it never deletes or relabels any ProjectRequest that
-// already references it, so historical requests keep their original type
-// forever, matching the same "soft delete" convention TicketStatus/
-// TicketPriority/TicketCategory already use for their own isActive flag.
-model ProjectRequestType {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  projectRequests ProjectRequest[]
-}
-
 // A configurable classification for a Project's EXPENSE TYPE — e.g. "CapEx",
 // "OpEx", "Maintenance". A single, global, admin-managed list (not
-// department-scoped — same rationale as ProjectRequestType above), offered
+// department-scoped — same rationale as TaskType above), offered
 // only to Projects created through the request-origin setup flow (see
 // createProjectFromApprovedRequest). Deactivating a type here only hides it
 // from the setup form's dropdown (the isActive filter in
 // GET /api/project-expense-types) — it never deletes or relabels any
 // Project that already references it, so a Project created against a since-
 // deactivated Expense Type keeps displaying it correctly forever, matching
-// the same "soft delete" convention ProjectRequestType/TicketStatus/
+// the same "soft delete" convention TaskType/TicketStatus/
 // TicketPriority/TicketCategory already use for their own isActive flag.
 // Hard delete (DELETE /api/admin/project-expense-types/[id]) is blocked
 // while any Project still references it — see that route's own doc comment.
@@ -1758,8 +1826,15 @@ model ProjectRequest {
   // importance mapping.
   importance  Int
 
-  projectType   ProjectRequestType @relation(fields: [projectTypeId], references: [id])
-  projectTypeId String
+  // HISTORICAL ONLY as of the Task Type move to Activity — the field/
+  // relation name is deliberately left unchanged (a renamed historical
+  // field adds nothing; see TaskType's own doc comment for why the model
+  // itself moved). Nullable: a NEW ProjectRequest never sets this anymore
+  // (removed from createProjectRequestSchema/the Project Request Form —
+  // see project-request-service.ts), but every row submitted before this
+  // change keeps its real, already-persisted value forever, untouched.
+  projectType   TaskType? @relation(fields: [projectTypeId], references: [id])
+  projectTypeId String?
 
   teamConcerned                     String
   expectedBenefits                  String  @db.Text

@@ -65,7 +65,12 @@ export default async function ProjectRequestDetailPage({
         <div>
           <h1 className="text-2xl font-bold">{request.title}</h1>
           <p className="text-muted-foreground mt-1">
-            {request.projectType.name} · {request.department.name}
+            {/* projectType (the former "Project Type" on a Project Request)
+                is historical only — a request submitted before that
+                classification moved to Activity still shows its original
+                type; a NEW request never has one. */}
+            {request.projectType ? `${request.projectType.name} · ` : ""}
+            {request.department.name}
           </p>
         </div>
         <ProjectRequestStatusBadge status={request.status} />

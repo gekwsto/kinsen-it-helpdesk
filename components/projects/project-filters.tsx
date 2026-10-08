@@ -149,6 +149,7 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
     get("statusGroup"),
     get("overdue") === "true" ? "1" : "",
     get("priority"),
+    get("origin"),
     get("ownerId"),
     get("memberId"),
     get("departmentId"),
@@ -221,6 +222,18 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
             {[3, 2, 1].map((p) => (
               <SelectItem key={p} value={String(p)}>{PROJECT_PRIORITY_LABEL[p]}</SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+
+        {/* Origin — canonical source of truth is Project.projectRequestId (see app/(main)/projects/page.tsx), never inferred from title/members/owner count. */}
+        <Select value={get("origin") || "all"} onValueChange={(v) => handleSelect("origin", v)}>
+          <SelectTrigger className="h-8 w-[140px] text-xs">
+            <SelectValue placeholder="Origin" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All</SelectItem>
+            <SelectItem value="request">From Request</SelectItem>
+            <SelectItem value="manual">Manual</SelectItem>
           </SelectContent>
         </Select>
 

@@ -24,7 +24,13 @@ import { ProjectCreateDialog } from "@/components/projects/project-create-dialog
 interface Project { id: string; title: string; projectRequestId: string | null }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface StatusOption { status: ActivityStatus; label: string; color: string }
-interface TaskTypeOption { id: string; name: string; cost: number }
+// The NEW, universally-required classification (see TaskType in
+// prisma/schema.prisma) — no cost of its own.
+interface TaskTypeOption { id: string; name: string }
+// The RENAMED former "Task Type" (see TaskSubType in prisma/schema.prisma)
+// — cost is nullable now; `null` means "no fixed configured cost", never
+// treated as 0.
+interface TaskSubTypeOption { id: string; name: string; cost: number | null }
 
 /**
  * Shape of GET /api/activities/[id]'s JSON response, as actually consumed
@@ -66,12 +72,15 @@ interface ActivityDetailResponse {
   /** Server-derived on the COMPLETED transition, never editable. */
   actualDays?: number | null;
   ownerId?: string | null;
+  /** The NEW, universally-required Task Type classification (see TaskType in prisma/schema.prisma). */
   taskTypeId?: string | null;
-  /** Prisma.Decimal serializes to a STRING over JSON (toJSON()), never a bare number — converted client-side before use. The historical snapshot, never re-read live from the Task Type's current cost. */
-  taskTypeCost?: string | number | null;
-  /** Server-derived (GET /api/activities/[id] via computeActivityFinancials) — taskTypeCost × expectedDays. Decimal-as-string over JSON, never stored, never editable. */
+  /** The RENAMED former "Task Type" (see TaskSubType in prisma/schema.prisma) — request-origin-only, same optional-elsewhere semantics as before. */
+  taskSubTypeId?: string | null;
+  /** Prisma.Decimal serializes to a STRING over JSON (toJSON()), never a bare number — converted client-side before use. The historical snapshot, never re-read live from the Task Sub Type's current cost. `null` means "no configured cost," never 0. */
+  taskSubTypeCost?: string | number | null;
+  /** Server-derived (GET /api/activities/[id] via computeActivityFinancials) — taskSubTypeCost × expectedDays. Decimal-as-string over JSON, never stored, never editable. */
   estimatedCost?: string | number | null;
-  /** Server-derived — taskTypeCost × actualDays (0 unless currently COMPLETED). Never stored, never editable. */
+  /** Server-derived — taskSubTypeCost × actualDays (0 unless currently COMPLETED). Never stored, never editable. */
   actualCost?: string | number | null;
 }
 
@@ -118,12 +127,23 @@ export function ActivityEditClient({ id }: Props) {
   const [expectedStartDate, setExpectedStartDate] = useState("");
   const [expectedFinishDate, setExpectedFinishDate] = useState("");
   const [ownerId, setOwnerId] = useState("");
+  // Task Type (NEW, required for every Activity — not just request-origin).
   const [taskTypeId, setTaskTypeId] = useState("");
   const [taskTypes, setTaskTypes] = useState<TaskTypeOption[]>([]);
+  // Task Sub Type (RENAMED former "Task Type" — request-origin-only, same
+  // optional-elsewhere semantics as before this rename).
+  const [taskSubTypeId, setTaskSubTypeId] = useState("");
+  const [taskSubTypes, setTaskSubTypes] = useState<TaskSubTypeOption[]>([]);
+  // Manual Estimated Cost — only meaningful (and only ever honored
+  // server-side) when the currently-selected Task Sub Type has NO
+  // configured cost. Pre-filled from this Activity's own existing snapshot
+  // once taskSubTypes loads (see the fetch below); cleared whenever the
+  // user switches Task Sub Type in this form, so a stale value never
+  // silently carries over to a different subtype.
+  const [manualEstimatedCost, setManualEstimatedCost] = useState("");
   // Server-derived, read-only display values — never sent back on PATCH.
   const [expectedDays, setExpectedDays] = useState<number | null>(null);
   const [actualDays, setActualDays] = useState<number | null>(null);
-  const [taskTypeCost, setTaskTypeCost] = useState<number | null>(null);
   const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
   const [actualCost, setActualCost] = useState<number | null>(null);
 
@@ -151,14 +171,30 @@ export function ActivityEditClient({ id }: Props) {
           setExpectedFinishDate(activity.expectedFinishDate ? activity.expectedFinishDate.substring(0, 10) : "");
           setOwnerId(activity.ownerId ?? "");
           setTaskTypeId(activity.taskTypeId ?? "");
+          setTaskSubTypeId(activity.taskSubTypeId ?? "");
           setExpectedDays(typeof activity.expectedDays === "number" ? activity.expectedDays : null);
           setActualDays(typeof activity.actualDays === "number" ? activity.actualDays : null);
-          setTaskTypeCost(activity.taskTypeCost !== null && activity.taskTypeCost !== undefined ? Number(activity.taskTypeCost) : null);
           setEstimatedCost(activity.estimatedCost !== null && activity.estimatedCost !== undefined ? Number(activity.estimatedCost) : null);
           setActualCost(activity.actualCost !== null && activity.actualCost !== undefined ? Number(activity.actualCost) : null);
-          fetch("/api/activity-task-types")
+          fetch("/api/task-types")
             .then((r) => (r.ok ? r.json() : []))
             .then((t) => setTaskTypes(Array.isArray(t) ? t : []))
+            .catch(() => {});
+          fetch("/api/task-sub-types")
+            .then((r) => (r.ok ? r.json() : []))
+            .then((t) => {
+              const list: TaskSubTypeOption[] = Array.isArray(t) ? t : [];
+              setTaskSubTypes(list);
+              // Pre-fill the manual Estimated Cost input with this
+              // Activity's own existing snapshot — but ONLY when the
+              // currently-selected Task Sub Type genuinely has no
+              // configured cost; the configured cost otherwise remains
+              // authoritative and this field stays hidden/empty.
+              const current = list.find((st) => st.id === activity.taskSubTypeId);
+              if (current && current.cost === null && activity.taskSubTypeCost !== null && activity.taskSubTypeCost !== undefined) {
+                setManualEstimatedCost(String(Number(activity.taskSubTypeCost)));
+              }
+            })
             .catch(() => {});
 
           // Eligible assignees/sub-departments/projects all depend on the
@@ -255,6 +291,13 @@ export function ActivityEditClient({ id }: Props) {
   const selectedProject = projects.find((p) => p.id === projectId);
   const isRequestOrigin = !!selectedProject?.projectRequestId;
 
+  // Same derivation as ActivityNewForm — whether the CURRENTLY SELECTED
+  // Task Sub Type has no configured cost, requiring a manual Estimated
+  // Cost. PATCH /api/activities/[id] independently re-derives this
+  // server-side off the database row; never trusted from the client.
+  const selectedTaskSubType = taskSubTypes.find((t) => t.id === taskSubTypeId);
+  const taskSubTypeNeedsManualCost = !!selectedTaskSubType && selectedTaskSubType.cost === null;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) {
@@ -264,6 +307,13 @@ export function ActivityEditClient({ id }: Props) {
     if (expectedStartDate && expectedFinishDate && new Date(expectedFinishDate) < new Date(expectedStartDate)) {
       toast.error("Expected Finish cannot be before Expected Start.");
       return;
+    }
+    if (taskSubTypeNeedsManualCost) {
+      const parsed = Number(manualEstimatedCost);
+      if (!manualEstimatedCost.trim() || !Number.isFinite(parsed) || parsed < 0) {
+        toast.error("Enter a valid Estimated Cost — the selected Task Sub Type has no fixed configured cost.");
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -287,22 +337,36 @@ export function ActivityEditClient({ id }: Props) {
           // (per-department configurable, never manually editable).
           isMilestone,
           subDepartmentId: subDepartmentId || null,
-          // Optional on edit (unlike initial request-origin creation,
-          // which stays strictly required — see createActivitySchema is
-          // NOT weakened). Always sent as a full snapshot: an empty field
-          // becomes an explicit `null` ("clear it"), never `undefined`
-          // ("leave untouched") and never left to collapse to 0/NaN. Sent
-          // whenever the block is relevant (current OR newly-selected
-          // project is request-origin) so a relink that fills in the
-          // metadata in the same request works; otherwise omitted entirely
-          // so a normal/manual Project's Activity edit never even mentions
-          // these keys.
-          ...(isRequestOrigin || expectedStartDate || expectedFinishDate || ownerId || taskTypeId
+          // Task Type (NEW) — required on this route's own schema whenever
+          // the key is present at all, so only ever sent when there's a
+          // real selection (never `null`/empty — that would just fail
+          // validation). Omitted when blank (a legacy Activity that never
+          // had one yet and the user hasn't picked one in THIS edit) so an
+          // otherwise-unrelated edit is never forced to backfill it.
+          taskTypeId: taskTypeId || undefined,
+          // Task Sub Type (RENAMED former "Task Type") — optional on edit
+          // (unlike initial request-origin creation, which stays strictly
+          // required — see createActivitySchema is NOT weakened). Always
+          // sent as a full snapshot: an empty field becomes an explicit
+          // `null` ("clear it"), never `undefined` ("leave untouched") and
+          // never left to collapse to 0/NaN. Sent whenever the block is
+          // relevant (current OR newly-selected project is request-origin)
+          // so a relink that fills in the metadata in the same request
+          // works; otherwise omitted entirely so a normal/manual Project's
+          // Activity edit never even mentions these keys.
+          ...(isRequestOrigin || expectedStartDate || expectedFinishDate || ownerId || taskSubTypeId
             ? {
                 expectedStartDate: expectedStartDate || null,
                 expectedFinishDate: expectedFinishDate || null,
                 ownerId: ownerId || null,
-                taskTypeId: taskTypeId || null,
+                taskSubTypeId: taskSubTypeId || null,
+                // Only meaningful when the selected Task Sub Type has no
+                // configured cost — the server independently re-derives
+                // this and silently ignores it otherwise (the configured
+                // cost always wins). Resent even when unchanged, same
+                // convention as taskSubTypeId above; the server's own
+                // re-snapshot is idempotent when the value hasn't moved.
+                ...(taskSubTypeNeedsManualCost ? { manualEstimatedCost: Number(manualEstimatedCost) } : {}),
               }
             : {}),
         }),
@@ -452,6 +516,28 @@ export function ActivityEditClient({ id }: Props) {
               </div>
             )}
 
+            <div className="space-y-2">
+              <Label htmlFor="task-type">
+                Task Type <span className="text-destructive">*</span>
+              </Label>
+              <Select value={taskTypeId || "__none__"} onValueChange={(v) => setTaskTypeId(v === "__none__" ? "" : v)}>
+                <SelectTrigger id="task-type">
+                  <SelectValue placeholder="Select a Task Type…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {/* "__none__" only ever appears for a legacy Activity that
+                      predates this field — picking it keeps taskTypeId
+                      omitted from the PATCH body (an unrelated edit is
+                      never forced to backfill it); choosing a real Task
+                      Type here is how such an Activity gets one. */}
+                  {!taskTypeId && <SelectItem value="__none__">None (legacy)</SelectItem>}
+                  {taskTypes.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             {/* Request-origin-only — only ever shown for an Activity whose
                 (current or newly-selected) project originates from a
                 Project Request. Every field here is OPTIONAL on edit
@@ -522,7 +608,7 @@ export function ActivityEditClient({ id }: Props) {
                       placeholder="Not set"
                       className="cursor-default bg-muted/40"
                     />
-                    <p className="text-xs text-muted-foreground">Task Type cost × Expected Days. Calculated automatically.</p>
+                    <p className="text-xs text-muted-foreground">Task Sub Type cost × Expected Days. Calculated automatically.</p>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="actual-cost">Actual Cost</Label>
@@ -537,31 +623,63 @@ export function ActivityEditClient({ id }: Props) {
                       placeholder="Not set until completion"
                       className="cursor-default bg-muted/40"
                     />
-                    <p className="text-xs text-muted-foreground">Task Type cost × Actual Days. Clears when reopened.</p>
+                    <p className="text-xs text-muted-foreground">Task Sub Type cost × Actual Days. Clears when reopened.</p>
                   </div>
                 </div>
 
                 <div className="space-y-2">
-                  <Label>Task Type</Label>
-                  <Select value={taskTypeId || "__none__"} onValueChange={(v) => setTaskTypeId(v === "__none__" ? "" : v)}>
+                  <Label>Task Sub Type</Label>
+                  <Select
+                    value={taskSubTypeId || "__none__"}
+                    onValueChange={(v) => {
+                      setTaskSubTypeId(v === "__none__" ? "" : v);
+                      // Switching Task Sub Type always invalidates any
+                      // previously-entered/pre-filled manual Estimated
+                      // Cost — it must never silently carry over to a
+                      // different subtype (fixed-cost or another
+                      // null-cost one).
+                      setManualEstimatedCost("");
+                    }}
+                  >
                     <SelectTrigger>
                       <SelectValue placeholder="None" />
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="__none__">None</SelectItem>
-                      {taskTypes.map((t) => (
+                      {taskSubTypes.map((t) => (
                         <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
-                  {/* taskTypeCost is this Activity's own HISTORICAL
-                      snapshot — shown whenever one exists, regardless of
-                      whether the user has touched the Select above.
-                      Informational only, never directly editable; the
-                      server re-snapshots it ONLY if Task Type is actually
-                      changed on save (see PATCH /api/activities/[id]). */}
-                  {taskTypeCost !== null && (
-                    <p className="text-xs text-muted-foreground">Snapshot cost: {taskTypeCost.toFixed(2)} EUR</p>
+                  {/* Informational preview of what will be (re-)snapshotted
+                      if this Activity is saved — never the authoritative
+                      value; the server independently re-derives it from
+                      the database. */}
+                  {selectedTaskSubType && selectedTaskSubType.cost !== null && (
+                    <p className="text-xs text-muted-foreground">Cost: {selectedTaskSubType.cost.toFixed(2)} EUR (snapshotted on save)</p>
+                  )}
+                  {taskSubTypeNeedsManualCost && (
+                    <div className="space-y-2 pt-1">
+                      <Label htmlFor="manual-estimated-cost">
+                        Estimated Cost <span className="text-destructive">*</span>
+                      </Label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
+                        <Input
+                          id="manual-estimated-cost"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          className="pl-7"
+                          placeholder="0.00"
+                          value={manualEstimatedCost}
+                          onChange={(e) => setManualEstimatedCost(e.target.value)}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        This Task Sub Type has no fixed configured cost — enter the estimated cost for this Activity.
+                      </p>
+                    </div>
                   )}
                 </div>
 

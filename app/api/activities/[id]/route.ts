@@ -56,6 +56,7 @@ export async function GET(
         businessUnit: { select: { id: true, name: true } },
         owner: { select: { id: true, name: true, email: true, image: true } },
         taskType: { select: { id: true, name: true } },
+        taskSubType: { select: { id: true, name: true } },
       },
     });
 
@@ -123,7 +124,7 @@ export async function GET(
     // Estimated/Actual Cost — derived here (never stored), reusing the SAME
     // computeActivityFinancials used by Project-level aggregation (see
     // lib/services/project-financials-service.ts). Harmless for a manual
-    // Activity too (naturally €0/€0, since taskTypeCost is never set there).
+    // Activity too (naturally €0/€0, since taskSubTypeCost is never set there).
     const { estimatedCost, actualCost } = computeActivityFinancials(activity);
 
     return NextResponse.json({ ...activity, estimatedCost: estimatedCost.toString(), actualCost: actualCost.toString(), progress, progressConfigError, statusLabel: statusDisplay.label, statusColor: statusDisplay.color, canCreateProjectInDept, canEditActivity, canDeleteActivity, effectiveDepartmentId });
@@ -151,7 +152,7 @@ export async function PATCH(
         expectedStartDate: true,
         expectedFinishDate: true,
         ownerId: true,
-        taskTypeId: true,
+        taskSubTypeId: true,
       },
     });
     if (!existing) return NextResponse.json({ error: "Not found", code: "activity_not_found" }, { status: 404 });
@@ -213,6 +214,8 @@ export async function PATCH(
       expectedFinishDate,
       ownerId,
       taskTypeId,
+      taskSubTypeId,
+      manualEstimatedCost,
       ...rest
     } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
@@ -264,14 +267,14 @@ export async function PATCH(
         const missing = requestOriginActivityMissingFields({
           expectedStartDate: expectedStartDate !== undefined ? expectedStartDate : existing.expectedStartDate?.toISOString(),
           expectedFinishDate: expectedFinishDate !== undefined ? expectedFinishDate : existing.expectedFinishDate?.toISOString(),
-          taskTypeId: taskTypeId !== undefined ? taskTypeId : existing.taskTypeId,
+          taskSubTypeId: taskSubTypeId !== undefined ? taskSubTypeId : existing.taskSubTypeId,
           ownerId: ownerId !== undefined ? ownerId : existing.ownerId,
           assignedUserIds: assignedUserIds !== undefined ? assignedUserIds : currentAssigneeCount > 0 ? ["__existing__"] : [],
         });
         if (missing.length > 0) {
           return NextResponse.json(
             {
-              error: "This Project originates from a Project Request — moving this Activity into it requires Expected Start, Expected Finish, Task Type, Owner, and at least one Related User. Supply the missing fields in the same request, or complete them first.",
+              error: "This Project originates from a Project Request — moving this Activity into it requires Expected Start, Expected Finish, Task Sub Type, Owner, and at least one Related User. Supply the missing fields in the same request, or complete them first.",
               code: "request_origin_fields_required",
               missingFields: missing,
             },
@@ -305,24 +308,60 @@ export async function PATCH(
       }
     }
 
-    // Task Type — only re-validated (must exist AND be active) when
-    // GENUINELY changing to a different id, the same "re-saving an
-    // already-set, since-deactivated reference value is fine; picking a
-    // NEW one must be active" rule this repo's Project Expense Type PATCH
-    // already established. Unchanged (including resending the same id, or
-    // omitting the field) never touches taskTypeCost's historical snapshot
-    // below.
-    let newTaskTypeCost: number | undefined;
-    const taskTypeChanging = taskTypeId !== undefined && taskTypeId !== existing.taskTypeId;
-    if (taskTypeChanging && taskTypeId !== null) {
-      const taskType = await prisma.activityTaskType.findUnique({ where: { id: taskTypeId! }, select: { id: true, isActive: true, cost: true } });
+    // Task Type (the NEW classification — see TaskType in
+    // prisma/schema.prisma) — re-validated (must exist AND be active)
+    // whenever a value is actually supplied; createActivitySchema's own
+    // .min(1) already rejects an explicit empty string, so this can only
+    // ever be a real, non-empty candidate id here. Has NO cost of its own
+    // — nothing to snapshot.
+    if (taskTypeId !== undefined) {
+      const taskType = await prisma.taskType.findUnique({ where: { id: taskTypeId }, select: { id: true, isActive: true } });
       if (!taskType || !taskType.isActive) {
         return NextResponse.json(
           { error: "The selected Task Type does not exist or is not active.", code: "invalid_task_type" },
           { status: 400 }
         );
       }
-      newTaskTypeCost = Number(taskType.cost);
+    }
+
+    // Task Sub Type (the RENAMED former "Task Type" — see TaskSubType in
+    // prisma/schema.prisma) — only re-validated (must exist AND be active)
+    // when GENUINELY changing to a different id, the same "re-saving an
+    // already-set, since-deactivated reference value is fine; picking a
+    // NEW one must be active" rule this repo's Project Expense Type PATCH
+    // already established. Cost resolution is re-run either when the Sub
+    // Type itself is changing, OR when the caller explicitly supplies a
+    // NEW manualEstimatedCost for whichever Sub Type is currently
+    // effective (letting a previously-entered manual estimate be
+    // corrected later without also having to reselect the Sub Type) — in
+    // BOTH cases, a configured cost on the resolved row always wins over
+    // any submitted manualEstimatedCost, never overridable. Completely
+    // unchanged (including resending the same taskSubTypeId with no
+    // manualEstimatedCost, or omitting both) never touches
+    // taskSubTypeCost's historical snapshot below. `null` cost + no
+    // manual value on a genuine change -> rejected, NEVER coerced to 0.
+    let newTaskSubTypeCost: number | null | undefined;
+    const taskSubTypeChanging = taskSubTypeId !== undefined && taskSubTypeId !== existing.taskSubTypeId;
+    const effectiveTaskSubTypeId = taskSubTypeId !== undefined ? taskSubTypeId : existing.taskSubTypeId;
+    const costResolutionNeeded = taskSubTypeChanging || (manualEstimatedCost !== undefined && !!effectiveTaskSubTypeId);
+    if (costResolutionNeeded && effectiveTaskSubTypeId) {
+      const taskSubType = await prisma.taskSubType.findUnique({ where: { id: effectiveTaskSubTypeId }, select: { id: true, isActive: true, cost: true } });
+      if (!taskSubType || !taskSubType.isActive) {
+        return NextResponse.json(
+          { error: "The selected Task Sub Type does not exist or is not active.", code: "invalid_task_sub_type" },
+          { status: 400 }
+        );
+      }
+      if (taskSubType.cost !== null) {
+        newTaskSubTypeCost = Number(taskSubType.cost);
+      } else if (manualEstimatedCost !== undefined) {
+        newTaskSubTypeCost = manualEstimatedCost;
+      } else {
+        return NextResponse.json(
+          { error: "Enter an Estimated Cost — the selected Task Sub Type has no fixed configured cost.", code: "estimated_cost_required" },
+          { status: 400 }
+        );
+      }
     }
 
     // Expected Start/Finish — independently optional on edit (neither
@@ -438,7 +477,8 @@ export async function PATCH(
           actualDays: justCompleted ? newActualDays : justReopened ? null : undefined,
           ownerId: ownerId !== undefined ? ownerId : undefined,
           taskTypeId: taskTypeId !== undefined ? taskTypeId : undefined,
-          taskTypeCost: taskTypeId === null ? null : taskTypeChanging ? newTaskTypeCost : undefined,
+          taskSubTypeId: taskSubTypeId !== undefined ? taskSubTypeId : undefined,
+          taskSubTypeCost: taskSubTypeId === null ? null : costResolutionNeeded ? newTaskSubTypeCost : undefined,
           expectedStartDate: expectedStartDate !== undefined ? effectiveExpectedStart : undefined,
           expectedFinishDate: expectedFinishDate !== undefined ? effectiveExpectedFinish : undefined,
           expectedDays: expectedDaysChanging ? newExpectedDays : undefined,
@@ -452,6 +492,7 @@ export async function PATCH(
           assignedUsers: { select: { id: true, name: true, email: true, image: true } },
           owner: { select: { id: true, name: true, email: true, image: true } },
           taskType: { select: { id: true, name: true } },
+          taskSubType: { select: { id: true, name: true } },
         },
       });
     });

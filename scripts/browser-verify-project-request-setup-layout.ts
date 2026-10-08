@@ -339,7 +339,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     departmentIds.push(dept.id);
-    const type = await prisma.projectRequestType.create({ data: { name: `${TAG}-type` } });
+    const type = await prisma.taskType.create({ data: { name: `${TAG}-type` } });
     typeIds.push(type.id);
 
     const admin = await prisma.user.findFirstOrThrow({ where: { email: ADMIN_EMAIL }, select: { id: true } });
@@ -420,7 +420,7 @@ async function main() {
       await prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: departmentIds } } });

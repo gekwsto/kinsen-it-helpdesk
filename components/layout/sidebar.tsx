@@ -222,10 +222,13 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
         // Permission-gated (each resource's own `.manage` key), NOT a
         // hardcoded roles:["ADMIN"] — see navFlags.canManageProjectRequestTypes/
         // canManageProjectExpenseTypes/canManageTaskTypes's own doc comment
-        // (lib/services/department-scope-service.ts).
-        { label: "Project Request Types", href: "/admin/project-request-types", visible: navFlags.canManageProjectRequestTypes },
+        // (lib/services/department-scope-service.ts). The flag NAMES are
+        // deliberately unchanged by the Task Type/Task Sub Type rename
+        // (they mirror the underlying, intentionally-unchanged permission
+        // KEYS) — only the labels/hrefs below reflect the new names.
+        { label: "Task Types", href: "/admin/task-types", visible: navFlags.canManageProjectRequestTypes },
         { label: "Project Expense Types", href: "/admin/project-expense-types", visible: navFlags.canManageProjectExpenseTypes },
-        { label: "Task Types", href: "/admin/activity-task-types", visible: navFlags.canManageTaskTypes },
+        { label: "Task Sub Types", href: "/admin/task-sub-types", visible: navFlags.canManageTaskTypes },
         // Permission-gated (projectFeedback.view), NOT a hardcoded
         // roles:["ADMIN"] — see navFlags.canViewProjectFeedback's own doc
         // comment (lib/services/department-scope-service.ts) for why this

@@ -65,10 +65,10 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
-    const taskType = await prisma.activityTaskType.create({ data: { name: `${TAG}-tasktype`, cost: 55 } });
+    const taskType = await prisma.taskSubType.create({ data: { name: `${TAG}-tasktype`, cost: 55 } });
     taskTypeIds.push(taskType.id);
 
     const admin = await prisma.user.findFirstOrThrow({ where: { email: ADMIN_EMAIL }, select: { id: true } });
@@ -140,6 +140,10 @@ async function main() {
     check("A2. No request-origin fields appear for a manual Project", (await page.locator("#expected-start").count()) === 0);
 
     await page.fill("#title", `${TAG} Manual click-through Activity`);
+    // Task Type (NEW, universal) — required for every Activity now, manual
+    // or request-origin alike.
+    await page.locator("#task-type").click();
+    await page.getByRole("option", { name: `${TAG}-reqtype` }).click();
     await page.getByRole("button", { name: /create activity/i }).click();
     await page.waitForURL((url) => /\/activities\/[a-z0-9]+$/.test(url.pathname) && !url.pathname.endsWith("/activities/new"), { timeout: 10000 });
     const manualActivityId = page.url().split("/").pop()!;
@@ -161,7 +165,7 @@ async function main() {
       "B2. The request-origin extended fields appear IMMEDIATELY, with no reselection of the Project required",
       (await page.locator("#expected-start").count()) === 1 &&
         (await page.locator("#expected-finish").count()) === 1 &&
-        (await page.locator("#task-type").count()) === 1 &&
+        (await page.locator("#task-sub-type").count()) === 1 &&
         (await page.locator("#owner").count()) === 1
     );
     check("B3. Related Users label appears too (reused assignedUsers, relabeled)", (await page.getByText("Related Users", { exact: false }).count()) > 0);
@@ -169,7 +173,11 @@ async function main() {
     await page.fill("#title", `${TAG} RO click-through Activity`);
     await page.fill("#expected-start", "2026-09-02");
     await page.fill("#expected-finish", "2026-09-06");
+    // Task Type (NEW, universal) and Task Sub Type (RENAMED former "Task
+    // Type," request-origin-only) are two independent fields now.
     await page.locator("#task-type").click();
+    await page.getByRole("option", { name: `${TAG}-reqtype` }).click();
+    await page.locator("#task-sub-type").click();
     await page.getByRole("option", { name: `${TAG}-tasktype` }).click();
     await page.waitForTimeout(150);
     await page.locator("#owner").click();
@@ -195,12 +203,12 @@ async function main() {
     await browser.close();
     try {
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds.filter(Boolean) } } });
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });

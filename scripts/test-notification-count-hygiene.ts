@@ -220,7 +220,7 @@ async function main() {
     console.log("\n=== 1/4. One real business event -> exactly one notification per recipient; a REJECTED mutation creates none ===\n");
     const dept = await createDepartment({ name: `Notif Hygiene Dept ${RUN_ID}`, slug: `notif-hygiene-dept-${RUN_ID}` });
     deptIds.push(dept.id);
-    const type = await prisma.projectRequestType.create({ data: { name: `Notif Hygiene Type ${RUN_ID}` } });
+    const type = await prisma.taskType.create({ data: { name: `Notif Hygiene Type ${RUN_ID}` } });
     typeIds.push(type.id);
     const requester = await makeUser(`notif-hygiene-requester-${RUN_ID}@kinsen.gr`);
     await prisma.departmentMembership.create({
@@ -346,7 +346,7 @@ async function main() {
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
       ["notifications (window-bug fixture user)", () => prisma.notification.deleteMany({ where: { userId: { in: userIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

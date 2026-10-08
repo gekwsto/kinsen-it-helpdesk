@@ -26,10 +26,6 @@ interface DepartmentOption {
   id: string;
   name: string;
 }
-interface ProjectTypeOption {
-  id: string;
-  name: string;
-}
 interface IntermediateApproverOption {
   id: string;
   name: string | null;
@@ -39,8 +35,6 @@ interface IntermediateApproverOption {
 interface ProjectRequestFormProps {
   /** The caller's own real, canonical accessible-departments set — the SAME one the workspace selector itself uses (see app/(main)/project-requests/new/page.tsx). A single entry is auto-selected and the picker is hidden entirely. */
   departments: DepartmentOption[];
-  /** Every currently-ACTIVE Project Request Type — the page already renders a clean empty state instead of this form when there are none. */
-  types: ProjectTypeOption[];
   /** The active workspace's departmentId, ONLY when it's a real department (never the synthetic "All Workspaces" state) and already confirmed by the page to be in `departments` — a pre-selected default when there's more than one option, never an authorization decision; the server re-verifies whatever is actually submitted regardless. */
   defaultDepartmentId?: string;
   /** Every real, currently-eligible intermediate approver, system-wide (never department-scoped) — the page already renders a clean empty state instead of this form when there are none (this stage is mandatory, never silently skipped). */
@@ -49,7 +43,7 @@ interface ProjectRequestFormProps {
 
 const IMPORTANCE_LEVELS = [1, 2, 3] as const;
 
-export function ProjectRequestForm({ departments, types, defaultDepartmentId, intermediateApproverOptions }: ProjectRequestFormProps) {
+export function ProjectRequestForm({ departments, defaultDepartmentId, intermediateApproverOptions }: ProjectRequestFormProps) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
 
@@ -71,7 +65,6 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
   });
 
   const importance = watch("importance");
-  const projectTypeId = watch("projectTypeId");
   const departmentId = watch("departmentId");
   const replacesExisting = watch("replacesExisting");
   const intermediateApproverIds = watch("intermediateApproverIds") ?? [];
@@ -169,44 +162,23 @@ export function ProjectRequestForm({ departments, types, defaultDepartmentId, in
             {errors.description && <p className="text-xs text-destructive">{errors.description.message}</p>}
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="importance">
-                Importance level <span className="text-destructive">*</span>
-              </Label>
-              <Select value={String(importance)} onValueChange={(v) => setValue("importance", Number(v), { shouldValidate: true })}>
-                <SelectTrigger id="importance">
-                  <SelectValue placeholder="Select importance" />
-                </SelectTrigger>
-                <SelectContent>
-                  {IMPORTANCE_LEVELS.map((level) => (
-                    <SelectItem key={level} value={String(level)}>
-                      {PROJECT_PRIORITY_LABEL[level]}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {errors.importance && <p className="text-xs text-destructive">{errors.importance.message}</p>}
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="projectTypeId">
-                Project Type <span className="text-destructive">*</span>
-              </Label>
-              <Select value={projectTypeId} onValueChange={(v) => setValue("projectTypeId", v, { shouldValidate: true })}>
-                <SelectTrigger id="projectTypeId">
-                  <SelectValue placeholder="Select a type" />
-                </SelectTrigger>
-                <SelectContent>
-                  {types.map((t) => (
-                    <SelectItem key={t.id} value={t.id}>
-                      {t.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {errors.projectTypeId && <p className="text-xs text-destructive">{errors.projectTypeId.message}</p>}
-            </div>
+          <div className="space-y-2">
+            <Label htmlFor="importance">
+              Importance level <span className="text-destructive">*</span>
+            </Label>
+            <Select value={String(importance)} onValueChange={(v) => setValue("importance", Number(v), { shouldValidate: true })}>
+              <SelectTrigger id="importance">
+                <SelectValue placeholder="Select importance" />
+              </SelectTrigger>
+              <SelectContent>
+                {IMPORTANCE_LEVELS.map((level) => (
+                  <SelectItem key={level} value={String(level)}>
+                    {PROJECT_PRIORITY_LABEL[level]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {errors.importance && <p className="text-xs text-destructive">{errors.importance.message}</p>}
           </div>
 
           <div className="space-y-2">

@@ -2,7 +2,7 @@
  * Regression coverage for the negative Activity Actual Days / Actual Cost
  * bug: completing a request-origin Activity BEFORE its own Expected Start
  * produced a negative actualDays (raw wholeCalendarDaysBetween going
- * negative), which multiplied through taskTypeCost into a negative
+ * negative), which multiplied through taskSubTypeCost into a negative
  * Activity Actual Cost and, summed, a negative Project Actual Cost (a real
  * row in this dev DB showed actualDays: -2, Project Actual Cost: -€300.00
  * before this fix).
@@ -91,7 +91,7 @@ async function main() {
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
   const setupPOST = (await import("@/app/api/project-requests/[id]/project/route")).POST;
-  const taskTypesAdminPOST = (await import("@/app/api/admin/activity-task-types/route")).POST;
+  const taskTypesAdminPOST = (await import("@/app/api/admin/task-sub-types/route")).POST;
   const { computeProjectFinancials } = await import("@/lib/services/project-financials-service");
 
   const deptIds: string[] = [];
@@ -105,7 +105,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -164,7 +164,7 @@ async function main() {
 
     async function createActivity(title: string, expectedStartDate: string, expectedFinishDate: string) {
       const res = await activitiesPOST(
-        jsonReq({ title, projectId: project, departmentId: dept.id, expectedStartDate, expectedFinishDate, taskTypeId: taskType.id, ownerId: worker1.id, assignedUserIds: [worker1.id] })
+        jsonReq({ title, projectId: project, departmentId: dept.id, expectedStartDate, expectedFinishDate, taskTypeId: reqType.id, taskSubTypeId: taskType.id, ownerId: worker1.id, assignedUserIds: [worker1.id] })
       );
       if (res.status !== 201) throw new Error(`Fixture activity create failed: ${res.status}: ${JSON.stringify(await res.json())}`);
       const activity = await res.json();
@@ -181,7 +181,7 @@ async function main() {
     check("1. actualDays = 0 (Expected Start is 5 days in the future; completed today)", completedEarly.actualDays === 0);
     check("2. Activity Actual Cost = '0' (never negative)", completedEarly.actualCost === "0");
 
-    const projAfterEarly = await prisma.projectActivity.findMany({ where: { projectId: project }, select: { taskTypeCost: true, expectedDays: true, actualDays: true } });
+    const projAfterEarly = await prisma.projectActivity.findMany({ where: { projectId: project }, select: { taskSubTypeCost: true, expectedDays: true, actualDays: true } });
     const totalsAfterEarly = computeProjectFinancials(projAfterEarly);
     check("3. Project Actual Cost does not become negative", Number(totalsAfterEarly.actualCost) >= 0 && totalsAfterEarly.actualCost.toString() === "0");
 
@@ -230,7 +230,7 @@ async function main() {
     // ══════════════════════ 11. Legacy negative-row reconciliation mechanism ══════════════════════
     console.log("\n=== 11. The reconciliation mechanism (migration SQL) correctly fixes a negative row ===\n");
     const legacyNegative = await prisma.projectActivity.create({
-      data: { title: `${TAG} LegacyNegative`, projectId: project, departmentId: dept.id, createdById: worker1.id, taskTypeId: taskType.id, taskTypeCost: 150, actualDays: -5, completedAt: new Date() },
+      data: { title: `${TAG} LegacyNegative`, projectId: project, departmentId: dept.id, createdById: worker1.id, taskSubTypeId: taskType.id, taskSubTypeCost: 150, actualDays: -5, completedAt: new Date() },
     });
     activityIds.push(legacyNegative.id);
     check("(fixture) A simulated pre-fix negative row exists", (await prisma.projectActivity.findUniqueOrThrow({ where: { id: legacyNegative.id } })).actualDays === -5);
@@ -242,7 +242,7 @@ async function main() {
 
     // ══════════════════════ 12. No negative contribution to Project aggregation ══════════════════════
     console.log("\n=== 12. Project financial aggregation contains no negative contribution, across a mixed set ===\n");
-    const allActivities = await prisma.projectActivity.findMany({ where: { projectId: project }, select: { taskTypeCost: true, expectedDays: true, actualDays: true } });
+    const allActivities = await prisma.projectActivity.findMany({ where: { projectId: project }, select: { taskSubTypeCost: true, expectedDays: true, actualDays: true } });
     check("(sanity) This Project now has a mix of zero, positive, and a reconciled-legacy actualDays", allActivities.some((a) => a.actualDays === 0) && allActivities.some((a) => (a.actualDays ?? 0) > 0));
     const finalTotals = computeProjectFinancials(allActivities);
     check("12. Project Actual Cost is non-negative", Number(finalTotals.actualCost) >= 0);
@@ -255,7 +255,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): activities", err instanceof Error ? err.message : err);
     }
     try {
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): task types", err instanceof Error ? err.message : err);
     }
@@ -268,7 +268,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);

@@ -4,8 +4,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Calendar, Loader2 } from "lucide-react";
+import { Calendar, Eye, Loader2 } from "lucide-react";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ActivityPriority } from "@prisma/client";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
@@ -31,6 +32,8 @@ interface ActivityCardProps {
   activity: SerializedActivity;
   toggling: boolean;
   onToggleComplete: (activity: SerializedActivity) => void;
+  /** Opens the shared read-only Preview dialog (see activity-list.tsx) — optional so other, unrelated callers of this card (if any) keep working without it. */
+  onPreview?: (activity: SerializedActivity) => void;
 }
 
 /**
@@ -44,7 +47,7 @@ interface ActivityCardProps {
  * placed the same way the Project card places its own, and the completion
  * checkbox the List view already offers as its one inline action).
  */
-export function ActivityCard({ activity, toggling, onToggleComplete }: ActivityCardProps) {
+export function ActivityCard({ activity, toggling, onToggleComplete, onPreview }: ActivityCardProps) {
   const router = useRouter();
 
   return (
@@ -88,6 +91,21 @@ export function ActivityCard({ activity, toggling, onToggleComplete }: ActivityC
             <div className="flex items-center gap-1.5 flex-shrink-0">
               {activity.overdue && <OverdueBadge />}
               <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
+              {onPreview && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 w-7 p-0"
+                  title="Preview this activity"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    onPreview(activity);
+                  }}
+                >
+                  <Eye className="h-3.5 w-3.5" />
+                </Button>
+              )}
             </div>
           </div>
           <CardDescription>

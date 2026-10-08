@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission } from "@/lib/permissions";
-import { activityTaskTypeSchema } from "@/lib/validations";
+import { taskSubTypeSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 
-async function requireTaskTypeManageAccess() {
+async function requireTaskSubTypeManageAccess() {
   const session = await requireAuth();
   const allowed = await hasPermission(session.user.role, "taskType.manage", session.user.customRoleId);
   if (!allowed) throw new Error("Forbidden");
@@ -13,34 +13,36 @@ async function requireTaskTypeManageAccess() {
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireTaskTypeManageAccess();
+    await requireTaskSubTypeManageAccess();
     const { id } = await params;
     const body = await req.json();
-    const parsed = activityTaskTypeSchema.partial().safeParse(body);
+    const parsed = taskSubTypeSchema.partial().safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);
 
     if (parsed.data.name) {
-      const existing = await prisma.activityTaskType.findUnique({ where: { name: parsed.data.name }, select: { id: true } });
+      const existing = await prisma.taskSubType.findUnique({ where: { name: parsed.data.name }, select: { id: true } });
       if (existing && existing.id !== id) {
-        return NextResponse.json(apiError("name_taken", "A Task Type with this name already exists.", { field: "name" }), { status: 409 });
+        return NextResponse.json(apiError("name_taken", "A Task Sub Type with this name already exists.", { field: "name" }), { status: 409 });
       }
     }
 
     // Changing the MASTER cost here is exactly the scenario this feature's
     // snapshot principle exists for: any Activity that already references
-    // this Task Type keeps its own Activity.taskTypeCost untouched — this
-    // update never reaches into ProjectActivity at all.
-    const type = await prisma.activityTaskType.update({
+    // this Task Sub Type keeps its own Activity.taskSubTypeCost untouched
+    // — this update never reaches into ProjectActivity at all. `cost` key
+    // absent from the body -> left untouched; `cost: null` -> explicitly
+    // cleared (a real, supported edit, not an error); a number -> set.
+    const type = await prisma.taskSubType.update({
       where: { id },
       data: parsed.data,
       include: { _count: { select: { activities: true } } },
     });
-    return NextResponse.json({ ...type, cost: Number(type.cost) });
+    return NextResponse.json({ ...type, cost: type.cost === null ? null : Number(type.cost) });
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();
-    if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Task Types.");
-    if (error.code === "P2025") return NextResponse.json(apiError("item_not_found", "This Task Type no longer exists."), { status: 404 });
-    console.error("[api/admin/activity-task-types/[id]] PATCH failed", error);
+    if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Task Sub Types.");
+    if (error.code === "P2025") return NextResponse.json(apiError("item_not_found", "This Task Sub Type no longer exists."), { status: 404 });
+    console.error("[api/admin/task-sub-types/[id]] PATCH failed", error);
     return internalErrorResponse();
   }
 }
@@ -52,31 +54,31 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 // removing a type that was never actually used.
 export async function DELETE(_req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await requireTaskTypeManageAccess();
+    await requireTaskSubTypeManageAccess();
     const { id } = await params;
 
-    const existing = await prisma.activityTaskType.findUnique({
+    const existing = await prisma.taskSubType.findUnique({
       where: { id },
       include: { _count: { select: { activities: true } } },
     });
-    if (!existing) return NextResponse.json(apiError("item_not_found", "This Task Type no longer exists."), { status: 404 });
+    if (!existing) return NextResponse.json(apiError("item_not_found", "This Task Sub Type no longer exists."), { status: 404 });
 
     if (existing._count.activities > 0) {
       return NextResponse.json(
-        apiError("item_in_use", `This Task Type is used by ${existing._count.activities} Activity(ies) and cannot be deleted. Deactivate it instead.`),
+        apiError("item_in_use", `This Task Sub Type is used by ${existing._count.activities} Activity(ies) and cannot be deleted. Deactivate it instead.`),
         { status: 409 }
       );
     }
 
-    await prisma.activityTaskType.delete({ where: { id } });
+    await prisma.taskSubType.delete({ where: { id } });
     return new NextResponse(null, { status: 204 });
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();
-    if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Task Types.");
+    if (error.message === "Forbidden") return forbiddenResponse("You do not have permission to manage Task Sub Types.");
     if (error.code === "P2003") {
-      return NextResponse.json(apiError("item_in_use", "This Task Type is still referenced and cannot be deleted. Deactivate it instead."), { status: 409 });
+      return NextResponse.json(apiError("item_in_use", "This Task Sub Type is still referenced and cannot be deleted. Deactivate it instead."), { status: 409 });
     }
-    console.error("[api/admin/activity-task-types/[id]] DELETE failed", error);
+    console.error("[api/admin/task-sub-types/[id]] DELETE failed", error);
     return internalErrorResponse();
   }
 }

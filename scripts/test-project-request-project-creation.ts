@@ -230,7 +230,7 @@ async function main() {
     const dept = await createDepartment({ name: `PR Creation Dept ${RUN_ID}`, slug: `pr-creation-dept-${RUN_ID}` });
     const otherDept = await createDepartment({ name: `PR Creation OtherDept ${RUN_ID}`, slug: `pr-creation-otherdept-${RUN_ID}` });
     deptIds.push(dept.id, otherDept.id);
-    const type = await prisma.projectRequestType.create({ data: { name: `PR Creation Type ${RUN_ID}` } });
+    const type = await prisma.taskType.create({ data: { name: `PR Creation Type ${RUN_ID}` } });
     typeIds.push(type.id);
 
     const requester = await makeUser(`pr-creation-requester-${RUN_ID}@kinsen.gr`);
@@ -845,7 +845,7 @@ async function main() {
       ["projects (auto-linked from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["intermediate approver rows", () => prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["project expense types", () => prisma.projectExpenseType.deleteMany({ where: { id: { in: expenseTypeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],

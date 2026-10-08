@@ -55,6 +55,12 @@ async function login(page: Page) {
   ]);
 }
 
+/** Clicks the Nth (1-5) scale option within the question row identified by its exact Greek label text — see components/projects/project-feedback-card.tsx. */
+async function selectRating(page: Page, questionLabel: string, value: number) {
+  const row = page.locator("div.rounded-lg.border", { has: page.locator("label", { hasText: questionLabel }) }).last();
+  await row.locator(`input[type="radio"][value="${value}"]`).click({ force: true });
+}
+
 async function changeStatusViaDropdown(page: Page, label: string | RegExp) {
   await page.getByRole("button", { name: /change project status/i }).click();
   await page.waitForTimeout(200);
@@ -84,7 +90,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -131,7 +137,7 @@ async function main() {
     await page.goto(`${BASE_URL}/projects/${project.id}`, { waitUntil: "load" });
     await page.waitForTimeout(800);
     check("(sanity) Badge shows COMPLETED on initial load", (await page.getByText("COMPLETED", { exact: true }).count()) > 0);
-    check("(sanity) Project Feedback form is visible (COMPLETED, eligible requester, no feedback yet)", (await page.getByText("Project Feedback", { exact: true }).count()) === 1);
+    check("(sanity) 'Αξιολόγηση Έργου' form is visible (COMPLETED, eligible requester, no feedback yet)", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 1);
 
     // ══════════════════════ 14-19. Real dropdown: COMPLETED -> IN_PROGRESS ══════════════════════
     console.log("\n=== 14-19. Real dropdown interaction: COMPLETED -> IN_PROGRESS ===\n");
@@ -142,7 +148,7 @@ async function main() {
     check("16. Dropdown immediately displays IN PROGRESS — no reload", (await page.getByRole("button", { name: /change project status/i }).innerText()).toUpperCase().includes("IN PROGRESS"));
     check("17. Status badge immediately displays IN PROGRESS", (await page.getByText("IN PROGRESS", { exact: true }).count()) > 0);
     check("18. No manual page refresh was performed between the click and these checks (by construction of this test)", true);
-    check("22. Completion-dependent UI (Project Feedback form) disappears immediately — status is no longer COMPLETED", (await page.getByText("Project Feedback", { exact: true }).count()) === 0);
+    check("22. Completion-dependent UI ('Αξιολόγηση Έργου' form) disappears immediately — status is no longer COMPLETED, and no feedback exists yet", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 0);
 
     await page.reload({ waitUntil: "load" });
     await page.waitForTimeout(600);
@@ -155,7 +161,7 @@ async function main() {
     check("20. DB status becomes COMPLETED again", dbAfter2?.status === "COMPLETED");
     check("...dropdown immediately displays COMPLETED", (await page.getByRole("button", { name: /change project status/i }).innerText()).toUpperCase().includes("COMPLETED"));
     check("...badge immediately displays COMPLETED", (await page.getByText("COMPLETED", { exact: true }).count()) > 0);
-    check("...Project Feedback form reappears immediately (status is COMPLETED again, still no feedback submitted)", (await page.getByText("Project Feedback", { exact: true }).count()) === 1);
+    check("...'Αξιολόγηση Έργου' form reappears immediately (status is COMPLETED again, still no feedback submitted)", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 1);
 
     // ══════════════════════ 21. Failed mutation never leaves false/stale dropdown state ══════════════════════
     console.log("\n=== 21. A FAILED status mutation leaves the dropdown showing the real, unchanged status ===\n");
@@ -173,21 +179,42 @@ async function main() {
     check("...and the DB was genuinely never touched by the failed attempt", dbAfterFailedAttempt?.status === "COMPLETED");
     await page.unroute("**/api/projects/**");
 
-    // ══════════════════════ 23. Existing submitted Feedback remains visible per its own immutable rule ══════════════════════
-    console.log("\n=== 23. Existing submitted Feedback stays visible (its own established historical rule) even after status moves away from COMPLETED ===\n");
-    await page.getByRole("button", { name: "8 out of 10", exact: true }).click();
+    // ══════════════════════ 23. Existing submitted Feedback remains visible, but becomes readonly, after status moves away from COMPLETED ══════════════════════
+    console.log("\n=== 23. Existing submitted Feedback stays visible (historical record) but becomes readonly once status moves away from COMPLETED ===\n");
+    const QUESTIONS = [
+      "Πόσο ικανοποιημένοι είστε με την ταχύτητα παράδοσης του έργου;",
+      "Πόσο ικανοποιημένοι είστε με την επικοινωνία με την ομάδα;",
+      "Πόσο ικανοποιημένοι είστε με τις λειτουργίες που παραδόθηκαν;",
+      "Πόσο ικανοποιημένοι είστε με την ευκολία χρήσης;",
+      "Πόσο ικανοποιημένοι είστε συνολικά από την υλοποίηση;",
+    ];
+    // The full form no longer lives on /projects/[id] at all — the CTA
+    // there only ever links to the dedicated standalone page.
+    await Promise.all([
+      page.waitForURL((url) => url.pathname === `/projects/${project.id}/feedback`, { timeout: 10000 }),
+      page.getByRole("link", { name: "Μετάβαση στην Αξιολόγηση", exact: true }).click(),
+    ]);
+    for (const q of QUESTIONS) await selectRating(page, q, 4);
+    await page.getByLabel("Παραδόθηκαν όλες οι συμφωνημένες προδιαγραφές", { exact: true }).check();
     await page.fill("#feedback-comments", `${TAG} status-refresh regression comment`);
     await Promise.all([
       page.waitForResponse((r) => r.url().includes(`/api/projects/${project.id}/feedback`) && r.request().method() === "POST"),
-      page.getByRole("button", { name: /submit feedback/i }).click(),
+      page.getByRole("button", { name: "Υποβολή Αξιολόγησης", exact: true }).click(),
     ]);
     await page.waitForTimeout(500);
-    check("(fixture) Feedback submitted successfully -> 'Your Feedback' readonly card shows", (await page.getByText("Your Feedback", { exact: true }).count()) === 1);
+    check("(fixture) Feedback submitted successfully -> button becomes 'Ενημέρωση Αξιολόγησης' (editable update)", (await page.getByRole("button", { name: "Ενημέρωση Αξιολόγησης", exact: true }).count()) === 1);
 
+    await page.goto(`${BASE_URL}/projects/${project.id}`, { waitUntil: "load" });
+    await page.waitForTimeout(500);
     await changeStatusViaDropdown(page, /in progress/i);
-    check("23. After moving status AWAY from COMPLETED, the ALREADY-SUBMITTED Feedback remains visible (immutable historical record — not re-hidden)", (await page.getByText("Your Feedback", { exact: true }).count()) === 1);
-    check("...and still shows the real submitted rating", (await page.getByText("Satisfaction: 8 / 10", { exact: true }).count()) === 1);
-    check("...never shows a second editable form alongside it", (await page.getByRole("button", { name: /submit feedback/i }).count()) === 0);
+    check("23. After moving status AWAY from COMPLETED, the CTA (and thus the ALREADY-SUBMITTED Feedback it links to) remains visible — historical record, not re-hidden", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 1);
+    check("...the CTA still offers 'Προβολή / Ενημέρωση Αξιολόγησης' (feedback exists, even though the Project is no longer COMPLETED)", (await page.getByRole("link", { name: "Προβολή / Ενημέρωση Αξιολόγησης", exact: true }).count()) === 1);
+
+    await page.getByRole("link", { name: "Προβολή / Ενημέρωση Αξιολόγησης", exact: true }).click();
+    await page.waitForURL((url) => url.pathname === `/projects/${project.id}/feedback`, { timeout: 10000 });
+    await page.waitForTimeout(300);
+    check("...the dedicated page still shows the real submitted rating (4 / 5)", (await page.getByText("4 / 5", { exact: true }).first().count()) === 1);
+    check("...but is now READONLY — no editable scale inputs and no update button, since the Project is no longer COMPLETED", (await page.locator('input[type="radio"]').count()) === 0 && (await page.getByRole("button", { name: /Ενημέρωση Αξιολόγησης|Υποβολή Αξιολόγησης/, exact: true }).count()) === 0);
   } finally {
     await browser.close();
     try {
@@ -196,7 +223,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });

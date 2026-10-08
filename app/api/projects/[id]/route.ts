@@ -10,7 +10,7 @@ import { updateProjectSchema, updateProjectRequestOriginFieldsSchema } from "@/l
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
-import { notifyRequesterOfProjectCompletion } from "@/lib/services/project-feedback-service";
+import { notifyOwnerOfProjectCompletion } from "@/lib/services/project-feedback-service";
 import { Role } from "@prisma/client";
 
 // Every field the Project List (table) or Grid (card) view actually
@@ -57,9 +57,9 @@ const PROJECT_INCLUDE = {
 // SAME request's already-loaded `project.activities` (no extra query) via
 // the single authoritative aggregation (lib/services/project-financials-
 // service.ts). Harmless to compute for a manual Project too (naturally
-// €0/€0, since a manual Activity never has taskTypeCost set) — the UI only
+// €0/€0, since a manual Activity never has taskSubTypeCost set) — the UI only
 // ever renders these inside its own projectRequest-gated section.
-function withProjectFinancials<T extends { activities: { taskTypeCost: any; expectedDays: number | null; actualDays: number | null }[] }>(
+function withProjectFinancials<T extends { activities: { taskSubTypeCost: any; expectedDays: number | null; actualDays: number | null }[] }>(
   project: T
 ): T & { estimatedCost: string; actualCost: string } {
   const { estimatedCost, actualCost } = computeProjectFinancials(project.activities);
@@ -258,14 +258,19 @@ export async function PATCH(
       publishActivityListInvalidation();
     }
 
-    // Notify the original requester the moment THIS save is what just
-    // completed a request-origin Project — never on an unrelated edit of
-    // an already-COMPLETED Project, never for a manual one (no
-    // projectRequestId). createInAppNotification never throws (failures
-    // are only logged), so this can never turn an otherwise-successful
-    // PATCH into an error response.
+    // Notify + email the Project's primary Owner the moment THIS save is
+    // what just completed a request-origin Project — never on an
+    // unrelated edit of an already-COMPLETED Project, never for a manual
+    // one (no projectRequestId). This is the ONE canonical genuine
+    // non-COMPLETED -> COMPLETED transition check (never re-derived
+    // elsewhere) — a reopen + later re-complete cycle legitimately fires
+    // this again, a repeated PATCH while already COMPLETED never does.
+    // notifyOwnerOfProjectCompletion never throws (both the in-app
+    // notification and the email send are independently caught/logged
+    // inside it), so this can never turn an otherwise-successful PATCH
+    // into an error response or roll back the completion itself.
     if (existing.status !== "COMPLETED" && project.status === "COMPLETED" && existing.projectRequestId) {
-      await notifyRequesterOfProjectCompletion({ id: project.id, title: project.title, projectRequestId: existing.projectRequestId });
+      await notifyOwnerOfProjectCompletion({ id: project.id, title: project.title, projectRequestId: existing.projectRequestId, owner: project.owner });
     }
 
     return NextResponse.json(withProjectFinancials(project));

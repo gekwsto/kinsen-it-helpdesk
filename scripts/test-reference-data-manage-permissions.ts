@@ -68,23 +68,23 @@ async function main() {
     return;
   }
 
-  const { default: ProjectRequestTypesAdminPage } = await import("@/app/(main)/admin/project-request-types/page");
+  const { default: ProjectRequestTypesAdminPage } = await import("@/app/(main)/admin/task-types/page");
   const { default: ProjectExpenseTypesAdminPage } = await import("@/app/(main)/admin/project-expense-types/page");
-  const { default: ActivityTaskTypesAdminPage } = await import("@/app/(main)/admin/activity-task-types/page");
+  const { default: ActivityTaskTypesAdminPage } = await import("@/app/(main)/admin/task-sub-types/page");
 
-  const reqTypesRoute = await import("@/app/api/admin/project-request-types/route");
-  const reqTypesIdRoute = await import("@/app/api/admin/project-request-types/[id]/route");
+  const reqTypesRoute = await import("@/app/api/admin/task-types/route");
+  const reqTypesIdRoute = await import("@/app/api/admin/task-types/[id]/route");
   const expTypesRoute = await import("@/app/api/admin/project-expense-types/route");
   const expTypesIdRoute = await import("@/app/api/admin/project-expense-types/[id]/route");
-  const taskTypesRoute = await import("@/app/api/admin/activity-task-types/route");
-  const taskTypesIdRoute = await import("@/app/api/admin/activity-task-types/[id]/route");
+  const taskTypesRoute = await import("@/app/api/admin/task-sub-types/route");
+  const taskTypesIdRoute = await import("@/app/api/admin/task-sub-types/[id]/route");
 
   const rolesRoute = await import("@/app/api/admin/roles/route");
   const rolePermRoute = await import("@/app/api/admin/roles/[id]/permissions/[permId]/route");
 
-  const publicReqTypesRoute = await import("@/app/api/project-request-types/route");
+  const publicReqTypesRoute = await import("@/app/api/task-types/route");
   const publicExpTypesRoute = await import("@/app/api/project-expense-types/route");
-  const publicTaskTypesRoute = await import("@/app/api/activity-task-types/route");
+  const publicTaskTypesRoute = await import("@/app/api/task-sub-types/route");
 
   function mkReq(url: string, body?: unknown, method = "POST"): any {
     return new Request(url, {
@@ -306,17 +306,17 @@ async function main() {
     const referencedTaskType = await referencedTaskTypeRes.json();
     taskTypeIds.push(referencedTaskType.id);
     const activity = await prisma.projectActivity.create({
-      data: { title: `RefData Activity ${RUN_ID}`, projectId: project.id, taskTypeId: referencedTaskType.id, taskTypeCost: 500 },
+      data: { title: `RefData Activity ${RUN_ID}`, projectId: project.id, taskSubTypeId: referencedTaskType.id, taskSubTypeCost: 500 },
     });
     activityIds.push(activity.id);
     const deleteReferencedTaskTypeRes: Response = await taskTypesIdRoute.DELETE(mkReq("http://localhost/x", undefined, "DELETE"), { params: Promise.resolve({ id: referencedTaskType.id }) });
     check("29. Referenced Task Type remains protected (409 item_in_use)", deleteReferencedTaskTypeRes.status === 409);
 
     // Changing the MASTER cost must never touch the Activity's own snapshot — core
-    // "Do NOT alter Activity taskTypeCost snapshot behavior" constraint for this task.
+    // "Do NOT alter Activity taskSubTypeCost snapshot behavior" constraint for this task.
     await taskTypesIdRoute.PATCH(mkReq("http://localhost/x", { cost: 999 }, "PATCH"), { params: Promise.resolve({ id: referencedTaskType.id }) });
-    const activityAfterMasterCostChange = await prisma.projectActivity.findUnique({ where: { id: activity.id }, select: { taskTypeCost: true } });
-    check("...changing the master Task Type cost never touches the Activity's own taskTypeCost snapshot (untouched business logic)", Number(activityAfterMasterCostChange?.taskTypeCost) === 500);
+    const activityAfterMasterCostChange = await prisma.projectActivity.findUnique({ where: { id: activity.id }, select: { taskSubTypeCost: true } });
+    check("...changing the master Task Type cost never touches the Activity's own taskSubTypeCost snapshot (untouched business logic)", Number(activityAfterMasterCostChange?.taskSubTypeCost) === 500);
 
     currentSession = { user: { id: userReqOnly.id, role: Role.USER, customRoleId: roleReqOnly.id } };
     const noPermTaskTypePostRes: Response = await taskTypesRoute.POST(mkReq("http://localhost/x", { name: `RefData Denied TaskType ${RUN_ID}`, cost: 1 }));
@@ -361,16 +361,19 @@ async function main() {
     check("38. Expense Type usage in Projects unchanged — the public (active-only) Project Expense Types list still works for any authenticated user", publicExpTypesRes.status === 200);
     const publicTaskTypesRes: Response = await publicTaskTypesRoute.GET();
     const publicTaskTypesBody = await publicTaskTypesRes.json();
-    check("39. Task Type cost/snapshot behavior unchanged — the public Task Types list still works and still includes cost", publicTaskTypesRes.status === 200 && publicTaskTypesBody.every((t: any) => typeof t.cost === "number"));
+    // cost is now OPTIONAL (Task Sub Type) — a real number OR a genuine
+    // `null` ("no fixed configured cost") are both valid; never coerced to
+    // 0, never any other type.
+    check("39. Task Sub Type cost/snapshot behavior unchanged — the public Task Sub Types list still works and cost is always a number or a genuine null", publicTaskTypesRes.status === 200 && publicTaskTypesBody.every((t: any) => typeof t.cost === "number" || t.cost === null));
   } finally {
     console.log("\nCleaning up test data...\n");
     try {
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: projectRequestIds } } });
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { id: { in: expTypeIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: reqTypeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: reqTypeIds } } });
       await prisma.department.deleteMany({ where: { id: { in: departmentIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
       await prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } });

@@ -53,6 +53,8 @@ const PROJECT_SORT_KEYS: Record<string, SortKeyDef> = {
   status: (order) => ({ status: order }),
   priority: (order) => ({ priority: order }),
   startDate: (order) => ({ startDate: { sort: order, nulls: "last" } }),
+  // Never null, so no `nulls` modifier needed — same as title/status/priority.
+  createdAt: (order) => ({ createdAt: order }),
 };
 const PROJECT_DEFAULT_ORDER_BY = [{ createdAt: "desc" as const }, { id: "asc" as const }];
 
@@ -71,6 +73,8 @@ interface SearchParams {
   /** "true" only — same rule as the Projects Dashboard's Overdue Projects card (lib/overdue.ts + ProjectStatusConfig terminal resolution). */
   overdue?: string;
   priority?: string;
+  /** "request" | "manual" — canonical source of truth is Project.projectRequestId (never inferred from title/members/owner count). */
+  origin?: string;
   ownerId?: string;
   memberId?: string;
   departmentId?: string;
@@ -179,6 +183,12 @@ export default async function ProjectsPage({
   if (params.ownerId) andConditions.push({ ownerId: params.ownerId });
   if (params.memberId) andConditions.push({ members: { some: { id: params.memberId } } });
 
+  // Origin — canonical source of truth is Project.projectRequestId, never
+  // inferred from title/members/owner count/anything else.
+  const origin = params.origin === "request" || params.origin === "manual" ? params.origin : undefined;
+  if (origin === "request") andConditions.push({ projectRequestId: { not: null } });
+  else if (origin === "manual") andConditions.push({ projectRequestId: null });
+
   const startDateAfter = parseStrictDate(params.startDateAfter);
   const startDateBefore = parseStrictDate(params.startDateBefore);
   if (startDateAfter || startDateBefore) {
@@ -255,8 +265,20 @@ export default async function ProjectsPage({
         take: pageSize,
         include: {
           owner: { select: { id: true, name: true, image: true } },
+          // Authoritative full Owner set (always contains `owner` above —
+          // see Project.owners' own schema doc comment) and Audience — both
+          // small, bounded relations (same cost profile as `members`
+          // already selected below), added ONLY so the list preview can
+          // show them without a second per-row fetch. Empty for every
+          // manual Project.
+          owners: { select: { id: true, name: true, image: true } },
+          audience: { select: { id: true, name: true, image: true } },
           department: { select: { id: true, name: true } },
           members: { select: { id: true, name: true, image: true } },
+          // Cheap nullable to-one relation — lets the list preview link
+          // back to the originating Project Request without a second
+          // fetch; null for every manual Project.
+          projectRequest: { select: { id: true, title: true } },
           _count: { select: { activities: true } },
         },
       }),

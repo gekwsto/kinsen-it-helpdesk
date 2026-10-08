@@ -134,7 +134,7 @@ async function main() {
     check(`The active workspace "${targetDept.name}" is pre-selected as the picker's default value`, deptTriggerText.includes(targetDept.name));
 
     console.log("\n=== 4. Submitting now succeeds outright — no manager dependency anywhere in this flow ===\n");
-    const typeRes = await page.request.post(`${BASE_URL}/api/admin/project-request-types`, { data: { name: `BV Elig Type ${RUN_ID}` } });
+    const typeRes = await page.request.post(`${BASE_URL}/api/admin/task-types`, { data: { name: `BV Elig Type ${RUN_ID}` } });
     check("Fixture: created an active Project Request Type", typeRes.status() === 201);
     const createdType = await typeRes.json();
     typeIds.push(createdType.id);
@@ -143,9 +143,9 @@ async function main() {
     await page.waitForLoadState("load");
     await page.fill("#title", `BV Elig Request ${RUN_ID}`);
     await page.fill("#description", "A description that is definitely long enough for validation.");
-    // Project Type select (shadcn Select — click trigger, pick the option).
-    await page.locator("#projectTypeId").click();
-    await page.getByRole("option", { name: new RegExp(`BV Elig Type ${RUN_ID}`) }).click({ timeout: 5000 });
+    // Project Type was removed from the Project Request Form entirely — see
+    // TaskType in prisma/schema.prisma, which moved this classification to
+    // Activity instead. No field/selection to interact with here any more.
     await page.fill("#teamConcerned", "Engineering");
     await page.fill("#expectedBenefits", "Benefits text that is definitely long enough for validation.");
     const [submitResponse] = await Promise.all([
@@ -201,7 +201,7 @@ async function main() {
       // by link, not by an enumerated recipient list.
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ...deptIds.flatMap((deptId): [string, () => Promise<unknown>][] => [
         [`ticket categories (${deptId})`, () => prisma.ticketCategory.deleteMany({ where: { departmentId: deptId } })],
         [`ticket priorities (${deptId})`, () => prisma.ticketPriority.deleteMany({ where: { departmentId: deptId } })],

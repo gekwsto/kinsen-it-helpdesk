@@ -161,7 +161,7 @@ const PERMISSIONS = [
   // app/api/admin/roles/[id]/permissions/[permId]/route.ts and
   // app/(main)/admin/roles/page.tsx). Administrator-only in practice today,
   // same rationale as integration.manage above.
-  { key: "taskType.manage", description: "Create, edit, and delete Activity Task Types", module: "admin" },
+  { key: "taskType.manage", description: "Create, edit, and delete Task Sub Types (global reference data)", module: "admin" },
   // Project Request Types / Project Expense Types — same GLOBAL reference-data
   // tier as taskType.manage immediately above (global, not department-scoped;
   // same GLOBAL_ONLY_PERMISSION_KEYS gate in both files it references). Each
@@ -169,7 +169,7 @@ const PERMISSIONS = [
   // give each its own independently-grantable `.manage` key instead, same
   // normalization taskType.manage itself already received. Administrator-only
   // in practice today, same rationale as taskType.manage.
-  { key: "projectRequestType.manage", description: "Create, edit, and delete Project Request Types", module: "admin" },
+  { key: "projectRequestType.manage", description: "Create, edit, and delete Task Types (a global Activity classification)", module: "admin" },
   { key: "projectExpenseType.manage", description: "Create, edit, and delete Project Expense Types", module: "admin" },
   // Project Feedback — GLOBAL-only review capability, same tier as
   // taskType.manage above (see GLOBAL_ONLY_PERMISSION_KEYS in

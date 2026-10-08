@@ -7,8 +7,12 @@
  *
  * Covers what scripts/test-multi-mailbox-inbound-email.ts's broader
  * end-to-end run doesn't specifically isolate:
- *  1. A never-before-polled mailbox defaults to the Unix epoch (never
- *     silently skips a pre-existing backlog).
+ *  1. A never-before-polled mailbox is bounded to
+ *     `now - INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS` (default 72h) — NEVER
+ *     the Unix epoch, which used to let the first poll crawl a mailbox's
+ *     entire historical Inbox (the real incident this fix addresses; see
+ *     lib/services/inbound-mailbox-service.ts's getMailboxPollCursor).
+ *     An existing cursor is completely unaffected by this bound.
  *  2. The cursor advances past a successfully-handled message.
  *  3. A per-message FAILURE freezes the cursor at that message — it (and
  *     everything chronologically after it in the same batch) is retried
@@ -147,11 +151,60 @@ async function main() {
   const mailboxesToCleanup = [CENTRAL];
 
   try {
-    console.log("\n=== 1. A never-before-polled mailbox defaults to the Unix epoch ===\n");
+    console.log("\n=== 1. A never-before-polled mailbox is bounded to now - lookback, never the Unix epoch ===\n");
     const freshMailbox = `fresh-${RUN_ID}@kinsen.gr`;
     mailboxesToCleanup.push(freshMailbox);
+    const beforeFreshCall = Date.now();
     const freshCursor = await getMailboxPollCursor(freshMailbox);
-    check("Cursor for a mailbox with no row yet is the Unix epoch", freshCursor.getTime() === 0);
+    const afterFreshCall = Date.now();
+    check("Cursor for a mailbox with no row yet is NEVER the Unix epoch", freshCursor.getTime() !== 0);
+    const defaultLookbackMs = 72 * 60 * 60 * 1000;
+    check(
+      "...and is approximately now - 72h (the default INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS, unset in this test's env)",
+      freshCursor.getTime() >= beforeFreshCall - defaultLookbackMs - 5000 && freshCursor.getTime() <= afterFreshCall - defaultLookbackMs + 5000
+    );
+
+    console.log("\n=== 1b. A CUSTOM lookback is honored ===\n");
+    const customLookbackMailbox = `fresh-custom-${RUN_ID}@kinsen.gr`;
+    mailboxesToCleanup.push(customLookbackMailbox);
+    process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS = "6";
+    const beforeCustomCall = Date.now();
+    const customCursor = await getMailboxPollCursor(customLookbackMailbox);
+    const afterCustomCall = Date.now();
+    const customLookbackMs = 6 * 60 * 60 * 1000;
+    check(
+      "A custom INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS=6 is honored for a fresh mailbox",
+      customCursor.getTime() >= beforeCustomCall - customLookbackMs - 5000 && customCursor.getTime() <= afterCustomCall - customLookbackMs + 5000
+    );
+    delete process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS;
+
+    console.log("\n=== 1c. An invalid lookback (zero/negative/non-numeric) falls back to the safe default, never an unbounded poll ===\n");
+    for (const invalid of ["0", "-5", "not-a-number", ""]) {
+      const invalidMailbox = `fresh-invalid-${invalid.replace(/[^a-z0-9]/gi, "x") || "empty"}-${RUN_ID}@kinsen.gr`;
+      mailboxesToCleanup.push(invalidMailbox);
+      if (invalid === "") delete process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS;
+      else process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS = invalid;
+      const beforeInvalidCall = Date.now();
+      const invalidCursor = await getMailboxPollCursor(invalidMailbox);
+      const afterInvalidCall = Date.now();
+      check(
+        `INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS="${invalid}" falls back to the default 72h bound, never epoch/unbounded`,
+        invalidCursor.getTime() !== 0 &&
+          invalidCursor.getTime() >= beforeInvalidCall - defaultLookbackMs - 5000 &&
+          invalidCursor.getTime() <= afterInvalidCall - defaultLookbackMs + 5000
+      );
+    }
+    delete process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS;
+
+    console.log("\n=== 1d. A mailbox WITH an existing cursor ignores the lookback entirely ===\n");
+    const existingCursorMailbox = `fresh-existing-${RUN_ID}@kinsen.gr`;
+    mailboxesToCleanup.push(existingCursorMailbox);
+    const persistedCursorValue = new Date("2020-05-01T00:00:00.000Z"); // deliberately older than any lookback window — proves the stored value, not the bound, wins
+    await advanceMailboxPollCursor(existingCursorMailbox, persistedCursorValue);
+    process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS = "1"; // a tiny window that would clearly NOT reach 2020 if it were (wrongly) applied
+    const existingCursorResult = await getMailboxPollCursor(existingCursorMailbox);
+    check("An EXISTING cursor's exact persisted value wins regardless of the lookback config", existingCursorResult.getTime() === persistedCursorValue.getTime());
+    delete process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS;
 
     console.log("\n=== 5. advanceMailboxPollCursor never moves the cursor backward ===\n");
     const t1 = new Date("2026-01-01T00:00:00.000Z");

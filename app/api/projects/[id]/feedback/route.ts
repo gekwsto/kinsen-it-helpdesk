@@ -2,16 +2,19 @@ import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/permissions";
 import { projectFeedbackSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, internalErrorResponse } from "@/lib/api-errors";
-import { submitProjectFeedback } from "@/lib/services/project-feedback-service";
+import { upsertProjectFeedback } from "@/lib/services/project-feedback-service";
 
-// POST — the ONLY way a ProjectFeedback row is ever created. Deliberately
-// NOT authorized through project.edit (or any other Project permission) —
-// being ADMIN, the Project Owner, a Project Manager, the final approver,
-// or a department admin grants NOTHING here. The one and only identity
-// allowed through is the original Project Request's own requesterId,
-// re-resolved from the DB on every call — see
-// lib/services/project-feedback-service.ts's submitProjectFeedback for the
-// full rule and its own doc comment for the race-safety strategy.
+// POST — the ONLY way a ProjectFeedback row is ever created OR updated
+// (create-or-update/upsert, never a separate second endpoint for the same
+// business action). Deliberately NOT authorized through project.edit (or
+// any other Project permission) — being ADMIN, a member of the full
+// `owners` multi-owner set (unless also the canonical ownerId), the
+// original Project Request requester (unless also ownerId), Audience, or
+// a Member grants NOTHING here. The one and only identity allowed through
+// is Project.ownerId — the single canonical primary Owner, re-resolved
+// from the DB on every call — see lib/services/project-feedback-service.ts's
+// upsertProjectFeedback for the full rule and its own doc comment for the
+// race-safety strategy and legacy-provenance preservation.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const session = await requireAuth();
@@ -21,7 +24,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const parsed = projectFeedbackSchema.safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);
 
-    const result = await submitProjectFeedback(id, session.user.id, parsed.data);
+    const result = await upsertProjectFeedback(id, session.user.id, parsed.data);
     if (!result.ok) {
       switch (result.error.code) {
         case "not_found":
@@ -33,12 +36,12 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           );
         case "forbidden":
           return NextResponse.json(
-            apiError("forbidden", "Only the original requester of this Project's Project Request can submit Feedback."),
+            apiError("forbidden", "Only this Project's primary Owner can submit Feedback."),
             { status: 403 }
           );
         case "not_completed":
           return NextResponse.json(
-            apiError("not_completed", "Feedback can only be submitted once this Project is COMPLETED.", { field: "status" }),
+            apiError("not_completed", "Feedback can only be submitted or updated while this Project is COMPLETED.", { field: "status" }),
             { status: 409 }
           );
         default:
@@ -46,19 +49,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
       }
     }
 
-    // alreadyExisted:true (a duplicate/race submission) still returns 200
-    // with the EXISTING row — never a second row, never an error the
-    // client would need to special-case; the client's own "replace the
-    // form with a readonly result" behavior is identical either way.
     return NextResponse.json(
       {
         id: result.feedback.id,
-        satisfactionScore: result.feedback.satisfactionScore,
+        deliverySpeedRating: result.feedback.deliverySpeedRating,
+        communicationRating: result.feedback.communicationRating,
+        functionalityRating: result.feedback.functionalityRating,
+        easeOfUseRating: result.feedback.easeOfUseRating,
+        overallRating: result.feedback.overallRating,
+        requirementsDelivered: result.feedback.requirementsDelivered,
         comments: result.feedback.comments,
         createdAt: result.feedback.createdAt,
-        alreadyExisted: result.alreadyExisted,
+        updatedAt: result.feedback.updatedAt,
+        created: result.created,
       },
-      { status: result.alreadyExisted ? 200 : 201 }
+      { status: result.created ? 201 : 200 }
     );
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();

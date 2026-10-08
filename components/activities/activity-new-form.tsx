@@ -31,7 +31,13 @@ interface Project { id: string; title: string; projectRequestId: string | null }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface SubDepartmentOption { id: string; name: string }
 interface StatusOption { status: ActivityStatus; label: string; color: string }
-interface TaskTypeOption { id: string; name: string; cost: number }
+// The NEW, universally-required classification (see TaskType in
+// prisma/schema.prisma) — no cost of its own.
+interface TaskTypeOption { id: string; name: string }
+// The RENAMED former "Task Type" (see TaskSubType in prisma/schema.prisma)
+// — cost is nullable now; `null` means "no fixed configured cost", never
+// treated as 0.
+interface TaskSubTypeOption { id: string; name: string; cost: number | null }
 
 /** Whole calendar days between two date-only (YYYY-MM-DD) strings — a client-side PREVIEW only, purely for UX; mirrors wholeCalendarDaysBetween in lib/date-only.ts, but the server always recomputes and persists its own authoritative value. Returns null until both dates are present/valid. */
 function previewCalendarDays(startStr: string, finishStr: string): number | null {
@@ -162,8 +168,21 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   const [expectedStartDate, setExpectedStartDate] = useState("");
   const [expectedFinishDate, setExpectedFinishDate] = useState("");
   const [ownerId, setOwnerId] = useState("");
+  // Task Type (NEW, required for every Activity — not just request-origin).
   const [taskTypeId, setTaskTypeId] = useState("");
   const [taskTypes, setTaskTypes] = useState<TaskTypeOption[]>([]);
+  // Task Sub Type (RENAMED former "Task Type" — request-origin-only, same
+  // optional-elsewhere semantics as before this rename).
+  const [taskSubTypeId, setTaskSubTypeId] = useState("");
+  const [taskSubTypes, setTaskSubTypes] = useState<TaskSubTypeOption[]>([]);
+  // Only meaningful (and only ever rendered) when the selected Task Sub
+  // Type has NO configured cost (cost === null, e.g. "Others"/
+  // "External") — this Activity's own manually-entered effective cost,
+  // independent of the Task Sub Type reference-data record (never writes
+  // back to TaskSubType.cost). Cleared whenever the Task Sub Type
+  // selection changes, so a stale value from a PREVIOUS null-cost
+  // selection can never silently apply to a newly-selected one.
+  const [manualEstimatedCost, setManualEstimatedCost] = useState("");
 
   useEffect(() => {
     const assignableUrl = `/api/users?assignableFor=activity${departmentId ? `&departmentId=${departmentId}` : ""}`;
@@ -185,13 +204,15 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
       fetch(assignableUrl).then((r) => (r.ok ? r.json() : [])),
       departmentId ? fetch(`/api/departments/${departmentId}/sub-departments`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
       departmentId ? fetch(`/api/departments/${departmentId}/activity-statuses`).then((r) => (r.ok ? r.json() : [])) : Promise.resolve([]),
-      fetch("/api/activity-task-types").then((r) => (r.ok ? r.json() : [])),
+      fetch("/api/task-types").then((r) => (r.ok ? r.json() : [])),
+      fetch("/api/task-sub-types").then((r) => (r.ok ? r.json() : [])),
     ])
-      .then(([p, u, sd, statuses, taskTypeOptions]) => {
+      .then(([p, u, sd, statuses, taskTypeOptions, taskSubTypeOptions]) => {
         setProjects(Array.isArray(p?.projects) ? p.projects : []);
         setAssignableUsers(Array.isArray(u) ? u : []);
         setSubDepartments(Array.isArray(sd) ? sd : []);
         setTaskTypes(Array.isArray(taskTypeOptions) ? taskTypeOptions : []);
+        setTaskSubTypes(Array.isArray(taskSubTypeOptions) ? taskSubTypeOptions : []);
         const options: StatusOption[] = Array.isArray(statuses) ? statuses.map((row: any) => ({ status: row.status, label: row.label, color: row.color })) : [];
         setStatusOptions(options);
         // Default to the department's own lowest-sortOrder enabled status
@@ -252,15 +273,31 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   // requires client-side.
   const selectedProject = projects.find((p) => p.id === projectId);
   const isRequestOrigin = !!selectedProject?.projectRequestId;
-  const selectedTaskType = taskTypes.find((t) => t.id === taskTypeId);
+  const selectedTaskSubType = taskSubTypes.find((t) => t.id === taskSubTypeId);
+  // Whether the CURRENTLY selected Task Sub Type has no fixed configured
+  // cost — the one condition that makes the manual Estimated Cost field
+  // relevant at all. `false` while nothing is selected yet.
+  const taskSubTypeNeedsManualCost = !!selectedTaskSubType && selectedTaskSubType.cost === null;
   const previewExpectedDays = previewCalendarDays(expectedStartDate, expectedFinishDate);
+  // The effective per-unit cost this Activity would snapshot — the
+  // configured cost when one exists, otherwise whatever the user has
+  // typed into the manual field so far (parsed defensively; an invalid/
+  // empty manual entry simply yields no preview, never a fabricated 0).
+  const effectiveUnitCost = selectedTaskSubType
+    ? selectedTaskSubType.cost !== null
+      ? selectedTaskSubType.cost
+      : manualEstimatedCost.trim() !== "" && Number.isFinite(Number(manualEstimatedCost))
+      ? Number(manualEstimatedCost)
+      : null
+    : null;
   // Client-side PREVIEW only (same convention as previewExpectedDays above)
   // — POST /api/activities independently computes and returns the
-  // authoritative Estimated Cost (taskTypeCost × expectedDays) via
+  // authoritative Estimated Cost (taskSubTypeCost × expectedDays) via
   // computeActivityFinancials; this never gets sent, only shown ahead of
-  // creation so the number isn't a total surprise.
-  const previewEstimatedCost =
-    selectedTaskType && previewExpectedDays !== null ? selectedTaskType.cost * previewExpectedDays : null;
+  // creation so the number isn't a total surprise. No resolvable unit
+  // cost (configured or manual) means no preview at all — NEVER treated
+  // as a 0 cost.
+  const previewEstimatedCost = effectiveUnitCost !== null && previewExpectedDays !== null ? effectiveUnitCost * previewExpectedDays : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -272,6 +309,10 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
       toast.error("No department resolved for this activity.");
       return;
     }
+    // Task Type is REQUIRED for every Activity, manual or request-origin
+    // alike — client-side UX guard only, POST /api/activities
+    // independently enforces this server-side regardless.
+    if (!taskTypeId) return toast.error("Select a Task Type.");
     // Client-side UX guard only — POST /api/activities independently
     // re-derives isRequestOrigin from the Project row itself and enforces
     // the identical requirement; this just avoids a round-trip for the
@@ -280,7 +321,13 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
       if (!expectedStartDate) return toast.error("Expected Start is required for an Activity under a request-origin Project.");
       if (!expectedFinishDate) return toast.error("Expected Finish is required for an Activity under a request-origin Project.");
       if (new Date(expectedFinishDate) < new Date(expectedStartDate)) return toast.error("Expected Finish cannot be before Expected Start.");
-      if (!taskTypeId) return toast.error("Select a Task Type.");
+      if (!taskSubTypeId) return toast.error("Select a Task Sub Type.");
+      if (taskSubTypeNeedsManualCost) {
+        const n = Number(manualEstimatedCost);
+        if (manualEstimatedCost.trim() === "" || !Number.isFinite(n) || n < 0) {
+          return toast.error("Enter a valid Estimated Cost — the selected Task Sub Type has no fixed configured cost.");
+        }
+      }
       if (!ownerId) return toast.error("Select an Owner.");
       if (selectedUserIds.length === 0) return toast.error("Select at least one Related User.");
     }
@@ -312,12 +359,14 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
             // requires it (never relies on the fallback, which is scoped to
             // the CALLER's active workspace, not necessarily the ticket's own).
             departmentId: departmentId || undefined,
+            taskTypeId,
             ...(isRequestOrigin
               ? {
                   expectedStartDate,
                   expectedFinishDate,
                   ownerId,
-                  taskTypeId,
+                  taskSubTypeId,
+                  ...(taskSubTypeNeedsManualCost ? { manualEstimatedCost: Number(manualEstimatedCost) } : {}),
                 }
               : {}),
           }),
@@ -508,6 +557,24 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
               )}
             </div>
 
+            <div className="space-y-2">
+              <Label htmlFor="task-type">
+                Task Type <span className="text-destructive">*</span>
+              </Label>
+              <Select value={taskTypeId} onValueChange={setTaskTypeId}>
+                <SelectTrigger id="task-type">
+                  <SelectValue placeholder="Select a Task Type…" />
+                </SelectTrigger>
+                <SelectContent>
+                  {taskTypes.map((t) => (
+                    <SelectItem key={t.id} value={t.id}>
+                      {t.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
             {subDepartments.length > 0 && (
               <div className="space-y-2">
                 <Label>Sub-Department (optional)</Label>
@@ -574,15 +641,25 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="task-type">
-                    Task Type <span className="text-destructive">*</span>
+                  <Label htmlFor="task-sub-type">
+                    Task Sub Type <span className="text-destructive">*</span>
                   </Label>
-                  <Select value={taskTypeId} onValueChange={setTaskTypeId}>
-                    <SelectTrigger id="task-type">
-                      <SelectValue placeholder="Select a Task Type…" />
+                  <Select
+                    value={taskSubTypeId}
+                    onValueChange={(value) => {
+                      setTaskSubTypeId(value);
+                      // Switching Task Sub Type always invalidates any
+                      // previously-entered manual Estimated Cost — it must
+                      // never silently carry over to a different subtype
+                      // (fixed-cost or another null-cost one).
+                      setManualEstimatedCost("");
+                    }}
+                  >
+                    <SelectTrigger id="task-sub-type">
+                      <SelectValue placeholder="Select a Task Sub Type…" />
                     </SelectTrigger>
                     <SelectContent>
-                      {taskTypes.map((t) => (
+                      {taskSubTypes.map((t) => (
                         <SelectItem key={t.id} value={t.id}>
                           {t.name}
                         </SelectItem>
@@ -590,10 +667,35 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                     </SelectContent>
                   </Select>
                   {/* Informational only — never the authoritative value;
-                      the server independently loads the Task Type and
+                      the server independently loads the Task Sub Type and
                       snapshots ITS OWN current cost at creation time. */}
-                  {selectedTaskType && (
-                    <p className="text-xs text-muted-foreground">Cost: {selectedTaskType.cost.toFixed(2)} EUR (snapshotted at creation)</p>
+                  {selectedTaskSubType && selectedTaskSubType.cost !== null && (
+                    <p className="text-xs text-muted-foreground">
+                      Cost: {selectedTaskSubType.cost.toFixed(2)} EUR (snapshotted at creation)
+                    </p>
+                  )}
+                  {taskSubTypeNeedsManualCost && (
+                    <div className="space-y-2 pt-1">
+                      <Label htmlFor="manual-estimated-cost">
+                        Estimated Cost <span className="text-destructive">*</span>
+                      </Label>
+                      <div className="relative">
+                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
+                        <Input
+                          id="manual-estimated-cost"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          className="pl-7"
+                          placeholder="0.00"
+                          value={manualEstimatedCost}
+                          onChange={(e) => setManualEstimatedCost(e.target.value)}
+                        />
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        This Task Sub Type has no fixed configured cost — enter the estimated cost for this Activity.
+                      </p>
+                    </div>
                   )}
                 </div>
 
@@ -607,10 +709,10 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                     aria-readonly="true"
                     tabIndex={-1}
                     value={previewEstimatedCost !== null ? `${previewEstimatedCost.toFixed(2)} EUR` : ""}
-                    placeholder="Select a Task Type and both dates to calculate"
+                    placeholder="Select a Task Sub Type (with a configured cost) and both dates to calculate"
                     className="cursor-default bg-muted/40"
                   />
-                  <p className="text-xs text-muted-foreground">Task Type cost × Expected Days. Calculated automatically.</p>
+                  <p className="text-xs text-muted-foreground">Task Sub Type cost × Expected Days. Calculated automatically.</p>
                 </div>
 
                 <div className="space-y-2">

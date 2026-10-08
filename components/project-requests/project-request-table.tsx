@@ -23,6 +23,7 @@ import {
 import { Check, FileText, X, Eye, FolderKanban, Wrench } from "lucide-react";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
 import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
+import { PreviewField } from "@/components/shared/preview-field";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { formatDateTime } from "@/lib/utils";
 import type { ProjectRequestStatus, IntermediateApprovalStatus } from "@prisma/client";
@@ -37,7 +38,10 @@ export interface ProjectRequestRow {
   expectedBenefits: string;
   replacesExisting: boolean;
   replacementDescription: string | null;
-  projectType: { id: string; name: string };
+  // Historical only (the former "Project Type" on a Project Request) — a
+  // NEW request never has one, since that classification moved to
+  // Activity. Null for every request submitted after that change.
+  projectType: { id: string; name: string } | null;
   department: { id: string; name: string };
   requester: { name: string | null; email: string };
   submittedAt: Date;
@@ -190,7 +194,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                         {r.title}
                       </button>
                     </TableCell>
-                    <TableCell className="text-muted-foreground">{r.projectType.name}</TableCell>
+                    <TableCell className="text-muted-foreground">{r.projectType?.name ?? "—"}</TableCell>
                     <TableCell className="text-muted-foreground">{r.department.name}</TableCell>
                     <TableCell className="text-muted-foreground">{r.requester.name ?? r.requester.email}</TableCell>
                     <TableCell>
@@ -239,7 +243,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm border rounded-md p-3 bg-muted/30 flex-shrink-0">
                 <div>
                   <span className="text-muted-foreground">Type: </span>
-                  <span className="font-medium">{previewTarget.projectType.name}</span>
+                  <span className="font-medium">{previewTarget.projectType?.name ?? "—"}</span>
                 </div>
                 <div>
                   <span className="text-muted-foreground">Status: </span>
@@ -352,15 +356,6 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
         onCancel={cancelDecision}
         onConfirm={submitDecision}
       />
-    </div>
-  );
-}
-
-function PreviewField({ label, value, multiline }: { label: string; value: string; multiline?: boolean }) {
-  return (
-    <div className="px-4 py-3">
-      <p className="text-xs font-medium text-muted-foreground mb-1">{label}</p>
-      <p className={multiline ? "text-sm whitespace-pre-wrap" : "text-sm"}>{value}</p>
     </div>
   );
 }

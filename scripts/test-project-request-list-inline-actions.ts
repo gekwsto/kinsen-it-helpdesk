@@ -193,7 +193,7 @@ async function main() {
     deptIds.push(dept.id);
     const otherDept = await createDepartment({ name: `PR List Other Dept ${RUN_ID}`, slug: `pr-list-other-dept-${RUN_ID}` });
     deptIds.push(otherDept.id);
-    const type = await prisma.projectRequestType.create({ data: { name: `PR List Type ${RUN_ID}` } });
+    const type = await prisma.taskType.create({ data: { name: `PR List Type ${RUN_ID}` } });
     typeIds.push(type.id);
 
     const requester = await makeUser(`pr-list-requester-${RUN_ID}@kinsen.gr`);
@@ -286,7 +286,14 @@ async function main() {
         mainRow?.status === "PENDING_APPROVAL" &&
         mainRow?.submittedAt instanceof Date
     );
-    check("4. ...department and projectType names are present for display", mainRow?.department?.name === dept.name && mainRow?.projectType?.name === type.name);
+    // projectType (the former "Project Type" classification) is no longer
+    // accepted/persisted on NEW Project Request submissions at all — see
+    // TaskType in prisma/schema.prisma, which moved this classification to
+    // Activity instead. `basePayload.projectTypeId` above is simply
+    // stripped by createProjectRequestSchema (an unknown key), so a freshly
+    // submitted request's own `projectType` is genuinely null — this is
+    // the correct, current behavior, not a bug.
+    check("4. ...department name is present for display; projectType is genuinely null for a new request (no longer accepted on submission)", mainRow?.department?.name === dept.name && mainRow?.projectType === null);
 
     console.log("\n-- 5. replacementDescription present ONLY when replacesExisting is true --\n");
     const replacesRow = awaitingRows.find((r) => r.id === withReplacement.id);
@@ -416,7 +423,7 @@ async function main() {
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

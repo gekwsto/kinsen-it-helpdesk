@@ -96,10 +96,10 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
-    const taskType = await prisma.activityTaskType.create({ data: { name: `${TAG}-tasktype`, cost: 150 } });
+    const taskType = await prisma.taskSubType.create({ data: { name: `${TAG}-tasktype`, cost: 150 } });
     taskTypeIds.push(taskType.id);
 
     const admin = await prisma.user.findFirstOrThrow({ where: { email: ADMIN_EMAIL }, select: { id: true } });
@@ -208,7 +208,14 @@ async function main() {
     const expectedDaysValue = await page.locator("#expected-days").inputValue();
     check("B. Expected Days preview shows 12 days", expectedDaysValue === "12 days");
 
+    // Task Type (NEW, universal) — required for every Activity now.
     await page.locator("#task-type").click();
+    await page.getByRole("option", { name: `${TAG}-reqtype` }).click();
+
+    // Task Sub Type (RENAMED former "Task Type," cost-bearing) —
+    // request-origin-only field this Estimated Cost preview is actually
+    // derived from.
+    await page.locator("#task-sub-type").click();
     await page.getByRole("option", { name: `${TAG}-tasktype` }).click();
     await page.waitForTimeout(150);
     const estimatedCostPreview = await page.locator("#estimated-cost").inputValue();
@@ -290,7 +297,7 @@ async function main() {
 
     // ══════════════════════ F. Master Task Type price bump never affects this Activity ══════════════════════
     console.log("\n=== F. Bumping the Task Type's MASTER cost never retroactively changes this Activity's displayed cost ===\n");
-    await prisma.activityTaskType.update({ where: { id: taskType.id }, data: { cost: 9999 } });
+    await prisma.taskSubType.update({ where: { id: taskType.id }, data: { cost: 9999 } });
     await page.goto(`${BASE_URL}/activities/${act1Id}`, { waitUntil: "load" });
     await page.waitForTimeout(500);
     check("F. Activity detail's Estimated Cost is STILL '1800.00 EUR' (the frozen €150/day snapshot), not a recalculation off the new €9999/day master price", (await page.getByText("1800.00 EUR").count()) > 0);
@@ -312,12 +319,12 @@ async function main() {
     await browser.close();
     try {
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });

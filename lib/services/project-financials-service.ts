@@ -8,7 +8,7 @@ import { Prisma } from "@prisma/client";
  * through without re-selecting anything.
  */
 export interface ActivityFinancialInputs {
-  taskTypeCost: Prisma.Decimal | null;
+  taskSubTypeCost: Prisma.Decimal | null;
   expectedDays: number | null;
   actualDays: number | null;
 }
@@ -26,13 +26,14 @@ export interface ProjectFinancials {
  * these are now computed fresh from the Project's own Activities every time
  * they're read, never incrementally maintained with `+=`/`-=`, which would
  * be fragile around retries, duplicate requests, concurrent tabs, reopen/
- * re-complete, deleted Activities, and changed Task Types/dates).
+ * re-complete, deleted Activities, and changed Task Sub Types/dates).
  *
- * Activity Estimated Cost = taskTypeCost × expectedDays. Both must be
- * present (a legacy/incomplete Activity — null taskTypeId, or dates not yet
- * set — contributes exactly 0, never a fabricated value).
+ * Activity Estimated Cost = taskSubTypeCost × expectedDays. Both must be
+ * present (a legacy/incomplete Activity — null taskSubTypeId, OR a Task
+ * Sub Type with no configured cost at all, or dates not yet set —
+ * contributes exactly 0, never a fabricated value).
  *
- * Activity Actual Cost = taskTypeCost × actualDays. actualDays is null
+ * Activity Actual Cost = taskSubTypeCost × actualDays. actualDays is null
  * except while the Activity is CURRENTLY in COMPLETED status (see
  * app/api/activities/[id]/route.ts's reopen/re-complete lifecycle: reopening
  * clears it back to null, re-completing recomputes it from the NEW
@@ -43,20 +44,20 @@ export interface ProjectFinancials {
  * history of past completions).
  *
  * Exact Decimal arithmetic throughout (Prisma.Decimal, the same type
- * taskTypeCost itself is stored/returned as) — never JS floating point. A
+ * taskSubTypeCost itself is stored/returned as) — never JS floating point. A
  * zero-day Activity contributes exactly €0 (not skipped); a null
- * taskTypeCost/expectedDays/actualDays contributes nothing (not €0 by
+ * taskSubTypeCost/expectedDays/actualDays contributes nothing (not €0 by
  * coincidence of `0 * x`, genuinely excluded).
  */
 export function computeProjectFinancials(activities: ActivityFinancialInputs[]): ProjectFinancials {
   let estimatedCost = new Prisma.Decimal(0);
   let actualCost = new Prisma.Decimal(0);
   for (const activity of activities) {
-    if (activity.taskTypeCost !== null && activity.expectedDays !== null) {
-      estimatedCost = estimatedCost.plus(activity.taskTypeCost.times(activity.expectedDays));
+    if (activity.taskSubTypeCost !== null && activity.expectedDays !== null) {
+      estimatedCost = estimatedCost.plus(activity.taskSubTypeCost.times(activity.expectedDays));
     }
-    if (activity.taskTypeCost !== null && activity.actualDays !== null) {
-      actualCost = actualCost.plus(activity.taskTypeCost.times(activity.actualDays));
+    if (activity.taskSubTypeCost !== null && activity.actualDays !== null) {
+      actualCost = actualCost.plus(activity.taskSubTypeCost.times(activity.actualDays));
     }
   }
   return { estimatedCost, actualCost };

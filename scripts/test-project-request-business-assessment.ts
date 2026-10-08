@@ -229,7 +229,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `PR BA Dept ${RUN_ID}`, slug: `pr-ba-dept-${RUN_ID}` });
     deptIds.push(dept.id);
-    const type = await prisma.projectRequestType.create({ data: { name: `PR BA Type ${RUN_ID}` } });
+    const type = await prisma.taskType.create({ data: { name: `PR BA Type ${RUN_ID}` } });
     typeIds.push(type.id);
 
     const requester = await makeUser(`pr-ba-requester-${RUN_ID}@kinsen.gr`);
@@ -413,7 +413,7 @@ async function main() {
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

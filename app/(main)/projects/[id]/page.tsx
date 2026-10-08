@@ -24,7 +24,7 @@ import { ProjectDetailHeader } from "@/components/projects/project-detail-header
 import { formatEUR } from "@/lib/currency";
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
 import { getProjectFeedbackEligibility } from "@/lib/services/project-feedback-service";
-import { ProjectFeedbackCard } from "@/components/projects/project-feedback-card";
+import { ProjectFeedbackCtaCard } from "@/components/projects/project-feedback-cta-card";
 import { FolderKanban, Wallet } from "lucide-react";
 
 export default async function ProjectDetailPage({
@@ -149,10 +149,10 @@ export default async function ProjectDetailPage({
   // totals uses (GET/PATCH /api/projects/[id], the edit page) — Project
   // Estimated/Actual Cost no longer exist as stored columns at all; they're
   // derived fresh, here, from this Project's own currently-loaded
-  // Activities (already carrying taskTypeCost/expectedDays/actualDays via
+  // Activities (already carrying taskSubTypeCost/expectedDays/actualDays via
   // the `include` above, no extra query). Harmless to compute even for a
   // manual Project (naturally €0, since a manual Activity never has
-  // taskTypeCost set) — only ever RENDERED inside the projectRequest-gated
+  // taskSubTypeCost set) — only ever RENDERED inside the projectRequest-gated
   // card below.
   const { estimatedCost: projectEstimatedCost, actualCost: projectActualCost } = computeProjectFinancials(project.activities);
 
@@ -206,6 +206,7 @@ export default async function ProjectDetailPage({
             id: activity.id,
             title: activity.title,
             dueDate: activity.dueDate ? activity.dueDate.toISOString() : null,
+            expectedStartDate: activity.expectedStartDate ? activity.expectedStartDate.toISOString() : null,
             isCompleted: activity.isCompleted,
             statusLabel: statusDisplay.label,
             statusColor: statusDisplay.color,
@@ -435,7 +436,7 @@ export default async function ProjectDetailPage({
 
               <Separator />
               <div className="grid grid-cols-2 gap-3">
-                {/* Derived from this Project's own Activities (taskTypeCost
+                {/* Derived from this Project's own Activities (taskSubTypeCost
                     × expectedDays/actualDays, summed) — never a stored,
                     manually-entered value. Budget was removed entirely (no
                     replacement). */}
@@ -457,30 +458,19 @@ export default async function ProjectDetailPage({
         )}
       </div>
 
-      {/* Project Feedback — ONLY ever rendered for a request-origin
-          Project (feedbackEligibility is null for a manual one), and even
-          then only once the viewer is confirmed to be the original
-          requester (Case D in this feature's own spec: anyone else simply
-          never sees this card, full stop — there is no admin-review
-          variant of it on this page at all; that lives at Administration
-          -> Feedback instead). Before completion (Case A), nothing is
-          rendered — never an empty/disabled placeholder card. */}
-      {feedbackEligibility?.isOriginalRequester && (feedbackEligibility.isProjectCompleted || feedbackEligibility.feedback) && (
-        <ProjectFeedbackCard
-          projectId={project.id}
-          // Date is a class instance — cannot cross the Server -> Client
-          // Component boundary as-is (same rule as Prisma.Decimal
-          // elsewhere on this page); converted to an ISO string here.
-          initialFeedback={
-            feedbackEligibility.feedback
-              ? {
-                  satisfactionScore: feedbackEligibility.feedback.satisfactionScore,
-                  comments: feedbackEligibility.feedback.comments,
-                  createdAt: feedbackEligibility.feedback.createdAt.toISOString(),
-                }
-              : null
-          }
-        />
+      {/* Project Feedback — the FULL evaluation form no longer lives on
+          this page at all; it's a dedicated standalone route
+          (/projects/[id]/feedback). This is only a small CTA, ONLY ever
+          rendered for a request-origin Project (feedbackEligibility is
+          null for a manual one), and even then only once the viewer is
+          confirmed to be the Project's own primary Owner (Project.ownerId
+          — never the full `owners` set, Audience, Members, the original
+          requester, or ADMIN merely by role; see this feature's own
+          eligibility rule in lib/services/project-feedback-service.ts).
+          Before completion AND with no existing feedback (Case A),
+          nothing is rendered — never an empty/disabled placeholder card. */}
+      {feedbackEligibility?.isPrimaryOwner && (feedbackEligibility.isProjectCompleted || feedbackEligibility.feedback) && (
+        <ProjectFeedbackCtaCard projectId={project.id} hasExistingFeedback={feedbackEligibility.feedback !== null} />
       )}
 
       <div className="grid gap-6 lg:grid-cols-3">

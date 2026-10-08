@@ -65,12 +65,15 @@ interface Activity {
   expectedDays?: number | null;
   actualDays?: number | null;
   owner?: { id: string; name: string | null; email: string; image?: string | null } | null;
+  /** The NEW, universally-required Task Type classification (see TaskType in prisma/schema.prisma) — populated for every Activity, not just request-origin ones. */
   taskType?: { id: string; name: string } | null;
-  /** Prisma.Decimal serializes to a STRING over JSON — converted with Number() before display. */
-  taskTypeCost?: string | number | null;
-  /** Server-derived (GET /api/activities/[id] via computeActivityFinancials) — taskTypeCost × expectedDays. Never stored. */
+  /** The RENAMED former "Task Type" (see TaskSubType in prisma/schema.prisma) — request-origin-only, same optional-elsewhere semantics as before. */
+  taskSubType?: { id: string; name: string } | null;
+  /** Prisma.Decimal serializes to a STRING over JSON — converted with Number() before display. `null` means "no configured cost," never 0. */
+  taskSubTypeCost?: string | number | null;
+  /** Server-derived (GET /api/activities/[id] via computeActivityFinancials) — taskSubTypeCost × expectedDays. Never stored. */
   estimatedCost?: string | number | null;
-  /** Server-derived — taskTypeCost × actualDays (0 unless currently COMPLETED). Never stored. */
+  /** Server-derived — taskSubTypeCost × actualDays (0 unless currently COMPLETED). Never stored. */
   actualCost?: string | number | null;
   /** Whether the current user holds activity.edit here — governs the Notes composer AND the quick-status dropdown. POST /api/activities/[id]/notes and PATCH /api/activities/[id] independently re-check this; this is only a UI hint. */
   canEditActivity?: boolean;
@@ -457,6 +460,12 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
                 <span className="text-muted-foreground italic">Standalone</span>
               )}
             </div>
+            <div>
+              <p className="text-xs text-muted-foreground mb-1">Task Type</p>
+              {/* "Not set" only ever appears for a legacy Activity created
+                  before this classification existed — never fabricated. */}
+              <p className="font-medium">{activity.taskType?.name ?? "Not set"}</p>
+            </div>
             {activity.assignedUsers.length > 0 && (
               <div>
                 <p className="text-xs text-muted-foreground mb-1">Assigned To</p>
@@ -524,11 +533,12 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
                 <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
               </div>
               <div>
-                <p className="text-xs text-muted-foreground mb-1">Task Type</p>
+                <p className="text-xs text-muted-foreground mb-1">Task Sub Type</p>
                 <p className="font-medium">
-                  {activity.taskType?.name ?? "Not set"}
-                  {activity.taskTypeCost !== null && activity.taskTypeCost !== undefined && (
-                    <span className="text-muted-foreground font-normal"> — {Number(activity.taskTypeCost).toFixed(2)} EUR (snapshot)</span>
+                  {activity.taskSubType?.name ?? "Not set"}
+                  {/* `null` (no configured cost) is simply never shown — never displayed as 0.00. */}
+                  {activity.taskSubTypeCost !== null && activity.taskSubTypeCost !== undefined && (
+                    <span className="text-muted-foreground font-normal"> — {Number(activity.taskSubTypeCost).toFixed(2)} EUR (snapshot)</span>
                   )}
                 </p>
               </div>

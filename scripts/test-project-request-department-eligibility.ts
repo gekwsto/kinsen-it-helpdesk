@@ -139,7 +139,7 @@ async function main() {
     deptIds.push(deptInactive.id);
     await prisma.department.update({ where: { id: deptInactive.id }, data: { isActive: false } });
 
-    const activeType = await prisma.projectRequestType.create({ data: { name: `PR Elig Type ${RUN_ID}` } });
+    const activeType = await prisma.taskType.create({ data: { name: `PR Elig Type ${RUN_ID}` } });
     typeIds.push(activeType.id);
 
     const manager = await prisma.user.create({ data: { email: `pr-elig-manager-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
@@ -329,7 +329,7 @@ async function main() {
       ["notifications (by request link)", () => prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } })],
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

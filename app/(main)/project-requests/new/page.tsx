@@ -1,5 +1,4 @@
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { getIntermediateApproverOptions } from "@/lib/services/project-request-service";
@@ -27,12 +26,6 @@ export default async function NewProjectRequestPage() {
   const departments = workspace.departments;
   const defaultDepartmentId = workspace.isAllSelected ? undefined : workspace.departmentId ?? undefined;
 
-  const activeTypes = await prisma.projectRequestType.findMany({
-    where: { isActive: true },
-    orderBy: { name: "asc" },
-    select: { id: true, name: true },
-  });
-
   // Every real, currently-eligible intermediate approver, system-wide —
   // never department-scoped. This stage is mandatory (fail closed): if
   // nobody currently holds projectRequest.intermediateApprove, submission
@@ -57,13 +50,6 @@ export default async function NewProjectRequestPage() {
             administrator.
           </p>
         </div>
-      ) : activeTypes.length === 0 ? (
-        <div className="text-center py-20 border rounded-lg">
-          <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-          <p className="text-muted-foreground">
-            No Project Types have been configured yet. Contact an administrator before submitting a request.
-          </p>
-        </div>
       ) : intermediateApproverOptions.length === 0 ? (
         <div className="text-center py-20 border rounded-lg">
           <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
@@ -75,7 +61,6 @@ export default async function NewProjectRequestPage() {
       ) : (
         <ProjectRequestForm
           departments={departments}
-          types={activeTypes}
           defaultDepartmentId={defaultDepartmentId}
           intermediateApproverOptions={intermediateApproverOptions}
         />

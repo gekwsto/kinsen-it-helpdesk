@@ -60,7 +60,7 @@ async function main() {
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
   const setupPOST = (await import("@/app/api/project-requests/[id]/project/route")).POST;
-  const taskTypesAdminPOST = (await import("@/app/api/admin/activity-task-types/route")).POST;
+  const taskTypesAdminPOST = (await import("@/app/api/admin/task-sub-types/route")).POST;
   const { computeProjectFinancials } = await import("@/lib/services/project-financials-service");
 
   const deptIds: string[] = [];
@@ -74,7 +74,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -142,7 +142,8 @@ async function main() {
           departmentId: dept.id,
           expectedStartDate: "2026-01-01",
           expectedFinishDate: "2026-01-02",
-          taskTypeId: taskType.id,
+          taskTypeId: reqType.id,
+          taskSubTypeId: taskType.id,
           ownerId: worker1.id,
           assignedUserIds: [worker1.id],
         })
@@ -158,7 +159,7 @@ async function main() {
 
     // ══════════════════════ 1-3. SCOPE ══════════════════════
     console.log("\n=== 1-3. Scope: manual vs request-origin, provenance server-resolved ===\n");
-    const manualActivityRes = await activitiesPOST(jsonReq({ title: `${TAG} manual activity`, projectId: manualProject.id, departmentId: dept.id }));
+    const manualActivityRes = await activitiesPOST(jsonReq({ title: `${TAG} manual activity`, projectId: manualProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
     check("(fixture) Manual Project Activity creation -> 201", manualActivityRes.status === 201);
     const manualActivity = await manualActivityRes.json();
     activityIds.push(manualActivity.id);
@@ -316,7 +317,7 @@ async function main() {
     const rAct2 = await createActivity(regressionProject, "Regression Act2");
     await activitiesPATCH(jsonReq({ isCompleted: true, status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: rAct1.id }) });
     const beforeReorderSnapshot = await prisma.projectActivity.findUniqueOrThrow({ where: { id: rAct1.id } });
-    const projectFinancialsBefore = computeProjectFinancials(await prisma.projectActivity.findMany({ where: { projectId: regressionProject }, select: { taskTypeCost: true, expectedDays: true, actualDays: true } }));
+    const projectFinancialsBefore = computeProjectFinancials(await prisma.projectActivity.findMany({ where: { projectId: regressionProject }, select: { taskSubTypeCost: true, expectedDays: true, actualDays: true } }));
 
     const regressionReorderRes = await reorderPATCH(jsonReq({ activityIds: [rAct2.id, rAct1.id] }, "PATCH"), { params: Promise.resolve({ id: regressionProject }) });
     check("(fixture) Reorder succeeds -> 200", regressionReorderRes.status === 200);
@@ -324,10 +325,10 @@ async function main() {
     check("26. Reorder does not modify Activity status", afterReorderSnapshot.status === beforeReorderSnapshot.status);
     check("27. Reorder does not modify completedAt", afterReorderSnapshot.completedAt?.getTime() === beforeReorderSnapshot.completedAt?.getTime());
     check("28. Reorder does not modify expectedDays/actualDays", afterReorderSnapshot.expectedDays === beforeReorderSnapshot.expectedDays && afterReorderSnapshot.actualDays === beforeReorderSnapshot.actualDays);
-    check("29. Reorder does not modify Task Type or its snapshot cost", afterReorderSnapshot.taskTypeId === beforeReorderSnapshot.taskTypeId && afterReorderSnapshot.taskTypeCost?.toString() === beforeReorderSnapshot.taskTypeCost?.toString());
+    check("29. Reorder does not modify Task Type or its snapshot cost", afterReorderSnapshot.taskTypeId === beforeReorderSnapshot.taskTypeId && afterReorderSnapshot.taskSubTypeCost?.toString() === beforeReorderSnapshot.taskSubTypeCost?.toString());
     check("...and the sequence DID actually change (proving this isn't a no-op)", afterReorderSnapshot.sequence !== beforeReorderSnapshot.sequence);
 
-    const projectFinancialsAfter = computeProjectFinancials(await prisma.projectActivity.findMany({ where: { projectId: regressionProject }, select: { taskTypeCost: true, expectedDays: true, actualDays: true } }));
+    const projectFinancialsAfter = computeProjectFinancials(await prisma.projectActivity.findMany({ where: { projectId: regressionProject }, select: { taskSubTypeCost: true, expectedDays: true, actualDays: true } }));
     check("30. Project Estimated/Actual Cost are completely unchanged by the reorder — set-based aggregation, never order-dependent", projectFinancialsBefore.estimatedCost.toString() === projectFinancialsAfter.estimatedCost.toString() && projectFinancialsBefore.actualCost.toString() === projectFinancialsAfter.actualCost.toString());
   } finally {
     console.log("\nCleaning up test data...\n");
@@ -337,7 +338,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): activities", err instanceof Error ? err.message : err);
     }
     try {
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): task types", err instanceof Error ? err.message : err);
     }
@@ -350,7 +351,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);

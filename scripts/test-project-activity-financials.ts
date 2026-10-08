@@ -6,8 +6,8 @@
  *   - Made Project Estimated/Actual Cost fully DERIVED, every read, from the
  *     Project's own Activities (lib/services/project-financials-service.ts),
  *     never stored, never incrementally maintained with +=/-=.
- *   - Activity Estimated Cost = taskTypeCost × expectedDays.
- *   - Activity Actual Cost   = taskTypeCost × actualDays (actualDays only
+ *   - Activity Estimated Cost = taskSubTypeCost × expectedDays.
+ *   - Activity Actual Cost   = taskSubTypeCost × actualDays (actualDays only
  *     non-null while the Activity is CURRENTLY COMPLETED — reopening clears
  *     it, re-completing recomputes it from the NEW completedAt).
  *
@@ -71,7 +71,7 @@ async function main() {
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
   const setupPOST = (await import("@/app/api/project-requests/[id]/project/route")).POST;
-  const taskTypesAdminPOST = (await import("@/app/api/admin/activity-task-types/route")).POST;
+  const taskTypesAdminPOST = (await import("@/app/api/admin/task-sub-types/route")).POST;
   const { computeProjectFinancials } = await import("@/lib/services/project-financials-service");
 
   const deptIds: string[] = [];
@@ -85,7 +85,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -178,7 +178,7 @@ async function main() {
     check("7. ...and it never had a budget column either", !("budget" in manualGetBody));
 
     // ══════════════════════ 8-13. ACTIVITY ESTIMATED COST ══════════════════════
-    console.log("\n=== 8-13. Activity Estimated Cost = taskTypeCost × expectedDays ===\n");
+    console.log("\n=== 8-13. Activity Estimated Cost = taskSubTypeCost × expectedDays ===\n");
     const act1Res = await activitiesPOST(
       jsonReq({
         title: `${TAG} Act1`,
@@ -190,7 +190,12 @@ async function main() {
         // at check 24).
         expectedStartDate: "2026-09-20",
         expectedFinishDate: "2026-10-02",
-        taskTypeId: taskTypeA.id,
+        // Task Type (NEW, universally-required) and Task Sub Type (the
+        // RENAMED former "Task Type," which carries the cost snapshot) are
+        // two independent fields now — see ProjectActivity.taskType/
+        // taskSubType in prisma/schema.prisma.
+        taskTypeId: reqType.id,
+        taskSubTypeId: taskTypeA.id,
         ownerId: worker1.id,
         assignedUserIds: [worker1.id],
       })
@@ -215,7 +220,8 @@ async function main() {
         departmentId: dept.id,
         expectedStartDate: "2026-11-01",
         expectedFinishDate: "2026-11-06",
-        taskTypeId: taskTypeB.id,
+        taskTypeId: reqType.id,
+        taskSubTypeId: taskTypeB.id,
         ownerId: worker1.id,
         assignedUserIds: [worker1.id],
       })
@@ -243,7 +249,7 @@ async function main() {
     check("...and the Project total updates automatically with zero extra bookkeeping: 1800 + 2000 = 3800", projGet.estimatedCost === "3800");
 
     // ══════════════════════ 14-21. ACTIVITY ACTUAL COST ══════════════════════
-    console.log("\n=== 14-21. Activity Actual Cost = taskTypeCost × actualDays (only while COMPLETED) ===\n");
+    console.log("\n=== 14-21. Activity Actual Cost = taskSubTypeCost × actualDays (only while COMPLETED) ===\n");
     check("14. Before completion, Act1's actualCost is '0'", act1Get.actualCost === "0");
 
     const completeAct1Res = await activitiesPATCH(jsonReq({ isCompleted: true, status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: act1.id }) });
@@ -251,7 +257,7 @@ async function main() {
     const completedAct1 = await completeAct1Res.json();
     check("16. actualDays is now a real non-null number (computed from Expected Start to the server's completedAt)", typeof completedAct1.actualDays === "number" && completedAct1.actualDays >= 0);
     const expectedAct1ActualCost = (150 * completedAct1.actualDays).toString();
-    check("16. actualCost === taskTypeCost(150) × actualDays, exact", completedAct1.actualCost === expectedAct1ActualCost);
+    check("16. actualCost === taskSubTypeCost(150) × actualDays, exact", completedAct1.actualCost === expectedAct1ActualCost);
 
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
     check("17. Project actualCost reflects ONLY the completed Activity (Act2 still open, contributes 0)", projGet.actualCost === expectedAct1ActualCost);
@@ -265,7 +271,7 @@ async function main() {
 
     const completeLegacyRes = await activitiesPATCH(jsonReq({ isCompleted: true, status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: legacyActivity.id }) });
     const completedLegacy = await completeLegacyRes.json();
-    check("19. Completing the legacy (null taskTypeCost) Activity -> actualCost stays '0', never fabricated", completedLegacy.actualCost === "0");
+    check("19. Completing the legacy (null taskSubTypeCost) Activity -> actualCost stays '0', never fabricated", completedLegacy.actualCost === "0");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
     check("...and the Project total is unaffected by it", projGet.actualCost === expectedCombined);
 
@@ -277,7 +283,8 @@ async function main() {
         departmentId: dept.id,
         expectedStartDate: "2026-01-01",
         expectedFinishDate: "2026-01-04",
-        taskTypeId: taskTypeC.id,
+        taskTypeId: reqType.id,
+        taskSubTypeId: taskTypeC.id,
         ownerId: worker1.id,
         assignedUserIds: [worker1.id],
       })
@@ -376,20 +383,20 @@ async function main() {
     // 35: exact Decimal sum across remaining Activities (Act1 1800 + Act3 99.99 + legacy 0 = 1899.99).
     check("35. Exact Decimal sum verified: 1800 + 99.99 + 0 = '1899.99', never a float rounding artifact", projGet.estimatedCost === "1899.99");
 
-    // 36: changing an Activity's Task Type re-snapshots taskTypeCost, which
+    // 36: changing an Activity's Task Type re-snapshots taskSubTypeCost, which
     // (since actualCost is always derived from the CURRENT snapshot) changes
     // aggregation on the very next read — this is the one explicit path
     // allowed to alter a cost retroactively (an explicit user action on that
     // specific Activity, never a passive master-cost bump).
-    const changeTaskTypeRes = await activitiesPATCH(jsonReq({ taskTypeId: taskTypeB.id }, "PATCH"), { params: Promise.resolve({ id: act3.id }) });
+    const changeTaskTypeRes = await activitiesPATCH(jsonReq({ taskSubTypeId: taskTypeB.id }, "PATCH"), { params: Promise.resolve({ id: act3.id }) });
     const changedAct3 = await changeTaskTypeRes.json();
-    check("36. Changing Act3's Task Type (C->B) re-snapshots taskTypeCost to 200, and its estimatedCost recalculates (200×3=600)", changedAct3.estimatedCost === "600");
+    check("36. Changing Act3's Task Sub Type (C->B) re-snapshots taskSubTypeCost to 200, and its estimatedCost recalculates (200×3=600)", changedAct3.estimatedCost === "600");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
     check("...Project total reflects the new snapshot immediately: 1800 + 600 = 2400", projGet.estimatedCost === "2400");
 
     // 37: a MASTER Task Type cost change must NEVER retroactively alter an
     // existing Activity's snapshot or the Project total.
-    await prisma.activityTaskType.update({ where: { id: taskTypeA.id }, data: { cost: 9999 } });
+    await prisma.taskSubType.update({ where: { id: taskTypeA.id }, data: { cost: 9999 } });
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
     check("37. Bumping TaskTypeA's MASTER cost to 9999 does NOT change the Project total — still '2400', the frozen snapshot wins", projGet.estimatedCost === "2400");
 
@@ -398,19 +405,19 @@ async function main() {
     const manualProjectGet2 = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: manualProject.id }) })).json();
     check("38. The unrelated manual Project's totals remain '0'/'0' — completely isolated from this Project's Activities", manualProjectGet2.estimatedCost === "0" && manualProjectGet2.actualCost === "0");
 
-    // 39/40: null-safety — a taskTypeCost with no expectedDays, and vice versa.
-    const onlyCostRow = await prisma.projectActivity.create({ data: { title: `${TAG} OnlyCost`, projectId: project.id, departmentId: dept.id, createdById: worker1.id, taskTypeId: taskTypeA.id, taskTypeCost: 9999 } });
+    // 39/40: null-safety — a taskSubTypeCost with no expectedDays, and vice versa.
+    const onlyCostRow = await prisma.projectActivity.create({ data: { title: `${TAG} OnlyCost`, projectId: project.id, departmentId: dept.id, createdById: worker1.id, taskSubTypeId: taskTypeA.id, taskSubTypeCost: 9999 } });
     activityIds.push(onlyCostRow.id);
     const onlyDaysRow = await prisma.projectActivity.create({ data: { title: `${TAG} OnlyDays`, projectId: project.id, departmentId: dept.id, createdById: worker1.id, expectedDays: 50 } });
     activityIds.push(onlyDaysRow.id);
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("39. An Activity with taskTypeCost but no expectedDays contributes exactly 0 (never NaN, never cost×0 by coincidence)", projGet.estimatedCost === "2400");
-    check("40. An Activity with expectedDays but no taskTypeCost ALSO contributes exactly 0", projGet.estimatedCost === "2400");
+    check("39. An Activity with taskSubTypeCost but no expectedDays contributes exactly 0 (never NaN, never cost×0 by coincidence)", projGet.estimatedCost === "2400");
+    check("40. An Activity with expectedDays but no taskSubTypeCost ALSO contributes exactly 0", projGet.estimatedCost === "2400");
 
     // 41: full mixed-state aggregation already exercised throughout — this
     // confirms it one more time with the final combined state.
     const finalExpected = computeProjectFinancials(
-      (await prisma.projectActivity.findMany({ where: { projectId: project.id }, select: { taskTypeCost: true, expectedDays: true, actualDays: true } }))
+      (await prisma.projectActivity.findMany({ where: { projectId: project.id }, select: { taskSubTypeCost: true, expectedDays: true, actualDays: true } }))
     );
     check("41. The route's aggregation matches computeProjectFinancials() applied directly to the current DB rows — single source of truth", projGet.estimatedCost === finalExpected.estimatedCost.toString() && projGet.actualCost === finalExpected.actualCost.toString());
 
@@ -456,8 +463,8 @@ async function main() {
 
     // ══════════════════════ 50-54. SCOPE ══════════════════════
     console.log("\n=== 50-54. Scope: manual Projects/Activities are completely unaffected ===\n");
-    const manualActNoCostRes = await activitiesPOST(jsonReq({ title: `${TAG} manual act`, projectId: manualProject.id, departmentId: dept.id }));
-    check("50. A manual Project's Activity never requires taskTypeId/expectedDays/actualDays", manualActNoCostRes.status === 201);
+    const manualActNoCostRes = await activitiesPOST(jsonReq({ title: `${TAG} manual act`, projectId: manualProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
+    check("50. A manual Project's Activity never requires taskSubTypeId/expectedDays/actualDays (Task Type itself is the one universally-required field, supplied above)", manualActNoCostRes.status === 201);
     const manualActNoCost = await manualActNoCostRes.json();
     activityIds.push(manualActNoCost.id);
     check("51. ...and its estimatedCost/actualCost are harmlessly '0'/'0', never required to be anything else", manualActNoCost.estimatedCost === "0" && manualActNoCost.actualCost === "0");
@@ -481,7 +488,8 @@ async function main() {
         departmentId: dept.id,
         expectedStartDate: "2026-02-01",
         expectedFinishDate: "2026-02-03",
-        taskTypeId: taskTypeA.id,
+        taskTypeId: reqType.id,
+        taskSubTypeId: taskTypeA.id,
         ownerId: worker1.id,
         assignedUserIds: [worker1.id],
         estimatedCost: 999999,
@@ -490,7 +498,7 @@ async function main() {
     );
     const forgedActivityCost = await forgedActivityCostRes.json();
     activityIds.push(forgedActivityCost.id);
-    check("54. A client-forged estimatedCost/actualCost in the Activity POST body is completely ignored — the server computes its own (taskTypeCost 9999 [bumped at check 37] × 2 days)", forgedActivityCost.estimatedCost === (9999 * 2).toString() && forgedActivityCost.estimatedCost !== "999999");
+    check("54. A client-forged estimatedCost/actualCost in the Activity POST body is completely ignored — the server computes its own (taskSubTypeCost 9999 [bumped at check 37] × 2 days)", forgedActivityCost.estimatedCost === (9999 * 2).toString() && forgedActivityCost.estimatedCost !== "999999");
   } finally {
     console.log("\nCleaning up test data...\n");
     try {
@@ -499,7 +507,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): activities", err instanceof Error ? err.message : err);
     }
     try {
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): task types", err instanceof Error ? err.message : err);
     }
@@ -512,7 +520,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);

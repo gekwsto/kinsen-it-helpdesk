@@ -1,14 +1,26 @@
 /**
- * Regression coverage for two small, related additions on top of Project
+ * Regression coverage for three small, related additions on top of Project
  * Feedback:
  *
- *   1. A best-effort in-app notification to the ORIGINAL Project Request
- *      requester the moment their request-origin Project transitions to
- *      COMPLETED (lib/services/project-feedback-service.ts's
- *      notifyRequesterOfProjectCompletion, wired into PATCH
- *      /api/projects/[id]) — the discoverability prompt for the new
- *      Feedback card. Clicking it lands on /projects/[id].
- *   2. A "clear notifications" feature: DELETE /api/notifications/[id]
+ *   1. A best-effort in-app notification + EMAIL to the Project's own
+ *      PRIMARY Owner (Project.ownerId — REPLACED from the original Project
+ *      Request requester) the moment their request-origin Project
+ *      transitions to COMPLETED
+ *      (lib/services/project-feedback-service.ts's
+ *      notifyOwnerOfProjectCompletion, wired into PATCH
+ *      /api/projects/[id]) — the discoverability prompt for the dedicated
+ *      /projects/[id]/feedback page. Both the notification and the email
+ *      CTA link straight there, never to the Project detail page.
+ *   2. Idempotency: fires only on a genuine non-COMPLETED -> COMPLETED
+ *      transition (never on a repeated PATCH while already COMPLETED, or
+ *      an unrelated edit) — inherited entirely from the existing
+ *      transition-guard at the PATCH route's own call site, no separate
+ *      ledger. A genuine reopen -> re-complete cycle fires a fresh,
+ *      second notification+email.
+ *   3. Email-failure tolerance: a Microsoft Graph outage during the
+ *      completion email never rolls back the Project's own COMPLETED
+ *      transition, and never turns the PATCH response into an error.
+ *   4. A "clear notifications" feature: DELETE /api/notifications/[id]
  *      (dismiss one) and DELETE /api/notifications/clear-all (dismiss
  *      every notification for the authenticated user), plus their pure
  *      client-side state reducers (applyDeleted/applyClearAll).
@@ -20,6 +32,27 @@ import { prisma } from "@/lib/prisma";
 import { Role, AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
 import { createDepartment } from "@/lib/services/department-service";
 import { applyDeleted, applyClearAll, type NotificationState, type NotificationItem } from "@/lib/notifications/notification-state";
+import { microsoftGraph } from "@/lib/microsoft-graph";
+
+// ── Mocked Graph send — records every call, never touches the network ──────
+type SentCall = { to: string; subject: string; html: string };
+let sentCalls: SentCall[] = [];
+let sendShouldFail = false;
+
+const originalSendMail = microsoftGraph.sendMail;
+microsoftGraph.sendMail = async (payload) => {
+  if (sendShouldFail) throw new Error("Simulated Graph outage");
+  sentCalls.push({
+    to: payload.message.toRecipients[0]?.emailAddress.address ?? "",
+    subject: payload.message.subject,
+    html: payload.message.body.content,
+  });
+};
+
+function resetMock() {
+  sentCalls = [];
+  sendShouldFail = false;
+}
 
 let passed = 0;
 let failed = 0;
@@ -95,7 +128,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -110,7 +143,7 @@ async function main() {
       });
     }
 
-    const adminUser = await prisma.user.findFirstOrThrow({ where: { email: "admin@kinsen.gr" }, select: { id: true } });
+    const adminUser = await prisma.user.findFirstOrThrow({ where: { email: "admin@kinsen.gr" }, select: { id: true, email: true, name: true } });
     const requester = await makeUser(`${TAG}-requester@kinsen.gr`);
     await addMembership(requester.id, dept.id);
 
@@ -150,42 +183,71 @@ async function main() {
       return project.id;
     }
 
-    // ══════════════════════ SECTION B — completion notification ══════════════════════
-    console.log("\n=== SECTION B — notifying the original requester when their Project is COMPLETED ===\n");
+    // ══════════════════════ SECTION B — completion notification + email, targeting the primary OWNER ══════════════════════
+    console.log("\n=== SECTION B — notifying + emailing the primary Owner (NOT the requester) when their Project is COMPLETED ===\n");
     const proj1 = await makeRequestOriginProject("proj1");
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    resetMock();
 
-    const beforeCount = await prisma.notification.count({ where: { userId: requester.id, link: `/projects/${proj1}` } });
+    const beforeCount = await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } });
     check("5. No completion notification exists before the Project is completed", beforeCount === 0);
 
     const completeRes = await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
     check("(fixture) PATCH status=COMPLETED -> 200", completeRes.status === 200);
 
-    const notif1 = await prisma.notification.findFirst({ where: { userId: requester.id, link: `/projects/${proj1}` } });
-    check("6. Completing a request-origin Project creates exactly ONE notification for the ORIGINAL requester", notif1 !== null);
+    const notif1 = await prisma.notification.findFirst({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } });
+    check("6. Completing a request-origin Project creates exactly ONE notification for the PRIMARY OWNER (never the original requester)", notif1 !== null);
     if (notif1) notificationIds.push(notif1.id);
-    check("7. Its title is 'Project completed'", notif1?.title === "Project completed");
-    check("8. Its body names the real Project title and mentions feedback", (notif1?.body ?? "").includes(`${TAG} proj1 request`) && /feedback/i.test(notif1?.body ?? ""));
-    check("9. Its link points straight at the Project detail page (where the Feedback card now lives)", notif1?.link === `/projects/${proj1}`);
-    check("...exactly one such notification, never duplicated by this single completion", (await prisma.notification.count({ where: { userId: requester.id, link: `/projects/${proj1}` } })) === 1);
+    check("...and NOT for the original requester (a different person in this fixture)", (await prisma.notification.count({ where: { userId: requester.id, link: `/projects/${proj1}/feedback` } })) === 0);
+    check("7. Its title is the Greek 'Το έργο ολοκληρώθηκε'", notif1?.title === "Το έργο ολοκληρώθηκε");
+    check("8. Its body names the real Project title and mentions the Greek feedback prompt", (notif1?.body ?? "").includes(`${TAG} proj1 request`) && (notif1?.body ?? "").includes("αξιολόγησή"));
+    check("9. Its link points straight at the DEDICATED feedback page, never the Project detail page", notif1?.link === `/projects/${proj1}/feedback`);
+    check("...exactly one such notification, never duplicated by this single completion", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 1);
 
-    // 10: an unrelated edit on the ALREADY-completed Project must not fire a second one.
+    check("(email) Exactly one completion email sent, to the real Owner's email", sentCalls.length === 1 && sentCalls[0]?.to === adminUser.email);
+    check("(email) Subject is the Greek 'Αξιολόγηση ολοκληρωμένου έργου: {title}'", sentCalls[0]?.subject === `Αξιολόγηση ολοκληρωμένου έργου: ${TAG} proj1 request`);
+    check("(email) Body contains a direct CTA link to the dedicated feedback page (canonical APP_URL-based, not a Host-header guess)", sentCalls[0]?.html.includes(`/projects/${proj1}/feedback`) && sentCalls[0]?.html.includes("Αξιολόγηση Έργου"));
+
+    // 10: an unrelated edit on the ALREADY-completed Project must not fire a second notification or email.
     await projectsPATCH(jsonReq({ title: "Renamed after completion" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
-    check("10. An unrelated edit on an ALREADY-completed Project does NOT create a second notification", (await prisma.notification.count({ where: { userId: requester.id, link: `/projects/${proj1}` } })) === 1);
+    check("10. An unrelated edit on an ALREADY-completed Project does NOT create a second notification", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 1);
+    check("...nor send a second email", sentCalls.length === 1);
 
-    // 11: reopen -> re-complete is a GENUINE new transition -> a second, real notification.
+    // A repeated PATCH that re-sends COMPLETED while ALREADY completed (no real transition) must also be a no-op.
+    await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
+    check("...repeating status=COMPLETED while already COMPLETED (no real transition) still doesn't duplicate", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 1 && sentCalls.length === 1);
+
+    // 11: reopen -> re-complete is a GENUINE new transition -> a second, real notification AND email.
     await projectsPATCH(jsonReq({ status: "IN_PROGRESS" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
     await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
-    check("11. Reopening then re-completing (a genuine new transition) fires a SECOND real notification", (await prisma.notification.count({ where: { userId: requester.id, link: `/projects/${proj1}` } })) === 2);
-    const allNotifsForProj1 = await prisma.notification.findMany({ where: { userId: requester.id, link: `/projects/${proj1}` } });
+    check("11. Reopening then re-completing (a genuine new transition) fires a SECOND real notification", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 2);
+    check("...and a SECOND real email", sentCalls.length === 2);
+    const allNotifsForProj1 = await prisma.notification.findMany({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } });
     for (const n of allNotifsForProj1) notificationIds.push(n.id);
 
-    // 12: a manual Project's completion never notifies anyone this way.
+    // 12: a manual Project's completion never notifies/emails anyone this way.
     const manualProject = await prisma.project.create({ data: { title: `${TAG} manual project`, departmentId: dept.id, ownerId: adminUser.id } });
     projectIds.push(manualProject.id);
     const manualBeforeCount = await prisma.notification.count();
+    resetMock();
     await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: manualProject.id }) });
     check("12. Completing a MANUAL Project (no projectRequestId) creates no new notification at all", (await prisma.notification.count()) === manualBeforeCount);
+    check("...and sends no email either", sentCalls.length === 0);
+
+    // 13: a Microsoft Graph outage during the completion email must NEVER roll back the Project's own completion, nor fail the PATCH.
+    console.log("\n=== 13. Email-failure tolerance: Graph outage never undoes Project completion ===\n");
+    const proj9 = await makeRequestOriginProject("proj9-email-failure");
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    resetMock();
+    sendShouldFail = true;
+    const completeDuringOutageRes = await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: proj9 }) });
+    check("13. PATCH still returns 200 even though the completion email send throws", completeDuringOutageRes.status === 200);
+    const proj9Row = await prisma.project.findUniqueOrThrow({ where: { id: proj9 }, select: { status: true } });
+    check("...the Project genuinely IS COMPLETED in the DB — the failed email never rolled it back", proj9Row.status === "COMPLETED");
+    const proj9Notif = await prisma.notification.findFirst({ where: { userId: adminUser.id, link: `/projects/${proj9}/feedback` } });
+    check("...the in-app notification was still created despite the email failure (independent try/catch)", proj9Notif !== null);
+    if (proj9Notif) notificationIds.push(proj9Notif.id);
+    sendShouldFail = false;
 
     // ══════════════════════ SECTION C — DELETE /api/notifications/[id] ══════════════════════
     console.log("\n=== SECTION C — dismissing a single notification ===\n");
@@ -221,6 +283,7 @@ async function main() {
     check("17. Every notification belonging to the requester is now gone", (await prisma.notification.count({ where: { userId: requester.id } })) === 0);
     check("18. A DIFFERENT user's notification is completely unaffected by someone else's clear-all", (await prisma.notification.findUnique({ where: { id: otherUserNotif.id } })) !== null);
   } finally {
+    microsoftGraph.sendMail = originalSendMail;
     console.log("\nCleaning up test data...\n");
     try {
       await prisma.notification.deleteMany({ where: { id: { in: notificationIds } } });
@@ -237,7 +300,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);

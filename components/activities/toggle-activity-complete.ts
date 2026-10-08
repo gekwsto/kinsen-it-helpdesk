@@ -39,7 +39,7 @@ export async function toggleActivityComplete(activityId: string, currentlyComple
   // app/api/activities/[id]/route.ts); surfaced here the same way
   // progress/statusLabel/statusColor already are, so a caller that renders
   // it (the Activity detail page) never goes stale.
-  // actualCost — server-derived on this SAME transition (taskTypeCost ×
+  // actualCost — server-derived on this SAME transition (taskSubTypeCost ×
   // actualDays, see computeActivityFinancials) — a reopen clears it back to
   // "0" immediately here, re-completing returns the freshly-recalculated
   // amount, never the previous one.

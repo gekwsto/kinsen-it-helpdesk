@@ -82,8 +82,8 @@ async function main() {
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
-  const typesGET = (await import("@/app/api/admin/project-request-types/route")).GET;
-  const typesPOST = (await import("@/app/api/admin/project-request-types/route")).POST;
+  const typesGET = (await import("@/app/api/admin/task-types/route")).GET;
+  const typesPOST = (await import("@/app/api/admin/task-types/route")).POST;
   const { default: ProjectRequestDetailPage } = await import("@/app/(main)/project-requests/[id]/page");
   const { default: ProjectRequestsListPage } = await import("@/app/(main)/project-requests/page");
 
@@ -176,7 +176,7 @@ async function main() {
     const typeInactive = await typeInactiveRes.json();
     typeIds.push(typeInactive.id);
 
-    const activeTypesRes = await (await import("@/app/api/project-request-types/route")).GET();
+    const activeTypesRes = await (await import("@/app/api/task-types/route")).GET();
     const activeTypesBody = await activeTypesRes.json();
     check("The form's active-types endpoint includes the active type", activeTypesBody.some((t: any) => t.id === typeActive.id));
     check("...and EXCLUDES the inactive one", !activeTypesBody.some((t: any) => t.id === typeInactive.id));
@@ -470,7 +470,7 @@ async function main() {
       ["notifications (explicitly tracked)", () => prisma.notification.deleteMany({ where: { id: { in: notificationIds } } })],
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
-      ["project request types", () => prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

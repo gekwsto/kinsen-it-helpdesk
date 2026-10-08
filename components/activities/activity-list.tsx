@@ -14,8 +14,16 @@ import {
 } from "@/components/ui/table";
 import { SortableTableHead } from "@/components/ui/sortable-table-head";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { Eye, CheckSquare } from "lucide-react";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
@@ -26,6 +34,7 @@ import { ActivityCard } from "@/components/activities/activity-card";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { MemberPreview } from "@/components/shared/member-preview";
 import { PriorityBadge } from "@/components/shared/priority-badge";
+import { PreviewField } from "@/components/shared/preview-field";
 
 export interface SerializedActivity {
   id: string;
@@ -41,6 +50,8 @@ export interface SerializedActivity {
   dueDate: string | null;
   /** null means no ActivityProgressConfig row is configured/enabled for this department+status — render "Configuration required", never "0%". See lib/activities/activity-progress.ts. */
   progress: number | null;
+  /** Canonical creation timestamp — ProjectActivity.createdAt, never a derived/approximated date. */
+  createdAt: string;
   /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
   overdue: boolean;
   project: { id: string; title: string } | null;
@@ -51,6 +62,21 @@ export interface SerializedActivity {
     email: string;
     image: string | null;
   }[];
+  /** Preview-only fields below — none change any existing column/sort/filter behavior. */
+  description: string | null;
+  owner: { id: string; name: string | null; email: string } | null;
+  /** Request-origin-only planning dates — distinct from the legacy startDate/dueDate above. */
+  expectedStartDate: string | null;
+  expectedFinishDate: string | null;
+  expectedDays: number | null;
+  actualDays: number | null;
+  taskType: { id: string; name: string } | null;
+  taskSubType: { id: string; name: string } | null;
+  /** The historical cost snapshot (see ProjectActivity.taskSubTypeCost's own schema doc comment) — null means no configured/manual cost, never 0. */
+  taskSubTypeCost: number | null;
+  /** Server-derived (computeActivityFinancials) — taskSubTypeCost × expectedDays/actualDays. Never stored, never editable. */
+  estimatedCost: number | null;
+  actualCost: number | null;
 }
 
 interface ActivityListProps {
@@ -67,6 +93,11 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
   // from — NOT itself rendered, purely a comparison key.
   const [syncedFrom, setSyncedFrom] = useState(initialActivities);
   const [togglingId, setTogglingId] = useState<string | null>(null);
+  // Preview — mirrors the Project Requests list's own canonical pattern
+  // (components/project-requests/project-request-table.tsx): a local-state
+  // Dialog over a row already present in `activities` (no per-row fetch,
+  // no N+1), opened via a dedicated Eye-icon trigger.
+  const [previewTarget, setPreviewTarget] = useState<SerializedActivity | null>(null);
 
   // `activities` is intentionally local (not just the prop directly) so
   // handleToggle below can optimistically flip completion state without
@@ -107,8 +138,7 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
     }
   };
 
-  if (view === "list") {
-    return (
+  const content = view === "list" ? (
       <div className="rounded-lg border overflow-hidden">
         <TooltipProvider delayDuration={200}>
         <Table>
@@ -123,7 +153,8 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
               <SortableTableHead sortKey="startDate">Start</SortableTableHead>
               <SortableTableHead sortKey="dueDate">Due</SortableTableHead>
               <SortableTableHead sortKey="progress">Progress</SortableTableHead>
-              <TableHead className="w-16"></TableHead>
+              <SortableTableHead sortKey="createdAt">Created</SortableTableHead>
+              <TableHead className="w-24"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -192,10 +223,16 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
                     </div>
                   )}
                 </TableCell>
+                <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{formatDate(activity.createdAt)}</TableCell>
                 <TableCell>
-                  <Button size="sm" variant="ghost" asChild>
-                    <Link href={`/activities/${activity.id}`}>View</Link>
-                  </Button>
+                  <div className="flex justify-end gap-1.5">
+                    <Button size="sm" variant="ghost" onClick={() => setPreviewTarget(activity)} title="Preview this activity">
+                      <Eye className="h-3.5 w-3.5" />
+                    </Button>
+                    <Button size="sm" variant="ghost" asChild>
+                      <Link href={`/activities/${activity.id}`}>View</Link>
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -203,22 +240,121 @@ export function ActivityList({ activities: initialActivities, defaultView = "gri
         </Table>
         </TooltipProvider>
       </div>
+    ) : (
+      // Grid view — real Activity cards, same visual system as Project cards
+      // (components/projects/project-list.tsx's own grid: same breakpoints,
+      // same Card structure/spacing) rather than the old stacked-row layout.
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {activities.map((activity) => (
+          <ActivityCard
+            key={activity.id}
+            activity={activity}
+            toggling={togglingId === activity.id}
+            onToggleComplete={handleToggle}
+            onPreview={setPreviewTarget}
+          />
+        ))}
+      </div>
     );
-  }
 
-  // Grid view — real Activity cards, same visual system as Project cards
-  // (components/projects/project-list.tsx's own grid: same breakpoints,
-  // same Card structure/spacing) rather than the old stacked-row layout.
+  const estimatedCostLine =
+    previewTarget?.taskSubTypeCost !== null && previewTarget?.taskSubTypeCost !== undefined
+      ? `€${previewTarget.taskSubTypeCost.toFixed(2)} / day${previewTarget.estimatedCost !== null ? ` · Estimated: €${previewTarget.estimatedCost.toFixed(2)}` : ""}${previewTarget.actualCost !== null ? ` · Actual: €${previewTarget.actualCost.toFixed(2)}` : ""}`
+      : null;
+
   return (
-    <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {activities.map((activity) => (
-        <ActivityCard
-          key={activity.id}
-          activity={activity}
-          toggling={togglingId === activity.id}
-          onToggleComplete={handleToggle}
-        />
-      ))}
-    </div>
+    <>
+      {content}
+
+      {/* Preview dialog — read-only Activity detail, loaded from the SAME
+          row data the list already fetched (no per-row/N+1 request) —
+          mirrors components/project-requests/project-request-table.tsx's
+          own Preview dialog exactly: same container size, same info-grid
+          header, same scrollable PreviewField body, same Close + "Open"
+          footer pattern. No edit controls anywhere. */}
+      <Dialog open={!!previewTarget} onOpenChange={(o) => !o && setPreviewTarget(null)}>
+        <DialogContent className="max-w-2xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="pr-6 break-words">{previewTarget?.title}</DialogTitle>
+          </DialogHeader>
+          {previewTarget && (
+            <div className="flex-1 min-h-0 flex flex-col gap-3">
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm border rounded-md p-3 bg-muted/30 flex-shrink-0">
+                <div>
+                  <span className="text-muted-foreground">Status: </span>
+                  <StatusBadge label={previewTarget.statusLabel} color={previewTarget.statusColor} />
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Project: </span>
+                  <span className="font-medium">{previewTarget.project?.title ?? "Standalone"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Owner: </span>
+                  <span className="font-medium">{previewTarget.owner?.name ?? previewTarget.owner?.email ?? "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Priority: </span>
+                  <PriorityBadge priority={previewTarget.priority} />
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Task Type: </span>
+                  <span className="font-medium">{previewTarget.taskType?.name ?? "—"}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Task Sub Type: </span>
+                  <span className="font-medium">{previewTarget.taskSubType?.name ?? "—"}</span>
+                </div>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto rounded-md border divide-y">
+                {(previewTarget.expectedStartDate || previewTarget.expectedFinishDate) && (
+                  <PreviewField
+                    label="Expected Timeline"
+                    value={[
+                      previewTarget.expectedStartDate ? `Start: ${formatDate(previewTarget.expectedStartDate)}` : null,
+                      previewTarget.expectedFinishDate ? `Finish: ${formatDate(previewTarget.expectedFinishDate)}` : null,
+                      previewTarget.expectedDays !== null ? `${previewTarget.expectedDays} day(s) expected` : null,
+                    ]
+                      .filter(Boolean)
+                      .join("  ·  ")}
+                  />
+                )}
+                {!(previewTarget.expectedStartDate || previewTarget.expectedFinishDate) && (previewTarget.startDate || previewTarget.dueDate) && (
+                  <PreviewField
+                    label="Start / Due"
+                    value={[
+                      previewTarget.startDate ? `Start: ${formatDate(previewTarget.startDate)}` : null,
+                      previewTarget.dueDate ? `Due: ${formatDate(previewTarget.dueDate)}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join("  ·  ")}
+                  />
+                )}
+                {previewTarget.actualDays !== null && <PreviewField label="Actual Days" value={`${previewTarget.actualDays} day(s)`} />}
+                {estimatedCostLine && <PreviewField label="Cost" value={estimatedCostLine} />}
+                <PreviewField
+                  label="Related Users"
+                  value={previewTarget.assignedUsers.length > 0 ? previewTarget.assignedUsers.map((u) => u.name ?? u.email).join(", ") : "Unassigned"}
+                />
+                {previewTarget.description && <PreviewField label="Description" value={previewTarget.description} multiline />}
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPreviewTarget(null)}>
+              Close
+            </Button>
+            {previewTarget && (
+              <Button asChild>
+                <Link href={`/activities/${previewTarget.id}`}>
+                  <CheckSquare className="h-3.5 w-3.5 mr-1.5" />
+                  Open Activity
+                </Link>
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

@@ -14,9 +14,23 @@ interface SearchParams {
 
 /**
  * Administration -> Feedback — REVIEW ONLY. Renders every submitted
- * ProjectFeedback row; never offers create/edit/delete for any of them
- * (see prisma/schema.prisma's ProjectFeedback model — the data is
- * immutable by design, and this page never pretends otherwise).
+ * ProjectFeedback row; never offers create/edit/delete for any of them —
+ * editing a row is a privilege reserved for the Project's own primary
+ * Owner (Project.ownerId), exclusively through the dedicated
+ * /projects/[id]/feedback page (see
+ * lib/services/project-feedback-service.ts's upsertProjectFeedback). The
+ * "Submitted By" column shows whoever actually submitted a given row —
+ * for a pre-existing legacy row that may still be the OLD requester, even
+ * though the currently-authorized submitter going forward is the Owner
+ * (see this feature's own legacy-provenance-preservation rule).
+ *
+ * Shows the FIVE individual 1-5 ratings (never a single collapsed
+ * average) plus Requirements Delivered — the five-rating replacement of
+ * the old single 1-10 satisfactionScore (see prisma/schema.prisma's
+ * ProjectFeedback model doc comment). A pre-existing LEGACY row (submitted
+ * before the replacement) has all five ratings null — rendered as "—" in
+ * each rating column, with its own historical score shown in the Legacy
+ * Score column instead, never fabricated into the new five-rating shape.
  *
  * Gated on its OWN dedicated permission (projectFeedback.view), never bare
  * admin.access and never a hardcoded role === "ADMIN" check — see
@@ -43,7 +57,11 @@ export default async function ProjectFeedbackAdminPage({
     prisma.projectFeedback.findMany({
       where: {
         ...(departmentId ? { project: { departmentId } } : {}),
-        ...(minRatingNum && Number.isInteger(minRatingNum) ? { satisfactionScore: { gte: minRatingNum } } : {}),
+        // Filters on overallRating — the closest equivalent to the old
+        // satisfactionScore's own "overall satisfaction" meaning. A
+        // legacy row (overallRating null) never matches a minimum-rating
+        // filter — it has no rating on the new 1-5 scale to compare.
+        ...(minRatingNum && Number.isInteger(minRatingNum) ? { overallRating: { gte: minRatingNum } } : {}),
       },
       orderBy: { createdAt: "desc" },
       include: {
@@ -60,7 +78,7 @@ export default async function ProjectFeedbackAdminPage({
       <div>
         <h1 className="text-2xl font-bold">Project Feedback</h1>
         <p className="text-muted-foreground mt-1">
-          Feedback submitted by the original requester on delivered, request-origin Projects. Read-only.
+          Feedback submitted by the Project's primary Owner on delivered, request-origin Projects. Read-only.
         </p>
       </div>
 
@@ -89,7 +107,7 @@ export default async function ProjectFeedbackAdminPage({
         </div>
         <div className="space-y-1">
           <label htmlFor="minRating" className="text-xs font-medium text-muted-foreground">
-            Minimum Satisfaction
+            Minimum Overall Rating
           </label>
           <select
             id="minRating"
@@ -98,7 +116,7 @@ export default async function ProjectFeedbackAdminPage({
             className="h-9 rounded-md border border-input bg-background px-3 text-sm"
           >
             <option value="">Any</option>
-            {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+            {[1, 2, 3, 4, 5].map((n) => (
               <option key={n} value={n}>
                 {n}+
               </option>
@@ -120,42 +138,53 @@ export default async function ProjectFeedbackAdminPage({
           {feedbacks.length === 0 ? (
             <p className="text-sm text-muted-foreground p-6">No Project Feedback has been submitted yet.</p>
           ) : (
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Project</TableHead>
-                  <TableHead>Project Request</TableHead>
-                  <TableHead>Requester</TableHead>
-                  <TableHead>Department</TableHead>
-                  <TableHead>Satisfaction</TableHead>
-                  <TableHead>Comments</TableHead>
-                  <TableHead>Submitted At</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {feedbacks.map((fb) => (
-                  <TableRow key={fb.id}>
-                    <TableCell>
-                      <Link href={`/projects/${fb.project.id}`} className="text-primary hover:underline">
-                        {fb.project.title}
-                      </Link>
-                    </TableCell>
-                    <TableCell>
-                      <Link href={`/project-requests/${fb.projectRequest.id}`} className="text-primary hover:underline">
-                        {fb.projectRequest.title}
-                      </Link>
-                    </TableCell>
-                    <TableCell>{fb.submittedByUser.name ?? fb.submittedByUser.email}</TableCell>
-                    <TableCell>{fb.project.department?.name ?? "—"}</TableCell>
-                    <TableCell className="font-medium">{fb.satisfactionScore} / 10</TableCell>
-                    <TableCell className="max-w-xs truncate" title={fb.comments ?? undefined}>
-                      {fb.comments ?? <span className="text-muted-foreground">—</span>}
-                    </TableCell>
-                    <TableCell className="whitespace-nowrap">{formatDate(fb.createdAt)}</TableCell>
+            <div className="overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Project</TableHead>
+                    <TableHead>Submitted By</TableHead>
+                    <TableHead>Department</TableHead>
+                    <TableHead>Delivery</TableHead>
+                    <TableHead>Communication</TableHead>
+                    <TableHead>Functionality</TableHead>
+                    <TableHead>Ease of Use</TableHead>
+                    <TableHead>Overall</TableHead>
+                    <TableHead>Requirements Delivered</TableHead>
+                    <TableHead>Legacy Score</TableHead>
+                    <TableHead>Comments</TableHead>
+                    <TableHead>Submitted / Updated</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {feedbacks.map((fb) => (
+                    <TableRow key={fb.id}>
+                      <TableCell>
+                        <Link href={`/projects/${fb.project.id}`} className="text-primary hover:underline">
+                          {fb.project.title}
+                        </Link>
+                      </TableCell>
+                      <TableCell>{fb.submittedByUser.name ?? fb.submittedByUser.email}</TableCell>
+                      <TableCell>{fb.project.department?.name ?? "—"}</TableCell>
+                      <TableCell className="font-medium">{fb.deliverySpeedRating ?? "—"}</TableCell>
+                      <TableCell className="font-medium">{fb.communicationRating ?? "—"}</TableCell>
+                      <TableCell className="font-medium">{fb.functionalityRating ?? "—"}</TableCell>
+                      <TableCell className="font-medium">{fb.easeOfUseRating ?? "—"}</TableCell>
+                      <TableCell className="font-medium">{fb.overallRating ?? "—"}</TableCell>
+                      <TableCell>{fb.requirementsDelivered === null ? "—" : fb.requirementsDelivered ? "Yes" : "No"}</TableCell>
+                      <TableCell className="text-muted-foreground">{fb.legacySatisfactionScore !== null ? `${fb.legacySatisfactionScore} / 10` : "—"}</TableCell>
+                      <TableCell className="max-w-xs truncate" title={fb.comments ?? undefined}>
+                        {fb.comments ?? <span className="text-muted-foreground">—</span>}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {formatDate(fb.createdAt)}
+                        {fb.updatedAt.getTime() !== fb.createdAt.getTime() && <span className="text-muted-foreground"> (upd. {formatDate(fb.updatedAt)})</span>}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
           )}
         </CardContent>
       </Card>

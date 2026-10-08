@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
@@ -25,6 +25,8 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials, formatDate } from "@/lib/utils";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { SameDayStartWarningBadge } from "@/components/shared/same-day-start-warning-badge";
+import { computeSameDayStartWarnings, type SameDayStartWarning } from "@/lib/activities/activity-conflict";
 import { createTokenGuard } from "@/lib/navigation-loader";
 import { GripVertical } from "lucide-react";
 
@@ -32,6 +34,10 @@ export interface SequencedActivityRow {
   id: string;
   title: string;
   dueDate: string | null;
+  /** Used only to derive the same-day-start warning (see
+   * lib/activities/activity-conflict.ts) — never displayed directly in
+   * this row. */
+  expectedStartDate: string | null;
   isCompleted: boolean;
   statusLabel: string;
   statusColor: string;
@@ -84,6 +90,13 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
 
   const totalActivities = activities.length;
   const completedActivities = activities.filter((a) => a.isCompleted).length;
+
+  // Recomputed from the CURRENT `activities` state (never persisted) any
+  // time it changes — including right after a completion toggle below, so a
+  // warning disappears/reappears immediately for every affected row, not
+  // just the one that was toggled. See lib/activities/activity-conflict.ts
+  // for the shared rule itself.
+  const sameDayStartWarnings = useMemo(() => computeSameDayStartWarnings(activities), [activities]);
 
   const handleToggled = (activityId: string) => (result: ActivityToggleResult) => {
     const myToken = tokenGuardRef.current.bump();
@@ -161,6 +174,7 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
                     position={index + 1}
                     draggable
                     onToggled={handleToggled(activity.id)}
+                    sameDayStartWarning={sameDayStartWarnings.get(activity.id)}
                   />
                 ))}
               </div>
@@ -175,6 +189,7 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
                 position={index + 1}
                 draggable={false}
                 onToggled={handleToggled(activity.id)}
+                sameDayStartWarning={sameDayStartWarnings.get(activity.id)}
               />
             ))}
           </div>
@@ -189,11 +204,13 @@ function SequencedActivityRowItem({
   position,
   draggable,
   onToggled,
+  sameDayStartWarning,
 }: {
   activity: SequencedActivityRow;
   position: number;
   draggable: boolean;
   onToggled: (result: ActivityToggleResult) => void;
+  sameDayStartWarning: SameDayStartWarning | undefined;
 }) {
   // useSortable is always called (hooks can't be conditional) — its
   // listeners/attributes are simply never spread onto anything when
@@ -236,6 +253,9 @@ function SequencedActivityRowItem({
             </p>
             <div className="flex items-center gap-2 flex-wrap mt-0.5">
               <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
+              {!activity.isCompleted && sameDayStartWarning?.hasSameDayStartWarning && (
+                <SameDayStartWarningBadge sameDayStartActiveCount={sameDayStartWarning.sameDayStartActiveCount} />
+              )}
               {activity.owner && <span className="text-xs text-muted-foreground truncate">Owner: {activity.owner.name ?? "—"}</span>}
               {activity.dueDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Due: {formatDate(activity.dueDate)}</span>}
             </div>

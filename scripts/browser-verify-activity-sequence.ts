@@ -92,7 +92,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -107,7 +107,7 @@ async function main() {
     const setupPOST = (await import("@/app/api/project-requests/[id]/project/route")).POST;
     const activitiesPOST = (await import("@/app/api/activities/route")).POST;
     const activitiesDELETE = (await import("@/app/api/activities/[id]/route")).DELETE;
-    const taskTypesAdminPOST = (await import("@/app/api/admin/activity-task-types/route")).POST;
+    const taskTypesAdminPOST = (await import("@/app/api/admin/task-sub-types/route")).POST;
     const { NextRequest } = await import("next/server");
     const jsonReq = (body: unknown, method = "POST") => new NextRequest("http://localhost/x", { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
@@ -142,7 +142,7 @@ async function main() {
 
     async function createActivity(title: string) {
       const res = await activitiesPOST(
-        jsonReq({ title, projectId: project.id, departmentId: dept.id, expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-02", taskTypeId: taskType.id, ownerId: admin.id, assignedUserIds: [admin.id] })
+        jsonReq({ title, projectId: project.id, departmentId: dept.id, expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-02", taskTypeId: reqType.id, taskSubTypeId: taskType.id, ownerId: admin.id, assignedUserIds: [admin.id] })
       );
       return res.json();
     }
@@ -260,12 +260,12 @@ async function main() {
     await browser.close();
     try {
       await prisma.projectActivity.deleteMany({ where: { projectId: { in: projectIds } } });
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });

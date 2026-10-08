@@ -13,6 +13,7 @@ import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "
 import { getActivityTerminalConfigsForDepartments, resolveActivityTerminal } from "@/lib/status-terminal";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { isActivityOverdue } from "@/lib/overdue";
+import { computeActivityFinancials } from "@/lib/services/project-financials-service";
 
 interface SearchParams { status?: string }
 
@@ -54,6 +55,11 @@ export default async function MyActivitiesPage({
       project: { select: { id: true, title: true } },
       department: { select: { id: true, name: true } },
       assignedUsers: { select: { id: true, name: true, email: true, image: true } },
+      // Preview-only relations — see app/(main)/activities/page.tsx's
+      // identical addition for the full rationale.
+      owner: { select: { id: true, name: true, email: true } },
+      taskType: { select: { id: true, name: true } },
+      taskSubType: { select: { id: true, name: true } },
     },
   });
 
@@ -63,27 +69,42 @@ export default async function MyActivitiesPage({
   const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(activityDepartmentIds);
   const now = new Date();
 
-  const serializedActivities: SerializedActivity[] = activities.map((a) => ({
-    id: a.id,
-    title: a.title,
-    status: a.status,
-    statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
-    statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
-    priority: a.priority,
-    isCompleted: a.isCompleted,
-    startDate: a.startDate?.toISOString() ?? null,
-    dueDate: a.dueDate?.toISOString() ?? null,
-    progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
-    overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(terminalConfigs, a.departmentId, a.status), now),
-    project: a.project,
-    department: a.department,
-    assignedUsers: a.assignedUsers.map((u) => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      image: u.image,
-    })),
-  }));
+  const serializedActivities: SerializedActivity[] = activities.map((a) => {
+    const { estimatedCost, actualCost } = computeActivityFinancials(a);
+    return {
+      id: a.id,
+      title: a.title,
+      status: a.status,
+      statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
+      statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
+      priority: a.priority,
+      isCompleted: a.isCompleted,
+      startDate: a.startDate?.toISOString() ?? null,
+      dueDate: a.dueDate?.toISOString() ?? null,
+      progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
+      createdAt: a.createdAt.toISOString(),
+      overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(terminalConfigs, a.departmentId, a.status), now),
+      project: a.project,
+      department: a.department,
+      assignedUsers: a.assignedUsers.map((u) => ({
+        id: u.id,
+        name: u.name,
+        email: u.email,
+        image: u.image,
+      })),
+      description: a.description,
+      owner: a.owner,
+      expectedStartDate: a.expectedStartDate?.toISOString() ?? null,
+      expectedFinishDate: a.expectedFinishDate?.toISOString() ?? null,
+      expectedDays: a.expectedDays,
+      actualDays: a.actualDays,
+      taskType: a.taskType,
+      taskSubType: a.taskSubType,
+      taskSubTypeCost: a.taskSubTypeCost !== null ? Number(a.taskSubTypeCost) : null,
+      estimatedCost: a.taskSubTypeCost !== null && a.expectedDays !== null ? Number(estimatedCost) : null,
+      actualCost: a.taskSubTypeCost !== null && a.actualDays !== null ? Number(actualCost) : null,
+    };
+  });
 
   return (
     <div className="space-y-6">

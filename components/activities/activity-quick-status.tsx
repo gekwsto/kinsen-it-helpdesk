@@ -14,7 +14,7 @@ export interface ActivityStatusUpdate {
   completedAt: string | null;
   /** Server-derived on this SAME transition (see app/api/activities/[id]/route.ts) — null unless this status change just completed (or reopened) the Activity. */
   actualDays: number | null;
-  /** Server-derived (computeActivityFinancials, taskTypeCost × actualDays) on this SAME transition — '0' immediately on reopen, a fresh value on (re)completion. Never stored, never the client's own computation. */
+  /** Server-derived (computeActivityFinancials, taskSubTypeCost × actualDays) on this SAME transition — '0' immediately on reopen, a fresh value on (re)completion. Never stored, never the client's own computation. */
   actualCost: string | null;
 }
 

@@ -67,10 +67,10 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
-    const taskType = await prisma.activityTaskType.create({ data: { name: `${TAG}-tasktype`, cost: 77 } });
+    const taskType = await prisma.taskSubType.create({ data: { name: `${TAG}-tasktype`, cost: 77 } });
     taskTypeIds.push(taskType.id);
 
     const admin = await prisma.user.findFirstOrThrow({ where: { email: ADMIN_EMAIL }, select: { id: true } });
@@ -159,6 +159,7 @@ async function main() {
     await page.waitForTimeout(500);
 
     check("(sanity) None of the request-origin fields show before a project is picked", (await page.locator("#expected-start").count()) === 0);
+    check("Task Type field (NEW, universal) is present even before any Project is picked", (await page.locator("#task-type").count()) === 1);
 
     const projectSelect = page.getByRole("combobox").filter({ hasText: /no project/i });
     await projectSelect.click();
@@ -169,9 +170,14 @@ async function main() {
     check("Expected Finish field appears", (await page.locator("#expected-finish").count()) === 1);
     check("Expected Days (readonly) field appears", (await page.locator("#expected-days").count()) === 1);
     check("...and is readOnly", await page.locator("#expected-days").evaluate((el) => (el as HTMLInputElement).readOnly));
-    check("Task Type field appears", (await page.locator("#task-type").count()) === 1);
+    check("Task Sub Type field appears (request-origin-only, renamed from the old 'Task Type')", (await page.locator("#task-sub-type").count()) === 1);
     check("Owner field appears", (await page.locator("#owner").count()) === 1);
     check("Related Users (relabeled from Assigned Users) text appears", (await page.getByText("Related Users", { exact: false }).count()) > 0);
+
+    // Task Type (NEW, universal) — always visible, independent of
+    // request-origin status; must be selected for ANY Activity now.
+    await page.locator("#task-type").click();
+    await page.getByRole("option", { name: `${TAG}-reqtype` }).click();
 
     // Fill the whole request-origin block + submit.
     await page.fill("#title", `${TAG} RO Activity`);
@@ -180,10 +186,10 @@ async function main() {
     const expectedDaysValue = await page.locator("#expected-days").inputValue();
     check("Expected Days preview shows the real calculated value (7 days)", expectedDaysValue === "7 days");
 
-    await page.locator("#task-type").click();
+    await page.locator("#task-sub-type").click();
     await page.getByRole("option", { name: `${TAG}-tasktype` }).click();
     await page.waitForTimeout(150);
-    check("Task Type cost shown as informational text after selecting", (await page.getByText(/Cost: 77\.00 EUR/).count()) > 0);
+    check("Task Sub Type cost shown as informational text after selecting", (await page.getByText(/Cost: 77\.00 EUR/).count()) > 0);
 
     await page.locator("#owner").click();
     await page.getByRole("option", { name: "System Administrator" }).first().click();
@@ -211,7 +217,8 @@ async function main() {
     await projectSelect2.click();
     await page.getByRole("option", { name: manualProject.title, exact: true }).click();
     await page.waitForTimeout(400);
-    check("A manual Project shows NONE of the request-origin fields", (await page.locator("#expected-start").count()) === 0 && (await page.locator("#task-type").count()) === 0 && (await page.locator("#owner").count()) === 0);
+    check("A manual Project shows NONE of the request-origin-only fields (Task Sub Type included)", (await page.locator("#expected-start").count()) === 0 && (await page.locator("#task-sub-type").count()) === 0 && (await page.locator("#owner").count()) === 0);
+    check("...but Task Type (NEW, universal) is STILL shown — it's required for every Activity, manual or not", (await page.locator("#task-type").count()) === 1);
     check("...and the users section is still labeled 'Assigned Users', not 'Related Users'", (await page.getByText("Assigned Users", { exact: true }).count()) === 1);
 
     // ══════════════════════ 3. Completion -> Actual Days on the detail page ══════════════════════
@@ -239,12 +246,12 @@ async function main() {
     await browser.close();
     try {
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });

@@ -58,11 +58,11 @@ async function main() {
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
   const setupPOST = (await import("@/app/api/project-requests/[id]/project/route")).POST;
-  const taskTypesAdminPOST = (await import("@/app/api/admin/activity-task-types/route")).POST;
-  const taskTypesAdminPATCH = (await import("@/app/api/admin/activity-task-types/[id]/route")).PATCH;
-  const taskTypesAdminDELETE = (await import("@/app/api/admin/activity-task-types/[id]/route")).DELETE;
-  const taskTypesAdminGET = (await import("@/app/api/admin/activity-task-types/route")).GET;
-  const taskTypesActiveGET = (await import("@/app/api/activity-task-types/route")).GET;
+  const taskTypesAdminPOST = (await import("@/app/api/admin/task-sub-types/route")).POST;
+  const taskTypesAdminPATCH = (await import("@/app/api/admin/task-sub-types/[id]/route")).PATCH;
+  const taskTypesAdminDELETE = (await import("@/app/api/admin/task-sub-types/[id]/route")).DELETE;
+  const taskTypesAdminGET = (await import("@/app/api/admin/task-sub-types/route")).GET;
+  const taskTypesActiveGET = (await import("@/app/api/task-sub-types/route")).GET;
 
   const deptIds: string[] = [];
   const typeIds: string[] = [];
@@ -75,7 +75,7 @@ async function main() {
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     deptIds.push(dept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -154,9 +154,17 @@ async function main() {
     check("39. taskType.manage flows through the real hasPermission()/custom-role system (ADMIN bypass), not a hardcoded role check", await hasPermission(Role.ADMIN, "taskType.manage", null));
     check("...and a plain USER role does not have it by default", !(await hasPermission(Role.USER, "taskType.manage", null)));
 
-    check("22. Task Type cost is REQUIRED on create — missing cost rejected", (await taskTypesAdminPOST(jsonReq({ name: `${TAG} NoCost` }))).status === 400 || (await taskTypesAdminPOST(jsonReq({ name: `${TAG} NoCost` }))).status === 422);
-    check("23. Invalid money (negative) rejected", (await taskTypesAdminPOST(jsonReq({ name: `${TAG} Negative`, cost: -5 }))).status >= 400);
-    check("23. Invalid money (3 decimal places) rejected", (await taskTypesAdminPOST(jsonReq({ name: `${TAG} 3dp`, cost: 10.555 }))).status >= 400);
+    // Task Sub Type cost is now OPTIONAL (was required before the Task
+    // Type/Task Sub Type rename) — some Sub Types (e.g. "Others",
+    // "External") have no fixed predefined cost. A missing cost is
+    // ACCEPTED now, persisting as a genuine `null`, never coerced to 0.
+    const noCostRes = await taskTypesAdminPOST(jsonReq({ name: `${TAG} NoCost` }));
+    check("22. Task Sub Type cost is now OPTIONAL on create — missing cost accepted", noCostRes.status === 201);
+    const noCostType = await noCostRes.json();
+    taskTypeIds.push(noCostType.id);
+    check("...and persists as a genuine null, never coerced to 0", noCostType.cost === null);
+    check("23. Invalid money (negative) still rejected even though cost is optional", (await taskTypesAdminPOST(jsonReq({ name: `${TAG} Negative`, cost: -5 }))).status >= 400);
+    check("23. Invalid money (3 decimal places) still rejected even though cost is optional", (await taskTypesAdminPOST(jsonReq({ name: `${TAG} 3dp`, cost: 10.555 }))).status >= 400);
 
     const devTaskTypeRes = await taskTypesAdminPOST(jsonReq({ name: `${TAG} Development`, cost: 100 }));
     check("(fixture) Task Type 'Development' created at cost 100", devTaskTypeRes.status === 201);
@@ -178,20 +186,26 @@ async function main() {
     console.log("\n=== 1/2/3/4/5. Provenance: server-resolved from Project.projectRequestId, never a client flag ===\n");
     currentSession = { user: { id: worker1.id, role: Role.USER, customRoleId: null } };
 
-    const manualActivityRes = await activitiesPOST(jsonReq({ title: `${TAG} Manual Activity`, projectId: manualProject.id, departmentId: dept.id }));
-    check("1. Manual Project Activity creation still works with NONE of the new fields", manualActivityRes.status === 201);
+    // Task Type (the NEW, universally-required classification — see
+    // TaskType in prisma/schema.prisma) is required for EVERY Activity now,
+    // manual or request-origin alike — `reqType` (created above for the
+    // ProjectRequest fixture, back when Project Type still lived there) is
+    // the SAME TaskType model, reused here as this suite's Task Type
+    // fixture rather than creating a second, redundant one.
+    const manualActivityRes = await activitiesPOST(jsonReq({ title: `${TAG} Manual Activity`, projectId: manualProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
+    check("1. Manual Project Activity creation still works with NONE of the REQUEST-ORIGIN-only fields", manualActivityRes.status === 201);
     const manualActivity = await manualActivityRes.json();
     activityIds.push(manualActivity.id);
-    check("2. ...and none of the new fields are required (all null/default)", manualActivity.expectedStartDate === null && manualActivity.ownerId === null && manualActivity.taskTypeId === null);
+    check("2. ...none of the request-origin-only fields are required (all null/default); Task Type itself is the one universally-required field, supplied above", manualActivity.expectedStartDate === null && manualActivity.ownerId === null && manualActivity.taskTypeId === reqType.id);
 
-    const missingFieldsRes = await activitiesPOST(jsonReq({ title: `${TAG} RO Missing`, projectId: requestOriginProject.id, departmentId: dept.id }));
-    check("3. Request-origin Project Activity creation WITHOUT the new fields -> rejected", missingFieldsRes.status === 400);
+    const missingFieldsRes = await activitiesPOST(jsonReq({ title: `${TAG} RO Missing`, projectId: requestOriginProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
+    check("3. Request-origin Project Activity creation WITHOUT the request-origin-only fields -> rejected", missingFieldsRes.status === 400);
     const missingFieldsBody = await missingFieldsRes.json();
     check("...with code request_origin_fields_required and the real missing list", missingFieldsBody.code === "request_origin_fields_required" && Array.isArray(missingFieldsBody.missingFields) && missingFieldsBody.missingFields.length === 5);
 
     // 4: a client-sent fake flag changes nothing — there's no such field on
     // createActivitySchema at all, so this is a no-op, not a bypass.
-    const forgedFlagRes = await activitiesPOST(jsonReq({ title: `${TAG} Forged Flag`, projectId: requestOriginProject.id, departmentId: dept.id, fromProjectRequest: false, isRequestOrigin: false } as any));
+    const forgedFlagRes = await activitiesPOST(jsonReq({ title: `${TAG} Forged Flag`, projectId: requestOriginProject.id, departmentId: dept.id, taskTypeId: reqType.id, fromProjectRequest: false, isRequestOrigin: false } as any));
     check("4. A client-sent fake 'fromProjectRequest:false' flag changes nothing — still rejected the same way", forgedFlagRes.status === 400);
 
     // 5: confirmed by the fact that `manualActivityRes` (same route, same
@@ -207,7 +221,11 @@ async function main() {
       departmentId: dept.id,
       expectedStartDate: "2026-05-05",
       expectedFinishDate: "2026-05-17",
-      taskTypeId: devTaskType.id,
+      // Task Type (NEW, universal) and Task Sub Type (RENAMED former "Task
+      // Type", request-origin-only) are two independent fields now — see
+      // prisma/schema.prisma's ProjectActivity.taskType/taskSubType.
+      taskTypeId: reqType.id,
+      taskSubTypeId: devTaskType.id,
       ownerId: worker1.id,
       assignedUserIds: [worker1.id, worker2.id],
     });
@@ -264,7 +282,7 @@ async function main() {
     const createdAtYear = new Date(forgedCompletedAtActivity.completedAt).getUTCFullYear();
     check("17. Creating DIRECTLY as COMPLETED with a forged completedAt -> the server's own clock wins, not 2020", createdAtYear >= 2026);
 
-    const legacyNoStartRes = await activitiesPOST(jsonReq({ title: `${TAG} LegacyNoStart`, projectId: requestOriginProject.id, departmentId: dept.id, taskTypeId: devTaskType.id, ownerId: worker1.id, assignedUserIds: [worker1.id] } as any));
+    const legacyNoStartRes = await activitiesPOST(jsonReq({ title: `${TAG} LegacyNoStart`, projectId: requestOriginProject.id, departmentId: dept.id, taskTypeId: reqType.id, taskSubTypeId: devTaskType.id, ownerId: worker1.id, assignedUserIds: [worker1.id] } as any));
     // This should actually be rejected (missing dates) — simulate the TRUE
     // legacy case instead via direct DB write (pre-feature row), matching
     // every other legacy-safety test in this suite.
@@ -292,7 +310,7 @@ async function main() {
 
     // ══════════════════════ 24-29. Task Type snapshot semantics ══════════════════════
     console.log("\n=== 24-29. Task Type cost snapshot: frozen at the moment it's set, never retroactively rewritten ═��═\n");
-    check("24. Activity snapshots the CURRENT Task Type cost at creation (100)", twelveDaysActivity.taskTypeCost !== null && Number(twelveDaysActivity.taskTypeCost) === 100);
+    check("24. Activity snapshots the CURRENT Task Type cost at creation (100)", twelveDaysActivity.taskSubTypeCost !== null && Number(twelveDaysActivity.taskSubTypeCost) === 100);
 
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
     const bumpCostRes = await taskTypesAdminPATCH(jsonReq({ cost: 150 }, "PATCH"), { params: Promise.resolve({ id: devTaskType.id }) });
@@ -300,32 +318,32 @@ async function main() {
 
     const rereadOldActivityRes = await activitiesGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: twelveDaysActivity.id }) });
     const rereadOldActivity = await rereadOldActivityRes.json();
-    check("25. The EXISTING Activity's snapshot is STILL 100 — not retroactively rewritten to 150", Number(rereadOldActivity.taskTypeCost) === 100);
+    check("25. The EXISTING Activity's snapshot is STILL 100 — not retroactively rewritten to 150", Number(rereadOldActivity.taskSubTypeCost) === 100);
 
     currentSession = { user: { id: worker1.id, role: Role.USER, customRoleId: null } };
     const newActivityAfterBumpRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} AfterBump` }));
     const newActivityAfterBump = await newActivityAfterBumpRes.json();
     activityIds.push(newActivityAfterBump.id);
-    check("26. A NEW Activity created after the bump receives the NEW current cost (150)", Number(newActivityAfterBump.taskTypeCost) === 150);
+    check("26. A NEW Activity created after the bump receives the NEW current cost (150)", Number(newActivityAfterBump.taskSubTypeCost) === 150);
 
-    const forgedSnapshotRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} ForgedSnapshot`, taskTypeCost: 99999 } as any));
+    const forgedSnapshotRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} ForgedSnapshot`, taskSubTypeCost: 99999 } as any));
     const forgedSnapshotActivity = await forgedSnapshotRes.json();
     activityIds.push(forgedSnapshotActivity.id);
-    check("27. A client-forged taskTypeCost is ignored — the server's own resolved snapshot (150) persists instead", Number(forgedSnapshotActivity.taskTypeCost) === 150 && Number(forgedSnapshotActivity.taskTypeCost) !== 99999);
+    check("27. A client-forged taskSubTypeCost is ignored — the server's own resolved snapshot (150) persists instead", Number(forgedSnapshotActivity.taskSubTypeCost) === 150 && Number(forgedSnapshotActivity.taskSubTypeCost) !== 99999);
 
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
     const secondTaskTypeRes = await taskTypesAdminPOST(jsonReq({ name: `${TAG} Design`, cost: 200 }));
     const secondTaskType = await secondTaskTypeRes.json();
     taskTypeIds.push(secondTaskType.id);
     currentSession = { user: { id: worker1.id, role: Role.USER, customRoleId: null } };
-    const changeTaskTypeRes = await activitiesPATCH(jsonReq({ taskTypeId: secondTaskType.id }, "PATCH"), { params: Promise.resolve({ id: newActivityAfterBump.id }) });
-    check("28. Changing an Activity's Task Type on edit -> 200", changeTaskTypeRes.status === 200);
+    const changeTaskTypeRes = await activitiesPATCH(jsonReq({ taskSubTypeId: secondTaskType.id }, "PATCH"), { params: Promise.resolve({ id: newActivityAfterBump.id }) });
+    check("28. Changing an Activity's Task Sub Type on edit -> 200", changeTaskTypeRes.status === 200);
     const changedTaskTypeActivity = await changeTaskTypeRes.json();
-    check("28. ...snapshot updates to the NEWLY selected type's current cost (200)", Number(changedTaskTypeActivity.taskTypeCost) === 200);
+    check("28. ...snapshot updates to the NEWLY selected Sub Type's current cost (200)", Number(changedTaskTypeActivity.taskSubTypeCost) === 200);
 
     const unrelatedEditRes = await activitiesPATCH(jsonReq({ title: `${TAG} AfterBump Renamed` }, "PATCH"), { params: Promise.resolve({ id: newActivityAfterBump.id }) });
     const unrelatedEditActivity = await unrelatedEditRes.json();
-    check("29. Leaving Task Type UNCHANGED on an unrelated edit does NOT rewrite the snapshot", Number(unrelatedEditActivity.taskTypeCost) === 200);
+    check("29. Leaving Task Sub Type UNCHANGED on an unrelated edit does NOT rewrite the snapshot", Number(unrelatedEditActivity.taskSubTypeCost) === 200);
 
     // ══════════════════════ 30-35. Owner / Related Users ══════════════════════
     console.log("\n=== 30-35. Owner required; Related Users (reused assignedUsers) require >=1 ═══\n");
@@ -357,7 +375,7 @@ async function main() {
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
     const deleteReferencedRes = await taskTypesAdminDELETE(jsonReq(undefined, "DELETE"), { params: Promise.resolve({ id: devTaskType.id }) });
     check("42. DELETE on a Task Type still referenced by an Activity -> 409 item_in_use", deleteReferencedRes.status === 409);
-    check("...it was NOT deleted — still present", (await prisma.activityTaskType.findUnique({ where: { id: devTaskType.id } })) !== null);
+    check("...it was NOT deleted — still present", (await prisma.taskSubType.findUnique({ where: { id: devTaskType.id } })) !== null);
     check("...and no Activity was cascade-deleted by the blocked attempt", (await prisma.projectActivity.findUnique({ where: { id: twelveDaysActivity.id } })) !== null);
 
     const unusedTaskTypeRes = await taskTypesAdminPOST(jsonReq({ name: `${TAG} Unused`, cost: 5 }));
@@ -367,7 +385,7 @@ async function main() {
 
     const rereadAfterLifecycleRes = await activitiesGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: twelveDaysActivity.id }) });
     const rereadAfterLifecycle = await rereadAfterLifecycleRes.json();
-    check("43. The existing Activity remains readable after Task Type master lifecycle changes, still showing its Task Type name", rereadAfterLifecycleRes.status === 200 && rereadAfterLifecycle.taskType?.name === devTaskType.name);
+    check("43. The existing Activity remains readable after Task Sub Type master lifecycle changes, still showing its Task Sub Type name", rereadAfterLifecycleRes.status === 200 && rereadAfterLifecycle.taskSubType?.name === devTaskType.name);
 
     // ══════════════════════ 52-54. Legacy Activity readability/editability ══════════════════════
     console.log("\n=== 52-54. Legacy Activities with no new fields remain readable/editable/completable ═══\n");
@@ -395,7 +413,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): activities", err instanceof Error ? err.message : err);
     }
     try {
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds.filter(Boolean) } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds.filter(Boolean) } } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): task types", err instanceof Error ? err.message : err);
     }
@@ -408,7 +426,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);

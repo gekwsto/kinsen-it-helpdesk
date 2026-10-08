@@ -89,7 +89,7 @@ async function main() {
     deptIds.push(dept.id);
     const otherDept = await createDepartment({ name: `${TAG}-other-dept`, slug: `${TAG}-other-dept` });
     otherDeptIds.push(otherDept.id);
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-reqtype` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-reqtype` } });
     typeIds.push(reqType.id);
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expensetype` } });
 
@@ -176,7 +176,7 @@ async function main() {
     console.log("\n=== 4/8. Submitting with the preselected Project creates under it; server re-derives request-origin from the DB, never the query param ===\n");
     currentSession = { user: { id: worker.id, role: Role.USER, customRoleId: null } };
 
-    const manualSubmitRes = await activitiesPOST(jsonReq({ title: `${TAG} Manual via prefill`, projectId: manualProject.id, departmentId: dept.id }));
+    const manualSubmitRes = await activitiesPOST(jsonReq({ title: `${TAG} Manual via prefill`, projectId: manualProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
     check("4. Submitting with the preselected MANUAL Project's id -> 201, created under that exact Project", manualSubmitRes.status === 201);
     const manualSubmitActivity = await manualSubmitRes.json();
     activityIds.push(manualSubmitActivity.id);
@@ -186,11 +186,11 @@ async function main() {
     // still be rejected — proving the server resolves "is this request-
     // origin" from the DB Project row itself, never from any query-param-
     // adjacent client hint carried over from the navigation step.
-    const roMissingFieldsRes = await activitiesPOST(jsonReq({ title: `${TAG} RO via prefill missing`, projectId: requestOriginProject.id, departmentId: dept.id }));
+    const roMissingFieldsRes = await activitiesPOST(jsonReq({ title: `${TAG} RO via prefill missing`, projectId: requestOriginProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
     check("8. The server still enforces request-origin requirements from DB provenance alone — rejected without the extended fields even though navigation supplied projectId", roMissingFieldsRes.status === 400);
     check("...with code request_origin_fields_required", (await roMissingFieldsRes.json()).code === "request_origin_fields_required");
 
-    const taskType = await prisma.activityTaskType.create({ data: { name: `${TAG}-tasktype`, cost: 42 } });
+    const taskType = await prisma.taskSubType.create({ data: { name: `${TAG}-tasktype`, cost: 42 } });
     const roSubmitRes = await activitiesPOST(
       jsonReq({
         title: `${TAG} RO via prefill`,
@@ -198,7 +198,8 @@ async function main() {
         departmentId: dept.id,
         expectedStartDate: "2026-08-01",
         expectedFinishDate: "2026-08-05",
-        taskTypeId: taskType.id,
+        taskTypeId: reqType.id,
+        taskSubTypeId: taskType.id,
         ownerId: worker.id,
         assignedUserIds: [worker.id],
       })
@@ -206,7 +207,7 @@ async function main() {
     check("8. ...and succeeds once the real (server-validated) fields are supplied, creating under the preselected request-origin Project", roSubmitRes.status === 201);
     const roSubmitActivity = await roSubmitRes.json();
     activityIds.push(roSubmitActivity.id);
-    await prisma.activityTaskType.delete({ where: { id: taskType.id } }).catch(() => {});
+    await prisma.taskSubType.delete({ where: { id: taskType.id } }).catch(() => {});
     check("...Activity.projectId matches the preselected request-origin Project exactly", roSubmitActivity.projectId === requestOriginProject.id);
 
     // ══════════════════════ 6. Changing the Project after prefill still works correctly ══════════════════════
@@ -216,7 +217,7 @@ async function main() {
     // Simulates: page loaded with Project A preselected, user then picks
     // Project B in the Select before submitting — the POST reflects B, not
     // the original prefill target A.
-    const changedProjectRes = await activitiesPOST(jsonReq({ title: `${TAG} Changed Project`, projectId: secondManualProject.id, departmentId: dept.id }));
+    const changedProjectRes = await activitiesPOST(jsonReq({ title: `${TAG} Changed Project`, projectId: secondManualProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
     check("6. Submitting after changing to a different Project uses that NEW Project, not the original prefill target", changedProjectRes.status === 201);
     const changedProjectActivity = await changedProjectRes.json();
     activityIds.push(changedProjectActivity.id);
@@ -237,7 +238,7 @@ async function main() {
       await prisma.notification.deleteMany({ where: { link: { in: requestIds.map((id) => `/project-requests/${id}`) } } });
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);

@@ -22,22 +22,26 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Search, Plus, Loader2, Pencil, Trash2, Wrench } from "lucide-react";
-import { formatEUR } from "@/lib/currency";
+import { Search, Plus, Loader2, Pencil, Trash2, Tag } from "lucide-react";
 
 interface TypeRow {
   id: string;
   name: string;
   isActive: boolean;
-  cost: number;
-  _count: { activities: number };
+  _count: { projectRequests: number; activities: number };
 }
 
-interface ActivityTaskTypeManagementProps {
+interface TaskTypeManagementProps {
   types: TypeRow[];
 }
 
-export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTaskTypeManagementProps) {
+// Task Type (formerly "Project Request Type" — see TaskType in
+// prisma/schema.prisma) management — identity/name + lifecycle only, NO
+// cost field (contrast with Task Sub Type below, which does have one).
+// `projectRequests` on each row is historical-only (a legacy count from
+// before this classification moved to Activity); `activities` is the
+// current, forward-looking usage.
+export function TaskTypeManagement({ types: initialTypes }: TaskTypeManagementProps) {
   const router = useRouter();
   const [types, setTypes] = useState(initialTypes);
   const [search, setSearch] = useState("");
@@ -45,11 +49,9 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createName, setCreateName] = useState("");
-  const [createCost, setCreateCost] = useState("");
 
   const [editTarget, setEditTarget] = useState<TypeRow | null>(null);
   const [editName, setEditName] = useState("");
-  const [editCost, setEditCost] = useState("");
   const [saving, setSaving] = useState(false);
 
   const [deleteTarget, setDeleteTarget] = useState<TypeRow | null>(null);
@@ -57,38 +59,27 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
 
   const filtered = types.filter((t) => t.name.toLowerCase().includes(search.toLowerCase()));
 
-  // A valid, non-negative number — mirrors activityTaskTypeSchema's own
-  // client-side-reachable checks (the server independently re-validates
-  // regardless; this is purely for disabling the submit button on obviously
-  // invalid input).
-  const isValidCost = (raw: string) => {
-    if (raw.trim() === "") return false;
-    const n = Number(raw);
-    return Number.isFinite(n) && n >= 0;
-  };
-
   const handleCreate = async () => {
-    if (!createName.trim() || !isValidCost(createCost)) return;
+    if (!createName.trim()) return;
     setCreating(true);
     try {
-      const res = await fetch("/api/admin/activity-task-types", {
+      const res = await fetch("/api/admin/task-types", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: createName, cost: Number(createCost) }),
+        body: JSON.stringify({ name: createName }),
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.message ?? err.error ?? "Failed to create Task Type");
+        throw new Error(err.message ?? err.error ?? "Failed to create type");
       }
       const created = await res.json();
       setTypes((prev) => [...prev, created]);
       toast.success("Task Type created");
       setCreateOpen(false);
       setCreateName("");
-      setCreateCost("");
       router.refresh();
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to create Task Type");
+      toast.error(error.message ?? "Failed to create type");
     } finally {
       setCreating(false);
     }
@@ -97,21 +88,20 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
   const openEdit = (type: TypeRow) => {
     setEditTarget(type);
     setEditName(type.name);
-    setEditCost(String(type.cost));
   };
 
   const handleSaveEdit = async () => {
-    if (!editTarget || !editName.trim() || !isValidCost(editCost)) return;
+    if (!editTarget || !editName.trim()) return;
     setSaving(true);
     try {
-      const res = await fetch(`/api/admin/activity-task-types/${editTarget.id}`, {
+      const res = await fetch(`/api/admin/task-types/${editTarget.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: editName, cost: Number(editCost) }),
+        body: JSON.stringify({ name: editName }),
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.message ?? err.error ?? "Failed to update Task Type");
+        throw new Error(err.message ?? err.error ?? "Failed to update type");
       }
       const updated = await res.json();
       setTypes((prev) => prev.map((t) => (t.id === updated.id ? { ...t, ...updated } : t)));
@@ -119,7 +109,7 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
       setEditTarget(null);
       router.refresh();
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to update Task Type");
+      toast.error(error.message ?? "Failed to update type");
     } finally {
       setSaving(false);
     }
@@ -127,21 +117,21 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
 
   const toggleActive = async (type: TypeRow) => {
     try {
-      const res = await fetch(`/api/admin/activity-task-types/${type.id}`, {
+      const res = await fetch(`/api/admin/task-types/${type.id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ isActive: !type.isActive }),
       });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.message ?? err.error ?? "Failed to update Task Type");
+        throw new Error(err.message ?? err.error ?? "Failed to update type");
       }
       const updated = await res.json();
       setTypes((prev) => prev.map((t) => (t.id === updated.id ? { ...t, ...updated } : t)));
       toast.success(updated.isActive ? "Activated" : "Deactivated");
       router.refresh();
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to update Task Type");
+      toast.error(error.message ?? "Failed to update type");
     }
   };
 
@@ -149,17 +139,17 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
     if (!deleteTarget) return;
     setDeleting(true);
     try {
-      const res = await fetch(`/api/admin/activity-task-types/${deleteTarget.id}`, { method: "DELETE" });
+      const res = await fetch(`/api/admin/task-types/${deleteTarget.id}`, { method: "DELETE" });
       if (!res.ok) {
         const err = await res.json();
-        throw new Error(err.message ?? err.error ?? "Failed to delete Task Type");
+        throw new Error(err.message ?? err.error ?? "Failed to delete type");
       }
       setTypes((prev) => prev.filter((t) => t.id !== deleteTarget.id));
       toast.success("Task Type deleted");
       setDeleteTarget(null);
       router.refresh();
     } catch (error: any) {
-      toast.error(error.message ?? "Failed to delete Task Type");
+      toast.error(error.message ?? "Failed to delete type");
     } finally {
       setDeleting(false);
     }
@@ -170,12 +160,12 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
       <div className="flex items-center gap-3">
         <div className="relative max-w-sm flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search Task Types..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
+          <Input placeholder="Search types..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
         </div>
         <span className="text-sm text-muted-foreground whitespace-nowrap">{filtered.length} types</span>
         <Button onClick={() => setCreateOpen(true)} size="sm">
           <Plus className="h-4 w-4 mr-1.5" />
-          Add Task Type
+          Add Type
         </Button>
       </div>
 
@@ -184,7 +174,6 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
           <TableHeader>
             <TableRow className="bg-muted/50">
               <TableHead>Name</TableHead>
-              <TableHead>Cost</TableHead>
               <TableHead>Activities</TableHead>
               <TableHead className="w-24">Status</TableHead>
               <TableHead className="w-28"></TableHead>
@@ -193,7 +182,7 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
           <TableBody>
             {filtered.length === 0 && (
               <TableRow>
-                <TableCell colSpan={5} className="text-center text-sm text-muted-foreground py-10">
+                <TableCell colSpan={4} className="text-center text-sm text-muted-foreground py-10">
                   No Task Types match your search.
                 </TableCell>
               </TableRow>
@@ -203,12 +192,11 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
                 <TableCell>
                   <div className="flex items-center gap-3">
                     <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 shrink-0">
-                      <Wrench className="h-4 w-4 text-indigo-600" />
+                      <Tag className="h-4 w-4 text-indigo-600" />
                     </div>
                     <span className="text-sm font-medium">{type.name}</span>
                   </div>
                 </TableCell>
-                <TableCell className="text-sm">{formatEUR(type.cost)}</TableCell>
                 <TableCell className="text-sm text-muted-foreground">{type._count.activities}</TableCell>
                 <TableCell>
                   <button
@@ -234,7 +222,7 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
         </Table>
       </div>
 
-      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) { setCreateName(""); setCreateCost(""); } }}>
+      <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) setCreateName(""); }}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Add Task Type</DialogTitle>
@@ -242,33 +230,14 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
           <div className="space-y-4 py-2">
             <div className="space-y-2">
               <Label>Name</Label>
-              <Input placeholder="e.g. Development" value={createName} onChange={(e) => setCreateName(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="create-tasktype-cost">
-                Cost (EUR) <span className="text-destructive">*</span>
-              </Label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
-                <Input
-                  id="create-tasktype-cost"
-                  type="number"
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.00"
-                  className="pl-7"
-                  value={createCost}
-                  onChange={(e) => setCreateCost(e.target.value)}
-                />
-              </div>
+              <Input placeholder="e.g. New Product" value={createName} onChange={(e) => setCreateName(e.target.value)} />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => { setCreateOpen(false); setCreateName(""); setCreateCost(""); }}>Cancel</Button>
-            <Button onClick={handleCreate} disabled={creating || !createName.trim() || !isValidCost(createCost)}>
+            <Button variant="outline" onClick={() => { setCreateOpen(false); setCreateName(""); }}>Cancel</Button>
+            <Button onClick={handleCreate} disabled={creating || !createName.trim()}>
               {creating && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Create Task Type
+              Create Type
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -284,32 +253,10 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
               <Label>Name</Label>
               <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-tasktype-cost">
-                Cost (EUR) <span className="text-destructive">*</span>
-              </Label>
-              <p className="text-xs text-muted-foreground">
-                Changing this does NOT affect Activities already created with this Task Type — they keep their own historical cost snapshot.
-              </p>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
-                <Input
-                  id="edit-tasktype-cost"
-                  type="number"
-                  inputMode="decimal"
-                  min="0"
-                  step="0.01"
-                  placeholder="0.00"
-                  className="pl-7"
-                  value={editCost}
-                  onChange={(e) => setEditCost(e.target.value)}
-                />
-              </div>
-            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditTarget(null)}>Cancel</Button>
-            <Button onClick={handleSaveEdit} disabled={saving || !editName.trim() || !isValidCost(editCost)}>
+            <Button onClick={handleSaveEdit} disabled={saving || !editName.trim()}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               Save Changes
             </Button>
@@ -325,7 +272,8 @@ export function ActivityTaskTypeManagement({ types: initialTypes }: ActivityTask
               {deleteTarget && (
                 <>
                   Are you sure you want to delete <strong>{deleteTarget.name}</strong>? This cannot be undone. If it's still
-                  used by any Activity, deletion will be blocked until you deactivate it instead.
+                  used by any Activity{deleteTarget._count.projectRequests > 0 ? " or historical Project Request" : ""}, deletion
+                  will be blocked until you deactivate it instead.
                 </>
               )}
             </DialogDescription>

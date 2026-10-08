@@ -30,7 +30,7 @@ export function wholeCalendarDaysBetween(start: Date, finish: Date): number {
  * guarantee: an Activity can legitimately be completed on any real
  * calendar date, including one BEFORE its own Expected Start (an early/
  * ahead-of-schedule completion). A raw wholeCalendarDaysBetween there
- * would go negative, which then multiplies through taskTypeCost into a
+ * would go negative, which then multiplies through taskSubTypeCost into a
  * negative Activity Actual Cost and, summed, a negative Project Actual
  * Cost — invalid business values no currency/cost field in this app
  * should ever show. The business MEANING of "completed early" is "zero

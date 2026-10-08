@@ -41,23 +41,85 @@ function normalizeMailbox(email: string): string {
   return email.trim().toLowerCase();
 }
 
+const DEFAULT_INITIAL_LOOKBACK_HOURS = 72;
+
+/**
+ * INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS — bounds how far back a mailbox's
+ * very FIRST poll (no MailboxPollCursor row yet) is allowed to look, so a
+ * mailbox with years of history never gets crawled from its oldest message
+ * forward (the root cause of a real incident: `new Date(0)` used to be the
+ * bootstrap fallback here, which made Graph's `receivedDateTime ge {cursor}`
+ * filter match the ENTIRE Inbox, oldest-first). This is a soft, tunable
+ * knob (unlike GRAPH_TENANT_ID/etc in microsoft-graph.ts, which are hard
+ * requirements with no safe default) — an unset, non-numeric, zero, or
+ * negative value NEVER falls back to an effectively-unbounded poll; it
+ * falls back to DEFAULT_INITIAL_LOOKBACK_HOURS instead, logged once so a
+ * misconfiguration is still visible without breaking ingestion.
+ */
+function getInitialLookbackHours(): number {
+  const raw = process.env.INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_INITIAL_LOOKBACK_HOURS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[inbound-mailbox] INBOUND_EMAIL_INITIAL_LOOKBACK_HOURS="${raw}" is not a positive number — falling back to the default of ${DEFAULT_INITIAL_LOOKBACK_HOURS}h.`
+    );
+    return DEFAULT_INITIAL_LOOKBACK_HOURS;
+  }
+  return parsed;
+}
+
 /**
  * This mailbox's own persisted polling cursor (see MailboxPollCursor's
  * schema doc comment for the full rationale) — the receivedDateTime
  * boundary processInboundEmails already looked past, regardless of
- * Outlook's own read/unread state. A mailbox never polled before has no
- * row yet: defaults to the Unix epoch, so the very first poll sees
- * whatever's currently in that mailbox's Inbox (bounded by
- * getMessagesSince's own `top`) rather than silently skipping a
- * pre-existing backlog.
+ * Outlook's own read/unread state.
+ *
+ * A mailbox never polled before (no row yet) does NOT fall back to the
+ * Unix epoch — that previously made the very first poll match this
+ * mailbox's ENTIRE historical Inbox (Graph's `$orderby=receivedDateTime
+ * asc` then crawled it from the oldest message forward, 50 at a time,
+ * every ~2-minute run, silently creating PendingTicket rows for
+ * years-old mail). Instead it's bounded to `now - lookbackHours` — see
+ * getInitialLookbackHours above. This fallback is recomputed fresh on
+ * EVERY call for as long as no row exists (deliberately NOT persisted
+ * ahead of time — see this module's own "bootstrap cursor creation"
+ * design note below), so a poll that fails before processing a single
+ * message (Graph unreachable, every message in the batch errors) simply
+ * retries with the SAME kind of bounded, always-recent window next time —
+ * it can never regress toward epoch/history, only ever stay within the
+ * last `lookbackHours` of the CURRENT wall-clock time.
+ *
+ * Existing cursors are completely unaffected: a mailbox that already has
+ * a MailboxPollCursor row always uses its exact persisted
+ * `lastReceivedAt`, regardless of this lookback configuration.
  */
 export async function getMailboxPollCursor(mailbox: string): Promise<Date> {
   const row = await prisma.mailboxPollCursor.findUnique({
     where: { mailbox: normalizeMailbox(mailbox) },
     select: { lastReceivedAt: true },
   });
-  return row?.lastReceivedAt ?? new Date(0);
+  if (row) return row.lastReceivedAt;
+  return new Date(Date.now() - getInitialLookbackHours() * 60 * 60 * 1000);
 }
+
+/**
+ * Bootstrap cursor creation — chosen design: (A) getMailboxPollCursor
+ * above returns the bounded fallback on every call for as long as no row
+ * exists, and the row is only ever actually CREATED here, by
+ * processInboundEmails' own existing success path, once at least one
+ * message in the batch was handled without error (see its own
+ * `if (cursorAdvanceTo) await advanceMailboxPollCursor(...)` call — never
+ * changed by this fix). Rejected alternative: (B) pre-creating/seeding a
+ * row at the bounded timestamp BEFORE the first Graph fetch. B was not
+ * chosen because it adds a second place a cursor row can come into
+ * existence (with its own partial-failure/rollback edge cases — e.g. the
+ * seed write succeeds but the Graph fetch then throws, or vice versa) for
+ * no real benefit: A already guarantees the exact same safety property
+ * (never advance past unprocessed mail, never regress toward epoch) with
+ * zero new code paths, since it reuses the SAME existing advance-on-
+ * success logic every other cursor update already goes through.
+ */
 
 /**
  * Advances (never rewinds — see the explicit max() below) this mailbox's

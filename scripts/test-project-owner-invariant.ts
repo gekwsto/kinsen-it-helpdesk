@@ -150,7 +150,7 @@ async function main() {
     //       unrelated field, keeps its FULL owners set (never collapsed to
     //       a singleton, never losing the extra Owners) ──
     console.log("\n3. Updating a request-origin, multi-owner Project on an unrelated field -> full owners set preserved ===\n");
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-type` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-type` } });
     projectRequestTypeIds.push(reqType.id);
 
     const projReq = await prisma.projectRequest.create({
@@ -210,7 +210,7 @@ async function main() {
       await prisma.projectNote.deleteMany({ where: { projectId: { in: projectIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: projectRequestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: projectRequestTypeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: projectRequestTypeIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: departmentIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: departmentIds } } });

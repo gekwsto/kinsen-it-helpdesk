@@ -46,7 +46,7 @@ async function getAppendSequence(tx: Prisma.TransactionClient, projectId: string
  * actual Activity write so the lock and the write that depends on it
  * commit together. Mirrors the exact `SELECT id FROM "Project" WHERE id =
  * ${id} FOR UPDATE` pattern already established by
- * createProjectFromApprovedRequest/submitProjectFeedback for this same
+ * createProjectFromApprovedRequest/upsertProjectFeedback for this same
  * "serialize concurrent writers against one parent row" problem.
  */
 export async function getAppendSequenceLocked(tx: Prisma.TransactionClient, projectId: string): Promise<number> {

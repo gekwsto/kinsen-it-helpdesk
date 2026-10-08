@@ -76,7 +76,7 @@ async function main() {
     });
     userIds.push(approverBeta.id);
 
-    const reqType = await prisma.projectRequestType.create({ data: { name: `${TAG}-type` } });
+    const reqType = await prisma.taskType.create({ data: { name: `${TAG}-type` } });
     typeIds.push(reqType.id);
 
     const context = await browser.newContext({ viewport: { width: 1440, height: 1100 } });
@@ -155,8 +155,9 @@ async function main() {
     console.log("\n=== 5. Submission includes BOTH selected approvers, even ones hidden by search at any point ===\n");
     await page.fill("#title", `${TAG} request title`);
     await page.fill("#description", "A description that is definitely long enough for validation.");
-    await page.locator("#projectTypeId").click();
-    await page.getByRole("option", { name: new RegExp(`${TAG}-type`) }).click({ timeout: 5000 });
+    // Project Type was removed from the Project Request Form entirely —
+    // see TaskType in prisma/schema.prisma. No field to interact with here
+    // any more (the `reqType` fixture above is simply unused now).
     await page.fill("#teamConcerned", "Engineering");
     await page.fill("#expectedBenefits", "Benefits text that is definitely long enough for validation.");
 
@@ -187,7 +188,7 @@ async function main() {
     try {
       await prisma.projectRequestIntermediateApprover.deleteMany({ where: { projectRequestId: { in: requestIds } } });
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: typeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: departmentIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: departmentIds } } });

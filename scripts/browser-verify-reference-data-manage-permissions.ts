@@ -128,7 +128,7 @@ async function main() {
     await pageReq.waitForTimeout(400);
     const bodyAfterCreate = await pageReq.locator("body").innerText();
     check("Can create a Project Request Type through the real UI", bodyAfterCreate.includes(newTypeName));
-    const createdType = await prisma.projectRequestType.findUnique({ where: { name: newTypeName } });
+    const createdType = await prisma.taskType.findUnique({ where: { name: newTypeName } });
     if (createdType) reqTypeIds.push(createdType.id);
 
     if (createdType) {
@@ -139,7 +139,7 @@ async function main() {
       await pageReq.click('[role="dialog"] button:has-text("Save Changes")');
       await pageReq.waitForSelector('[role="dialog"] >> text=Edit Project Request Type', { state: "hidden", timeout: 5000 });
       await pageReq.waitForTimeout(400);
-      const edited = await prisma.projectRequestType.findUnique({ where: { id: createdType.id } });
+      const edited = await prisma.taskType.findUnique({ where: { id: createdType.id } });
       check("Can edit through the real UI", edited?.name === `${newTypeName} Edited`);
 
       await pageReq.click(`button[aria-label="Delete ${newTypeName} Edited"]`);
@@ -147,7 +147,7 @@ async function main() {
       await pageReq.click('[role="dialog"] button:has-text("Delete")');
       await pageReq.waitForSelector('[role="dialog"] >> text=Delete Project Request Type', { state: "hidden", timeout: 5000 });
       await pageReq.waitForTimeout(400);
-      const deleted = await prisma.projectRequestType.findUnique({ where: { id: createdType.id } });
+      const deleted = await prisma.taskType.findUnique({ where: { id: createdType.id } });
       check("Can delete the unused type through the real UI", deleted === null);
       if (deleted) reqTypeIds.pop();
     }
@@ -253,7 +253,7 @@ async function main() {
     await pageTask.click('[role="dialog"] button:has-text("Create Task Type")');
     await pageTask.waitForSelector('[role="dialog"] >> text=Add Task Type', { state: "hidden", timeout: 5000 });
     await pageTask.waitForTimeout(400);
-    const createdTask = await prisma.activityTaskType.findUnique({ where: { name: newTaskName } });
+    const createdTask = await prisma.taskSubType.findUnique({ where: { name: newTaskName } });
     check("Can create a Task Type through the real UI", !!createdTask && Number(createdTask.cost) === 123);
 
     if (createdTask) {
@@ -263,7 +263,7 @@ async function main() {
       await pageTask.click('[role="dialog"] button:has-text("Delete")');
       await pageTask.waitForSelector('[role="dialog"] >> text=Delete Task Type', { state: "hidden", timeout: 5000 });
       await pageTask.waitForTimeout(400);
-      const deletedTask = await prisma.activityTaskType.findUnique({ where: { id: createdTask.id } });
+      const deletedTask = await prisma.taskSubType.findUnique({ where: { id: createdTask.id } });
       check("Can delete the unused Task Type through the real UI", deletedTask === null);
       if (deletedTask) taskTypeIds.pop();
     }
@@ -275,9 +275,9 @@ async function main() {
   } finally {
     console.log("\nCleaning up test data...\n");
     try {
-      await prisma.activityTaskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.taskSubType.deleteMany({ where: { id: { in: taskTypeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { id: { in: expTypeIds } } });
-      await prisma.projectRequestType.deleteMany({ where: { id: { in: reqTypeIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: reqTypeIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
       await prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } });
       await prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } });

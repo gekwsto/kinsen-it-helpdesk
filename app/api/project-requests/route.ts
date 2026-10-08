@@ -42,14 +42,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(apiError("invalid_department", message, { field: "departmentId" }), { status: 400 });
     }
 
-    // Project Type: must be a REAL, currently ACTIVE type — never trusted
-    // from the client beyond its id. A forged id for an inactive or
-    // nonexistent type is rejected outright (fail closed), never silently
-    // accepted or substituted.
-    const projectType = await prisma.projectRequestType.findUnique({ where: { id: data.projectTypeId }, select: { id: true, isActive: true } });
-    if (!projectType || !projectType.isActive) {
-      return NextResponse.json(apiError("invalid_project_type", "The selected Project Type is not available.", { field: "projectTypeId" }), { status: 400 });
-    }
+    // Project Type (the former ProjectRequestType) is deliberately no
+    // longer accepted/validated here at all — that classification moved
+    // to Activity (see TaskType in prisma/schema.prisma). ProjectRequest.
+    // projectTypeId is simply never set for a new request below.
 
     // The canonical server-side invariant — never trusted from client state
     // or HTML `required` alone (createProjectRequestSchema's .superRefine
@@ -87,7 +83,6 @@ export async function POST(req: NextRequest) {
           title: data.title,
           description: data.description,
           importance: data.importance,
-          projectTypeId: data.projectTypeId,
           teamConcerned: data.teamConcerned,
           expectedBenefits: data.expectedBenefits,
           replacesExisting: data.replacesExisting,

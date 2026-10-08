@@ -134,6 +134,7 @@ export function ActivityFilters({ options }: ActivityFiltersProps) {
     get("overdue") === "true" ? "1" : "",
     get("priority"),
     get("projectId"),
+    get("origin"),
     get("assignedUserId"),
     get("unassigned") === "true" ? "1" : "",
     get("departmentId"),
@@ -201,6 +202,18 @@ export function ActivityFilters({ options }: ActivityFiltersProps) {
             {options.projects.map((p) => (
               <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
             ))}
+          </SelectContent>
+        </Select>
+
+        {/* Origin — canonical rule is activity.project.projectRequestId != null (see app/(main)/activities/page.tsx); a standalone Activity counts as Manual too, never inferred from Task Type/dates/Owner/UI mode. */}
+        <Select value={get("origin") || "all"} onValueChange={(v) => handleSelect("origin", v)}>
+          <SelectTrigger className="h-8 w-[140px] text-xs">
+            <SelectValue placeholder="Origin" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All</SelectItem>
+            <SelectItem value="request">From Request</SelectItem>
+            <SelectItem value="manual">Manual</SelectItem>
           </SelectContent>
         </Select>
 
