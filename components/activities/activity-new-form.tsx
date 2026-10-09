@@ -671,7 +671,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                       snapshots ITS OWN current cost at creation time. */}
                   {selectedTaskSubType && selectedTaskSubType.cost !== null && (
                     <p className="text-xs text-muted-foreground">
-                      Cost: {selectedTaskSubType.cost.toFixed(2)} EUR (snapshotted at creation)
+                      Cost: {selectedTaskSubType.cost.toFixed(2)} EUR
                     </p>
                   )}
                   {taskSubTypeNeedsManualCost && (

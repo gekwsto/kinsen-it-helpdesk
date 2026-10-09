@@ -676,7 +676,7 @@ export function ActivityEditClient({ id }: Props) {
                         value; the server independently re-derives it from
                         the database. */}
                     {selectedTaskSubType && selectedTaskSubType.cost !== null && (
-                      <p className="text-xs text-muted-foreground">Cost: {selectedTaskSubType.cost.toFixed(2)} EUR (snapshotted on save)</p>
+                      <p className="text-xs text-muted-foreground">Cost: {selectedTaskSubType.cost.toFixed(2)} EUR</p>
                     )}
                     {taskSubTypeNeedsManualCost && (
                       <div className="space-y-2 pt-1">

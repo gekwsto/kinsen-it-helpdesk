@@ -217,7 +217,13 @@ export default async function ProjectDetailPage({
     : null;
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    // Widened from max-w-5xl — same "narrow container leaves a large,
+    // visually dead blank area on anything wider than a small laptop
+    // screen" reasoning already used for the request-origin "New Project"
+    // setup flow and the Project/Activity edit forms, just a bigger step
+    // since this page's own bottom grid (Activities + a right-hand rail of
+    // Related Tickets/Success Target/Linked Goals) has real room to use.
+    <div className="space-y-6 max-w-7xl">
       {/* Breadcrumb */}
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/projects" className="hover:text-foreground">
@@ -473,9 +479,21 @@ export default async function ProjectDetailPage({
         <ProjectFeedbackCtaCard projectId={project.id} hasExistingFeedback={feedbackEligibility.feedback !== null} />
       )}
 
+      {/* Activities + a right-hand rail of "at a glance" cards (Related
+          Tickets, Success Target, Linked Goals) — grouped together in ONE
+          column so they stack coherently instead of the rail splitting
+          across rows (Related Tickets used to complete row 1's 3rd grid
+          cell while Success Target/Linked Goals, as separate grid items,
+          wrapped to row 2 under the Activities column instead of
+          continuing under Related Tickets). Attachments/Notes/Related
+          Links moved to their own full-width section below — they're
+          chronological/list content that can grow arbitrarily tall
+          (a long note thread, many attachments), which fits page width
+          better than a 2/3-width column; this also keeps the right rail's
+          natural height close to the Activities card's instead of towering
+          over it. */}
       <div className="grid gap-6 lg:grid-cols-3">
-        {/* Activities */}
-        <div className="lg:col-span-2 space-y-4">
+        <div className="lg:col-span-2">
           {activitySequenceRows ? (
             <ProjectActivitySequenceCard
               projectId={project.id}
@@ -492,78 +510,51 @@ export default async function ProjectDetailPage({
               progressIsCalculated={progressIsCalculated}
             />
           )}
-
-          <EntityAttachments
-            apiBasePath={`/api/projects/${project.id}`}
-            initialAttachments={attachments.map((a) => ({ ...a, createdAt: a.createdAt.toISOString() }))}
-            canManage={canEditProject}
-          />
-
-          <EntityNotes
-            apiBasePath={`/api/projects/${project.id}`}
-            initialNotes={notes.map((n) => ({
-              ...n,
-              createdAt: n.createdAt.toISOString(),
-              mentions: n.mentions.map((m) => ({ userId: m.user.id, name: m.user.name, email: m.user.email })),
-            }))}
-            canAddNote={canEditProject}
-            entityType="project"
-            entityId={project.id}
-          />
-
-          <EntityRelatedLinks
-            entityType="project"
-            entityId={project.id}
-            initialLinks={relatedLinks}
-            initialCanManage={relatedLinksAccess?.canManage ?? false}
-          />
         </div>
 
-        {/* Related Tickets */}
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base flex items-center gap-2">
-              <Ticket className="h-4 w-4" />
-              Related Tickets ({relatedTickets.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {relatedTickets.length === 0 ? (
-              <p className="text-center text-muted-foreground py-4 text-sm">
-                No tickets linked to this project.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {relatedTickets.map((t) => (
-                  <Link
-                    key={t.id}
-                    href={`/tickets/${t.id}`}
-                    className="flex items-center justify-between p-2.5 rounded-lg border hover:bg-muted/50 transition-colors"
-                  >
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className="font-mono text-xs text-muted-foreground shrink-0">
-                        {formatTicketNumber(t.ticketNumber)}
-                      </span>
-                      <span className="text-sm font-medium truncate">{t.title}</span>
-                    </div>
-                    <span
-                      className="text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ml-2"
-                      style={{
-                        backgroundColor: t.status.color + "22",
-                        color: t.status.color,
-                      }}
-                    >
-                      {t.status.name}
-                    </span>
-                  </Link>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Sidebar */}
         <div className="space-y-4">
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Ticket className="h-4 w-4" />
+                Related Tickets ({relatedTickets.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {relatedTickets.length === 0 ? (
+                <p className="text-center text-muted-foreground py-4 text-sm">
+                  No tickets linked to this project.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {relatedTickets.map((t) => (
+                    <Link
+                      key={t.id}
+                      href={`/tickets/${t.id}`}
+                      className="flex items-center justify-between p-2.5 rounded-lg border hover:bg-muted/50 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-xs text-muted-foreground shrink-0">
+                          {formatTicketNumber(t.ticketNumber)}
+                        </span>
+                        <span className="text-sm font-medium truncate">{t.title}</span>
+                      </div>
+                      <span
+                        className="text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ml-2"
+                        style={{
+                          backgroundColor: t.status.color + "22",
+                          color: t.status.color,
+                        }}
+                      >
+                        {t.status.name}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
           {project.successTarget && (
             <Card>
               <CardHeader className="pb-3">
@@ -613,6 +604,36 @@ export default async function ProjectDetailPage({
             </Card>
           )}
         </div>
+      </div>
+
+      {/* Full-width below the grid — see the comment above for why these
+          chronological/list sections aren't squeezed into the 2/3-width
+          Activities column. */}
+      <div className="space-y-4">
+        <EntityAttachments
+          apiBasePath={`/api/projects/${project.id}`}
+          initialAttachments={attachments.map((a) => ({ ...a, createdAt: a.createdAt.toISOString() }))}
+          canManage={canEditProject}
+        />
+
+        <EntityNotes
+          apiBasePath={`/api/projects/${project.id}`}
+          initialNotes={notes.map((n) => ({
+            ...n,
+            createdAt: n.createdAt.toISOString(),
+            mentions: n.mentions.map((m) => ({ userId: m.user.id, name: m.user.name, email: m.user.email })),
+          }))}
+          canAddNote={canEditProject}
+          entityType="project"
+          entityId={project.id}
+        />
+
+        <EntityRelatedLinks
+          entityType="project"
+          entityId={project.id}
+          initialLinks={relatedLinks}
+          initialCanManage={relatedLinksAccess?.canManage ?? false}
+        />
       </div>
     </div>
   );

@@ -337,7 +337,14 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
   }
 
   return (
-    <div className="space-y-6 max-w-3xl">
+    // Widened from max-w-3xl, which left this ENTIRE page — every card
+    // single-column, nothing beside anything else — capped at 768px with
+    // no grid at all, wasting the most horizontal space of any detail page
+    // in the app. Narrower than the Project detail page's own max-w-7xl:
+    // this page has no equivalent to Activities' own sub-list card, so a
+    // slightly narrower cap keeps the header Card's title/description from
+    // stretching into uncomfortably long text lines.
+    <div className="space-y-6 max-w-6xl">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/activities" className="hover:text-foreground">Activities</Link>
         {activity.project && (
@@ -352,365 +359,385 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
         <span className="text-foreground font-medium">{activity.title}</span>
       </div>
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-start justify-between gap-4">
-            <div className="flex items-start gap-3">
-              <button onClick={toggleComplete} disabled={toggling} className="mt-1 flex-shrink-0">
-                {activity.isCompleted ? (
-                  <CheckCircle2 className="h-5 w-5 text-green-600" />
-                ) : (
-                  <Circle className="h-5 w-5 text-muted-foreground hover:text-primary" />
-                )}
-              </button>
-              <div>
-                <CardTitle
-                  className={`text-xl ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}
-                >
-                  {activity.title}
-                </CardTitle>
-                <div className="flex items-center gap-2 mt-2">
-                  <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
-                  <span
-                    className={`text-xs font-medium px-2 py-0.5 rounded-full ${PRIORITY_COLORS[activity.priority]}`}
-                  >
-                    {activity.priority}
-                  </span>
-                </div>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => router.push(`/activities/${id}/edit`)}
-              >
-                <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                Edit
-              </Button>
-              <ActivityQuickStatus
-                activityId={id}
-                currentStatus={activity.status}
-                currentStatusLabel={activity.statusLabel}
-                currentStatusColor={activity.statusColor}
-                statuses={statusOptions}
-                optionsState={statusOptionsState}
-                canEdit={activity.canEditActivity ?? false}
-                onChanged={handleStatusChanged}
-              />
-              {activity.canDeleteActivity && (
-                <ActivityDeleteButton
-                  activityId={id}
-                  activityTitle={activity.title}
-                  projectId={activity.project?.id ?? null}
-                />
-              )}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {activity.description && (
-            <div>
-              <p className="text-sm text-muted-foreground mb-1">Description</p>
-              <p className="text-sm whitespace-pre-wrap">{activity.description}</p>
-            </div>
-          )}
-          <Separator />
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-xs text-muted-foreground">Progress</p>
-              <div className="text-right">
-                {activity.progress === null ? (
-                  <p className="text-xs font-medium text-amber-700">Configuration required</p>
-                ) : (
-                  <>
-                    <span className="text-xs font-medium">{activity.progress}%</span>
-                    <p className="text-[10px] text-muted-foreground">
-                      Calculated automatically from status
-                    </p>
-                  </>
-                )}
-              </div>
-            </div>
-            {activity.progress === null ? (
-              <p className="text-[11px] text-amber-700">
-                No progress percentage is configured for status &quot;{activity.statusLabel}&quot; in this department. Ask an admin to configure it under Activity Progress.
-              </p>
-            ) : (
-              <div className="h-1.5 bg-muted rounded-full">
-                <div
-                  className="h-1.5 bg-primary rounded-full transition-all"
-                  style={{ width: `${activity.progress}%` }}
-                />
-              </div>
-            )}
-          </div>
-          <Separator />
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Project</p>
-              {activity.project ? (
-                <Link
-                  href={`/projects/${activity.project.id}`}
-                  className="font-medium text-primary hover:underline"
-                >
-                  {activity.project.title}
-                </Link>
-              ) : (
-                <span className="text-muted-foreground italic">Standalone</span>
-              )}
-            </div>
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Task Type</p>
-              {/* "Not set" only ever appears for a legacy Activity created
-                  before this classification existed — never fabricated. */}
-              <p className="font-medium">{activity.taskType?.name ?? "Not set"}</p>
-            </div>
-            {activity.assignedUsers.length > 0 && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Assigned To</p>
-                <div className="flex flex-wrap gap-2">
-                  {activity.assignedUsers.map((u) => (
-                    <div key={u.id} className="flex items-center gap-1.5">
-                      <Avatar className="h-5 w-5">
-                        <AvatarImage src={u.image ?? undefined} />
-                        <AvatarFallback className="text-[9px]">
-                          {getInitials(u.name)}
-                        </AvatarFallback>
-                      </Avatar>
-                      <span className="font-medium text-sm">{u.name ?? u.email}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-            {activity.startDate && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Start Date</p>
-                <p className="font-medium">{formatDate(activity.startDate)}</p>
-              </div>
-            )}
-            {activity.dueDate && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Due Date</p>
-                <p className="font-medium">{formatDate(activity.dueDate)}</p>
-              </div>
-            )}
-            {activity.department && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Department</p>
-                <p className="font-medium">{activity.department.name}</p>
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-      {/* Request-origin-only metadata — only ever rendered for an Activity
-          whose parent Project originates from a Project Request
-          (project.projectRequestId non-null). A manual Project's Activity
-          never shows this section at all, never an empty version of it. */}
-      {activity.project?.projectRequestId && (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Project Request Setup</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="grid grid-cols-2 gap-4 text-sm">
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Expected Start</p>
-                <p className="font-medium">{activity.expectedStartDate ? formatDate(activity.expectedStartDate) : "Not set"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Expected Finish</p>
-                <p className="font-medium">{activity.expectedFinishDate ? formatDate(activity.expectedFinishDate) : "Not set"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Expected Days</p>
-                <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} day(s)` : "Not set"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Actual Days</p>
-                <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Task Sub Type</p>
-                <p className="font-medium">
-                  {activity.taskSubType?.name ?? "Not set"}
-                  {/* `null` (no configured cost) is simply never shown — never displayed as 0.00. */}
-                  {activity.taskSubTypeCost !== null && activity.taskSubTypeCost !== undefined && (
-                    <span className="text-muted-foreground font-normal"> — {Number(activity.taskSubTypeCost).toFixed(2)} EUR (snapshot)</span>
-                  )}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
-                <p className="font-medium">{activity.estimatedCost !== null && activity.estimatedCost !== undefined ? `${Number(activity.estimatedCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
-                <p className="font-medium">{activity.actualCost !== null && activity.actualCost !== undefined ? `${Number(activity.actualCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">Owner</p>
-                {activity.owner ? (
-                  <div className="flex items-center gap-1.5">
-                    <Avatar className="h-5 w-5">
-                      <AvatarImage src={activity.owner.image ?? undefined} />
-                      <AvatarFallback className="text-[9px]">{getInitials(activity.owner.name)}</AvatarFallback>
-                    </Avatar>
-                    <span className="font-medium">{activity.owner.name ?? activity.owner.email}</span>
-                  </div>
-                ) : (
-                  <p className="font-medium">Not set</p>
-                )}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-      {/* Dependencies */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <GitMerge className="h-4 w-4" />
-            Dependencies ({dependencies.length})
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          {dependencies.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-2">
-              No dependencies defined.
-            </p>
-          ) : (
-            <div className="space-y-1.5">
-              {dependencies.map((dep) => {
-                const isPred = dep.predecessorId === id;
-                const other  = isPred ? dep.successor : dep.predecessor;
-                const label  = DEP_TYPE_LABELS[dep.type] ?? dep.type;
-                return (
-                  <div key={dep.id} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded ${isPred ? "bg-indigo-50 text-indigo-700" : "bg-amber-50 text-amber-700"}`}>
-                        {isPred ? "blocks" : "blocked by"}
-                      </span>
-                      <Link href={`/activities/${other.id}`} className="truncate font-medium hover:text-primary transition-colors">
-                        {other.title}
-                      </Link>
-                      <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
-                    </div>
-                    {canManageDependencies && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive shrink-0"
-                        disabled={removingDepId === dep.id}
-                        onClick={() => removeDependency(dep.id)}
+      {/* Core activity info (left, wider) beside a "relationships" rail
+          (right: Dependencies + Related Tickets — both track this
+          Activity's connections to OTHER records, grouped together the
+          same way the Project detail page groups its own "at a glance"
+          cards). Attachments/Notes/Related Links are chronological/list
+          content that can grow arbitrarily tall, so they sit full-width
+          below the grid instead of being squeezed into either column —
+          see that section's own comment further down. */}
+      <div className="grid gap-6 lg:grid-cols-3">
+        <div className="lg:col-span-2 space-y-6">
+          <Card>
+            <CardHeader>
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex items-start gap-3">
+                  <button onClick={toggleComplete} disabled={toggling} className="mt-1 flex-shrink-0">
+                    {activity.isCompleted ? (
+                      <CheckCircle2 className="h-5 w-5 text-green-600" />
+                    ) : (
+                      <Circle className="h-5 w-5 text-muted-foreground hover:text-primary" />
+                    )}
+                  </button>
+                  <div>
+                    <CardTitle
+                      className={`text-xl ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}
+                    >
+                      {activity.title}
+                    </CardTitle>
+                    <div className="flex items-center gap-2 mt-2">
+                      <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
+                      <span
+                        className={`text-xs font-medium px-2 py-0.5 rounded-full ${PRIORITY_COLORS[activity.priority]}`}
                       >
-                        {removingDepId === dep.id
-                          ? <Loader2 className="h-3 w-3 animate-spin" />
-                          : <Trash2 className="h-3 w-3" />
-                        }
-                      </Button>
+                        {activity.priority}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => router.push(`/activities/${id}/edit`)}
+                  >
+                    <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                    Edit
+                  </Button>
+                  <ActivityQuickStatus
+                    activityId={id}
+                    currentStatus={activity.status}
+                    currentStatusLabel={activity.statusLabel}
+                    currentStatusColor={activity.statusColor}
+                    statuses={statusOptions}
+                    optionsState={statusOptionsState}
+                    canEdit={activity.canEditActivity ?? false}
+                    onChanged={handleStatusChanged}
+                  />
+                  {activity.canDeleteActivity && (
+                    <ActivityDeleteButton
+                      activityId={id}
+                      activityTitle={activity.title}
+                      projectId={activity.project?.id ?? null}
+                    />
+                  )}
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {activity.description && (
+                <div>
+                  <p className="text-sm text-muted-foreground mb-1">Description</p>
+                  <p className="text-sm whitespace-pre-wrap">{activity.description}</p>
+                </div>
+              )}
+              <Separator />
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <p className="text-xs text-muted-foreground">Progress</p>
+                  <div className="text-right">
+                    {activity.progress === null ? (
+                      <p className="text-xs font-medium text-amber-700">Configuration required</p>
+                    ) : (
+                      <>
+                        <span className="text-xs font-medium">{activity.progress}%</span>
+                        <p className="text-[10px] text-muted-foreground">
+                          Calculated automatically from status
+                        </p>
+                      </>
                     )}
                   </div>
-                );
-              })}
-            </div>
-          )}
-
-          {canManageDependencies && (
-            <div className="pt-1 space-y-2">
-              <p className="text-xs font-medium text-muted-foreground">Add predecessor</p>
-              <div className="flex gap-2">
-                <Select value={newPredId} onValueChange={setNewPredId}>
-                  <SelectTrigger className="h-8 text-xs flex-1 min-w-0">
-                    <SelectValue placeholder="Select activity..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {allActivities.map((a) => (
-                      <SelectItem key={a.id} value={a.id} className="text-xs">
-                        {a.title}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Select value={newDepType} onValueChange={setNewDepType}>
-                  <SelectTrigger className="h-8 text-xs w-[130px] shrink-0">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {Object.entries(DEP_TYPE_LABELS).map(([k, v]) => (
-                      <SelectItem key={k} value={k} className="text-xs">{v}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button size="sm" className="h-8 shrink-0" onClick={addDependency} disabled={addingDep || !newPredId}>
-                  {addingDep ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                </Button>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Related Tickets */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Ticket className="h-4 w-4" />
-            Related Tickets ({relatedTickets.length})
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          {relatedTickets.length === 0 ? (
-            <p className="text-sm text-muted-foreground text-center py-4">
-              No tickets linked to this activity.
-            </p>
-          ) : (
-            <div className="space-y-2">
-              {relatedTickets.map((t) => (
-                <Link
-                  key={t.id}
-                  href={`/tickets/${t.id}`}
-                  className="flex items-center justify-between p-2.5 rounded-lg border hover:bg-muted/50 transition-colors"
-                >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="font-mono text-xs text-muted-foreground shrink-0">
-                      {formatTicketNumber(t.ticketNumber)}
-                    </span>
-                    <span className="text-sm font-medium truncate">{t.title}</span>
+                </div>
+                {activity.progress === null ? (
+                  <p className="text-[11px] text-amber-700">
+                    No progress percentage is configured for status &quot;{activity.statusLabel}&quot; in this department. Ask an admin to configure it under Activity Progress.
+                  </p>
+                ) : (
+                  <div className="h-1.5 bg-muted rounded-full">
+                    <div
+                      className="h-1.5 bg-primary rounded-full transition-all"
+                      style={{ width: `${activity.progress}%` }}
+                    />
                   </div>
-                  <span
-                    className="text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ml-2"
-                    style={{
-                      backgroundColor: t.status.color + "22",
-                      color: t.status.color,
-                    }}
-                  >
-                    {t.status.name}
-                  </span>
-                </Link>
-              ))}
-            </div>
+                )}
+              </div>
+              <Separator />
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Project</p>
+                  {activity.project ? (
+                    <Link
+                      href={`/projects/${activity.project.id}`}
+                      className="font-medium text-primary hover:underline"
+                    >
+                      {activity.project.title}
+                    </Link>
+                  ) : (
+                    <span className="text-muted-foreground italic">Standalone</span>
+                  )}
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground mb-1">Task Type</p>
+                  {/* "Not set" only ever appears for a legacy Activity created
+                      before this classification existed — never fabricated. */}
+                  <p className="font-medium">{activity.taskType?.name ?? "Not set"}</p>
+                </div>
+                {activity.assignedUsers.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Assigned To</p>
+                    <div className="flex flex-wrap gap-2">
+                      {activity.assignedUsers.map((u) => (
+                        <div key={u.id} className="flex items-center gap-1.5">
+                          <Avatar className="h-5 w-5">
+                            <AvatarImage src={u.image ?? undefined} />
+                            <AvatarFallback className="text-[9px]">
+                              {getInitials(u.name)}
+                            </AvatarFallback>
+                          </Avatar>
+                          <span className="font-medium text-sm">{u.name ?? u.email}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {activity.startDate && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Start Date</p>
+                    <p className="font-medium">{formatDate(activity.startDate)}</p>
+                  </div>
+                )}
+                {activity.dueDate && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Due Date</p>
+                    <p className="font-medium">{formatDate(activity.dueDate)}</p>
+                  </div>
+                )}
+                {activity.department && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Department</p>
+                    <p className="font-medium">{activity.department.name}</p>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+          {/* Request-origin-only metadata — only ever rendered for an Activity
+              whose parent Project originates from a Project Request
+              (project.projectRequestId non-null). A manual Project's Activity
+              never shows this section at all, never an empty version of it. */}
+          {activity.project?.projectRequestId && (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-sm">Project Request Setup</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Expected Start</p>
+                    <p className="font-medium">{activity.expectedStartDate ? formatDate(activity.expectedStartDate) : "Not set"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Expected Finish</p>
+                    <p className="font-medium">{activity.expectedFinishDate ? formatDate(activity.expectedFinishDate) : "Not set"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Expected Days</p>
+                    <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} day(s)` : "Not set"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Actual Days</p>
+                    <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Task Sub Type</p>
+                    <p className="font-medium">
+                      {activity.taskSubType?.name ?? "Not set"}
+                      {/* `null` (no configured cost) is simply never shown — never displayed as 0.00. */}
+                      {activity.taskSubTypeCost !== null && activity.taskSubTypeCost !== undefined && (
+                        <span className="text-muted-foreground font-normal"> — {Number(activity.taskSubTypeCost).toFixed(2)} EUR</span>
+                      )}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
+                    <p className="font-medium">{activity.estimatedCost !== null && activity.estimatedCost !== undefined ? `${Number(activity.estimatedCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
+                    <p className="font-medium">{activity.actualCost !== null && activity.actualCost !== undefined ? `${Number(activity.actualCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Owner</p>
+                    {activity.owner ? (
+                      <div className="flex items-center gap-1.5">
+                        <Avatar className="h-5 w-5">
+                          <AvatarImage src={activity.owner.image ?? undefined} />
+                          <AvatarFallback className="text-[9px]">{getInitials(activity.owner.name)}</AvatarFallback>
+                        </Avatar>
+                        <span className="font-medium">{activity.owner.name ?? activity.owner.email}</span>
+                      </div>
+                    ) : (
+                      <p className="font-medium">Not set</p>
+                    )}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
           )}
-        </CardContent>
-      </Card>
+        </div>
 
-      <EntityAttachments
-        apiBasePath={`/api/activities/${id}`}
-        initialAttachments={attachments}
-        canManage={activity.canEditActivity ?? false}
-      />
+        <div className="space-y-6">
+          {/* Dependencies */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <GitMerge className="h-4 w-4" />
+                Dependencies ({dependencies.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {dependencies.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-2">
+                  No dependencies defined.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {dependencies.map((dep) => {
+                    const isPred = dep.predecessorId === id;
+                    const other  = isPred ? dep.successor : dep.predecessor;
+                    const label  = DEP_TYPE_LABELS[dep.type] ?? dep.type;
+                    return (
+                      <div key={dep.id} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-sm">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className={`shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded ${isPred ? "bg-indigo-50 text-indigo-700" : "bg-amber-50 text-amber-700"}`}>
+                            {isPred ? "blocks" : "blocked by"}
+                          </span>
+                          <Link href={`/activities/${other.id}`} className="truncate font-medium hover:text-primary transition-colors">
+                            {other.title}
+                          </Link>
+                          <span className="shrink-0 text-[10px] text-muted-foreground">{label}</span>
+                        </div>
+                        {canManageDependencies && (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive shrink-0"
+                            disabled={removingDepId === dep.id}
+                            onClick={() => removeDependency(dep.id)}
+                          >
+                            {removingDepId === dep.id
+                              ? <Loader2 className="h-3 w-3 animate-spin" />
+                              : <Trash2 className="h-3 w-3" />
+                            }
+                          </Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
-      <EntityNotes
-        apiBasePath={`/api/activities/${id}`}
-        initialNotes={notes}
-        canAddNote={activity.canEditActivity ?? false}
-        entityType="activity"
-        entityId={id}
-      />
+              {canManageDependencies && (
+                <div className="pt-1 space-y-2">
+                  <p className="text-xs font-medium text-muted-foreground">Add predecessor</p>
+                  <div className="flex gap-2">
+                    <Select value={newPredId} onValueChange={setNewPredId}>
+                      <SelectTrigger className="h-8 text-xs flex-1 min-w-0">
+                        <SelectValue placeholder="Select activity..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {allActivities.map((a) => (
+                          <SelectItem key={a.id} value={a.id} className="text-xs">
+                            {a.title}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select value={newDepType} onValueChange={setNewDepType}>
+                      <SelectTrigger className="h-8 text-xs w-[130px] shrink-0">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {Object.entries(DEP_TYPE_LABELS).map(([k, v]) => (
+                          <SelectItem key={k} value={k} className="text-xs">{v}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Button size="sm" className="h-8 shrink-0" onClick={addDependency} disabled={addingDep || !newPredId}>
+                      {addingDep ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
-      <EntityRelatedLinks entityType="activity" entityId={id} />
+          {/* Related Tickets */}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base flex items-center gap-2">
+                <Ticket className="h-4 w-4" />
+                Related Tickets ({relatedTickets.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {relatedTickets.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-4">
+                  No tickets linked to this activity.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {relatedTickets.map((t) => (
+                    <Link
+                      key={t.id}
+                      href={`/tickets/${t.id}`}
+                      className="flex items-center justify-between p-2.5 rounded-lg border hover:bg-muted/50 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-xs text-muted-foreground shrink-0">
+                          {formatTicketNumber(t.ticketNumber)}
+                        </span>
+                        <span className="text-sm font-medium truncate">{t.title}</span>
+                      </div>
+                      <span
+                        className="text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ml-2"
+                        style={{
+                          backgroundColor: t.status.color + "22",
+                          color: t.status.color,
+                        }}
+                      >
+                        {t.status.name}
+                      </span>
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+
+      {/* Full-width below the grid — see the comment above the grid for
+          why these chronological/list sections aren't squeezed into
+          either column. */}
+      <div className="space-y-4">
+        <EntityAttachments
+          apiBasePath={`/api/activities/${id}`}
+          initialAttachments={attachments}
+          canManage={activity.canEditActivity ?? false}
+        />
+
+        <EntityNotes
+          apiBasePath={`/api/activities/${id}`}
+          initialNotes={notes}
+          canAddNote={activity.canEditActivity ?? false}
+          entityType="activity"
+          entityId={id}
+        />
+
+        <EntityRelatedLinks entityType="activity" entityId={id} />
+      </div>
     </div>
   );
 }
