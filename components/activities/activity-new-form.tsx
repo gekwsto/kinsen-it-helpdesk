@@ -434,7 +434,13 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   }
 
   return (
-    <div className={inline ? "" : "space-y-6 max-w-2xl"}>
+    // Standalone: no max-width cap (previously max-w-2xl) — same rationale
+    // as app/(main)/projects/new/page.tsx's own comment: a fixed cap always
+    // clamps regardless of how much room <main> actually has, wasting up
+    // to ~1584px at a 2560px viewport. Inline mode is unaffected (and
+    // untouched) — it's embedded in a Dialog that sizes itself, never this
+    // page-level container.
+    <div className={inline ? "" : "space-y-6"}>
       {!inline && (
         <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
           <Link href="/activities" className="hover:text-foreground">Activities</Link>
@@ -473,7 +479,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={status} onValueChange={(v) => setStatus(v as ActivityStatus)}>
@@ -604,7 +610,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                   <p className="text-xs text-muted-foreground mt-0.5">Required for Activities created under a Project that originated from a Project Request.</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="expected-start">
                       Expected Start <span className="text-destructive">*</span>
@@ -764,7 +770,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="startDate">Start Date</Label>
                 <Input

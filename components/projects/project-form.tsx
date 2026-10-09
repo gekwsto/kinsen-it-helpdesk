@@ -571,7 +571,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Status</Label>
               <Select
@@ -609,7 +609,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Start Date</Label>
               <Input type="date" {...register("startDate")} />
@@ -711,7 +711,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                 )}
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="expected-start">
                     Expected Start Date <span className="text-destructive">*</span>
@@ -776,7 +776,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                   both naturally start at €0.00 — shown here as fixed
                   readonly text (not even a live preview input, since there
                   is nothing yet to compute from). */}
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="estimated-cost">Estimated Cost (EUR)</Label>
                   <Input

@@ -58,12 +58,14 @@ export default async function NewProjectPage({
     }
 
     return (
-      // Wider than the manual-creation form's max-w-2xl — this mode carries
-      // substantially more fields (the whole "Project Setup Details" block,
-      // itself already 2-column internally), so the same narrow width left
-      // a large, visually dead blank area on anything wider than a small
-      // laptop screen.
-      <div className="max-w-4xl space-y-6">
+      // No max-width cap (previously max-w-2xl, then max-w-4xl) — a fixed
+      // Tailwind cap always clamps at SOME fixed px value regardless of how
+      // much room <main> actually has (measured: 896px of unused width at a
+      // 1920px viewport, 1536px at 2560px). Fills whatever <main> gives it
+      // instead (page padding is <main>'s own p-4 sm:p-6 in
+      // app/(main)/layout.tsx, untouched here) — ProjectForm's own internal
+      // grids distribute that width proportionally on their own.
+      <div className="space-y-6">
         <div className="flex items-center gap-3">
           <Button variant="ghost" size="sm" asChild>
             <Link href={`/project-requests/${request.id}`}>
@@ -145,7 +147,10 @@ export default async function NewProjectPage({
     : undefined;
 
   return (
-    <div className="max-w-2xl space-y-6">
+    // No max-width cap — see the fromRequest branch above's own comment;
+    // same rationale, applied consistently to the standalone (manual
+    // creation) variant of this same page/form.
+    <div className="space-y-6">
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="sm" asChild>
           <Link href="/projects">

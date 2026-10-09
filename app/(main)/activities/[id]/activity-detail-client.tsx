@@ -337,14 +337,16 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
   }
 
   return (
-    // Widened from max-w-3xl, which left this ENTIRE page — every card
-    // single-column, nothing beside anything else — capped at 768px with
-    // no grid at all, wasting the most horizontal space of any detail page
-    // in the app. Narrower than the Project detail page's own max-w-7xl:
-    // this page has no equivalent to Activities' own sub-list card, so a
-    // slightly narrower cap keeps the header Card's title/description from
-    // stretching into uncomfortably long text lines.
-    <div className="space-y-6 max-w-6xl">
+    // No max-width cap (previously max-w-3xl, then max-w-6xl) — a fixed
+    // Tailwind cap always clamps at SOME fixed px value, which is exactly
+    // the thing that kept wasting space on anything wider than it (1152px
+    // at max-w-6xl: measured 464px of unused width at a 1920px viewport,
+    // 1104px at 2560px). Fills whatever <main> actually gives it instead
+    // (page padding is <main>'s own p-4 sm:p-6 in app/(main)/layout.tsx,
+    // untouched here) — the lg:grid-cols-3 grid (header/Project Request
+    // Setup + a Dependencies/Related Tickets right rail) distributes that
+    // width proportionally on its own.
+    <div className="space-y-6">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/activities" className="hover:text-foreground">Activities</Link>
         {activity.project && (

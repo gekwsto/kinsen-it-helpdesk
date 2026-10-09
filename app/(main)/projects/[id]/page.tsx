@@ -217,13 +217,17 @@ export default async function ProjectDetailPage({
     : null;
 
   return (
-    // Widened from max-w-5xl — same "narrow container leaves a large,
-    // visually dead blank area on anything wider than a small laptop
-    // screen" reasoning already used for the request-origin "New Project"
-    // setup flow and the Project/Activity edit forms, just a bigger step
-    // since this page's own bottom grid (Activities + a right-hand rail of
-    // Related Tickets/Success Target/Linked Goals) has real room to use.
-    <div className="space-y-6 max-w-7xl">
+    // No max-width cap (previously max-w-5xl, then max-w-7xl) — a fixed
+    // Tailwind cap always clamps at SOME fixed px value, which is exactly
+    // the thing that kept wasting space on anything wider than it (1280px
+    // at max-w-7xl: measured 336px of unused width at a 1920px viewport,
+    // 976px at 2560px). This way the page always fills whatever <main>
+    // actually gives it (page padding is <main>'s own p-4 sm:p-6 in
+    // app/(main)/layout.tsx, untouched here) — the bottom grid's own
+    // lg:grid-cols-3 (Activities + a right-hand rail of Related Tickets/
+    // Success Target/Linked Goals) distributes that width proportionally
+    // on its own, nothing here needs to pre-guess a cap for it.
+    <div className="space-y-6">
       {/* Breadcrumb */}
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/projects" className="hover:text-foreground">

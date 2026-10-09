@@ -223,12 +223,14 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   }
 
   return (
-    // Wider than a plain form (max-w-4xl) — same convention already used by
-    // the request-origin "New Project" setup flow (app/(main)/projects/new/page.tsx)
-    // for the same reason: this form carries enough fields (including the
-    // conditional Project Request Setup block) that max-w-2xl left a large,
-    // visually dead blank area on anything wider than a small laptop screen.
-    <div className="space-y-6 max-w-4xl">
+    // No max-width cap (previously max-w-2xl, then max-w-4xl) — a fixed
+    // Tailwind cap always clamps at SOME fixed px value regardless of how
+    // much room <main> actually has (measured: 720px of unused width at a
+    // 1920px viewport, 1360px at 2560px). Fills whatever <main> gives it
+    // instead (page padding is <main>'s own p-4 sm:p-6 in
+    // app/(main)/layout.tsx, untouched here) — this form's own internal
+    // grids distribute that width proportionally on their own.
+    <div className="space-y-6">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/projects" className="hover:text-foreground">Projects</Link>
         <ChevronRight className="h-4 w-4" />
