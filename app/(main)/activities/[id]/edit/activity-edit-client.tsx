@@ -392,7 +392,13 @@ export function ActivityEditClient({ id }: Props) {
   }
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    // Wider than a plain form (max-w-4xl) — same convention already used by
+    // the request-origin "New Project" setup flow
+    // (app/(main)/projects/new/page.tsx) for the same reason: this form
+    // carries enough fields (including the conditional Project Request
+    // Setup block) that max-w-2xl left a large, visually dead blank area
+    // on anything wider than a small laptop screen.
+    <div className="space-y-6 max-w-4xl">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/activities" className="hover:text-foreground">Activities</Link>
         <ChevronRight className="h-4 w-4" />
@@ -429,7 +435,7 @@ export function ActivityEditClient({ id }: Props) {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={status} onValueChange={(v) => setStatus(v as ActivityStatus)}>
@@ -461,60 +467,68 @@ export function ActivityEditClient({ id }: Props) {
               </div>
             </div>
 
-            <div className="space-y-2">
-              <Label>Project</Label>
-              <div className="flex gap-1.5">
-                <Select value={projectId || ""} onValueChange={setProjectId}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Standalone" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="">Standalone</SelectItem>
-                    {projects.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="shrink-0 gap-1"
-                  disabled={!activityDepartmentId || !canCreateProjectInDept}
-                  title={
-                    !activityDepartmentId
-                      ? "Select a department first."
-                      : !canCreateProjectInDept
-                      ? "You don't have permission to create projects in this department."
-                      : undefined
-                  }
-                  onClick={() => setProjectDialogOpen(true)}
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  New
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Only projects in this activity&apos;s department are listed.
-              </p>
-            </div>
-
-            {subDepartments.length > 0 && (
+            {/* Project (with its inline "New" button) and Sub-Department
+                grouped in one responsive row — both are
+                classification/assignment selects for this Activity.
+                Column count adapts to whether Sub-Department is actually
+                rendered, so Project never ends up sharing a row with a
+                visually empty trailing cell. */}
+            <div className={`grid grid-cols-1 gap-4 ${subDepartments.length > 0 ? "sm:grid-cols-2" : ""}`}>
               <div className="space-y-2">
-                <Label>Sub-Department (optional)</Label>
-                <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="None" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">None</SelectItem>
-                    {subDepartments.map((sd) => (
-                      <SelectItem key={sd.id} value={sd.id}>{sd.name}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <Label>Project</Label>
+                <div className="flex gap-1.5">
+                  <Select value={projectId || ""} onValueChange={setProjectId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Standalone" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Standalone</SelectItem>
+                      {projects.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>{p.title}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0 gap-1"
+                    disabled={!activityDepartmentId || !canCreateProjectInDept}
+                    title={
+                      !activityDepartmentId
+                        ? "Select a department first."
+                        : !canCreateProjectInDept
+                        ? "You don't have permission to create projects in this department."
+                        : undefined
+                    }
+                    onClick={() => setProjectDialogOpen(true)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    New
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Only projects in this activity&apos;s department are listed.
+                </p>
               </div>
-            )}
+
+              {subDepartments.length > 0 && (
+                <div className="space-y-2">
+                  <Label>Sub-Department (optional)</Label>
+                  <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">None</SelectItem>
+                      {subDepartments.map((sd) => (
+                        <SelectItem key={sd.id} value={sd.id}>{sd.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
 
             <div className="space-y-2">
               <Label htmlFor="task-type">
@@ -550,7 +564,7 @@ export function ActivityEditClient({ id }: Props) {
                   <p className="text-xs text-muted-foreground mt-0.5">Metadata from this Activity's request-origin Project.</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="expected-start">Expected Start</Label>
                     <Input id="expected-start" type="date" value={expectedStartDate} onChange={(e) => setExpectedStartDate(e.target.value)} />
@@ -561,7 +575,7 @@ export function ActivityEditClient({ id }: Props) {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="expected-days">Expected Days</Label>
                     <Input
@@ -594,7 +608,7 @@ export function ActivityEditClient({ id }: Props) {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="estimated-cost">Estimated Cost</Label>
                     <Input
@@ -627,75 +641,82 @@ export function ActivityEditClient({ id }: Props) {
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Task Sub Type</Label>
-                  <Select
-                    value={taskSubTypeId || "__none__"}
-                    onValueChange={(v) => {
-                      setTaskSubTypeId(v === "__none__" ? "" : v);
-                      // Switching Task Sub Type always invalidates any
-                      // previously-entered/pre-filled manual Estimated
-                      // Cost — it must never silently carry over to a
-                      // different subtype (fixed-cost or another
-                      // null-cost one).
-                      setManualEstimatedCost("");
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="None" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {taskSubTypes.map((t) => (
-                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {/* Informational preview of what will be (re-)snapshotted
-                      if this Activity is saved — never the authoritative
-                      value; the server independently re-derives it from
-                      the database. */}
-                  {selectedTaskSubType && selectedTaskSubType.cost !== null && (
-                    <p className="text-xs text-muted-foreground">Cost: {selectedTaskSubType.cost.toFixed(2)} EUR (snapshotted on save)</p>
-                  )}
-                  {taskSubTypeNeedsManualCost && (
-                    <div className="space-y-2 pt-1">
-                      <Label htmlFor="manual-estimated-cost">
-                        Estimated Cost <span className="text-destructive">*</span>
-                      </Label>
-                      <div className="relative">
-                        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
-                        <Input
-                          id="manual-estimated-cost"
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          className="pl-7"
-                          placeholder="0.00"
-                          value={manualEstimatedCost}
-                          onChange={(e) => setManualEstimatedCost(e.target.value)}
-                        />
+                {/* Task Sub Type and Owner grouped in one responsive row —
+                    both are simple selects. Task Sub Type can grow taller
+                    when its conditional manual-cost sub-field appears;
+                    Owner's column just has extra space below it then,
+                    the same as any other uneven-height grid row. */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Task Sub Type</Label>
+                    <Select
+                      value={taskSubTypeId || "__none__"}
+                      onValueChange={(v) => {
+                        setTaskSubTypeId(v === "__none__" ? "" : v);
+                        // Switching Task Sub Type always invalidates any
+                        // previously-entered/pre-filled manual Estimated
+                        // Cost — it must never silently carry over to a
+                        // different subtype (fixed-cost or another
+                        // null-cost one).
+                        setManualEstimatedCost("");
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="None" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">None</SelectItem>
+                        {taskSubTypes.map((t) => (
+                          <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {/* Informational preview of what will be (re-)snapshotted
+                        if this Activity is saved — never the authoritative
+                        value; the server independently re-derives it from
+                        the database. */}
+                    {selectedTaskSubType && selectedTaskSubType.cost !== null && (
+                      <p className="text-xs text-muted-foreground">Cost: {selectedTaskSubType.cost.toFixed(2)} EUR (snapshotted on save)</p>
+                    )}
+                    {taskSubTypeNeedsManualCost && (
+                      <div className="space-y-2 pt-1">
+                        <Label htmlFor="manual-estimated-cost">
+                          Estimated Cost <span className="text-destructive">*</span>
+                        </Label>
+                        <div className="relative">
+                          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">€</span>
+                          <Input
+                            id="manual-estimated-cost"
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            className="pl-7"
+                            placeholder="0.00"
+                            value={manualEstimatedCost}
+                            onChange={(e) => setManualEstimatedCost(e.target.value)}
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          This Task Sub Type has no fixed configured cost — enter the estimated cost for this Activity.
+                        </p>
                       </div>
-                      <p className="text-xs text-muted-foreground">
-                        This Task Sub Type has no fixed configured cost — enter the estimated cost for this Activity.
-                      </p>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </div>
 
-                <div className="space-y-2">
-                  <Label>Owner</Label>
-                  <Select value={ownerId || "__none__"} onValueChange={(v) => setOwnerId(v === "__none__" ? "" : v)}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="None" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {assignableUsers.map((u) => (
-                        <SelectItem key={u.id} value={u.id}>{u.name ?? u.email}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <div className="space-y-2">
+                    <Label>Owner</Label>
+                    <Select value={ownerId || "__none__"} onValueChange={(v) => setOwnerId(v === "__none__" ? "" : v)}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="None" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">None</SelectItem>
+                        {assignableUsers.map((u) => (
+                          <SelectItem key={u.id} value={u.id}>{u.name ?? u.email}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                 </div>
               </div>
             )}
@@ -756,7 +777,7 @@ export function ActivityEditClient({ id }: Props) {
                 />
               </div>
             ) : (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="startDate">Start Date</Label>
                   <Input

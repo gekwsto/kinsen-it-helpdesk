@@ -27,6 +27,8 @@ import { useState, useEffect } from "react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 import { useHelpGuide } from "@/components/help/help-guide-provider";
 import { resolveActiveHref } from "@/lib/sidebar-active-route";
+import { useMobileSidebar } from "@/components/layout/mobile-sidebar-provider";
+import { Sheet, SheetContent } from "@/components/ui/sheet";
 
 // `visible`, when defined, wins outright over `roles` — lets specific items
 // be gated by a server-computed permission flag (e.g. subdepartment.view)
@@ -71,6 +73,11 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
   // Help Guide is available to every user regardless of role/permissions —
   // no canAccess() gate applies to it, unlike every other item above.
   const { toggle: toggleHelpGuide } = useHelpGuide();
+  // Mobile off-canvas drawer — a SEPARATE concern from `collapsed` above
+  // (which is desktop-only, persisted, icon-only-vs-full-width). The
+  // drawer is always rendered in its full (non-collapsed) form when open;
+  // there is no "collapsed drawer" state.
+  const { isOpen: mobileOpen, close: closeMobile, triggerRef: mobileTriggerRef } = useMobileSidebar();
 
   useEffect(() => {
     const stored = localStorage.getItem("sidebar-collapsed");
@@ -249,6 +256,16 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
 
   const pathname = usePathname();
 
+  // Any navigation (a nav Link click, the back/forward buttons, a
+  // programmatic redirect) closes the mobile drawer — covers every case a
+  // single onClick handler on each Link wouldn't (and is the one existing
+  // `pathname` dependency already tracked here). A no-op when the drawer
+  // is already closed or on desktop, where it's never open.
+  useEffect(() => {
+    closeMobile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
+
   const toggleExpand = (label: string) => {
     setExpandedItems((prev) =>
       prev.includes(label) ? prev.filter((i) => i !== label) : [...prev, label]
@@ -266,34 +283,35 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
     return pathname.startsWith(href + "/");
   };
 
-  return (
-    <aside
-      className={cn(
-        "h-screen flex flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border transition-all duration-200 flex-shrink-0",
-        collapsed ? "w-16" : "w-64"
-      )}
-    >
-      {/* Logo / Header */}
-      {collapsed ? (
-        <div className="h-16 flex flex-col items-center justify-center gap-1 border-b border-sidebar-border">
-          <button
-            onClick={toggleCollapsed}
-            aria-label="Expand sidebar"
-            aria-expanded={false}
-            className="rounded-lg p-1.5 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-          >
-            <PanelLeftOpen className="h-5 w-5" />
-          </button>
+  // Header/Nav/Footer extracted into local render functions — parameterized
+  // by `isCollapsed` — so the desktop <aside> and the mobile drawer
+  // (always rendered in full, non-collapsed form) can share the exact same
+  // markup/logic instead of duplicating it. `showCollapseToggle` is the one
+  // real difference: the mobile drawer already has its own Close (X) button
+  // (see SheetContent) and has no "collapsed" concept at all, so it never
+  // renders the desktop-only collapse/expand toggle.
+  const renderHeader = (isCollapsed: boolean, showCollapseToggle: boolean) =>
+    isCollapsed ? (
+      <div className="h-16 flex flex-col items-center justify-center gap-1 border-b border-sidebar-border">
+        <button
+          onClick={toggleCollapsed}
+          aria-label="Expand sidebar"
+          aria-expanded={false}
+          className="rounded-lg p-1.5 text-sidebar-foreground/60 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+        >
+          <PanelLeftOpen className="h-5 w-5" />
+        </button>
+      </div>
+    ) : (
+      <div className="h-16 flex items-center gap-3 px-4 border-b border-sidebar-border">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-primary flex-shrink-0">
+          <Headset className="h-4 w-4 text-sidebar-primary-foreground" />
         </div>
-      ) : (
-        <div className="h-16 flex items-center gap-3 px-4 border-b border-sidebar-border">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sidebar-primary flex-shrink-0">
-            <Headset className="h-4 w-4 text-sidebar-primary-foreground" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-white">Kinsen IT</p>
-            <p className="text-xs text-sidebar-foreground/60">Helpdesk</p>
-          </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-white">Kinsen IT</p>
+          <p className="text-xs text-sidebar-foreground/60">Helpdesk</p>
+        </div>
+        {showCollapseToggle && (
           <button
             onClick={toggleCollapsed}
             aria-label="Collapse sidebar"
@@ -302,158 +320,206 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
           >
             <PanelLeftClose className="h-4 w-4" />
           </button>
-        </div>
-      )}
+        )}
+      </div>
+    );
 
-      {/* Navigation — sidebar-scroll gives this its own thin/dark scrollbar
-          (globals.css) instead of the app-wide light one; py/space-y shrink
-          slightly on shorter viewports (maxh-800/maxh-700, tailwind.config.ts)
-          so the menu needs less scrolling on laptop-height screens. */}
-      <nav className="flex-1 min-h-0 overflow-y-auto py-4 px-2 space-y-1 maxh-800:py-3 maxh-700:py-2 maxh-700:space-y-0.5 sidebar-scroll">
-        {navItems.map((item) => {
-          if (!canAccess(item)) return null;
+  const renderNav = (isCollapsed: boolean) => (
+    // sidebar-scroll gives this its own thin/dark scrollbar (globals.css)
+    // instead of the app-wide light one; py/space-y shrink slightly on
+    // shorter viewports (maxh-800/maxh-700, tailwind.config.ts) so the menu
+    // needs less scrolling on laptop-height screens.
+    <nav className="flex-1 min-h-0 overflow-y-auto py-4 px-2 space-y-1 maxh-800:py-3 maxh-700:py-2 maxh-700:space-y-0.5 sidebar-scroll">
+      {navItems.map((item) => {
+        if (!canAccess(item)) return null;
 
-          const hasChildren = item.children && item.children.length > 0;
-          const isExpanded = expandedItems.includes(item.label);
-          const active = isActive(item.href);
+        const hasChildren = item.children && item.children.length > 0;
+        const isExpanded = expandedItems.includes(item.label);
+        const active = isActive(item.href);
 
-          // Collapsed mode: all items are direct icon links
-          if (collapsed) {
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                title={item.label}
-                className={cn(
-                  "flex items-center justify-center rounded-lg transition-colors",
-                  NAV_ICON_SIZE,
-                  active
-                    ? "bg-sidebar-primary text-sidebar-primary-foreground"
-                    : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                )}
-              >
-                <item.icon className="h-5 w-5" />
-              </Link>
-            );
-          }
-
-          if (hasChildren) {
-            const visibleChildren = item.children!.filter((c) => canAccess(c));
-            if (visibleChildren.length === 0) return null;
-            // Computed once per section, from ALL visible siblings at once —
-            // never per-child in isolation — so exactly one child (the most
-            // specific href match, or none) is active. See resolveActiveHref's
-            // own doc comment above.
-            const activeChildHref = resolveActiveHref(pathname, visibleChildren.map((c) => c.href));
-
-            return (
-              <div key={item.label}>
-                <button
-                  onClick={() => toggleExpand(item.label)}
-                  className={cn(
-                    "w-full flex items-center justify-between gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
-                    NAV_ITEM_SIZE,
-                    "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
-                    pathname.startsWith(item.href)
-                      ? "bg-sidebar-accent text-sidebar-accent-foreground"
-                      : "text-sidebar-foreground/80"
-                  )}
-                >
-                  <span className="flex items-center gap-3">
-                    <item.icon className="h-4 w-4 flex-shrink-0" />
-                    {item.label}
-                  </span>
-                  <ChevronDown
-                    className={cn(
-                      "h-3.5 w-3.5 transition-transform",
-                      isExpanded && "rotate-180"
-                    )}
-                  />
-                </button>
-                {isExpanded && (
-                  <div className="mt-1 ml-4 pl-3 border-l border-sidebar-border space-y-1 maxh-700:space-y-0.5">
-                    {visibleChildren.map((child) => (
-                      <Link
-                        key={child.href}
-                        href={child.href}
-                        className={cn(
-                          "flex items-center gap-2 px-3 rounded-lg text-sm transition-colors",
-                          NAV_CHILD_SIZE,
-                          child.href === activeChildHref
-                            ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium"
-                            : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-                        )}
-                      >
-                        {child.label}
-                      </Link>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          }
-
+        // Collapsed mode: all items are direct icon links
+        if (isCollapsed) {
           return (
             <Link
               key={item.href}
               href={item.href}
+              title={item.label}
               className={cn(
-                "flex items-center gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
-                NAV_ITEM_SIZE,
+                "flex items-center justify-center rounded-lg transition-colors",
+                NAV_ICON_SIZE,
                 active
                   ? "bg-sidebar-primary text-sidebar-primary-foreground"
                   : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
               )}
             >
-              <item.icon className="h-4 w-4 flex-shrink-0" />
-              {item.label}
+              <item.icon className="h-5 w-5" />
             </Link>
           );
-        })}
-      </nav>
+        }
 
-      {/* Footer */}
-      <div className="p-2 border-t border-sidebar-border space-y-1 maxh-700:space-y-0.5">
-        {collapsed ? (
-          <>
-            <Link
-              href="/settings"
-              title="Settings"
-              className={cn("flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
-            >
-              <Settings className="h-5 w-5" />
-            </Link>
-            <button
-              type="button"
-              onClick={toggleHelpGuide}
-              title="Help Guide"
-              aria-label="Help Guide"
-              className={cn("w-full flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
-            >
-              <BookOpen className="h-5 w-5" />
-            </button>
-          </>
-        ) : (
-          <>
-            <Link
-              href="/settings"
-              className={cn("flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
-            >
-              <Settings className="h-4 w-4" />
-              Settings
-            </Link>
-            <button
-              type="button"
-              onClick={toggleHelpGuide}
-              aria-label="Help Guide"
-              className={cn("w-full flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
-            >
-              <BookOpen className="h-4 w-4" />
-              Help Guide
-            </button>
-          </>
+        if (hasChildren) {
+          const visibleChildren = item.children!.filter((c) => canAccess(c));
+          if (visibleChildren.length === 0) return null;
+          // Computed once per section, from ALL visible siblings at once —
+          // never per-child in isolation — so exactly one child (the most
+          // specific href match, or none) is active. See resolveActiveHref's
+          // own doc comment above.
+          const activeChildHref = resolveActiveHref(pathname, visibleChildren.map((c) => c.href));
+
+          return (
+            <div key={item.label}>
+              <button
+                onClick={() => toggleExpand(item.label)}
+                className={cn(
+                  "w-full flex items-center justify-between gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
+                  NAV_ITEM_SIZE,
+                  "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
+                  pathname.startsWith(item.href)
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground"
+                    : "text-sidebar-foreground/80"
+                )}
+              >
+                <span className="flex items-center gap-3">
+                  <item.icon className="h-4 w-4 flex-shrink-0" />
+                  {item.label}
+                </span>
+                <ChevronDown
+                  className={cn(
+                    "h-3.5 w-3.5 transition-transform",
+                    isExpanded && "rotate-180"
+                  )}
+                />
+              </button>
+              {isExpanded && (
+                <div className="mt-1 ml-4 pl-3 border-l border-sidebar-border space-y-1 maxh-700:space-y-0.5">
+                  {visibleChildren.map((child) => (
+                    <Link
+                      key={child.href}
+                      href={child.href}
+                      className={cn(
+                        "flex items-center gap-2 px-3 rounded-lg text-sm transition-colors",
+                        NAV_CHILD_SIZE,
+                        child.href === activeChildHref
+                          ? "bg-sidebar-primary text-sidebar-primary-foreground font-medium"
+                          : "text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+                      )}
+                    >
+                      {child.label}
+                    </Link>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <Link
+            key={item.href}
+            href={item.href}
+            className={cn(
+              "flex items-center gap-3 px-3 rounded-lg text-sm font-medium transition-colors",
+              NAV_ITEM_SIZE,
+              active
+                ? "bg-sidebar-primary text-sidebar-primary-foreground"
+                : "text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+            )}
+          >
+            <item.icon className="h-4 w-4 flex-shrink-0" />
+            {item.label}
+          </Link>
+        );
+      })}
+    </nav>
+  );
+
+  const renderFooter = (isCollapsed: boolean) => (
+    <div className="p-2 border-t border-sidebar-border space-y-1 maxh-700:space-y-0.5">
+      {isCollapsed ? (
+        <>
+          <Link
+            href="/settings"
+            title="Settings"
+            className={cn("flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
+          >
+            <Settings className="h-5 w-5" />
+          </Link>
+          <button
+            type="button"
+            onClick={toggleHelpGuide}
+            title="Help Guide"
+            aria-label="Help Guide"
+            className={cn("w-full flex items-center justify-center rounded-lg text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ICON_SIZE)}
+          >
+            <BookOpen className="h-5 w-5" />
+          </button>
+        </>
+      ) : (
+        <>
+          <Link
+            href="/settings"
+            className={cn("flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
+          >
+            <Settings className="h-4 w-4" />
+            Settings
+          </Link>
+          <button
+            type="button"
+            onClick={toggleHelpGuide}
+            aria-label="Help Guide"
+            className={cn("w-full flex items-center gap-3 px-3 rounded-lg text-sm text-sidebar-foreground/70 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors", NAV_ITEM_SIZE)}
+          >
+            <BookOpen className="h-4 w-4" />
+            Help Guide
+          </button>
+        </>
+      )}
+    </div>
+  );
+
+  return (
+    <>
+      {/* Desktop — unchanged behavior/styling (expanded/collapsed state +
+          persistence, the collapse toggle button, icon-only mode): just
+          hidden below `md` now, where the mobile drawer below takes over. */}
+      <aside
+        className={cn(
+          "hidden md:flex h-screen flex-col bg-sidebar text-sidebar-foreground border-r border-sidebar-border transition-all duration-200 flex-shrink-0",
+          collapsed ? "w-16" : "w-64"
         )}
-      </div>
-    </aside>
+      >
+        {renderHeader(collapsed, true)}
+        {renderNav(collapsed)}
+        {renderFooter(collapsed)}
+      </aside>
+
+      {/* Mobile — off-canvas drawer, hidden entirely at `md` and up (the
+          desktop <aside> above takes over there). Always renders the full
+          (non-collapsed) nav — "collapsed" is a desktop space-saving
+          concept that doesn't apply to an on-demand overlay. Everything
+          else (focus trap, Escape, backdrop click, scroll lock, the X
+          close button) comes from Radix's Dialog primitive via
+          components/ui/sheet.tsx — not reimplemented here. Closing is
+          driven by MobileSidebarProvider's shared state (opened from the
+          Topbar's hamburger button, a sibling component), and also closes
+          automatically on navigation (see the pathname effect above). */}
+      <Sheet open={mobileOpen} onOpenChange={(open) => !open && closeMobile()}>
+        <SheetContent
+          title="Navigation menu"
+          className="md:hidden"
+          onCloseAutoFocus={(e) => {
+            // Restore focus to the REAL hamburger button in the Topbar —
+            // see MobileSidebarProvider's triggerRef doc comment for why
+            // Radix can't do this automatically on its own here.
+            e.preventDefault();
+            mobileTriggerRef.current?.focus();
+          }}
+        >
+          {renderHeader(false, false)}
+          {renderNav(false)}
+          {renderFooter(false)}
+        </SheetContent>
+      </Sheet>
+    </>
   );
 }

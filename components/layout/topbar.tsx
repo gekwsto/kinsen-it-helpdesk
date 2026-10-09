@@ -1,7 +1,8 @@
 "use client";
 
 import { signOut } from "next-auth/react";
-import { LogOut, User, ChevronDown } from "lucide-react";
+import { LogOut, User, ChevronDown, Menu } from "lucide-react";
+import { useMobileSidebar } from "@/components/layout/mobile-sidebar-provider";
 import { getInitials } from "@/lib/utils";
 import { Role } from "@prisma/client";
 import { getSessionSyncChannel, broadcastLogout } from "@/lib/client-session-broadcast";
@@ -48,9 +49,26 @@ interface TopbarProps {
 }
 
 export function Topbar({ user }: TopbarProps) {
+  const { toggle: toggleMobileSidebar, triggerRef } = useMobileSidebar();
+
   return (
-    <header className="h-16 border-b bg-white flex items-center justify-between px-6 sticky top-0 z-30">
-      <div className="flex items-center gap-2">
+    <header className="h-16 border-b bg-white flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30">
+      <div className="flex items-center gap-2 min-w-0">
+        {/* Hamburger — mobile/tablet only (hidden at `md` and up, where the
+            persistent desktop Sidebar is visible instead). Not a
+            SheetTrigger: the drawer it opens lives in a sibling component
+            (components/layout/sidebar.tsx), not nested under this button,
+            so the two communicate through MobileSidebarProvider's shared
+            state instead of Radix's own Trigger/Content pairing. */}
+        <button
+          ref={triggerRef}
+          type="button"
+          onClick={toggleMobileSidebar}
+          aria-label="Open navigation menu"
+          className="md:hidden -ml-1 rounded-lg p-2 text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors flex-shrink-0"
+        >
+          <Menu className="h-5 w-5" />
+        </button>
         <WorkspaceSelector />
       </div>
 

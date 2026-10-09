@@ -7,6 +7,7 @@ import { ActiveWorkspaceProvider } from "@/components/workspace/active-workspace
 import { AppRoutePrefetcher } from "@/components/navigation/app-route-prefetcher";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
+import { MobileSidebarProvider } from "@/components/layout/mobile-sidebar-provider";
 import { HelpGuideProvider } from "@/components/help/help-guide-provider";
 import { HelpGuideWidget } from "@/components/help/help-guide-widget";
 import { SessionExpiryController } from "@/components/auth/session-expiry-controller";
@@ -45,21 +46,30 @@ export default async function MainLayout({
       canViewAllDepartments={activeWorkspace.canViewAllDepartments}
       initialIsAllSelected={activeWorkspace.isAllSelected}
     >
-      <HelpGuideProvider>
-        <div className="flex h-screen overflow-hidden bg-background">
-          <Sidebar userRole={session.user.role} navFlags={navFlags} />
-          <div className="flex-1 flex flex-col overflow-hidden">
-            <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
-            {/* position:relative makes main the containing block for absolutely-positioned
-                descendants (e.g. Radix Select's hidden native <select> for form bubbling).
-                Without it, such elements anchor to <body> using their current viewport-relative
-                top, which can land past main's own clipped bottom edge on a long scrolled page
-                and inflate document.scrollHeight — a second, phantom window-level scrollbar. */}
-            <main className="relative flex-1 min-h-0 overflow-y-auto p-6">{children}</main>
+      {/* MobileSidebarProvider: shared open/close state for the mobile
+          off-canvas drawer — the Topbar's hamburger button and the
+          Sidebar's drawer are siblings below, not parent/child, so both
+          need this common ancestor to coordinate through (same reason
+          HelpGuideProvider wraps this same subtree). */}
+      <MobileSidebarProvider>
+        <HelpGuideProvider>
+          <div className="flex h-screen overflow-hidden bg-background">
+            <Sidebar userRole={session.user.role} navFlags={navFlags} />
+            <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+              <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
+              {/* position:relative makes main the containing block for absolutely-positioned
+                  descendants (e.g. Radix Select's hidden native <select> for form bubbling).
+                  Without it, such elements anchor to <body> using their current viewport-relative
+                  top, which can land past main's own clipped bottom edge on a long scrolled page
+                  and inflate document.scrollHeight — a second, phantom window-level scrollbar.
+                  Padding shrinks slightly below `sm` (mobile) so page content gets more of the
+                  narrow viewport's width instead of losing 48px total to desktop-sized gutters. */}
+              <main className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6">{children}</main>
+            </div>
           </div>
-        </div>
-        <HelpGuideWidget />
-      </HelpGuideProvider>
+          <HelpGuideWidget />
+        </HelpGuideProvider>
+      </MobileSidebarProvider>
       {/* Central, single mount point for absolute-8h session enforcement —
           never one per page. See components/auth/session-expiry-controller.tsx. */}
       <SessionExpiryController />

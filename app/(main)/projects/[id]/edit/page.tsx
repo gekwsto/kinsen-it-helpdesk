@@ -223,7 +223,12 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   }
 
   return (
-    <div className="space-y-6 max-w-2xl">
+    // Wider than a plain form (max-w-4xl) — same convention already used by
+    // the request-origin "New Project" setup flow (app/(main)/projects/new/page.tsx)
+    // for the same reason: this form carries enough fields (including the
+    // conditional Project Request Setup block) that max-w-2xl left a large,
+    // visually dead blank area on anything wider than a small laptop screen.
+    <div className="space-y-6 max-w-4xl">
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
         <Link href="/projects" className="hover:text-foreground">Projects</Link>
         <ChevronRight className="h-4 w-4" />
@@ -262,26 +267,34 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               />
             </div>
 
-            {subDepartments.length > 0 && (
-              <div className="space-y-2">
-                <Label>Sub-Department</Label>
-                <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="None" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">None</SelectItem>
-                    {subDepartments.map((sd) => (
-                      <SelectItem key={sd.id} value={sd.id}>
-                        {sd.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+            {/* Sub-Department (when this department has any configured)
+                joins Status/Priority in one responsive row instead of its
+                own standalone row — three short single-value selects group
+                naturally. Column count adapts to whether Sub-Department is
+                actually rendered, so the row never ends with a visually
+                empty trailing cell on wide screens. Collapses to a single
+                column below `sm` (mobile), 2-up from `sm`, and the full
+                adaptive count only from `lg` upward. */}
+            <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 ${subDepartments.length > 0 ? "lg:grid-cols-3" : ""}`}>
+              {subDepartments.length > 0 && (
+                <div className="space-y-2">
+                  <Label>Sub-Department</Label>
+                  <Select value={subDepartmentId || "__none__"} onValueChange={(v) => setSubDepartmentId(v === "__none__" ? "" : v)}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="None" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">None</SelectItem>
+                      {subDepartments.map((sd) => (
+                        <SelectItem key={sd.id} value={sd.id}>
+                          {sd.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
 
-            <div className="grid grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label>Status</Label>
                 <Select value={status} onValueChange={(v) => setStatus(v as ProjectStatus)}>
@@ -313,7 +326,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="startDate">Start Date</Label>
                 <Input
@@ -344,7 +357,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                   <p className="text-xs text-muted-foreground mt-0.5">Metadata from this Project's originating Project Request.</p>
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="expectedStartDate">Expected Start Date</Label>
                     <Input id="expectedStartDate" type="date" value={expectedStartDate} onChange={(e) => setExpectedStartDate(e.target.value)} />
@@ -355,45 +368,49 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                   </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="expectedTotalInitialDays">Expected Total Initial Days</Label>
-                  {/* readOnly (never `disabled`) — the creation-time baseline.
-                      Editing Expected Start/Finish above never recomputes or
-                      overwrites it; there is no code path here or on the
-                      server that does. Same visual treatment as the
-                      create-flow's own readonly field in project-form.tsx. */}
-                  <Input
-                    id="expectedTotalInitialDays"
-                    type="text"
-                    inputMode="none"
-                    readOnly
-                    aria-readonly="true"
-                    tabIndex={-1}
-                    value={expectedTotalInitialDays !== null ? `${expectedTotalInitialDays} day${expectedTotalInitialDays === 1 ? "" : "s"}` : ""}
-                    placeholder="Not set"
-                    className="cursor-default bg-muted/40"
-                  />
-                  <p className="text-xs text-muted-foreground">Baseline set at Project creation — not editable.</p>
+                {/* Expense Type (editable) paired with the readonly baseline
+                    day count — both single, short fields, grouped the same
+                    way Expected Start/Finish are above. */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label>Expense Type</Label>
+                    <Select value={expenseTypeId || "__none__"} onValueChange={(v) => setExpenseTypeId(v === "__none__" ? "" : v)}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="None" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">None</SelectItem>
+                        {expenseTypes.map((t) => (
+                          <SelectItem key={t.id} value={t.id}>
+                            {t.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="expectedTotalInitialDays">Expected Total Initial Days</Label>
+                    {/* readOnly (never `disabled`) — the creation-time baseline.
+                        Editing Expected Start/Finish above never recomputes or
+                        overwrites it; there is no code path here or on the
+                        server that does. Same visual treatment as the
+                        create-flow's own readonly field in project-form.tsx. */}
+                    <Input
+                      id="expectedTotalInitialDays"
+                      type="text"
+                      inputMode="none"
+                      readOnly
+                      aria-readonly="true"
+                      tabIndex={-1}
+                      value={expectedTotalInitialDays !== null ? `${expectedTotalInitialDays} day${expectedTotalInitialDays === 1 ? "" : "s"}` : ""}
+                      placeholder="Not set"
+                      className="cursor-default bg-muted/40"
+                    />
+                    <p className="text-xs text-muted-foreground">Baseline set at Project creation — not editable.</p>
+                  </div>
                 </div>
 
-                <div className="space-y-2">
-                  <Label>Expense Type</Label>
-                  <Select value={expenseTypeId || "__none__"} onValueChange={(v) => setExpenseTypeId(v === "__none__" ? "" : v)}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="None" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {expenseTypes.map((t) => (
-                        <SelectItem key={t.id} value={t.id}>
-                          {t.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="estimatedCost">Estimated Cost (EUR)</Label>
                     <div className="relative">
