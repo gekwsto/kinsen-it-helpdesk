@@ -1,8 +1,10 @@
 import Link from "next/link";
+import { FolderKanban } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials } from "@/lib/utils";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
+import { ChartEmptyState } from "@/components/dashboard/chart-empty-state";
 
 export interface DashboardProject {
   id: string;
@@ -27,7 +29,7 @@ interface RecentProjectsProps {
  */
 export function RecentProjects({ projects }: RecentProjectsProps) {
   return (
-    <Card>
+    <Card className="rounded-xl">
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Recent Projects</CardTitle>
         <Link href="/projects" className="text-sm text-primary hover:underline">
@@ -36,16 +38,16 @@ export function RecentProjects({ projects }: RecentProjectsProps) {
       </CardHeader>
       <CardContent className="p-0">
         {projects.length === 0 ? (
-          <p className="text-center text-muted-foreground py-8 text-sm">
-            No projects yet.
-          </p>
+          <div className="py-8">
+            <ChartEmptyState icon={FolderKanban} label="No projects yet." className="" />
+          </div>
         ) : (
           <div className="divide-y">
             {projects.map((project) => (
               <Link
                 key={project.id}
                 href={`/projects/${project.id}`}
-                className="flex items-start gap-3 px-6 py-3 hover:bg-muted/50 transition-colors"
+                className="flex items-start gap-3 px-6 py-3 border-l-2 border-transparent hover:border-primary hover:bg-muted/50 transition-colors"
               >
                 <Avatar className="h-8 w-8 mt-0.5 flex-shrink-0">
                   <AvatarImage src={project.ownerImage ?? undefined} />

@@ -11,6 +11,7 @@ import {
   Cell,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChartEmptyState } from "@/components/dashboard/chart-empty-state";
 
 export interface CategoryDataPoint {
   name: string;
@@ -27,15 +28,13 @@ export function TicketsByCategoryChart({ data }: Props) {
   const chartHeight = Math.max(160, nonEmpty.length * 40 + 32);
 
   return (
-    <Card className="flex flex-col">
+    <Card className="flex flex-col rounded-xl">
       <CardHeader className="pb-2">
         <CardTitle className="text-base">Tickets by Category</CardTitle>
       </CardHeader>
       <CardContent className="flex-1">
         {nonEmpty.length === 0 ? (
-          <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
-            No categorised tickets
-          </div>
+          <ChartEmptyState label="No categorised tickets" />
         ) : (
           <div style={{ height: chartHeight }}>
             <ResponsiveContainer width="100%" height="100%">

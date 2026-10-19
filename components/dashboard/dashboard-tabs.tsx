@@ -35,12 +35,16 @@ export function DashboardTabs({ active }: DashboardTabsProps) {
   };
 
   return (
-    <div className="inline-flex items-center rounded-md border p-0.5" role="group" aria-label="Dashboard">
+    <div className="inline-flex items-center rounded-lg bg-muted p-1" role="group" aria-label="Dashboard">
       <Button
         type="button"
         size="sm"
-        variant={active === "tickets" ? "secondary" : "ghost"}
-        className="h-8 px-3 gap-1.5"
+        variant="ghost"
+        className={
+          active === "tickets"
+            ? "h-8 px-3 gap-1.5 bg-background shadow-sm hover:bg-background"
+            : "h-8 px-3 gap-1.5 text-muted-foreground hover:text-foreground hover:bg-transparent"
+        }
         onClick={() => setTab("tickets")}
         aria-pressed={active === "tickets"}
       >
@@ -50,8 +54,12 @@ export function DashboardTabs({ active }: DashboardTabsProps) {
       <Button
         type="button"
         size="sm"
-        variant={active === "projects" ? "secondary" : "ghost"}
-        className="h-8 px-3 gap-1.5"
+        variant="ghost"
+        className={
+          active === "projects"
+            ? "h-8 px-3 gap-1.5 bg-background shadow-sm hover:bg-background"
+            : "h-8 px-3 gap-1.5 text-muted-foreground hover:text-foreground hover:bg-transparent"
+        }
         onClick={() => setTab("projects")}
         aria-pressed={active === "projects"}
       >

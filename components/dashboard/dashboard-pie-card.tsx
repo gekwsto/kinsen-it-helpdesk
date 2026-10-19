@@ -1,7 +1,9 @@
 "use client";
 
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
+import { PieChart as PieChartIcon } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChartEmptyState } from "@/components/dashboard/chart-empty-state";
 
 export interface PieDataPoint {
   name: string;
@@ -28,15 +30,13 @@ export function DashboardPieCard({ title, data, emptyLabel }: Props) {
   const total = data.reduce((s, d) => s + d.value, 0);
 
   return (
-    <Card className="flex flex-col">
+    <Card className="flex flex-col rounded-xl">
       <CardHeader className="pb-2">
         <CardTitle className="text-base">{title}</CardTitle>
       </CardHeader>
       <CardContent className="flex-1">
         {total === 0 ? (
-          <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
-            {emptyLabel}
-          </div>
+          <ChartEmptyState icon={PieChartIcon} label={emptyLabel} />
         ) : (
           <div className="flex flex-col gap-4">
             <div className="h-48">

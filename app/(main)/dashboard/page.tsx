@@ -96,10 +96,10 @@ export default async function DashboardPage({
     }
 
     return (
-      <div className="space-y-6">
+      <div className="space-y-7">
         <div className="flex items-center justify-between flex-wrap gap-3">
           <div>
-            <h1 className="text-2xl font-bold">Dashboard</h1>
+            <h1 className="text-3xl font-bold tracking-tight">Dashboard</h1>
             <p className="text-muted-foreground mt-1">Projects overview</p>
           </div>
           <DashboardTabs active={tab} />
@@ -115,42 +115,51 @@ export default async function DashboardPage({
           overdueActivities={data.overdueActivities}
         />
 
-        <div className="grid gap-6 md:grid-cols-2">
-          <DashboardPieCard title="Projects by Status" data={data.byStatus} emptyLabel="No projects yet" />
-          <DashboardPieCard title="Projects by Priority" data={data.byPriority} emptyLabel="No projects yet" />
+        <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-5">
+          <div className="lg:col-span-3">
+            <DashboardPieCard title="Projects by Status" data={data.byStatus} emptyLabel="No projects yet" />
+          </div>
+          <div className="lg:col-span-2">
+            <DashboardPieCard title="Projects by Priority" data={data.byPriority} emptyLabel="No projects yet" />
+          </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-3">
-          <div className="lg:col-span-2">
-            <RecentProjects projects={data.recentProjects} />
+        <div>
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+            Recent
+          </h2>
+          <div className="grid gap-5 lg:grid-cols-3">
+            <div className="lg:col-span-2">
+              <RecentProjects projects={data.recentProjects} />
+            </div>
+            <Card className="rounded-xl">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Due Soon</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {data.dueSoonProjects === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No active projects due within the next 7 days.
+                  </p>
+                ) : (
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-50 dark:bg-amber-900/20 flex-shrink-0">
+                      <FolderKanban className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+                    </div>
+                    <div>
+                      <p className="text-2xl font-bold tabular-nums">{data.dueSoonProjects}</p>
+                      <p className="text-xs text-muted-foreground">
+                        project{data.dueSoonProjects !== 1 ? "s" : ""} due within 7 days
+                      </p>
+                    </div>
+                  </div>
+                )}
+                <Button asChild variant="outline" size="sm" className="mt-4 w-full">
+                  <Link href="/projects">View all projects</Link>
+                </Button>
+              </CardContent>
+            </Card>
           </div>
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Due Soon</CardTitle>
-            </CardHeader>
-            <CardContent>
-              {data.dueSoonProjects === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No active projects due within the next 7 days.
-                </p>
-              ) : (
-                <div className="flex items-center gap-3">
-                  <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-50 flex-shrink-0">
-                    <FolderKanban className="h-5 w-5 text-amber-600" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold">{data.dueSoonProjects}</p>
-                    <p className="text-xs text-muted-foreground">
-                      project{data.dueSoonProjects !== 1 ? "s" : ""} due within 7 days
-                    </p>
-                  </div>
-                </div>
-              )}
-              <Button asChild variant="outline" size="sm" className="mt-4 w-full">
-                <Link href="/projects">View all projects</Link>
-              </Button>
-            </CardContent>
-          </Card>
         </div>
 
         <DashboardBarCard title="Projects by Owner" data={data.byOwner} emptyLabel="No projects yet" tooltipLabel="Projects" />
@@ -291,11 +300,11 @@ export default async function DashboardPage({
   }));
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-7">
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold">
+          <h1 className="text-3xl font-bold tracking-tight">
             {isPersonalView ? "My Dashboard" : "Dashboard"}
           </h1>
           <p className="text-muted-foreground mt-1">
@@ -316,54 +325,63 @@ export default async function DashboardPage({
         emailCreated={emailCount}
       />
 
-      {/* Row 2 — Status + Priority pie/donut */}
-      <div className="grid gap-6 md:grid-cols-2">
-        <TicketsByStatusChart data={statusChartData} />
-        <TicketsByPriorityChart data={priorityChartData} />
+      {/* Row 2 — Status (primary breakdown, given more width) + Priority */}
+      <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-5">
+        <div className="lg:col-span-3">
+          <TicketsByStatusChart data={statusChartData} />
+        </div>
+        <div className="lg:col-span-2">
+          <TicketsByPriorityChart data={priorityChartData} />
+        </div>
       </div>
 
       {/* Row 3 — Category bar + Timeline line */}
-      <div className="grid gap-6 md:grid-cols-2">
+      <div className="grid gap-5 md:grid-cols-2">
         <TicketsByCategoryChart data={categoryChartData} />
         <TicketsOverTimeChart data={timelineData} days={TIMELINE_DAYS} />
       </div>
 
       {/* Row 4 — Recent tickets + Recent activity */}
-      <div className="grid gap-6 lg:grid-cols-3">
-        <div className="lg:col-span-2">
-          <RecentTickets tickets={recentTickets as any} />
-        </div>
+      <div>
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3">
+          Recent
+        </h2>
+        <div className="grid gap-5 lg:grid-cols-3">
+          <div className="lg:col-span-2">
+            <RecentTickets tickets={recentTickets as any} />
+          </div>
 
-        {recentActivity.length > 0 && (
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base">Recent Activity</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-3">
-                {recentActivity.map((a) => (
-                  <div key={a.id} className="flex items-start gap-3 text-sm">
-                    <div className="h-1.5 w-1.5 rounded-full bg-primary mt-2 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <span className="font-medium">{a.changedBy?.name ?? "System"}</span>{" "}
-                      <span className="text-muted-foreground">{a.description}</span>{" "}
-                      on{" "}
-                      <Link
-                        href={`/tickets/${a.ticket.id}`}
-                        className="font-medium text-primary hover:underline"
-                      >
-                        {formatTicketNumber(a.ticket.ticketNumber)}
-                      </Link>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {formatRelative(a.createdAt)}
-                      </p>
+          {recentActivity.length > 0 && (
+            <Card className="rounded-xl">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Recent Activity</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-3">
+                  {recentActivity.map((a) => (
+                    <div key={a.id} className="flex items-start gap-3 text-sm">
+                      <div className="h-1.5 w-1.5 rounded-full bg-primary mt-2 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <span className="font-medium">{a.changedBy?.name ?? "System"}</span>{" "}
+                        <span className="text-muted-foreground">{a.description}</span>{" "}
+                        on{" "}
+                        <Link
+                          href={`/tickets/${a.ticket.id}`}
+                          className="font-medium text-primary hover:underline"
+                        >
+                          {formatTicketNumber(a.ticket.ticketNumber)}
+                        </Link>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {formatRelative(a.createdAt)}
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-        )}
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+        </div>
       </div>
     </div>
   );

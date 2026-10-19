@@ -9,7 +9,9 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
+import { TrendingUp } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChartEmptyState } from "@/components/dashboard/chart-empty-state";
 
 export interface TimelinePoint {
   date: string;   // ISO date string "YYYY-MM-DD"
@@ -35,15 +37,13 @@ export function TicketsOverTimeChart({ data, days }: Props) {
     .map((d) => d.date);
 
   return (
-    <Card className="flex flex-col">
+    <Card className="flex flex-col rounded-xl">
       <CardHeader className="pb-2">
         <CardTitle className="text-base">Tickets Created — Last {days} Days</CardTitle>
       </CardHeader>
       <CardContent className="flex-1">
         {!hasAny ? (
-          <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
-            No tickets in this period
-          </div>
+          <ChartEmptyState icon={TrendingUp} label="No tickets in this period" />
         ) : (
           <div className="h-52">
             <ResponsiveContainer width="100%" height="100%">
