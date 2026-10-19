@@ -281,7 +281,7 @@ export function SubDepartmentMembersManagement({
                     className="pl-9"
                   />
                   {(searching || userResults.length > 0) && (
-                    <div className="mt-1.5 rounded-lg border bg-white shadow-sm max-h-56 overflow-y-auto">
+                    <div className="mt-1.5 rounded-lg border bg-popover shadow-sm max-h-56 overflow-y-auto">
                       {searching ? (
                         <div className="p-3 text-center">
                           <Loader2 className="h-4 w-4 animate-spin mx-auto text-muted-foreground" />

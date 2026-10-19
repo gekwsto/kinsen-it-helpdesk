@@ -406,7 +406,7 @@ export function NotificationDropdown() {
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold">Notifications</span>
             {unreadCount > 0 && (
-              <span className="text-xs bg-red-100 text-red-600 px-1.5 py-0.5 rounded-full font-medium leading-none">
+              <span className="text-xs bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 px-1.5 py-0.5 rounded-full font-medium leading-none">
                 {unreadCount}
               </span>
             )}
@@ -498,7 +498,7 @@ export function NotificationDropdown() {
               const row = (
                 <div
                   className={`group flex items-start gap-3 px-4 py-3 border-b last:border-0 hover:bg-muted/50 cursor-pointer transition-colors ${
-                    !n.isRead ? "bg-blue-50/60" : ""
+                    !n.isRead ? "bg-blue-50 dark:bg-blue-900/20/60" : ""
                   }`}
                   onClick={() => markRead(n)}
                 >

@@ -34,7 +34,7 @@ export function StatusBadge({ name, color }: { name: string; color: string }) {
 export function SourceBadge({ source }: { source: string }) {
   if (source === "EMAIL") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 text-[10px] font-medium">
+      <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 border border-blue-200 dark:border-blue-800 px-2 py-0.5 text-[10px] font-medium">
         <Mail className="h-3 w-3" />
         Email
       </span>
@@ -42,14 +42,14 @@ export function SourceBadge({ source }: { source: string }) {
   }
   if (source === "API") {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 text-violet-700 border border-violet-200 px-2 py-0.5 text-[10px] font-medium">
+      <span className="inline-flex items-center gap-1 rounded-full bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-400 border border-violet-200 dark:border-violet-800 px-2 py-0.5 text-[10px] font-medium">
         <Plug className="h-3 w-3" />
         Integration
       </span>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-slate-50 text-slate-600 border border-slate-200 px-2 py-0.5 text-[10px] font-medium">
+    <span className="inline-flex items-center gap-1 rounded-full bg-muted text-muted-foreground border border-border px-2 py-0.5 text-[10px] font-medium">
       <Globe className="h-3 w-3" />
       Portal
     </span>

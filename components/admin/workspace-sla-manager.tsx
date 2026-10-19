@@ -342,7 +342,7 @@ export function WorkspaceSlaManager({
       )}
 
       {!showEnableToggle && !isEnabled && (
-        <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+        <p className="rounded-md border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
           SLA enforcement is currently disabled system-wide. Only a System Admin can enable it (switch workspace to
           &quot;All Workspaces&quot; if you hold that role). Hours below still save, but aren&apos;t enforced until then.
         </p>
@@ -375,17 +375,17 @@ export function WorkspaceSlaManager({
                   <div className="flex items-center gap-2 min-w-0">
                     <span className="inline-block h-2.5 w-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: p.color }} />
                     <span className="text-sm font-medium truncate">{p.name}</span>
-                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-blue-50 text-blue-700 border-blue-200 flex-shrink-0">
+                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800 flex-shrink-0">
                       {p.department?.name ?? "Department"}
                     </span>
                     {!p.isActive && (
-                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-gray-100 text-gray-600 border-gray-200 flex-shrink-0">
+                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400 border-gray-200 dark:border-gray-700 flex-shrink-0">
                         Disabled
                       </span>
                     )}
                   </div>
                   {p.firstResponseHours == null ? (
-                    <span className="text-xs font-medium text-amber-700">SLA not configured</span>
+                    <span className="text-xs font-medium text-amber-700 dark:text-amber-400">SLA not configured</span>
                   ) : (
                     <div className="flex items-center gap-1.5">
                       <Input
@@ -400,7 +400,7 @@ export function WorkspaceSlaManager({
                     </div>
                   )}
                   {p.resolutionHours == null ? (
-                    <span className="text-xs font-medium text-amber-700">SLA not configured</span>
+                    <span className="text-xs font-medium text-amber-700 dark:text-amber-400">SLA not configured</span>
                   ) : (
                     <div className="flex items-center gap-1.5">
                       <Input

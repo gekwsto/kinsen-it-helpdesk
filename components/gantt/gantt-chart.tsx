@@ -719,7 +719,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
               </span>
             )}
             {item.overdue && (
-              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700">
+              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">
                 <AlertTriangle className="h-2.5 w-2.5" />
                 Overdue
               </span>
@@ -741,7 +741,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             </div>
           )}
           {item.progress === null && (
-            <p className="text-[11px] font-medium text-amber-700">Configuration required — no progress percentage configured for this status.</p>
+            <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">Configuration required — no progress percentage configured for this status.</p>
           )}
           {personName && (
             <div className="flex items-center gap-1.5 text-xs">
@@ -819,7 +819,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
               {displayLabel}
             </span>
             {item.overdue && (
-              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 text-red-700">
+              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">
                 <AlertTriangle className="h-2.5 w-2.5" />
                 Overdue
               </span>
@@ -993,7 +993,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                   {group.title}
                                 </Link>
                                 {group.overdue && (
-                                  <AlertTriangle className="h-3 w-3 text-red-600 flex-shrink-0" aria-label="Overdue" />
+                                  <AlertTriangle className="h-3 w-3 text-red-600 dark:text-red-400 flex-shrink-0" aria-label="Overdue" />
                                 )}
                                 {group.progress > 0 && (
                                   <span className="text-[10px] text-muted-foreground flex-shrink-0 ml-auto">{group.progress}%</span>
@@ -1038,7 +1038,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                     {child.title}
                                   </Link>
                                   {child.overdue && (
-                                    <AlertTriangle className="h-3 w-3 text-red-600 flex-shrink-0" aria-label="Overdue" />
+                                    <AlertTriangle className="h-3 w-3 text-red-600 dark:text-red-400 flex-shrink-0" aria-label="Overdue" />
                                   )}
                                   {child.type === "milestone" && (
                                     <span className="text-[9px] px-1 py-0.5 rounded font-medium flex-shrink-0 ml-auto bg-violet-50 text-violet-700 border border-violet-200">

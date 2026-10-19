@@ -22,8 +22,8 @@ const STATUS_EXTRA_COLUMNS = [
     type: "badges" as const,
     header: "Type",
     badges: [
-      { field: "isDefault", label: "Default", className: "bg-blue-100 text-blue-700" },
-      { field: "isClosed", label: "Closed", className: "bg-gray-100 text-gray-700" },
+      { field: "isDefault", label: "Default", className: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400" },
+      { field: "isClosed", label: "Closed", className: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300" },
     ],
   },
   { type: "field" as const, header: "Tickets", field: "_count.tickets" },

@@ -10,6 +10,7 @@ import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { KeyRound } from "lucide-react";
 import { MentionReminderSettingsCard } from "@/components/admin/mention-reminder-settings-card";
+import { ThemeSettingsCard } from "@/components/theme/theme-settings-card";
 import { getMentionReminderDelayMinutes } from "@/lib/services/mention-reminder-service";
 import { describeMentionReminderDelay } from "@/lib/mention-reminders/config";
 
@@ -22,11 +23,11 @@ const ROLE_LABELS: Record<Role, string> = {
 };
 
 const ROLE_COLORS: Record<Role, string> = {
-  ADMIN: "bg-red-100 text-red-700",
-  IT_AGENT: "bg-blue-100 text-blue-700",
-  DEPARTMENT_MANAGER: "bg-purple-100 text-purple-700",
-  DIRECTOR: "bg-indigo-100 text-indigo-700",
-  USER: "bg-gray-100 text-gray-700",
+  ADMIN: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  IT_AGENT: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  DEPARTMENT_MANAGER: "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
+  DIRECTOR: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-400",
+  USER: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
 };
 
 export default async function SettingsPage() {
@@ -121,6 +122,8 @@ export default async function SettingsPage() {
           </div>
         </CardContent>
       </Card>
+
+      <ThemeSettingsCard />
 
       {/* Account Info */}
       <Card>

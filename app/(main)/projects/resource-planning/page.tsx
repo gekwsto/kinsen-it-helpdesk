@@ -29,10 +29,10 @@ interface SearchParams {
 /** v1, count-based (no hours/estimate field exists on ProjectActivity — see the architecture plan). Thresholds are approximate and labeled as such in the UI, never shown as fake precision. */
 function utilizationFor(count: number): { count: number; label: string; className: string } {
   if (count === 0) return { count, label: "Idle", className: "bg-muted text-muted-foreground" };
-  if (count <= 2) return { count, label: "Low", className: "bg-emerald-100 text-emerald-700" };
-  if (count <= 5) return { count, label: "Normal", className: "bg-blue-100 text-blue-700" };
-  if (count <= 8) return { count, label: "High", className: "bg-amber-100 text-amber-700" };
-  return { count, label: "Overloaded", className: "bg-red-100 text-red-700" };
+  if (count <= 2) return { count, label: "Low", className: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400" };
+  if (count <= 5) return { count, label: "Normal", className: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400" };
+  if (count <= 8) return { count, label: "High", className: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400" };
+  return { count, label: "Overloaded", className: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400" };
 }
 
 export default async function ResourcePlanningPage({

@@ -406,8 +406,8 @@ export default function RolesAdminPage() {
                         selectedRole?.id === role.id
                           ? "bg-primary-foreground/20 text-primary-foreground"
                           : role.isBuiltIn
-                          ? "bg-slate-100 text-slate-600"
-                          : "bg-teal-100 text-teal-700"
+                          ? "bg-slate-100 dark:bg-gray-800 text-slate-600 dark:text-gray-400"
+                          : "bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400"
                       )}
                     >
                       {role.isBuiltIn ? "Built-in" : "Custom"}
@@ -418,7 +418,7 @@ export default function RolesAdminPage() {
                           "shrink-0 text-[10px] font-medium px-1.5 py-0.5 rounded-full",
                           selectedRole?.id === role.id
                             ? "bg-primary-foreground/20 text-primary-foreground"
-                            : "bg-amber-100 text-amber-700"
+                            : "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400"
                         )}
                       >
                         Disabled
@@ -447,8 +447,8 @@ export default function RolesAdminPage() {
                       onClick={(e) => { e.stopPropagation(); setDisableTarget(role); setDisableOpen(true); }}
                       title="Disable role — blocked if it would remove the last path to admin access"
                       className={cn(
-                        "p-1 rounded transition-colors hover:bg-amber-100 text-amber-600",
-                        selectedRole?.id === role.id && "text-primary-foreground hover:text-amber-600"
+                        "p-1 rounded transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/30 text-amber-600 dark:text-amber-400",
+                        selectedRole?.id === role.id && "text-primary-foreground hover:text-amber-600 dark:hover:text-amber-400"
                       )}
                     >
                       <Ban className="h-3.5 w-3.5" />
@@ -459,8 +459,8 @@ export default function RolesAdminPage() {
                       disabled={disabling}
                       title="Enable role"
                       className={cn(
-                        "p-1 rounded transition-colors hover:bg-emerald-100 text-emerald-600",
-                        selectedRole?.id === role.id && "text-primary-foreground hover:text-emerald-600"
+                        "p-1 rounded transition-colors hover:bg-emerald-100 dark:hover:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400",
+                        selectedRole?.id === role.id && "text-primary-foreground hover:text-emerald-600 dark:hover:text-emerald-400"
                       )}
                     >
                       <RotateCcw className="h-3.5 w-3.5" />
@@ -471,8 +471,8 @@ export default function RolesAdminPage() {
                     onClick={(e) => { e.stopPropagation(); setDeleteTarget(role); setDeleteOpen(true); }}
                     title="Delete role"
                     className={cn(
-                      "p-1 rounded transition-colors hover:bg-red-100 text-red-500",
-                      selectedRole?.id === role.id && "text-primary-foreground hover:text-red-500"
+                      "p-1 rounded transition-colors hover:bg-red-100 dark:hover:bg-red-900/30 text-red-500 dark:text-red-400",
+                      selectedRole?.id === role.id && "text-primary-foreground hover:text-red-500 dark:hover:text-red-400"
                     )}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
@@ -502,13 +502,13 @@ export default function RolesAdminPage() {
                         <p className="text-sm text-muted-foreground mt-1">{selectedRole.description}</p>
                       )}
                       {selectedRole.scope === "BOTH" && (
-                        <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-1 mt-2 inline-block">
+                        <p className="text-xs text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md px-2 py-1 mt-2 inline-block">
                           Shared with the global Department Manager role — editing permissions here affects both.
                         </p>
                       )}
                     </div>
                     {selectedRole.key === "ADMIN" && (
-                      <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
+                      <span className="text-xs bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 px-2 py-0.5 rounded-full font-medium">
                         Full Access
                       </span>
                     )}
@@ -517,7 +517,7 @@ export default function RolesAdminPage() {
               </Card>
 
               {selectedRole.key === "ADMIN" && (
-                <Card className="border-amber-200 bg-amber-50">
+                <Card className="border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20">
                   <CardContent className="py-3 flex items-start gap-2 text-sm text-amber-800">
                     <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
                     <p>
@@ -579,7 +579,7 @@ export default function RolesAdminPage() {
                                   <p className="text-sm font-medium">
                                     {perm.key}
                                     {perm.key.endsWith(".assignable") && (
-                                      <span className="ml-1.5 text-[10px] font-medium bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full align-middle">
+                                      <span className="ml-1.5 text-[10px] font-medium bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400 px-1.5 py-0.5 rounded-full align-middle">
                                         Assignable
                                       </span>
                                     )}
@@ -588,7 +588,7 @@ export default function RolesAdminPage() {
                                     <p className="text-xs text-muted-foreground">{perm.description}</p>
                                   )}
                                   {restricted && (
-                                    <p className="text-xs text-amber-700">System administration — Administrator only.</p>
+                                    <p className="text-xs text-amber-700 dark:text-amber-400">System administration — Administrator only.</p>
                                   )}
                                 </div>
                               </label>

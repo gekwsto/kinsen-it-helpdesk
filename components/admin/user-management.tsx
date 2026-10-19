@@ -117,11 +117,11 @@ const ROLE_LABELS: Record<Role, string> = {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const ROLE_COLORS: Record<Role, string> = {
-  ADMIN: "bg-red-100 text-red-700",
-  IT_AGENT: "bg-blue-100 text-blue-700",
-  DEPARTMENT_MANAGER: "bg-purple-100 text-purple-700",
-  DIRECTOR: "bg-indigo-100 text-indigo-700",
-  USER: "bg-gray-100 text-gray-700",
+  ADMIN: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400",
+  IT_AGENT: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
+  DEPARTMENT_MANAGER: "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400",
+  DIRECTOR: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400",
+  USER: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
 };
 
 export function UserManagement({
@@ -307,7 +307,7 @@ export function UserManagement({
 
   const getUserRoleDisplay = (user: User) => {
     if (user.customRole) {
-      return { label: `${user.customRole.name} (Custom)`, color: "bg-teal-100 text-teal-700" };
+      return { label: `${user.customRole.name} (Custom)`, color: "bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400" };
     }
     // Prefer the persisted CustomRole.name for a renamed built-in role — the
     // static ROLE_LABELS fallback only fires when no matching CustomRole
@@ -315,7 +315,7 @@ export function UserManagement({
     const builtInOption = allGlobalRoleOptions.find((o) => !o.isCustom && o.value === user.role);
     return {
       label: builtInOption?.label ?? ROLE_LABELS[user.role] ?? user.role,
-      color: ROLE_COLORS[user.role] ?? "bg-gray-100 text-gray-700",
+      color: ROLE_COLORS[user.role] ?? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
     };
   };
 
@@ -569,7 +569,7 @@ export function UserManagement({
                         <div className="flex items-center gap-1.5">
                           <p className="text-sm font-medium">{user.name ?? "—"}</p>
                           {user.microsoftUserId && (
-                            <Link2 className="h-3 w-3 text-blue-600" aria-label="Microsoft-linked" />
+                            <Link2 className="h-3 w-3 text-blue-600 dark:text-blue-400" aria-label="Microsoft-linked" />
                           )}
                         </div>
                         <p className="text-xs text-muted-foreground">{user.email}</p>
@@ -617,7 +617,7 @@ export function UserManagement({
                       return (
                         <div className="flex flex-wrap items-center gap-1">
                           {shown.map((m) => (
-                            <span key={m.id} className="text-[11px] font-medium px-1.5 py-0.5 rounded-full border bg-slate-100 text-slate-700 border-slate-200">
+                            <span key={m.id} className="text-[11px] font-medium px-1.5 py-0.5 rounded-full border bg-slate-100 dark:bg-gray-800 text-slate-700 dark:text-gray-300 border-slate-200 dark:border-gray-700">
                               {m.subDepartment.name}
                             </span>
                           ))}
@@ -630,11 +630,11 @@ export function UserManagement({
                   </TableCell>
                   <TableCell>
                     {user.isActive ? (
-                      <span className="flex items-center gap-1 text-xs text-green-700">
+                      <span className="flex items-center gap-1 text-xs text-green-700 dark:text-green-400">
                         <UserCheck className="h-3.5 w-3.5" /> Active
                       </span>
                     ) : (
-                      <span className="flex items-center gap-1 text-xs text-red-600">
+                      <span className="flex items-center gap-1 text-xs text-red-600 dark:text-red-400">
                         <UserX className="h-3.5 w-3.5" /> Inactive
                       </span>
                     )}
@@ -653,7 +653,7 @@ export function UserManagement({
                           title={user.isActive ? "Block user" : "Unblock user"}
                           onClick={() => handleQuickBlock(user)}
                           disabled={blockingId === user.id}
-                          className={user.isActive ? "text-orange-500 hover:text-orange-600 hover:bg-orange-50" : "text-green-600 hover:text-green-700 hover:bg-green-50"}
+                          className={user.isActive ? "text-orange-500 dark:text-orange-400 hover:text-orange-600 dark:hover:text-orange-400 hover:bg-orange-50 dark:hover:bg-orange-900/20" : "text-green-600 dark:text-green-400 hover:text-green-700 dark:hover:text-green-400 hover:bg-green-50 dark:hover:bg-green-900/20"}
                         >
                           {blockingId === user.id ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -955,7 +955,7 @@ export function UserManagement({
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-muted-foreground">Linked</span>
                         {editUser.microsoftUserId ? (
-                          <span className="flex items-center gap-1 text-blue-700 font-medium">
+                          <span className="flex items-center gap-1 text-blue-700 dark:text-blue-400 font-medium">
                             <Link2 className="h-3 w-3" /> Yes
                           </span>
                         ) : (
@@ -987,7 +987,7 @@ export function UserManagement({
                   <p className="text-xs text-muted-foreground">You cannot change your own role or status.</p>
                 )}
                 {editUser.globalRoleSource === "MICROSOFT_DEPARTMENT" && (
-                  <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-md px-2 py-1.5">
+                  <p className="text-xs text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-md px-2 py-1.5">
                     Role source: Microsoft Department Mapping
                     {editUser.globalRoleMicrosoftMapping && (
                       <>
@@ -998,7 +998,7 @@ export function UserManagement({
                   </p>
                 )}
                 {editUser.globalRoleSource === "MANUAL" && (
-                  <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                  <p className="text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-md px-2 py-1.5">
                     Role is manually overridden — Microsoft sync will not change it.
                   </p>
                 )}

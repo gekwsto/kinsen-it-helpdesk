@@ -20,6 +20,7 @@ import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
 import { NotificationDropdown } from "@/components/notifications/notification-dropdown";
 import { WorkspaceSelector } from "@/components/workspace/workspace-selector";
+import { ThemeToggle } from "@/components/theme/theme-toggle";
 
 const ROLE_LABELS: Record<Role, string> = {
   ADMIN: "Administrator",
@@ -30,11 +31,11 @@ const ROLE_LABELS: Record<Role, string> = {
 };
 
 const ROLE_BADGE_VARIANTS: Record<Role, string> = {
-  ADMIN: "bg-red-100 text-red-700 border-red-200",
-  IT_AGENT: "bg-blue-100 text-blue-700 border-blue-200",
-  DEPARTMENT_MANAGER: "bg-purple-100 text-purple-700 border-purple-200",
-  DIRECTOR: "bg-indigo-100 text-indigo-700 border-indigo-200",
-  USER: "bg-gray-100 text-gray-700 border-gray-200",
+  ADMIN: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800",
+  IT_AGENT: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 border-blue-200 dark:border-blue-800",
+  DEPARTMENT_MANAGER: "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 border-purple-200 dark:border-purple-800",
+  DIRECTOR: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800",
+  USER: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700",
 };
 
 interface TopbarProps {
@@ -52,7 +53,7 @@ export function Topbar({ user }: TopbarProps) {
   const { toggle: toggleMobileSidebar, triggerRef } = useMobileSidebar();
 
   return (
-    <header className="h-16 border-b bg-white flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30">
+    <header className="h-16 border-b bg-background flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30">
       <div className="flex items-center gap-2 min-w-0">
         {/* Hamburger — mobile/tablet only (hidden at `md` and up, where the
             persistent desktop Sidebar is visible instead). Not a
@@ -73,6 +74,8 @@ export function Topbar({ user }: TopbarProps) {
       </div>
 
       <div className="flex items-center gap-3">
+        <ThemeToggle />
+
         {/* Notifications */}
         <NotificationDropdown />
 

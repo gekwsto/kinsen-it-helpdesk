@@ -24,7 +24,7 @@ export function SameDayStartWarningBadge({ sameDayStartActiveCount, className }:
         <TooltipTrigger asChild>
           <span
             className={cn(
-              "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap bg-amber-100 text-amber-700 cursor-default",
+              "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 cursor-default",
               className
             )}
           >

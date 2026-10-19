@@ -207,13 +207,13 @@ function MessageBubble({
             <span className="text-muted-foreground">({roleLabel})</span>
           )}
           {isInternal && (
-            <span className="flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+            <span className="flex items-center gap-0.5 rounded bg-amber-100 dark:bg-amber-900/30 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-400">
               <Lock className="h-2.5 w-2.5" />
               Internal
             </span>
           )}
           {isEmailInbound && (
-            <span className="flex items-center gap-0.5 rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-600">
+            <span className="flex items-center gap-0.5 rounded bg-blue-50 dark:bg-blue-900/20 px-1.5 py-0.5 text-[10px] font-medium text-blue-600 dark:text-blue-400">
               <Mail className="h-2.5 w-2.5" />
               Email
             </span>
@@ -228,7 +228,7 @@ function MessageBubble({
           className={cn(
             "rounded-2xl px-4 py-2.5 text-sm leading-relaxed",
             isInternal
-              ? "rounded-tl-sm border border-amber-200 bg-amber-50 text-amber-900"
+              ? "rounded-tl-sm border border-amber-200 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-amber-900"
               : isOwn
               ? "rounded-tr-sm bg-primary text-primary-foreground"
               : "rounded-tl-sm bg-muted text-foreground"

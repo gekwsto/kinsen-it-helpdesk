@@ -43,17 +43,17 @@ const HISTORY_ICONS: Record<TicketHistoryType, React.ElementType> = {
 };
 
 const HISTORY_COLORS: Record<TicketHistoryType, string> = {
-  CREATED: "bg-green-100 text-green-700",
-  STATUS_CHANGE: "bg-blue-100 text-blue-700",
-  PRIORITY_CHANGE: "bg-orange-100 text-orange-700",
-  CATEGORY_CHANGE: "bg-purple-100 text-purple-700",
-  ASSIGNMENT_CHANGE: "bg-cyan-100 text-cyan-700",
-  DEPARTMENT_CHANGE: "bg-indigo-100 text-indigo-700",
-  CLOSED: "bg-gray-100 text-gray-700",
-  REOPENED: "bg-green-100 text-green-700",
-  COMMENT_ADDED: "bg-slate-100 text-slate-700",
-  ATTACHMENT_ADDED: "bg-slate-100 text-slate-700",
-  CANCEL_REASON_SET: "bg-red-100 text-red-700",
+  CREATED: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
+  STATUS_CHANGE: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
+  PRIORITY_CHANGE: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
+  CATEGORY_CHANGE: "bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400",
+  ASSIGNMENT_CHANGE: "bg-cyan-100 dark:bg-cyan-900/30 text-cyan-700 dark:text-cyan-400",
+  DEPARTMENT_CHANGE: "bg-indigo-100 dark:bg-indigo-900/30 text-indigo-700 dark:text-indigo-400",
+  CLOSED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
+  REOPENED: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
+  COMMENT_ADDED: "bg-slate-100 dark:bg-gray-800 text-slate-700 dark:text-gray-300",
+  ATTACHMENT_ADDED: "bg-slate-100 dark:bg-gray-800 text-slate-700 dark:text-gray-300",
+  CANCEL_REASON_SET: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400",
 };
 
 interface TicketHistoryProps {
@@ -73,7 +73,7 @@ export function TicketHistory({ history }: TicketHistoryProps) {
     <div className="space-y-3">
       {history.map((entry) => {
         const Icon = HISTORY_ICONS[entry.type] ?? GitBranch;
-        const colorClass = HISTORY_COLORS[entry.type] ?? "bg-gray-100 text-gray-700";
+        const colorClass = HISTORY_COLORS[entry.type] ?? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300";
 
         return (
           <div key={entry.id} className="flex items-start gap-3 text-sm">

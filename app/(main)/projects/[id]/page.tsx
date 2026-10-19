@@ -584,12 +584,12 @@ export default async function ProjectDetailPage({
               <CardContent className="space-y-2">
                 {project.yearlyGoals.map((goal) => {
                   const GOAL_STATUS_COLORS: Record<GoalStatus, string> = {
-                    NOT_STARTED: "bg-gray-100 text-gray-700",
-                    IN_PROGRESS: "bg-blue-100 text-blue-700",
-                    ON_TRACK: "bg-green-100 text-green-700",
-                    AT_RISK: "bg-orange-100 text-orange-700",
-                    COMPLETED: "bg-emerald-100 text-emerald-700",
-                    CANCELLED: "bg-gray-100 text-gray-500",
+                    NOT_STARTED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
+                    IN_PROGRESS: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
+                    ON_TRACK: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
+                    AT_RISK: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
+                    COMPLETED: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400",
+                    CANCELLED: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400",
                   };
                   return (
                     <Link

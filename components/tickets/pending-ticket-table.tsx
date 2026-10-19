@@ -65,9 +65,9 @@ interface PendingTicketTableProps {
 }
 
 const STATUS_BADGE: Record<string, { label: string; className: string }> = {
-  PENDING: { label: "Pending", className: "bg-amber-100 text-amber-700" },
-  ACCEPTED: { label: "Accepted", className: "bg-emerald-100 text-emerald-700" },
-  REJECTED: { label: "Rejected", className: "bg-slate-100 text-slate-600" },
+  PENDING: { label: "Pending", className: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400" },
+  ACCEPTED: { label: "Accepted", className: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400" },
+  REJECTED: { label: "Rejected", className: "bg-slate-100 dark:bg-gray-800 text-slate-600 dark:text-gray-400" },
 };
 
 export function PendingTicketTable({
@@ -237,7 +237,7 @@ export function PendingTicketTable({
                         </Button>
                         {!isRejectedMode && pt.status === "PENDING" && canAccept && (
                           <Button size="sm" variant="outline" onClick={() => openAccept(pt)}>
-                            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600" />
+                            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600 dark:text-emerald-400" />
                             Accept
                           </Button>
                         )}
@@ -252,7 +252,7 @@ export function PendingTicketTable({
                             recovery action, never a second implementation. */}
                         {isRejectedMode && pt.status === "REJECTED" && canAccept && (
                           <Button size="sm" variant="outline" onClick={() => openAccept(pt)}>
-                            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600" />
+                            <CheckCircle2 className="h-3.5 w-3.5 mr-1.5 text-emerald-600 dark:text-emerald-400" />
                             Create Ticket
                           </Button>
                         )}

@@ -13,7 +13,7 @@ export function ProgressConfigGapBadge({ className }: { className?: string }) {
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap bg-amber-100 text-amber-700",
+        "inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400",
         className
       )}
       title="No progress percentage is configured for this status in this department. Ask an admin to configure it under Activity Progress."
@@ -28,7 +28,7 @@ export function ProgressConfigGapBadge({ className }: { className?: string }) {
 export function ProgressConfigGapInline({ className }: { className?: string }) {
   return (
     <span
-      className={cn("inline-flex items-center gap-1 text-xs font-medium text-amber-700", className)}
+      className={cn("inline-flex items-center gap-1 text-xs font-medium text-amber-700 dark:text-amber-400", className)}
       title="No progress percentage is configured for this status in this department. Ask an admin to configure it under Activity Progress."
     >
       <AlertCircle className="h-3 w-3" />

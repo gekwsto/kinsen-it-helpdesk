@@ -14,12 +14,12 @@ interface ActiveWorkspaceBadgeProps {
 export function ActiveWorkspaceBadge({ name, className }: ActiveWorkspaceBadgeProps) {
   return (
     <span
-      className={`inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 shadow-sm ${className ?? ""}`}
+      className={`inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-1.5 shadow-sm ${className ?? ""}`}
     >
-      <Building2 className="h-4 w-4 text-blue-600" />
+      <Building2 className="h-4 w-4 text-blue-600 dark:text-blue-400" />
       <span className="flex flex-col leading-none">
-        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400">Workspace</span>
-        <span className="text-sm font-semibold text-slate-800">{name ?? "—"}</span>
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Workspace</span>
+        <span className="text-sm font-semibold text-foreground">{name ?? "—"}</span>
       </span>
     </span>
   );
