@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import Link from "next/link";
 import { Plus, Ticket } from "lucide-react";
 import { redirect } from "next/navigation";
-import { parseTicketStatusGroup } from "@/lib/services/ticket-status-groups";
+import { parseTicketStatusGroup, buildTicketStatusGroupCondition } from "@/lib/services/ticket-status-groups";
 import {
   getTicketFilterOptions,
   splitFilterParam,
@@ -90,17 +90,19 @@ interface SearchParams {
   /**
    * Legacy/deep-link-only status GROUP — no longer user-selectable in the UI
    * (the old left-most "Open" dropdown was removed; see
-   * components/tickets/ticket-filters.tsx). Only two values still change
+   * components/tickets/ticket-filters.tsx). Three values still change
    * behavior here: "all" (the Dashboard's "Total Tickets" KPI card — lifts
    * the default non-closed scope so closed/cancelled-status tickets are
-   * included too) and "closed" (the Dashboard's "Closed Tickets" KPI card —
-   * redirects to the dedicated /tickets/closed page, the actual canonical
-   * home for closed tickets). Any other value (including the former
-   * "in_progress" name-heuristic group, which used to silently AND-conflict
-   * with an explicitly selected statusId — see the redesign notes on the
-   * base scope below) is treated the same as absent: the implicit
-   * non-closed default. statusId below is the real, precise, per-department
-   * filter and is unaffected by this legacy param either way.
+   * included too), "in_progress" (the Dashboard's "In Progress" KPI card —
+   * ANDs in the same name-contains("Progress") condition the dashboard's own
+   * count uses, via buildTicketStatusGroupCondition, and narrows the Status
+   * dropdown's own option list to match — so the two can never silently
+   * disagree the way a bare statusId would), and "closed" (the Dashboard's
+   * "Closed Tickets" KPI card — redirects to the dedicated /tickets/closed
+   * page, the actual canonical home for closed tickets). Any other value is
+   * treated the same as absent: the implicit non-closed default. statusId
+   * below is the real, precise, per-department filter and is unaffected by
+   * this legacy param either way.
    */
   status?: string;
   statusId?: string;
@@ -232,9 +234,14 @@ export default async function AllTicketsPage({
   }
   // "all" (the Dashboard's "Total Tickets" KPI card) lifts the normal
   // non-closed default so closed/cancelled-status tickets are included too
-  // — every other value (absent, "open", or the retired "in_progress"
-  // name-heuristic) means the normal implicit default scope.
-  const isAllStatusesMode = parseTicketStatusGroup(params.status) === "all";
+  // — every other value (absent or "open") means the normal implicit
+  // default scope. "in_progress" (the Dashboard's "In Progress" KPI card)
+  // keeps the non-closed default AND additionally narrows to the same
+  // name-contains("Progress") condition the dashboard's own count uses —
+  // see isInProgressMode below.
+  const statusGroup = parseTicketStatusGroup(params.status);
+  const isAllStatusesMode = statusGroup === "all";
+  const isInProgressMode = statusGroup === "in_progress";
 
   // Status/Priority/Category options for THIS workspace scope (or the
   // authorized union for "All Workspaces") — fetched once, reused both to
@@ -249,7 +256,13 @@ export default async function AllTicketsPage({
     effectiveDepartmentId,
     session.user.id,
     role,
-    isAllStatusesMode ? {} : { statusWhere: { isClosed: false } }
+    isAllStatusesMode
+      ? {}
+      : {
+          statusWhere: isInProgressMode
+            ? { isClosed: false, name: { contains: "Progress", mode: "insensitive" } }
+            : { isClosed: false },
+        }
   );
 
   // If the active workspace changed since statusId/priorityId/categoryId
@@ -281,6 +294,7 @@ export default async function AllTicketsPage({
   // implied compatible by construction, not just implied likely.
   const andConditions: any[] = [scope, { cancelReasonId: null }];
   if (!isAllStatusesMode) andConditions.push({ status: { isClosed: false } });
+  if (isInProgressMode) andConditions.push(buildTicketStatusGroupCondition("in_progress"));
 
   if (params.myOnly === "true") {
     andConditions.push({ requesterId: session.user.id });
