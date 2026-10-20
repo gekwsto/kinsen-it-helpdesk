@@ -8,9 +8,10 @@ import { publishProjectListInvalidation } from "@/lib/realtime/project-list-inva
 // POST — turns an APPROVED Project Request into a real Project. A
 // deliberately SEPARATE mutation from POST .../approval and from the
 // normal POST /api/projects — see createProjectFromApprovedRequest's own
-// doc comment for the exact authorization boundary (the EXACT recorded
-// final approver, on a genuinely APPROVED request with no Project yet; no
-// generic project.create requirement, and no ADMIN identity bypass). The
+// doc comment for the exact authorization boundary (anyone who currently
+// holds effective projectRequest.approve for this request's own
+// department, on a genuinely APPROVED request with no Project yet — not
+// tied to the one specific person who originally clicked Approve). The
 // department is never accepted from the request body — it always comes
 // from the Project Request itself, resolved server-side.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
@@ -22,13 +23,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const parsed = createProjectFromRequestSchema.safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);
 
-    const result = await createProjectFromApprovedRequest(id, session.user.id, parsed.data);
+    const result = await createProjectFromApprovedRequest(id, session.user.id, session.user.role, session.user.customRoleId, parsed.data);
     if (!result.ok) {
       switch (result.error.code) {
         case "not_found":
           return NextResponse.json(apiError("item_not_found", "This Project Request no longer exists."), { status: 404 });
         case "forbidden":
-          return forbiddenResponse("Only the approver who gave final approval on this Project Request can complete its Project setup.");
+          return forbiddenResponse("You need final-approval rights for this department to complete this Project Request's setup.");
         case "invalid_status":
           return NextResponse.json(
             apiError("invalid_status", "This Project Request must be APPROVED before its Project can be set up.", { field: "status" }),

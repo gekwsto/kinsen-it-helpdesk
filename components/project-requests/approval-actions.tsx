@@ -21,8 +21,8 @@ interface ApprovalActionsProps {
   businessAssessment: string | null;
   /** The Project created from this request's own request-origin setup flow — null until that's been completed. */
   project: { id: string; title: string } | null;
-  /** True exactly when the CURRENT viewer is the recorded final approver for this request — the only person who may complete (or resume) its Project setup. Never derived from any broader permission; see createProjectFromApprovedRequest's own doc comment for why. */
-  viewerIsRecordedApprover: boolean;
+  /** True when the CURRENT viewer currently holds effective projectRequest.approve for this request's own department — anyone with that authority may complete (or resume) its Project setup, not only whoever originally clicked Approve. Same permission canDecideNow is built from; see createProjectFromApprovedRequest's own doc comment. */
+  canCompleteSetup: boolean;
 }
 
 /**
@@ -40,12 +40,13 @@ interface ApprovalActionsProps {
  *
  * A successful APPROVE does not create a Project — it immediately
  * redirects the acting approver to the dedicated request-origin Project
- * setup page (/projects/new?projectRequestId=...) instead. If they ever
- * leave before finishing (closed the tab, lost connection, refreshed), this
- * same component offers "Complete Project Setup" to resume — see
- * viewerIsRecordedApprover.
+ * setup page (/projects/new?projectRequestId=...) instead. If nobody
+ * finishes it right away (closed the tab, lost connection, refreshed, or
+ * simply never came back), this same component offers "Complete Project
+ * Setup" to anyone who currently holds that same approval authority for
+ * this department — see canCompleteSetup.
  */
-export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, project, viewerIsRecordedApprover }: ApprovalActionsProps) {
+export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, project, canCompleteSetup }: ApprovalActionsProps) {
   const router = useRouter();
   const [pendingDecision, setPendingDecision] = useState<"approve" | "reject" | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -106,7 +107,7 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
             <FolderKanban className="h-3.5 w-3.5" />
             View Project
           </Link>
-        ) : viewerIsRecordedApprover ? (
+        ) : canCompleteSetup ? (
           <Button size="sm" className="mt-2" asChild>
             <Link href={`/projects/new?projectRequestId=${requestId}`}>
               <Wrench className="h-3.5 w-3.5 mr-1.5" />
@@ -114,7 +115,7 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
             </Link>
           </Button>
         ) : (
-          <p className="text-xs text-muted-foreground mt-2">Project setup is still pending, from the approver who gave final approval.</p>
+          <p className="text-xs text-muted-foreground mt-2">Project setup is still pending, from someone with final-approval rights in this department.</p>
         )}
       </div>
     );

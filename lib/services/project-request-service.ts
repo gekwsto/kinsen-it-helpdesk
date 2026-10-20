@@ -456,33 +456,37 @@ export type CreateProjectFromRequestResult =
 /**
  * Turns an APPROVED Project Request into a real Project — a deliberately
  * SEPARATE step from decideApproval (see that function's own doc comment),
- * with its own, narrower authorization boundary:
+ * with its own authorization boundary:
  *
  *   - the request must genuinely be APPROVED (never
  *     PENDING_INTERMEDIATE_APPROVAL/PENDING_APPROVAL/REJECTED — Project
  *     creation is only ever reachable from the terminal APPROVED state);
- *   - the acting user must be the EXACT recorded final approver
- *     (`existing.approverId === userId`) — not "anyone who currently holds
- *     projectRequest.approve", and deliberately no ADMIN bypass here: this
- *     is an identity/ownership check on a specific already-made decision,
- *     not a permission grant, and this codebase's existing ADMIN bypass
- *     convention (hasPermission()) only ever shortcuts PERMISSION checks,
- *     never identity checks like this one. This intentionally does NOT
- *     require (or grant) generic `project.create` — completing setup for
- *     the one request this exact user just approved is a narrower
- *     capability than being allowed to manually create arbitrary Projects
- *     in that department.
+ *   - the acting user must currently hold effective `projectRequest.approve`
+ *     for THIS request's own department (hasEffectiveEntityPermission — the
+ *     exact same check decideApproval itself uses to decide who may approve
+ *     in the first place), NOT the exact recorded final approver. Completing
+ *     setup is a continuation of "who may finalize this department's
+ *     requests right now," not a one-time personal grant tied to whoever
+ *     happened to click Approve — if that original approver has since left
+ *     the department/role, or simply never returns to finish it, anyone else
+ *     who currently holds that same authority can pick it up instead,
+ *     without anything getting permanently stuck on one person. This
+ *     intentionally does NOT require (or grant) generic `project.create` —
+ *     completing setup for an already-decided request in a department you
+ *     can approve requests for is a narrower capability than being allowed
+ *     to manually create arbitrary Projects there.
  *
  * Idempotent/race-safe: acquires a `SELECT ... FOR UPDATE` row lock on the
  * ProjectRequest as the first statement of the transaction (same
  * established pattern as decideIntermediateApproval's own doc comment),
  * re-checks for an already-linked Project INSIDE that lock, and only
  * creates one if it's still genuinely missing. If a Project already exists
- * (e.g. a duplicate submission, two open tabs, or a refresh after an
- * earlier success), this returns `alreadyExisted: true` with that Project's
- * own id — a clean, safe resolution, never a second Project and never a
- * hard error. Project.projectRequestId's own `@unique` DB constraint is a
- * second, structural backstop even if the row lock were somehow bypassed.
+ * (e.g. a duplicate submission, two open tabs, two different eligible
+ * approvers both finishing setup, or a refresh after an earlier success),
+ * this returns `alreadyExisted: true` with that Project's own id — a clean,
+ * safe resolution, never a second Project and never a hard error.
+ * Project.projectRequestId's own `@unique` DB constraint is a second,
+ * structural backstop even if the row lock were somehow bypassed.
  *
  * Department is ALWAYS `existing.departmentId` — never accepted from the
  * caller's input at all (see createProjectFromRequestSchema, which doesn't
@@ -493,6 +497,8 @@ export type CreateProjectFromRequestResult =
 export async function createProjectFromApprovedRequest(
   requestId: string,
   userId: string,
+  role: Role,
+  customRoleId: string | null | undefined,
   data: import("@/lib/validations").CreateProjectFromRequestInput
 ): Promise<CreateProjectFromRequestResult> {
   const existing = await prisma.projectRequest.findUnique({
@@ -501,7 +507,8 @@ export async function createProjectFromApprovedRequest(
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
   if (existing.status !== "APPROVED") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
-  if (existing.approverId !== userId) return { ok: false, error: { code: "forbidden" } };
+  const allowed = await hasEffectiveEntityPermission(userId, role, customRoleId, existing.departmentId, APPROVE_PERMISSION_KEY);
+  if (!allowed) return { ok: false, error: { code: "forbidden" } };
 
   if (existing.project) {
     return { ok: true, projectId: existing.project.id, alreadyExisted: true };

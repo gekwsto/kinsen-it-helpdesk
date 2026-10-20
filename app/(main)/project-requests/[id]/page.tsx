@@ -44,9 +44,19 @@ export default async function ProjectRequestDetailPage({
   const canView = await canViewProjectRequest(session.user.id, session.user.role, session.user.customRoleId, request);
   if (!canView) notFound();
 
-  const canDecideNow =
-    request.status === "PENDING_APPROVAL" &&
-    (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, request.departmentId, "projectRequest.approve"));
+  // Shared by both canDecideNow (gated to PENDING_APPROVAL) and the
+  // Project-setup completion button below (gated to APPROVED + no Project
+  // yet instead) — the same underlying authority, "may finalize this
+  // department's requests right now," just applied at two different stages
+  // of the same request's lifecycle. One permission lookup either way.
+  const hasApprovePermission = await hasEffectiveEntityPermission(
+    session.user.id,
+    session.user.role,
+    session.user.customRoleId,
+    request.departmentId,
+    "projectRequest.approve"
+  );
+  const canDecideNow = request.status === "PENDING_APPROVAL" && hasApprovePermission;
 
   // THIS viewer's own intermediate-approver row, only if the requester
   // explicitly selected them for THIS request — never derived any other way.
@@ -115,7 +125,7 @@ export default async function ProjectRequestDetailPage({
               rejectedAt={request.rejectedAt}
               businessAssessment={request.businessAssessment}
               project={request.project}
-              viewerIsRecordedApprover={request.approver?.id === session.user.id}
+              canCompleteSetup={hasApprovePermission}
             />
           )}
         </div>

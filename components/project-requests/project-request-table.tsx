@@ -63,6 +63,15 @@ export interface ProjectRequestRow {
    * a per-row permission query (no N+1).
    */
   canDecideNow: boolean;
+  /**
+   * Server-computed (status === APPROVED AND no Project yet AND effective
+   * projectRequest.approve for THIS row's own department — the same scope
+   * canDecideNow above uses, just applied at the Project-setup stage
+   * instead of the decision stage). Anyone who currently holds that
+   * authority may complete setup, not only whoever originally approved —
+   * see createProjectFromApprovedRequest's own doc comment.
+   */
+  canCompleteSetup: boolean;
 }
 
 interface ProjectRequestTableProps {
@@ -310,7 +319,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                     {previewTarget.businessAssessment && (
                       <p className="text-sm whitespace-pre-wrap mt-2">{previewTarget.businessAssessment}</p>
                     )}
-                    {previewTarget.project && (
+                    {previewTarget.project ? (
                       <Link
                         href={`/projects/${previewTarget.project.id}`}
                         className="inline-flex items-center gap-1.5 mt-2 text-sm text-primary hover:underline"
@@ -318,7 +327,18 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                         <FolderKanban className="h-3.5 w-3.5" />
                         View Project
                       </Link>
-                    )}
+                    ) : previewTarget.status === "APPROVED" && previewTarget.canCompleteSetup ? (
+                      <Button size="sm" className="mt-2" asChild>
+                        <Link href={`/projects/new?projectRequestId=${previewTarget.id}`}>
+                          <Wrench className="h-3.5 w-3.5 mr-1.5" />
+                          Complete Project Setup
+                        </Link>
+                      </Button>
+                    ) : previewTarget.status === "APPROVED" ? (
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Project setup is still pending, from someone with final-approval rights in this department.
+                      </p>
+                    ) : null}
                   </div>
                 )}
                 {previewTarget.legacyRequesterBusinessAssessment && (

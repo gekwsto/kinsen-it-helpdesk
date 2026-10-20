@@ -96,6 +96,13 @@ export default async function ProjectRequestsPage({
   const rowsWithActions = requests.map((r) => ({
     ...r,
     canDecideNow: r.status === "PENDING_APPROVAL" && (scope.hasGlobalApprove || scope.approveDepartmentIds.includes(r.departmentId)),
+    // Same scope, applied at the Project-setup stage instead of the decision
+    // stage: APPROVED + no Project yet + this viewer currently holds
+    // projectRequest.approve for the row's own department — not tied to
+    // whoever originally made the decision. See ApprovalActions'
+    // canCompleteSetup and createProjectFromApprovedRequest's doc comment.
+    canCompleteSetup:
+      r.status === "APPROVED" && !r.project && (scope.hasGlobalApprove || scope.approveDepartmentIds.includes(r.departmentId)),
   }));
 
   return (
