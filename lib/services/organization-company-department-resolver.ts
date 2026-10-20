@@ -162,3 +162,173 @@ export async function resolveOrganizationPlacement(
   const department = await resolveDepartmentForSync(cache, company?.id ?? null, rawDepartmentName);
   return { companyId: company?.id ?? null, companyName: company?.name ?? null, departmentId: department.id, departmentName: department.name };
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// HR directory API (lib/services/hr-directory-sync-service.ts) resolution —
+// a SEPARATE cache/function set from the Microsoft ones above, never mixed
+// into the same signatures, since the two sources key on genuinely different
+// identities (a real external integer id here vs. pure string-normalization
+// above). Both still write to the exact same Company/Department tables and
+// still never fabricate a BusinessUnit — only the match key differs.
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface HrOrganizationResolutionCache {
+  companyByHrId: Map<number, { id: string; name: string }>;
+  companyByNormalizedName: Map<string, { id: string; name: string }>;
+  departmentByHrId: Map<number, { id: string; name: string }>;
+  departmentByCompanyAndNormalizedName: Map<string, { id: string; name: string }>;
+}
+
+export function createHrOrganizationResolutionCache(): HrOrganizationResolutionCache {
+  return {
+    companyByHrId: new Map(),
+    companyByNormalizedName: new Map(),
+    departmentByHrId: new Map(),
+    departmentByCompanyAndNormalizedName: new Map(),
+  };
+}
+
+/**
+ * Finds or creates the Company for one HR API row's `CompanyId`/`Company` —
+ * `hrCompanyId` is checked FIRST (a real, stable integer identity), falling
+ * back to `normalizedName` matching only for a company that predates the HR
+ * sync (e.g. matches an existing Microsoft-sourced or manually-created
+ * company by name) — in which case `hrCompanyId` is backfilled onto that row
+ * so every subsequent sync is an O(1) id lookup instead of a string match.
+ * A missing/blank `hrCompanyId` AND name returns `null` — never persists a
+ * fabricated company, same rule as resolveCompanyForSync.
+ */
+export async function resolveCompanyForHrSync(
+  cache: HrOrganizationResolutionCache,
+  hrCompanyId: number | null | undefined,
+  rawCompanyName: string | null | undefined
+): Promise<{ id: string; name: string } | null> {
+  const name = rawCompanyName?.trim();
+  if (!hrCompanyId && !name) return null;
+
+  if (hrCompanyId) {
+    const cachedById = cache.companyByHrId.get(hrCompanyId);
+    if (cachedById) return cachedById;
+
+    const existingById = await prisma.company.findUnique({ where: { hrCompanyId }, select: { id: true, name: true } });
+    if (existingById) {
+      cache.companyByHrId.set(hrCompanyId, existingById);
+      return existingById;
+    }
+  }
+
+  if (!name) {
+    // Have an hrCompanyId but no usable name and no existing row to match —
+    // genuinely nothing to create (Company.name is required).
+    return null;
+  }
+
+  const normalizedName = normalizeCompanyName(name);
+  const cachedByName = cache.companyByNormalizedName.get(normalizedName);
+  if (cachedByName) {
+    if (hrCompanyId) cache.companyByHrId.set(hrCompanyId, cachedByName);
+    return cachedByName;
+  }
+
+  const existingByName = await prisma.company.findUnique({ where: { normalizedName }, select: { id: true, name: true, hrCompanyId: true } });
+  if (existingByName) {
+    const summary = { id: existingByName.id, name: existingByName.name };
+    if (hrCompanyId && existingByName.hrCompanyId !== hrCompanyId) {
+      // Backfill — a pre-HR-sync company matched by name, now linked to its
+      // real external id so future syncs skip the name match entirely.
+      await prisma.company.update({ where: { id: existingByName.id }, data: { hrCompanyId } }).catch(() => {
+        // A race (another sync run linked it first, or a genuine duplicate
+        // hrCompanyId conflict) degrades to "already linked by someone else" —
+        // never a hard failure for what's otherwise a successful resolution.
+      });
+    }
+    cache.companyByNormalizedName.set(normalizedName, summary);
+    if (hrCompanyId) cache.companyByHrId.set(hrCompanyId, summary);
+    return summary;
+  }
+
+  try {
+    const created = await prisma.company.create({ data: { name, normalizedName, hrCompanyId: hrCompanyId ?? null } });
+    const summary = { id: created.id, name: created.name };
+    cache.companyByNormalizedName.set(normalizedName, summary);
+    if (hrCompanyId) cache.companyByHrId.set(hrCompanyId, summary);
+    return summary;
+  } catch (err) {
+    if (!isUniqueConstraintError(err)) throw err;
+    const retried = await prisma.company.findUnique({ where: { normalizedName }, select: { id: true, name: true } });
+    if (!retried) throw err;
+    cache.companyByNormalizedName.set(normalizedName, retried);
+    if (hrCompanyId) cache.companyByHrId.set(hrCompanyId, retried);
+    return retried;
+  }
+}
+
+/** Same hrDepartmentId-first, normalizedName-fallback strategy as resolveCompanyForHrSync above, scoped to one Company via (companyId, normalizedName). */
+export async function resolveDepartmentForHrSync(
+  cache: HrOrganizationResolutionCache,
+  companyId: string | null,
+  hrDepartmentId: number | null | undefined,
+  rawDepartmentName: string | null | undefined
+): Promise<{ id: string; name: string }> {
+  const name = rawDepartmentName?.trim() || UNASSIGNED_NODE_NAME;
+  const normalizedName = normalizeDepartmentName(name);
+  const cacheKey = `${companyId ?? "__no_company__"}:${normalizedName}`;
+
+  if (hrDepartmentId) {
+    const cachedById = cache.departmentByHrId.get(hrDepartmentId);
+    if (cachedById) return cachedById;
+
+    const existingById = await prisma.department.findUnique({ where: { hrDepartmentId }, select: { id: true, name: true } });
+    if (existingById) {
+      cache.departmentByHrId.set(hrDepartmentId, existingById);
+      return existingById;
+    }
+  }
+
+  const cachedByName = cache.departmentByCompanyAndNormalizedName.get(cacheKey);
+  if (cachedByName) {
+    if (hrDepartmentId) cache.departmentByHrId.set(hrDepartmentId, cachedByName);
+    return cachedByName;
+  }
+
+  const existingByName = await prisma.department.findFirst({ where: { companyId, normalizedName }, select: { id: true, name: true, hrDepartmentId: true } });
+  if (existingByName) {
+    const summary = { id: existingByName.id, name: existingByName.name };
+    if (hrDepartmentId && existingByName.hrDepartmentId !== hrDepartmentId) {
+      await prisma.department.update({ where: { id: existingByName.id }, data: { hrDepartmentId } }).catch(() => {
+        // Same race tolerance as resolveCompanyForHrSync above.
+      });
+    }
+    cache.departmentByCompanyAndNormalizedName.set(cacheKey, summary);
+    if (hrDepartmentId) cache.departmentByHrId.set(hrDepartmentId, summary);
+    return summary;
+  }
+
+  try {
+    const created = await createDepartment({ name, companyId, hrDepartmentId: hrDepartmentId ?? null });
+    const summary = { id: created.id, name: created.name };
+    cache.departmentByCompanyAndNormalizedName.set(cacheKey, summary);
+    if (hrDepartmentId) cache.departmentByHrId.set(hrDepartmentId, summary);
+    return summary;
+  } catch (err) {
+    if (!isUniqueConstraintError(err)) throw err;
+    const retried = await prisma.department.findFirst({ where: { companyId, normalizedName }, select: { id: true, name: true } });
+    if (!retried) throw err;
+    cache.departmentByCompanyAndNormalizedName.set(cacheKey, retried);
+    if (hrDepartmentId) cache.departmentByHrId.set(hrDepartmentId, retried);
+    return retried;
+  }
+}
+
+/** HR-sourced counterpart to resolveOrganizationPlacement above — resolves both levels in one call from one HR API row's CompanyId/Company/HrDepartmentId/Department fields. */
+export async function resolveHrOrganizationPlacement(
+  cache: HrOrganizationResolutionCache,
+  hrCompanyId: number | null | undefined,
+  rawCompanyName: string | null | undefined,
+  hrDepartmentId: number | null | undefined,
+  rawDepartmentName: string | null | undefined
+): Promise<OrganizationPlacement> {
+  const company = await resolveCompanyForHrSync(cache, hrCompanyId, rawCompanyName);
+  const department = await resolveDepartmentForHrSync(cache, company?.id ?? null, hrDepartmentId, rawDepartmentName);
+  return { companyId: company?.id ?? null, companyName: company?.name ?? null, departmentId: department.id, departmentName: department.name };
+}

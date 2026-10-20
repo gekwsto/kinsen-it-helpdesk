@@ -79,6 +79,8 @@ export interface CreateDepartmentInput {
    * enforce mutual exclusivity).
    */
   companyId?: string | null;
+  /** HR directory API's stable external id (lib/services/hr-directory-sync-service.ts) — null for a manually-created or Microsoft-sourced department. */
+  hrDepartmentId?: number | null;
   /** Explicit slug override; auto-generated from `name` (collision-checked) if omitted. */
   slug?: string;
 }
@@ -101,6 +103,7 @@ export async function createDepartment(input: CreateDepartmentInput): Promise<De
         description: input.description ?? null,
         businessUnitId: input.businessUnitId ?? null,
         companyId: input.companyId ?? null,
+        hrDepartmentId: input.hrDepartmentId ?? null,
       },
     });
     await ensureStatusAndPriorityConfigForDepartment(tx, department.id);

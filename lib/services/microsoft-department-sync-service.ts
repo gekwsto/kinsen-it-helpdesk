@@ -9,22 +9,24 @@
  * never reads a user id from anywhere else, so it works identically for a
  * brand-new user's first login and a returning user's Nth login.
  */
-import { GlobalRoleSource, MembershipSource, Prisma, Role } from "@prisma/client";
+import { GlobalRoleSource, Prisma, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import {
   resolveDepartmentMemberships,
   hasActiveProfileDepartmentMapping,
   resolvePrimaryMicrosoftMapping,
 } from "@/lib/services/microsoft-mapping-service";
-import { syncDepartmentMemberships, setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
-import { resolveDefaultGlobalRoleAssignment, resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
+import { syncDepartmentMemberships } from "@/lib/services/department-membership-service";
+import { resolveDefaultGlobalRoleAssignment } from "@/lib/services/default-role-service";
 import { fetchMicrosoftGraphProfile, type GraphUserProfile } from "@/lib/services/microsoft-graph-profile-service";
 import { maybeAutoCreateDepartmentForGraphValue } from "@/lib/services/microsoft-department-autocreate-service";
 import { shouldSyncGlobalRole } from "@/lib/services/department-role-translation";
 import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsoft-directory-service";
 import { syncMicrosoftProfilePhoto } from "@/lib/services/microsoft-profile-photo-service";
 import { getOrganizationDirectoryEligibility, isOrganizationPlacementTrustedForAuthenticatedLogin, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
-import { createOrganizationResolutionCache, resolveOrganizationPlacement } from "@/lib/services/organization-company-department-resolver";
+import { fetchHrUserByMail } from "@/lib/hr-directory-api";
+import { applyHrPlacementToUser } from "@/lib/services/hr-directory-sync-service";
+import { createHrOrganizationResolutionCache } from "@/lib/services/organization-company-department-resolver";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -199,35 +201,39 @@ export async function syncMicrosoftUserDepartment(
   let primaryDepartmentSynced = false;
   if (placementTrust.trusted) {
     try {
-      const placementCache = createOrganizationResolutionCache();
-      const placement = await resolveOrganizationPlacement(placementCache, claims.companyName, claims.department);
-      await prisma.user.update({
-        where: { id: userId },
-        data: {
-          companyId: placement.companyId,
-          givenName: result.profile.givenName ?? undefined,
-          surname: result.profile.surname ?? undefined,
-          jobTitle: claims.jobTitle ?? undefined,
-          organizationSyncedAt: new Date(),
-        },
-      });
-      // No MicrosoftDepartmentMapping concept applies to PRIMARY placement
-      // (see this block's own header comment — it's driven entirely by
-      // organization-company-department-resolver.ts) — resolving straight
-      // to the configured Default Department Role (or the pre-existing
-      // REQUESTER/no-custom-role fallback when none is configured) is the
-      // full "explicit mapping -> default -> no role" precedence collapsed
-      // to its last two tiers. setPrimaryDepartmentMembership's own
-      // MANUAL/custom-role protection decides whether this is actually
-      // applied to an existing row (never overwrites the invariant in
-      // rule #1 above).
-      const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
-      await setPrimaryDepartmentMembership(userId, placement.departmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
-        role: departmentDefault.role,
-        customRoleId: departmentDefault.customRoleId,
-        deactivateObsoleteMicrosoftPrimary: true,
-      });
-      primaryDepartmentSynced = true;
+      // Organizational placement is now sourced from the external HR
+      // directory API (lib/hr-directory-api.ts), not Graph's own
+      // companyName/department claims — see
+      // lib/services/hr-directory-sync-service.ts's header comment. Looked
+      // up by `effectiveMail` (this function's own already-resolved,
+      // already-domain-validated email), never by a username derived from
+      // it — the HR API's own sample data shows a user's AD username and
+      // their email local-part are not guaranteed to match. Graph's
+      // delegated `/me` call above is still used for everything else
+      // (jobTitle/givenName/surname/photo, and for effectiveMail itself) —
+      // this HR lookup only replaces WHERE the Company/Department placement
+      // signal comes from.
+      const hrResult = await fetchHrUserByMail(effectiveMail);
+      if (!hrResult.ok) {
+        console.warn("[microsoft-department-sync] HR directory API lookup failed, skipping placement this login", {
+          userId,
+          reason: hrResult.reason,
+          status: hrResult.status,
+        });
+      } else if (!hrResult.row) {
+        console.warn("[microsoft-department-sync] No HR directory row found for this user, skipping placement this login", { userId });
+      } else {
+        const placementCache = createHrOrganizationResolutionCache();
+        await applyHrPlacementToUser(userId, hrResult.row, placementCache);
+        // Graph-only fields applyHrPlacementToUser doesn't set (it has no
+        // givenName/surname of its own) — still backfilled from this same
+        // login's Graph profile, unrelated to organizational placement.
+        await prisma.user.update({
+          where: { id: userId },
+          data: { givenName: result.profile.givenName ?? undefined, surname: result.profile.surname ?? undefined },
+        });
+        primaryDepartmentSynced = true;
+      }
     } catch (err) {
       console.warn("[microsoft-department-sync] Failed to resolve/set organization placement", {
         userId,
@@ -255,8 +261,8 @@ export async function syncMicrosoftUserDepartment(
 
   // autoPromoteSoleActiveMembership: false — ROOT-CAUSE FIX. This function
   // ALWAYS has its own explicit primary-placement mechanism (the
-  // resolveOrganizationPlacement + setPrimaryDepartmentMembership call
-  // above), whether or not it happened to run/succeed THIS login (skipped
+  // fetchHrUserByMail + applyHrPlacementToUser call above), whether or not
+  // it happened to run/succeed THIS login (skipped
   // when !eligibility.eligible, or caught-and-logged on a genuine
   // exception) — syncDepartmentMemberships's "promote the sole active
   // membership to primary" fallback exists for callers with no such

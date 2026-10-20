@@ -25,11 +25,12 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials } from "@/lib/utils";
 import { Search, Plus, Loader2, UserX, UserCheck } from "lucide-react";
 import { MEMBERSHIP_SOURCE_LABELS, MEMBERSHIP_SOURCE_COLORS } from "@/components/admin/department-role-info";
+import type { MembershipSource } from "@prisma/client";
 
 interface Membership {
   id: string;
   userId: string;
-  source: "MANUAL" | "MICROSOFT_DEPARTMENT" | "MICROSOFT_GROUP" | "MICROSOFT_APP_ROLE" | "MICROSOFT_JOB_TITLE";
+  source: MembershipSource;
   isActive: boolean;
   user: { id: string; name: string | null; email: string; image: string | null };
 }

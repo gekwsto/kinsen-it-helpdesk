@@ -76,6 +76,13 @@ enum MembershipSource {
   MICROSOFT_APP_ROLE
   MICROSOFT_JOB_TITLE
   MANUAL
+  // Primary placement sourced from the external HR directory API
+  // (lib/services/hr-directory-sync-service.ts), not Microsoft Graph — see
+  // that file's header comment. Kept as its own distinct value (not reusing
+  // MICROSOFT_DEPARTMENT) purely for audit-trail clarity: which rows were
+  // placed by which data source survives the cutover, instead of every
+  // pre-migration Microsoft-sourced row silently reading as "HR API" too.
+  HR_DIRECTORY
 }
 
 // How User.role (the GLOBAL role, distinct from DepartmentRole) was last
@@ -195,6 +202,15 @@ model Company {
   // admin-created company (via /admin/companies) is expected to always set
   // one. Still unique when present.
   domain            String?        @unique
+  // The external HR directory API's own stable `CompanyId` (see
+  // lib/services/hr-directory-sync-service.ts) — a real integer identity,
+  // checked FIRST on every HR sync before falling back to normalizedName
+  // matching, so a company rename in the HR system never creates a
+  // duplicate root the way pure string matching alone could. Null for any
+  // company that predates the HR sync (including every Microsoft-sourced
+  // company) or was created purely manually — backfilled the first time an
+  // HR sync row names it.
+  hrCompanyId       Int?           @unique
   businessUnits     BusinessUnit[]
   // Departments attached directly to this Company (no BusinessUnit) — the
   // path Microsoft Directory Sync always uses, since Entra has no "business
@@ -253,6 +269,11 @@ model Department {
   // how the two paths are rendered under the same Company node either way.
   company                 Company?                     @relation("DepartmentDirectCompany", fields: [companyId], references: [id])
   companyId               String?
+  // The external HR directory API's own stable `HrDepartmentId` — same
+  // role as Company.hrCompanyId above, checked first before falling back to
+  // the (companyId, normalizedName) string match. Null for any department
+  // that predates the HR sync or was created purely manually.
+  hrDepartmentId          Int?                         @unique
   subDepartments          SubDepartment[]
   users                   User[]
   memberships             DepartmentMembership[]
@@ -640,6 +661,14 @@ model User {
   // Entra ID `oid` claim — stable identity anchor independent of email, so a
   // user's Microsoft identity survives an email change (see admin email edit).
   microsoftUserId              String?                     @unique
+  // External HR directory API's `Username`/`sAMAccountName` (see
+  // lib/services/hr-directory-sync-service.ts) — the HR-sourced counterpart
+  // to microsoftUserId above: a stable match key checked FIRST before
+  // falling back to email, so a later HR sync re-finds the same local user
+  // even if their email ever changes. Distinct from `email`'s local-part —
+  // the two are NOT guaranteed to match (confirmed in the HR API's own
+  // sample data, e.g. username "geokos" vs email "Georgios.Kostopoulos@...").
+  hrUsername                   String?                     @unique
   // Set only on a *successful* Graph-based department sync during Microsoft
   // login (lib/services/microsoft-department-sync-service.ts) — never on a
   // failed fetch, so it always reflects the last time data actually synced.
@@ -1407,11 +1436,11 @@ model ProjectFeedback {
   // boundary for every NEW submission going forward, the same
   // "nullable at DB, required at creation" pattern this schema already
   // uses throughout (e.g. TaskSubType.cost, ProjectActivity.taskTypeId).
-  deliverySpeedRating Int?
-  communicationRating Int?
-  functionalityRating Int?
-  easeOfUseRating     Int?
-  overallRating       Int?
+  deliverySpeedRating   Int?
+  communicationRating   Int?
+  functionalityRating   Int?
+  easeOfUseRating       Int?
+  overallRating         Int?
   // A separate, explicit boolean answer — never derived from the five
   // ratings above. Same DB-nullable/application-required rationale as the
   // five ratings.
@@ -1515,7 +1544,7 @@ model ProjectActivity {
   // "nullable at DB, required at creation" pattern every other
   // request-origin-only field on this model already uses. Has NO cost of
   // its own (see TaskType — unlike TaskSubType below, which does).
-  taskType           TaskType?    @relation(fields: [taskTypeId], references: [id])
+  taskType           TaskType?            @relation(fields: [taskTypeId], references: [id])
   taskTypeId         String?
   // The RENAMED former "Task Type" (now Task Sub Type — see TaskSubType's
   // own doc comment) — same field, same meaning, same historical values,
@@ -1523,7 +1552,7 @@ model ProjectActivity {
   // free that name up for the brand-new, unrelated field above. Business
   // semantics (required only for request-origin Activities) are
   // completely unchanged by this rename.
-  taskSubType        TaskSubType? @relation(fields: [taskSubTypeId], references: [id])
+  taskSubType        TaskSubType?         @relation(fields: [taskSubTypeId], references: [id])
   taskSubTypeId      String?
   // A HISTORICAL SNAPSHOT of taskSubType.cost at the moment it was set on
   // this Activity (at creation, or whenever Task Sub Type is CHANGED
@@ -1534,7 +1563,7 @@ model ProjectActivity {
   // null — NEVER coerced to 0; see
   // lib/services/project-financials-service.ts for how financial totals
   // treat a null snapshot as "no fixed calculable cost," not a zero cost.
-  taskSubTypeCost    Decimal?     @db.Decimal(10, 2)
+  taskSubTypeCost    Decimal?             @db.Decimal(10, 2)
   // The user-controlled execution/priority ORDER of this Activity within
   // its parent Project's vertical sequence — request-origin Projects only
   // (Project.projectRequestId != null; see
@@ -2346,7 +2375,9 @@ model EmailProcessingLog {
  * never silently skipping a pre-existing backlog.
  */
 model MailboxPollCursor {
-  /** Normalized (trim + lowercase) mailbox address — same normalization inbound-mailbox-service.ts already applies to every mailbox it discovers. */
+  /**
+   * Normalized (trim + lowercase) mailbox address — same normalization inbound-mailbox-service.ts already applies to every mailbox it discovers.
+   */
   mailbox        String   @id
   lastReceivedAt DateTime
   updatedAt      DateTime @updatedAt

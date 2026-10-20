@@ -8,9 +8,14 @@
  */
 import { prisma } from "@/lib/prisma";
 import { OrganizationSyncStatus, OrganizationSyncType } from "@prisma/client";
-import { runOrganizationDirectorySync, type DirectoryRawUserRecord } from "@/lib/services/organization-directory-sync-service";
-import { runOrganizationManagerSync } from "@/lib/services/organization-manager-sync-service";
+import { runHrDirectorySync } from "@/lib/services/hr-directory-sync-service";
 import { invalidateOrganizationTreeCache } from "@/lib/services/organization-tree-service";
+
+// The two Graph-based services this orchestrator used to call
+// (runOrganizationDirectorySync, runOrganizationManagerSync) are left in
+// place, unimported here, in case Graph-based sync is ever needed again —
+// see lib/services/hr-directory-sync-service.ts's header comment for why a
+// single HR-sourced scan now replaces both of them in one pass.
 
 const STALE_LOCK_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes — a lock older than this is treated as a crashed run, not a real in-progress one
 
@@ -54,26 +59,6 @@ async function releaseOrganizationSyncLock(runId: string): Promise<void> {
   });
 }
 
-/**
- * `RELATIONSHIP_REFRESH` (manager sync without a fresh directory scan) has
- * no per-run raw-directory-scan result to draw candidate managers from —
- * this rebuilds an equivalent candidate list from the CURRENT DB state
- * instead of re-fetching `GET /users`. Trade-off, explicit: this can never
- * discover a currently-excluded (guest/service) Entra manager, since such a
- * user was never given a local row in the first place — only a `FULL` sync
- * (which re-scans the raw directory, excluded users included) can detect
- * MANAGER_NOT_SYNCED. Acceptable because RELATIONSHIP_REFRESH's whole
- * purpose is a cheaper refresh of reporting lines among ALREADY-known
- * users, not a full re-discovery pass.
- */
-async function buildCandidateManagersFromDb(): Promise<DirectoryRawUserRecord[]> {
-  const users = await prisma.user.findMany({
-    where: { microsoftUserId: { not: null } },
-    select: { id: true, microsoftUserId: true },
-  });
-  return users.map((u) => ({ microsoftUserId: u.microsoftUserId as string, isExcluded: false, dbUserId: u.id }));
-}
-
 export interface OrganizationSyncRunResult {
   runId: string;
   status: OrganizationSyncStatus;
@@ -87,13 +72,15 @@ export interface OrganizationSyncRunResult {
 }
 
 /**
- * `FULL` = directory sync (user properties + department membership) THEN
- * manager sync (fed the SAME run's raw directory-scan result, including
- * excluded users). `INCREMENTAL` = directory sync only (cheaper — property
- * refresh, no manager traversal). `RELATIONSHIP_REFRESH` = manager sync
- * only, candidate list rebuilt from the current DB (see
- * buildCandidateManagersFromDb). All three share this same lock/
- * run-lifecycle machinery.
+ * `FULL` and `INCREMENTAL` both run the SAME single HR-sourced scan
+ * (lib/services/hr-directory-sync-service.ts) — the FULL/INCREMENTAL
+ * distinction existed to avoid an expensive Graph manager-fan-out on every
+ * run; the HR API makes a full scan cheap (one paginated GET, no per-
+ * manager fan-out), so there's no longer a cheaper partial mode to offer.
+ * `RELATIONSHIP_REFRESH` is a no-op alias of the same scan — no route
+ * exposes it today (only FULL/INCREMENTAL have admin UI triggers), kept
+ * defined rather than removed in case a future caller needs it back. All
+ * three share this same lock/run-lifecycle machinery.
  */
 export async function runOrganizationSync(
   type: OrganizationSyncType,
@@ -122,39 +109,21 @@ export async function runOrganizationSync(
   let errorCount = 0;
   let hardFailureReason: string | null = null;
   let managerHierarchyPublished: boolean | null = null;
-  let directoryRawUsers: DirectoryRawUserRecord[] = [];
 
   try {
     if (type === OrganizationSyncType.FULL || type === OrganizationSyncType.INCREMENTAL) {
-      const directoryOutcome = await runOrganizationDirectorySync();
-      if (!directoryOutcome.ok) {
-        hardFailureReason = `Directory sync failed: ${directoryOutcome.reason}`;
+      const outcome = await runHrDirectorySync();
+      managerHierarchyPublished = outcome.managerHierarchyPublished;
+      if (!outcome.ok) {
+        hardFailureReason = `HR directory sync failed: ${outcome.reason}`;
       } else {
-        usersScanned += directoryOutcome.usersScanned;
-        usersUpdated += directoryOutcome.usersUpdated;
-        usersSkipped += directoryOutcome.usersSkipped;
-        errorCount += directoryOutcome.errorCount;
-        directoryRawUsers = directoryOutcome.rawUsers;
+        usersScanned += outcome.usersScanned;
+        usersUpdated += outcome.usersUpdated;
+        usersSkipped += outcome.usersSkipped;
+        errorCount += outcome.errorCount;
       }
     }
-
-    // Only proceed to the (separate, independent) manager sync if the
-    // directory stage didn't hard-fail — a directory-stage permission/
-    // config error almost certainly means the manager stage would fail
-    // identically (same app-only token), so this avoids a second identical
-    // failure being logged.
-    if (!hardFailureReason && (type === OrganizationSyncType.FULL || type === OrganizationSyncType.RELATIONSHIP_REFRESH)) {
-      const candidateManagers = type === OrganizationSyncType.FULL ? directoryRawUsers : await buildCandidateManagersFromDb();
-      const managerOutcome = await runOrganizationManagerSync(candidateManagers);
-      managerHierarchyPublished = managerOutcome.published;
-      if (!managerOutcome.ok) {
-        hardFailureReason = `Manager sync failed: ${managerOutcome.reason}`;
-      } else {
-        usersUpdated += managerOutcome.usersUpdated;
-        usersSkipped += managerOutcome.usersSkipped;
-        errorCount += managerOutcome.errorCount;
-      }
-    }
+    // RELATIONSHIP_REFRESH: no-op (see this function's own doc comment above).
   } catch (err) {
     hardFailureReason = err instanceof Error ? err.message : String(err);
   } finally {
