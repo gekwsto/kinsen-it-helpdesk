@@ -634,6 +634,11 @@ model User {
   // Per-USER (not per-browser) preference — see MentionReminder. Separate from
   // the immediate mention notification and from browser push permission.
   mentionRemindersEnabled      Boolean                     @default(true)
+  // Opt-in (default OFF, unlike mentionRemindersEnabled above) — when true,
+  // this user is notified every time a new Ticket is created in a
+  // Department they hold an active DepartmentMembership in. See
+  // lib/ticket-notification-service.ts's notifyDepartmentOfNewTicket.
+  newDepartmentTicketsEnabled  Boolean                     @default(false)
   passwordHash                 String?
   authProvider                 AuthProvider                @default(MICROSOFT)
   mustChangePassword           Boolean                     @default(false)
@@ -1407,11 +1412,11 @@ model ProjectFeedback {
   // boundary for every NEW submission going forward, the same
   // "nullable at DB, required at creation" pattern this schema already
   // uses throughout (e.g. TaskSubType.cost, ProjectActivity.taskTypeId).
-  deliverySpeedRating Int?
-  communicationRating Int?
-  functionalityRating Int?
-  easeOfUseRating     Int?
-  overallRating       Int?
+  deliverySpeedRating   Int?
+  communicationRating   Int?
+  functionalityRating   Int?
+  easeOfUseRating       Int?
+  overallRating         Int?
   // A separate, explicit boolean answer — never derived from the five
   // ratings above. Same DB-nullable/application-required rationale as the
   // five ratings.
@@ -1515,7 +1520,7 @@ model ProjectActivity {
   // "nullable at DB, required at creation" pattern every other
   // request-origin-only field on this model already uses. Has NO cost of
   // its own (see TaskType — unlike TaskSubType below, which does).
-  taskType           TaskType?    @relation(fields: [taskTypeId], references: [id])
+  taskType           TaskType?            @relation(fields: [taskTypeId], references: [id])
   taskTypeId         String?
   // The RENAMED former "Task Type" (now Task Sub Type — see TaskSubType's
   // own doc comment) — same field, same meaning, same historical values,
@@ -1523,7 +1528,7 @@ model ProjectActivity {
   // free that name up for the brand-new, unrelated field above. Business
   // semantics (required only for request-origin Activities) are
   // completely unchanged by this rename.
-  taskSubType        TaskSubType? @relation(fields: [taskSubTypeId], references: [id])
+  taskSubType        TaskSubType?         @relation(fields: [taskSubTypeId], references: [id])
   taskSubTypeId      String?
   // A HISTORICAL SNAPSHOT of taskSubType.cost at the moment it was set on
   // this Activity (at creation, or whenever Task Sub Type is CHANGED
@@ -1534,7 +1539,7 @@ model ProjectActivity {
   // null — NEVER coerced to 0; see
   // lib/services/project-financials-service.ts for how financial totals
   // treat a null snapshot as "no fixed calculable cost," not a zero cost.
-  taskSubTypeCost    Decimal?     @db.Decimal(10, 2)
+  taskSubTypeCost    Decimal?             @db.Decimal(10, 2)
   // The user-controlled execution/priority ORDER of this Activity within
   // its parent Project's vertical sequence — request-origin Projects only
   // (Project.projectRequestId != null; see
@@ -2346,7 +2351,9 @@ model EmailProcessingLog {
  * never silently skipping a pre-existing backlog.
  */
 model MailboxPollCursor {
-  /** Normalized (trim + lowercase) mailbox address — same normalization inbound-mailbox-service.ts already applies to every mailbox it discovers. */
+  /**
+   * Normalized (trim + lowercase) mailbox address — same normalization inbound-mailbox-service.ts already applies to every mailbox it discovers.
+   */
   mailbox        String   @id
   lastReceivedAt DateTime
   updatedAt      DateTime @updatedAt
@@ -2452,6 +2459,12 @@ model EmailNotificationLog {
 enum PushNotificationType {
   REPLY
   TERMINAL
+  // A new Ticket was created in a department this user belongs to (see
+  // lib/ticket-notification-service.ts's notifyDepartmentOfNewTicket) —
+  // reuses this same eventKey-backed claim table so each eligible member
+  // gets at most one notification per Ticket, exactly like REPLY/TERMINAL
+  // already guarantee for their own events.
+  DEPARTMENT_NEW_TICKET
 }
 
 enum PushNotificationStatus {

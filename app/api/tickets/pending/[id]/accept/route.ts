@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/prisma";
 import { requireAuth, hasPermission, requireDepartmentPermission } from "@/lib/permissions";
 import { acceptPendingTicket } from "@/lib/services/pending-ticket-service";
-import { notifyRequesterCreated } from "@/lib/ticket-notification-service";
+import { notifyRequesterCreated, notifyDepartmentOfNewTicket } from "@/lib/ticket-notification-service";
 
 const acceptSchema = z.object({
   departmentId: z.string().nullable().optional(),
@@ -53,7 +53,12 @@ export async function POST(
     // an email was received (that only ever creates a PendingTicket); only
     // once a human has accepted it here. Deferred via after(), same
     // reasoning as POST /api/tickets.
-    after(() => notifyRequesterCreated({ ticketId: result.ticket.id }));
+    after(() =>
+      Promise.all([
+        notifyRequesterCreated({ ticketId: result.ticket.id }),
+        notifyDepartmentOfNewTicket({ ticketId: result.ticket.id }),
+      ])
+    );
 
     return NextResponse.json(result.ticket);
   } catch (error: any) {

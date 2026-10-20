@@ -17,7 +17,7 @@ import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createTicketAtomic } from "@/lib/services/ticket-creation-service";
 import { createTicketSchema } from "@/lib/validations";
-import { notifyRequesterCreated } from "@/lib/ticket-notification-service";
+import { notifyRequesterCreated, notifyDepartmentOfNewTicket } from "@/lib/ticket-notification-service";
 
 export async function GET(req: NextRequest) {
   try {
@@ -328,7 +328,10 @@ export async function POST(req: NextRequest) {
       if (process.env.NODE_ENV !== "production") {
         console.log("[notify-diag] POST /api/tickets:after-callback-start", JSON.stringify({ ticketId: ticket.id }));
       }
-      return notifyRequesterCreated({ ticketId: ticket.id });
+      return Promise.all([
+        notifyRequesterCreated({ ticketId: ticket.id }),
+        notifyDepartmentOfNewTicket({ ticketId: ticket.id }),
+      ]);
     });
 
     return NextResponse.json(ticket, { status: 201 });

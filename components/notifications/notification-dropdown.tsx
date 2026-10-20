@@ -89,6 +89,40 @@ export function NotificationDropdown() {
       setRemindersSaving(false);
     }
   };
+
+  // Same per-USER, server-persisted shape as remindersEnabled above — opt-in
+  // notice when a new Ticket is created in a Department this user belongs
+  // to. Defaults to false (opt-in), unlike remindersEnabled's default true.
+  const [deptTicketsEnabled, setDeptTicketsEnabled] = useState<boolean | null>(null);
+  const [deptTicketsSaving, setDeptTicketsSaving] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/users/me/new-department-tickets")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!cancelled && d) setDeptTicketsEnabled(!!d.enabled);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const toggleDeptTickets = async (next: boolean) => {
+    setDeptTicketsSaving(true);
+    try {
+      const res = await fetch("/api/users/me/new-department-tickets", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!res.ok) throw new Error();
+      setDeptTicketsEnabled(next);
+    } catch {
+      toast.error("Could not update your new department tickets preference.");
+    } finally {
+      setDeptTicketsSaving(false);
+    }
+  };
   // The VAPID public key, resolved at RUNTIME from the authenticated
   // /api/notifications/push/config endpoint — never read from
   // process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY directly. That value
@@ -479,6 +513,23 @@ export function NotificationDropdown() {
               onCheckedChange={toggleReminders}
               disabled={remindersSaving}
               aria-label="Mention reminders"
+            />
+          </div>
+        )}
+
+        {deptTicketsEnabled !== null && (
+          <div className="flex items-start justify-between gap-3 border-b px-4 py-2.5">
+            <div className="min-w-0">
+              <p className="text-sm font-medium leading-tight">New department tickets</p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Notify me when a new ticket is created in a department I belong to.
+              </p>
+            </div>
+            <Switch
+              checked={deptTicketsEnabled}
+              onCheckedChange={toggleDeptTickets}
+              disabled={deptTicketsSaving}
+              aria-label="New department tickets"
             />
           </div>
         )}

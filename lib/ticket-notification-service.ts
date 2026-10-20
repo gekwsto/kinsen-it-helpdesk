@@ -8,6 +8,7 @@ import {
 import { formatTicketNumber, truncate } from "@/lib/utils";
 import { sendPushNotificationsToUser } from "@/lib/web-push";
 import { publishNotificationCreated } from "@/lib/realtime/notification-publisher";
+import { getActiveDepartmentMemberUsers } from "@/lib/services/department-membership-service";
 import {
   EmailNotificationType,
   EmailNotificationStatus,
@@ -247,6 +248,97 @@ async function notifyRequesterCreatedImpl(params: { ticketId: string }): Promise
   }
 }
 
+// ── Department notification (opt-in, in-app + push only — no email) ───────────
+// Fired exactly once per ticket, alongside notifyRequesterCreated, from every
+// live Ticket-creation path (WEB, API integration, and email-accept) — see
+// each call site. Recipients are resolved purely from the CANONICAL
+// DepartmentMembership model (getActiveDepartmentMemberUsers), scoped to the
+// ticket's own departmentId — never inferred from the active workspace, the
+// ticket's creator/assignee, or any Microsoft profile field. Each eligible,
+// opted-in, active member gets at most one notification for this ticket,
+// enforced by the same eventKey-unique claim table (PushNotificationLog)
+// REPLY/TERMINAL push events already use — not a parallel idempotency
+// mechanism. The ticket's own requester is excluded (they already get
+// notifyRequesterCreated above; a "new ticket" notice about their own
+// just-filed ticket would be redundant noise), mirroring the same
+// self-exclusion already applied to mention notifications
+// (lib/services/mention-notification-service.ts) and the terminal-transition
+// push above (actorId === requesterId).
+
+export async function notifyDepartmentOfNewTicket(params: { ticketId: string }): Promise<void> {
+  try {
+    await notifyDepartmentOfNewTicketImpl(params);
+  } catch (err) {
+    // Same final safety net as notifyRequesterCreated — every call site
+    // schedules this via next/server's after(), detached from the response.
+    console.error(`[notification] notifyDepartmentOfNewTicket crashed for ticket ${params.ticketId}:`, err);
+  }
+}
+
+async function notifyDepartmentOfNewTicketImpl(params: { ticketId: string }): Promise<void> {
+  const ticket = await prisma.ticket.findUnique({
+    where: { id: params.ticketId },
+    select: { id: true, title: true, ticketNumber: true, departmentId: true, requesterId: true },
+  });
+  // A ticket with no department (schema allows Ticket.departmentId to be
+  // null) has no department membership to notify — nothing to do, not an
+  // error; every live creation path already resolves a real departmentId
+  // before creating, so this is expected to be unreachable in practice.
+  if (!ticket || !ticket.departmentId) return;
+
+  const members = await getActiveDepartmentMemberUsers(ticket.departmentId);
+  const candidateIds = Array.from(new Set(members.map((m) => m.id).filter((id) => id !== ticket.requesterId)));
+  if (candidateIds.length === 0) return;
+
+  // Opt-in filter — getActiveDepartmentMemberUsers already restricts to
+  // isActive:true members, so this only narrows further by the preference.
+  const optedIn = await prisma.user.findMany({
+    where: { id: { in: candidateIds }, newDepartmentTicketsEnabled: true },
+    select: { id: true },
+  });
+  if (optedIn.length === 0) return;
+
+  const ref = formatTicketNumber(ticket.ticketNumber);
+  const title = "New ticket in your department";
+  const body = `${ref} · ${ticket.title}`;
+  const link = `/tickets/${ticket.id}`;
+
+  await Promise.all(
+    optedIn.map((u) => notifyOneDepartmentMemberOfNewTicket({ ticketId: ticket.id, userId: u.id, title, body, link }))
+  );
+}
+
+async function notifyOneDepartmentMemberOfNewTicket(params: {
+  ticketId: string;
+  userId: string;
+  title: string;
+  body: string;
+  link: string;
+}): Promise<void> {
+  // One fixed key per (ticket, recipient) pair, ever — a ticket is created
+  // exactly once, so this can never legitimately recur for the same user;
+  // same atomic-INSERT-as-claim architecture as claimPushEvent's other
+  // callers (see that function's doc comment for the full TOCTOU reasoning).
+  const eventKey = `ticket:${params.ticketId}:department-notify:${params.userId}`;
+  const claim = await claimPushEvent({
+    eventKey,
+    ticketId: params.ticketId,
+    messageId: null,
+    userId: params.userId,
+    type: PushNotificationType.DEPARTMENT_NEW_TICKET,
+  });
+  if (!claim.claimed) return; // already delivered (or being delivered right now) to this user for this ticket
+
+  await deliverRequesterPush({
+    logId: claim.logId,
+    userId: params.userId,
+    title: params.title,
+    body: params.body,
+    link: params.link,
+    ticketId: params.ticketId,
+  });
+}
+
 // ── Closed notification ───────────────────────────────────────────────────────
 // Fired once per real open->closed TRANSITION, never merely because the
 // current status happens to be closed — callers are responsible for only
@@ -479,7 +571,9 @@ async function notifyTicketRequesterTerminalTransitionImpl(params: {
 }
 
 /**
- * Shared delivery tail for both push functions above: mirrors the existing
+ * Shared delivery tail — despite the name, not requester-specific; it just
+ * takes a `userId` and is reused as-is by notifyOneDepartmentMemberOfNewTicket
+ * above for a non-requester recipient. Mirrors the existing
  * in-app Notification (bell) feed — deliberately created here, once, so
  * refactoring the reply push path can never leave a duplicate/orphaned
  * Notification row behind, and a terminal push gets the same in-app parity
@@ -497,6 +591,19 @@ async function notifyTicketRequesterTerminalTransitionImpl(params: {
  * committed by the time this runs (every call site fires it only via
  * after()), so a push failure must never look like anything went wrong with
  * the ticket action itself.
+ *
+ * In-app delivery is the REQUIRED channel (push is best-effort — SKIPPED,
+ * meaning no subscriptions existed, is already a legitimate non-error
+ * terminal state). If prisma.notification.create itself fails, the claim
+ * must never be resolved to a terminal status on the strength of the push
+ * leg alone — doing so previously let an in-app write failure get silently
+ * recorded as SKIPPED/SENT/FAILED, permanently consuming the eventKey and
+ * making the event unrecoverable even though nothing was ever actually
+ * delivered in-app. Push is still attempted independently either way
+ * (unchanged — a transient in-app hiccup must not block a real push
+ * delivery), but the claim row itself is released (deleted, not resolved)
+ * whenever the in-app write didn't succeed, so a later legitimate retry can
+ * re-claim the SAME eventKey and try again — see releasePushClaim below.
  */
 async function deliverRequesterPush(params: {
   logId: string;
@@ -506,10 +613,12 @@ async function deliverRequesterPush(params: {
   link: string;
   ticketId: string;
 }): Promise<void> {
+  let notificationCreated = false;
   try {
     const created = await prisma.notification.create({
       data: { userId: params.userId, title: params.title, body: params.body, link: params.link },
     });
+    notificationCreated = true;
     // Realtime publish happens only after the row is actually committed —
     // the DB remains authoritative; this is purely an acceleration
     // mechanism for the bell UI. publishNotificationCreated/the event bus
@@ -526,8 +635,9 @@ async function deliverRequesterPush(params: {
       createdAt: created.createdAt.toISOString(),
     });
   } catch (err) {
-    // Non-fatal — the in-app bell feed is a nice-to-have alongside the real
-    // push; a failure here must not stop the push attempt below.
+    // Still non-fatal to the push attempt below (unchanged) — but
+    // notificationCreated stays false, which is what makes the claim
+    // releasable instead of resolved below.
     console.error(`[notification] Failed to create in-app notification for ticket ${params.ticketId}:`, err);
   }
 
@@ -537,6 +647,10 @@ async function deliverRequesterPush(params: {
       body: params.body,
       link: params.link,
     });
+    if (!notificationCreated) {
+      await releasePushClaim(params.logId);
+      return;
+    }
     if (result.subscriptionCount === 0) {
       await resolvePushClaim(params.logId, "SKIPPED");
     } else if (result.sentCount > 0) {
@@ -548,6 +662,10 @@ async function deliverRequesterPush(params: {
     // sendPushNotificationsToUser itself never throws (Promise.allSettled
     // internally) — this catch is defensive-only, same reasoning as the
     // email try/catch blocks above.
+    if (!notificationCreated) {
+      await releasePushClaim(params.logId);
+      return;
+    }
     const error = err instanceof Error ? err.message : String(err);
     console.error(`[notification] Failed to send push for ticket ${params.ticketId}:`, error);
     await resolvePushClaim(params.logId, "FAILED", error);
@@ -682,4 +800,26 @@ async function resolvePushClaim(logId: string, status: "SENT" | "FAILED" | "SKIP
     .catch((err) => {
       console.error("[notification] Failed to update push notification log:", err);
     });
+}
+
+/**
+ * Un-claims an eventKey whose REQUIRED in-app notification write never
+ * succeeded (see deliverRequesterPush above) — deletes the row rather than
+ * resolving it to any status, since claimPushEvent's uniqueness guard keys
+ * purely on row EXISTENCE (any existing row for an eventKey, regardless of
+ * status, blocks a new claim). Deleting is what makes the eventKey
+ * claimable again for a genuine later retry, without needing a new
+ * PushNotificationStatus value/migration for "needs retry". Scoped to
+ * exactly the row this call owns (by its own logId) — never touches any
+ * other claim, so this can't race with or clobber a concurrent, unrelated
+ * attempt for a different eventKey.
+ */
+async function releasePushClaim(logId: string): Promise<void> {
+  await prisma.pushNotificationLog.delete({ where: { id: logId } }).catch((err) => {
+    // If the delete itself fails (rare — a transient DB error), the row is
+    // left stuck PENDING, same residual risk this whole claim table already
+    // had for any write failure — logged, never thrown, never surfaced as a
+    // failure of the ticket action that triggered this.
+    console.error("[notification] Failed to release push notification claim:", err);
+  });
 }

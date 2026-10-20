@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { after } from "next/server";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { apiError, zodErrorResponse, internalErrorResponse } from "@/lib/api-errors";
@@ -6,6 +7,7 @@ import { extractBearerToken, verifyIntegrationKey, IntegrationPepperMissingError
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { isDepartmentAcceptingTickets } from "@/lib/services/department-scope-service";
+import { notifyDepartmentOfNewTicket } from "@/lib/ticket-notification-service";
 import {
   createTicketAtomic,
   resolveIntegrationTicketDefaults,
@@ -284,6 +286,13 @@ export async function POST(req: NextRequest) {
           description: `Ticket created through integration ${integration.name}`,
         }
       );
+
+      // Deferred via after(), same pattern as POST /api/tickets and the
+      // pending-ticket accept route — this route has no existing
+      // post-creation notification hook of its own to sit alongside (it
+      // never emails the requester today, a pre-existing, unrelated gap not
+      // touched here), so this is the first one added.
+      after(() => notifyDepartmentOfNewTicket({ ticketId: ticket.id }));
 
       return NextResponse.json(
         { success: true, created: true, ticket: toTicketResponse(ticket) },
