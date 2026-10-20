@@ -23,11 +23,11 @@ export default async function NewProjectPage({
   // comment). The query param only tells us WHICH request to look up; every
   // actual decision below is re-resolved server-side from the real
   // database row, never trusted from the URL itself. This deliberately
-  // bypasses the `canCreate` (project.create) gate below — the exact
-  // recorded final approver completing setup for the ONE request they just
-  // approved must never be blocked just because they don't separately hold
-  // generic project.create in that department (that would be a real
-  // regression: approve succeeds, then setup is refused). ───
+  // bypasses the `canCreate` (project.create) gate below — anyone who
+  // currently holds effective projectRequest.approve for this request's own
+  // department must never be blocked from completing setup just because
+  // they don't separately hold generic project.create there (that would be
+  // a real regression: approve succeeds, then setup is refused). ───
   if (projectRequestId) {
     const request = await prisma.projectRequest.findUnique({
       where: { id: projectRequestId },
@@ -38,16 +38,22 @@ export default async function NewProjectPage({
         importance: true,
         status: true,
         approverId: true,
+        departmentId: true,
         department: { select: { id: true, name: true } },
         project: { select: { id: true } },
       },
     });
 
-    // Doesn't exist, isn't APPROVED yet, or the viewer isn't its exact
-    // recorded final approver — never a distinguishable error state here;
-    // just send them back to the request itself, where canViewProjectRequest
-    // decides what (if anything) they're allowed to see.
-    if (!request || request.status !== "APPROVED" || request.approverId !== session.user.id) {
+    // Doesn't exist, isn't APPROVED yet, or the viewer doesn't currently
+    // hold projectRequest.approve for this request's own department — same
+    // permission createProjectFromApprovedRequest itself re-checks, not
+    // tied to whoever originally clicked Approve. Never a distinguishable
+    // error state here; just send them back to the request itself, where
+    // canViewProjectRequest decides what (if anything) they're allowed to see.
+    const canCompleteSetup =
+      !!request &&
+      (await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, request.departmentId, "projectRequest.approve"));
+    if (!request || request.status !== "APPROVED" || !canCompleteSetup) {
       redirect(`/project-requests/${projectRequestId}`);
     }
 
