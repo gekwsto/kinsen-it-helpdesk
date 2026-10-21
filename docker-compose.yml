@@ -107,6 +107,38 @@ services:
     networks:
       - kinsen-helpdesk-net
 
+  # Project Request setup-reminder worker — same sidecar pattern as the
+  # mention-reminder worker above. Triggers
+  # /api/internal/project-request-setup-reminders/process every 15 minutes
+  # (a 1-month-scale reminder needs nowhere near 60s granularity) over the
+  # internal Docker network. Authenticated with CRON_SECRET from .env.
+  # Running more than one copy is safe: reminders are claimed atomically in
+  # the database.
+  kinsen-helpdesk-project-request-setup-reminder-worker:
+    image: curlimages/curl:8.11.0
+    container_name: kinsen-helpdesk-project-request-setup-reminder-worker
+    restart: unless-stopped
+    depends_on:
+      - kinsen-helpdesk
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          if [ -z "$$CRON_SECRET" ]; then
+            echo "[project-request-setup-reminder-worker] CRON_SECRET is not set in .env — skipping this run (the endpoint rejects unauthenticated requests in production)."
+          else
+            curl -fsS -m 55 -X POST "http://kinsen-helpdesk:3000/api/internal/project-request-setup-reminders/process" \
+              -H "Authorization: Bearer $$CRON_SECRET" \
+              -o /dev/null -w "[project-request-setup-reminder-worker] run finished, HTTP %{http_code}\n" \
+              || echo "[project-request-setup-reminder-worker] run failed (network error or non-2xx response)"
+          fi
+          sleep 900
+        done
+    networks:
+      - kinsen-helpdesk-net
+
 volumes:
   kinsen_helpdesk_db_data:
 

@@ -25,7 +25,7 @@ import { ProjectRequestStatusBadge } from "@/components/project-requests/project
 import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
 import { PreviewField } from "@/components/shared/preview-field";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
-import { formatDateTime } from "@/lib/utils";
+import { formatDate, formatDateTime } from "@/lib/utils";
 import type { ProjectRequestStatus, IntermediateApprovalStatus } from "@prisma/client";
 
 export interface ProjectRequestRow {
@@ -209,7 +209,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                     <TableCell>
                       <ProjectRequestStatusBadge status={r.status} />
                     </TableCell>
-                    <TableCell className="text-muted-foreground whitespace-nowrap">{r.submittedAt.toLocaleDateString()}</TableCell>
+                    <TableCell className="text-muted-foreground whitespace-nowrap">{formatDate(r.submittedAt)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1.5">
                         <Button size="sm" variant="ghost" onClick={() => setPreviewTarget(r)} title="Preview this request">

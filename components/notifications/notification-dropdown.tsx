@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { toast } from "sonner";
 import { Bell, BellOff, Check, Loader2, X, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -12,6 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import Link from "next/link";
 import { formatRelative } from "@/lib/utils";
+import { NotificationPreferenceRow } from "@/components/notifications/notification-preference-row";
 import { useNotificationRealtime, type NotificationRealtimeEvent } from "@/hooks/use-notification-realtime";
 import {
   EMPTY_NOTIFICATION_STATE,
@@ -57,72 +57,6 @@ export function NotificationDropdown() {
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushLoading, setPushLoading] = useState(false);
 
-  // Per-USER (server-persisted, follows the user across browsers) "Mention
-  // reminders" preference — independent of the per-browser push toggle above.
-  const [remindersEnabled, setRemindersEnabled] = useState<boolean | null>(null);
-  const [remindersSaving, setRemindersSaving] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/users/me/mention-reminders")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!cancelled && d) setRemindersEnabled(!!d.enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const toggleReminders = async (next: boolean) => {
-    setRemindersSaving(true);
-    try {
-      const res = await fetch("/api/users/me/mention-reminders", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
-      });
-      if (!res.ok) throw new Error();
-      setRemindersEnabled(next);
-    } catch {
-      toast.error("Could not update your mention reminder preference.");
-    } finally {
-      setRemindersSaving(false);
-    }
-  };
-
-  // Same per-USER, server-persisted shape as remindersEnabled above — opt-in
-  // notice when a new Ticket is created in a Department this user belongs
-  // to. Defaults to false (opt-in), unlike remindersEnabled's default true.
-  const [deptTicketsEnabled, setDeptTicketsEnabled] = useState<boolean | null>(null);
-  const [deptTicketsSaving, setDeptTicketsSaving] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/users/me/new-department-tickets")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!cancelled && d) setDeptTicketsEnabled(!!d.enabled);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const toggleDeptTickets = async (next: boolean) => {
-    setDeptTicketsSaving(true);
-    try {
-      const res = await fetch("/api/users/me/new-department-tickets", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ enabled: next }),
-      });
-      if (!res.ok) throw new Error();
-      setDeptTicketsEnabled(next);
-    } catch {
-      toast.error("Could not update your new department tickets preference.");
-    } finally {
-      setDeptTicketsSaving(false);
-    }
-  };
   // The VAPID public key, resolved at RUNTIME from the authenticated
   // /api/notifications/push/config endpoint — never read from
   // process.env.NEXT_PUBLIC_WEB_PUSH_VAPID_PUBLIC_KEY directly. That value
@@ -500,39 +434,23 @@ export function NotificationDropdown() {
           </div>
         </div>
 
-        {remindersEnabled !== null && (
-          <div className="flex items-start justify-between gap-3 border-b px-4 py-2.5">
-            <div className="min-w-0">
-              <p className="text-sm font-medium leading-tight">Mention reminders</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Remind me when I have not responded to a Project or Activity mention.
-              </p>
-            </div>
-            <Switch
-              checked={remindersEnabled}
-              onCheckedChange={toggleReminders}
-              disabled={remindersSaving}
-              aria-label="Mention reminders"
-            />
-          </div>
-        )}
+        <NotificationPreferenceRow
+          apiPath="/api/users/me/mention-reminders"
+          label="Mention reminders"
+          description="Remind me when I have not responded to a Project or Activity mention."
+          ariaLabel="Mention reminders"
+          errorMessage="Could not update your mention reminder preference."
+          className="border-b px-4 py-2.5"
+        />
 
-        {deptTicketsEnabled !== null && (
-          <div className="flex items-start justify-between gap-3 border-b px-4 py-2.5">
-            <div className="min-w-0">
-              <p className="text-sm font-medium leading-tight">New department tickets</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                Notify me when a new ticket is created in a department I belong to.
-              </p>
-            </div>
-            <Switch
-              checked={deptTicketsEnabled}
-              onCheckedChange={toggleDeptTickets}
-              disabled={deptTicketsSaving}
-              aria-label="New department tickets"
-            />
-          </div>
-        )}
+        <NotificationPreferenceRow
+          apiPath="/api/users/me/new-department-tickets"
+          label="New department tickets"
+          description="Notify me when a new ticket is created in a department I belong to."
+          ariaLabel="New department tickets"
+          errorMessage="Could not update your new department tickets preference."
+          className="border-b px-4 py-2.5"
+        />
 
         {/* List */}
         <div className="max-h-[360px] overflow-y-auto">
@@ -549,7 +467,7 @@ export function NotificationDropdown() {
               const row = (
                 <div
                   className={`group flex items-start gap-3 px-4 py-3 border-b last:border-0 hover:bg-muted/50 cursor-pointer transition-colors ${
-                    !n.isRead ? "bg-blue-50 dark:bg-blue-900/20/60" : ""
+                    !n.isRead ? "bg-primary/5" : ""
                   }`}
                   onClick={() => markRead(n)}
                 >

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Loader2, Check, X, FolderKanban, Wrench } from "lucide-react";
 import type { ProjectRequestStatus } from "@prisma/client";
 import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
+import { formatDateTime } from "@/lib/utils";
 
 interface ApprovalActionsProps {
   requestId: string;
@@ -100,7 +101,7 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
         <p className="text-green-700">
           Approved by <span className="font-medium">{approver.name ?? approver.email}</span>
         </p>
-        {approvedAt && <p className="text-muted-foreground">{approvedAt.toLocaleString()}</p>}
+        {approvedAt && <p className="text-muted-foreground">{formatDateTime(approvedAt)}</p>}
         {businessAssessment && <p className="whitespace-pre-wrap mt-1">{businessAssessment}</p>}
         {project ? (
           <Link href={`/projects/${project.id}`} className="inline-flex items-center gap-1.5 mt-2 text-primary hover:underline">
@@ -127,7 +128,7 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
         <p className="text-red-700">
           Rejected by <span className="font-medium">{approver.name ?? approver.email}</span>
         </p>
-        {rejectedAt && <p className="text-muted-foreground">{rejectedAt.toLocaleString()}</p>}
+        {rejectedAt && <p className="text-muted-foreground">{formatDateTime(rejectedAt)}</p>}
         {businessAssessment && <p className="whitespace-pre-wrap mt-1">{businessAssessment}</p>}
       </div>
     );

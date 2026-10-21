@@ -38,8 +38,23 @@ export function useThemePreference() {
   useEffect(() => {
     const sync = () => {
       const current = readStoredMode();
+      const isDark = current === "dark" || (current === "system" && systemPrefersDark());
       setMode(current);
-      setResolvedDark(current === "dark" || (current === "system" && systemPrefersDark()));
+      setResolvedDark(isDark);
+      // Re-asserts the resolved theme on the DOM, not just in React state.
+      // theme-script.ts already applies the correct `.dark` class/colorScheme
+      // synchronously before first paint — this is normally a no-op. But
+      // when a hydration mismatch occurs ANYWHERE else on the page (e.g. a
+      // server/client locale-formatting difference), React's hydration
+      // recovery regenerates the document tree from the root (the `<html>`
+      // element returned by RootLayout), which silently discards the
+      // imperatively-added class the inline script set — React never knew
+      // about it, since it isn't part of any component's render output. This
+      // mount effect re-runs as part of that very regeneration (every
+      // (main) page's Topbar — and the root layout's own Toaster — mounts
+      // useThemePreference), so reapplying here closes that gap immediately,
+      // without a new timer, provider, or page-specific hack.
+      applyResolvedTheme(isDark);
     };
     sync();
 

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Check, X } from "lucide-react";
 import type { IntermediateApprovalStatus } from "@prisma/client";
 import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
+import { formatDateTime } from "@/lib/utils";
 
 export interface IntermediateApproverRow {
   id: string;
@@ -92,7 +93,7 @@ export function IntermediateApprovalActions({ requestId, approvers, myRow }: Int
                 {row.status === "APPROVED" ? "Approved" : row.status === "REJECTED" ? "Rejected" : "Pending"}
               </span>
             </div>
-            {row.decidedAt && <p className="text-xs text-muted-foreground mt-0.5">{row.decidedAt.toLocaleString()}</p>}
+            {row.decidedAt && <p className="text-xs text-muted-foreground mt-0.5">{formatDateTime(row.decidedAt)}</p>}
             {row.businessAssessment && <p className="text-sm whitespace-pre-wrap mt-1">{row.businessAssessment}</p>}
           </div>
         ))}

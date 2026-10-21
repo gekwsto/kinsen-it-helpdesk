@@ -10,6 +10,7 @@ import { prisma } from "@/lib/prisma";
 import Link from "next/link";
 import { KeyRound } from "lucide-react";
 import { MentionReminderSettingsCard } from "@/components/admin/mention-reminder-settings-card";
+import { NotificationPreferencesCard } from "@/components/notifications/notification-preferences-card";
 import { ThemeSettingsCard } from "@/components/theme/theme-settings-card";
 import { getMentionReminderDelayMinutes } from "@/lib/services/mention-reminder-service";
 import { describeMentionReminderDelay } from "@/lib/mention-reminders/config";
@@ -124,6 +125,8 @@ export default async function SettingsPage() {
       </Card>
 
       <ThemeSettingsCard />
+
+      <NotificationPreferencesCard />
 
       {/* Account Info */}
       <Card>

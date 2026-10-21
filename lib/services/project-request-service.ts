@@ -5,13 +5,13 @@ import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-se
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { listAccessibleWorkspaces, isAccessibleDepartment } from "@/lib/services/workspace-service";
-import { DEPARTMENT_ROLE_OPTIONS } from "@/lib/services/department-role-translation";
 import { ALL_WORKSPACES_VALUE } from "@/types/department";
 import { createInAppNotification, dispatchCreatedNotification } from "@/lib/notifications/create-notification";
+import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/services/project-request-setup-reminder-service";
+import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
 import { wholeCalendarDaysBetween } from "@/lib/date-only";
-import { Role, DepartmentRole, type ProjectRequestStatus, type Prisma } from "@prisma/client";
+import { Role, type ProjectRequestStatus, type Prisma } from "@prisma/client";
 
-const APPROVE_PERMISSION_KEY = "projectRequest.approve";
 // The intermediate stage, ahead of APPROVE_PERMISSION_KEY above. Holding
 // this permission is NECESSARY but NOT SUFFICIENT to decide any given
 // request — the requester must have ALSO explicitly selected that exact
@@ -63,65 +63,9 @@ export async function resolveDepartmentForRequest(
 }
 
 // ─── Eligible approvers (for the "Awaiting My Approval" scope AND submission notifications) ──
-
-/** Every roleKey (DepartmentRole strings, global Role enum values, or custom-role keys) currently granting `projectRequest.approve` — a real RolePermission catalogue lookup, never the runtime ADMIN bypass (so this also correctly reflects ADMIN's own explicit, migrated grant row). */
-async function getRoleKeysWithApprovePermission() {
-  const rows = await prisma.rolePermission.findMany({
-    where: { permission: { key: APPROVE_PERMISSION_KEY } },
-    select: { roleKey: true },
-  });
-  const roleKeys = rows.map((r) => r.roleKey);
-  const departmentRoleValues = new Set<string>(DEPARTMENT_ROLE_OPTIONS as string[]);
-  const globalRoleValues = new Set<string>(Object.values(Role));
-  return {
-    // DEPARTMENT_MANAGER is intentionally reachable via both sets — it's a
-    // single shared roleKey for the global Role and DepartmentRole enum
-    // values (see prisma/seed.ts's own comment on this).
-    departmentRoles: roleKeys.filter((k): k is DepartmentRole => departmentRoleValues.has(k)),
-    globalRoles: roleKeys.filter((k): k is Role => globalRoleValues.has(k)),
-    // Every roleKey, including admin-created custom-role keys that aren't a
-    // Role/DepartmentRole enum member at all — matched against
-    // User.customRole.key / DepartmentMembership.customRole.key.
-    allRoleKeys: roleKeys,
-  };
-}
-
-/**
- * Every ACTIVE user who effectively holds `projectRequest.approve` for
- * `departmentId` — a broad, cheap SQL prefilter by roleKey (never misses
- * anyone) followed by the exact hasEffectiveEntityPermission check per
- * candidate (never over-includes), same two-phase shape as
- * lib/services/assignment-eligibility-service.ts's getAssignableUsersForEntity.
- * Used both for the submission-time notification fan-out and could be
- * reused anywhere else "who can approve this" needs a real user list.
- */
-export async function getEligibleApproverUserIds(departmentId: string): Promise<string[]> {
-  const { departmentRoles, globalRoles, allRoleKeys } = await getRoleKeysWithApprovePermission();
-
-  const orConditions: Record<string, unknown>[] = [];
-  if (globalRoles.length > 0) orConditions.push({ role: { in: globalRoles } });
-  if (allRoleKeys.length > 0) orConditions.push({ customRole: { key: { in: allRoleKeys } } });
-  if (departmentRoles.length > 0) {
-    orConditions.push({ departmentMemberships: { some: { departmentId, isActive: true, role: { in: departmentRoles } } } });
-  }
-  if (allRoleKeys.length > 0) {
-    orConditions.push({ departmentMemberships: { some: { departmentId, isActive: true, customRole: { key: { in: allRoleKeys } } } } });
-  }
-  if (orConditions.length === 0) return [];
-
-  const candidates = await prisma.user.findMany({
-    where: { isActive: true, OR: orConditions },
-    select: { id: true, role: true, customRoleId: true },
-  });
-
-  const eligible: string[] = [];
-  for (const candidate of candidates) {
-    if (await hasEffectiveEntityPermission(candidate.id, candidate.role, candidate.customRoleId, departmentId, APPROVE_PERMISSION_KEY)) {
-      eligible.push(candidate.id);
-    }
-  }
-  return eligible;
-}
+// getEligibleApproverUserIds now lives in
+// project-request-approver-eligibility-service.ts (imported above) — see
+// that file's own header comment for why it was extracted out of here.
 
 /** Submission-time notification to every currently-eligible approver in the request's department — best-effort, called only after the ProjectRequest row itself has committed. */
 export async function notifyEligibleApproversOfSubmission(departmentId: string, requestId: string, title: string): Promise<void> {
@@ -408,6 +352,13 @@ export async function decideApproval(
         link: `/project-requests/${requestId}`,
       },
     });
+    // Only on approve — a rejected request has no Project to ever set up.
+    // See ProjectRequestSetupReminder's own doc comment for why this fires
+    // for every currently-eligible approver, not just `userId` (this call's
+    // own acting approver).
+    if (decision === "approve") {
+      await scheduleSetupReminderInTx(tx, requestId, now);
+    }
   });
 
   if (!notificationRow) {
@@ -609,6 +560,10 @@ export async function createProjectFromApprovedRequest(
       select: { id: true },
     });
     createdProjectId = project.id;
+    // The request now has a real Project — no more reminding needed. A
+    // no-op if no reminder exists (e.g. a request that predates this
+    // feature). See cancelSetupReminderInTx's own doc comment.
+    await cancelSetupReminderInTx(tx, requestId, "project_created", new Date());
   });
 
   if (!createdProjectId) {

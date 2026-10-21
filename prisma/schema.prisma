@@ -1922,6 +1922,12 @@ model ProjectRequest {
   // Project was never completed, or that has no Project yet.
   feedback ProjectFeedback?
 
+  // The ONE delayed reminder scheduled when this request is approved — see
+  // ProjectRequestSetupReminder's own doc comment. Null for a request never
+  // approved; non-null for every APPROVED request, scheduled once and never
+  // duplicated, regardless of its own PENDING/SENT/CANCELLED status.
+  setupReminder ProjectRequestSetupReminder?
+
   submittedAt DateTime @default(now())
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -2272,6 +2278,44 @@ model MentionReminderSettings {
   delayMinutes Int      @default(1440)
   updatedAt    DateTime @updatedAt
   updatedById  String?
+}
+
+enum ProjectRequestSetupReminderStatus {
+  PENDING
+  PROCESSING
+  SENT
+  CANCELLED
+}
+
+// One durable, delayed reminder per APPROVED ProjectRequest — scheduled the
+// moment a request is approved (see decideApproval in
+// lib/services/project-request-setup-reminder-service.ts), due 1 calendar
+// month later. Unlike MentionReminder (one row = one recipient), firing this
+// ONE row notifies EVERY user who currently holds effective
+// projectRequest.approve for the request's own department (the exact same
+// authority that may complete setup — see createProjectFromApprovedRequest),
+// not just whoever originally approved — so the reminder still reaches
+// someone even if the original approver has since moved on. Cancelled
+// automatically the moment a real Project is created from the request
+// (lib/services/project-request-service.ts's createProjectFromApprovedRequest) —
+// a completed setup needs no reminder. `projectRequestId` is `@unique`: a
+// request is approved at most once, ever (status transitions are one-way to
+// a terminal state), so at most one reminder is ever scheduled for it.
+model ProjectRequestSetupReminder {
+  id                 String                            @id @default(cuid())
+  projectRequest     ProjectRequest                    @relation(fields: [projectRequestId], references: [id], onDelete: Cascade)
+  projectRequestId   String                            @unique
+  dueAt              DateTime
+  status             ProjectRequestSetupReminderStatus @default(PENDING)
+  sentAt             DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  claimedAt          DateTime?
+  claimToken         String?
+  createdAt          DateTime                          @default(now())
+  updatedAt          DateTime                          @updatedAt
+
+  @@index([status, dueAt])
 }
 
 // ─── Notifications ────────────────────────────────────────────────────────────
