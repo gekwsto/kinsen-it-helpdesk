@@ -5,7 +5,10 @@ import {
   hasAnyFullTicketView,
   getAccessibleDepartmentSummaries,
   getNavVisibilityFlags,
+  canActOnEntity,
 } from "@/lib/services/department-scope-service";
+import { TicketKanbanBoard } from "@/components/tickets/ticket-kanban-board";
+import { TicketViewToggle } from "@/components/tickets/ticket-view-toggle";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { NoWorkspaceState } from "@/components/workspace/workspace-gate";
 import { TicketTable } from "@/components/tickets/ticket-table";
@@ -119,7 +122,12 @@ interface SearchParams {
   sortOrder?: string;
   unassigned?: string;
   myOnly?: string;
+  /** "board" opts into the Kanban view; any other value (or absent) is the default table. Only coherent for a single selected department — see boardDisabled below. */
+  view?: string;
 }
+
+/** Initial + "Load more" page size for each Kanban board column — see isBoardView's per-column query below. */
+const BOARD_COLUMN_PAGE_SIZE = 30;
 
 export default async function AllTicketsPage({
   searchParams,
@@ -207,6 +215,24 @@ export default async function AllTicketsPage({
   // trusted from the URL. AND-ed alongside every other filter (not merged
   // into one object) so a search/status filter can never clobber the
   // scope's own OR clause (own-tickets-only vs full department view).
+  // Kanban/board view — only coherent for a single selected department,
+  // since TicketStatus (the board's own column set) is per-department (see
+  // prisma/schema.prisma's TicketStatus @@unique([departmentId, name])).
+  // "All Workspaces" (effectiveDepartmentId undefined) disables it; a stale
+  // ?view=board URL from before switching to All Workspaces silently falls
+  // back to the table below rather than erroring or redirect-looping.
+  const view = params.view === "board" ? "board" : "table";
+  const boardDisabled = !effectiveDepartmentId;
+  const isBoardView = view === "board" && !boardDisabled;
+
+  // Who may drag a card (department-level half only — the per-ticket
+  // requester-owner bypass is evaluated client-side per card, since isOwner
+  // varies per ticket and every ticket's requester.id is already fetched
+  // below). Computed once here rather than once per ticket.
+  const canChangeStatusBase = effectiveDepartmentId
+    ? await canActOnEntity(session.user.id, role, effectiveDepartmentId, "ticket.changeStatus", false)
+    : false;
+
   const scope = await buildTicketListWhere(session.user.id, role, effectiveDepartmentId);
   if ("denied" in scope) {
     return (
@@ -345,38 +371,66 @@ export default async function AllTicketsPage({
 
   const where: any = { AND: andConditions };
 
-  const [tickets, total, departments, agents] = await Promise.all([
-    prisma.ticket.findMany({
-      where,
-      skip,
-      take: pageSize,
-      orderBy,
-      include: {
-        requester: { select: { id: true, name: true, email: true, image: true } },
-        assignedAgent: { select: { id: true, name: true, email: true, image: true } },
-        status: { select: { id: true, name: true, color: true } },
-        priority: { select: { id: true, name: true, color: true, level: true } },
-        category: { select: { id: true, name: true, color: true } },
-        department: { select: { id: true, name: true } },
-        project: { select: { id: true, title: true } },
-        departmentChangedBy: { select: { id: true, name: true, email: true } },
-        _count: { select: { messages: true, attachments: true } },
-      },
-    }),
-    prisma.ticket.count({ where }),
+  // Identical include for both views — the board needs exactly the same
+  // fields the table already fetches, nothing new.
+  const ticketInclude = {
+    requester: { select: { id: true, name: true, email: true, image: true } },
+    assignedAgent: { select: { id: true, name: true, email: true, image: true } },
+    status: { select: { id: true, name: true, color: true } },
+    priority: { select: { id: true, name: true, color: true, level: true } },
+    category: { select: { id: true, name: true, color: true } },
+    department: { select: { id: true, name: true } },
+    project: { select: { id: true, title: true } },
+    departmentChangedBy: { select: { id: true, name: true, email: true } },
+    _count: { select: { messages: true, attachments: true } },
+  } as const;
+
+  let tickets: any[] = [];
+  let total = 0;
+  // Board view: one small page PER STATUS COLUMN (not one big unpaginated
+  // fetch) — each column paginates independently via "Load more"
+  // (/api/tickets?statusId=...&page=...), the same existing endpoint the
+  // rest of the app's ticket search already uses. Reuses the identical
+  // `andConditions` (scope, search, every other active filter) with one
+  // extra AND per column: that column's own statusId — so an active Status
+  // filter composes naturally (a column whose status doesn't match it is
+  // just empty, not specially suppressed).
+  let boardColumns: { statusId: string; tickets: any[]; total: number }[] = [];
+  const [departments, agents] = await Promise.all([
     // Only departments the caller can actually filter to — never one that
     // would just 403 if picked.
     getAccessibleDepartmentSummaries(session.user.id, role, "ticket.view"),
     getVisibleTicketAssignees(assigneeOptionsWhere),
   ]);
 
+  if (isBoardView) {
+    boardColumns = await Promise.all(
+      filterOptions.statuses.map(async (status) => {
+        const statusId = status.ids[0];
+        const colWhere = { AND: [...andConditions, { statusId }] };
+        const [colTickets, colTotal] = await Promise.all([
+          prisma.ticket.findMany({ where: colWhere, take: BOARD_COLUMN_PAGE_SIZE, orderBy, include: ticketInclude }),
+          prisma.ticket.count({ where: colWhere }),
+        ]);
+        return { statusId, tickets: colTickets, total: colTotal };
+      })
+    );
+  } else {
+    [tickets, total] = await Promise.all([
+      prisma.ticket.findMany({ where, skip, take: pageSize, orderBy, include: ticketInclude }),
+      prisma.ticket.count({ where }),
+    ]);
+  }
+
   const pagination = computePagination(total, requestedPage, pageSize);
   // The requested page doesn't exist for this result set (a bookmarked/typed
   // page past the end, or the last row on the last page was just
   // deleted/reassigned out of scope) — canonicalize to the real last valid
   // page rather than rendering the empty skip, same pattern as
-  // app/(main)/projects/page.tsx / app/(main)/admin/users/page.tsx.
-  if (isOutOfRange(requestedPage, pagination)) {
+  // app/(main)/projects/page.tsx / app/(main)/admin/users/page.tsx. Doesn't
+  // apply to the board (it doesn't paginate by page at all — a stale ?page=
+  // left over from the table view is simply ignored there).
+  if (!isBoardView && isOutOfRange(requestedPage, pagination)) {
     redirect(buildCanonicalUrl(params, pagination.page));
   }
 
@@ -388,14 +442,17 @@ export default async function AllTicketsPage({
           <h1 className="text-2xl font-bold">All Tickets</h1>
           <p className="text-muted-foreground mt-1">Manage and view all support tickets</p>
         </div>
-        {canCreate && (
-          <Button asChild>
-            <Link href="/tickets/new">
-              <Plus className="h-4 w-4 mr-2" />
-              New Ticket
-            </Link>
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          <TicketViewToggle boardDisabled={boardDisabled} />
+          {canCreate && (
+            <Button asChild>
+              <Link href="/tickets/new">
+                <Plus className="h-4 w-4 mr-2" />
+                New Ticket
+              </Link>
+            </Button>
+          )}
+        </div>
       </div>
 
       <TicketFilters
@@ -405,11 +462,22 @@ export default async function AllTicketsPage({
         currentUserId={session.user.id}
       />
 
-      <TicketTable
-        tickets={tickets as any}
-        pagination={pagination}
-        showRequester
-      />
+      {isBoardView ? (
+        <TicketKanbanBoard
+          columns={boardColumns as any}
+          statuses={filterOptions.statuses}
+          departmentId={effectiveDepartmentId!}
+          canChangeStatusBase={canChangeStatusBase}
+          currentUserId={session.user.id}
+          pageSize={BOARD_COLUMN_PAGE_SIZE}
+        />
+      ) : (
+        <TicketTable
+          tickets={tickets as any}
+          pagination={pagination}
+          showRequester
+        />
+      )}
     </div>
   );
 }

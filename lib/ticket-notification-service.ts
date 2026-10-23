@@ -23,7 +23,16 @@ const SUPPORT_EMAIL = (
   "kinsenitsupport@kinsen.gr"
 ).toLowerCase();
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
+// Deliberately NOT NEXT_PUBLIC_* — this module is server-only (imports
+// prisma directly), and a NEXT_PUBLIC_ var gets inlined as a literal string
+// at `next build` time, everywhere it's referenced, client code or not. The
+// Docker build stage never sees the real .env (see .dockerignore), so a
+// NEXT_PUBLIC_ fallback here would permanently bake in "http://localhost:3000"
+// regardless of what docker-compose.yml's env_file supplies at container
+// runtime — exactly the bug this was changed to fix. A plain APP_URL is
+// read fresh from process.env whenever this code actually runs, which is
+// what every consumer here (building an email/notification link) needs.
+const APP_URL = process.env.APP_URL || "http://localhost:3000";
 
 const NO_REPLY_LOCAL_PARTS = new Set([
   "no-reply", "noreply", "do-not-reply", "donotreply",
