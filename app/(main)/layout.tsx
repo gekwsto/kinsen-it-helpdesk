@@ -11,6 +11,8 @@ import { MobileSidebarProvider } from "@/components/layout/mobile-sidebar-provid
 import { HelpGuideProvider } from "@/components/help/help-guide-provider";
 import { HelpGuideWidget } from "@/components/help/help-guide-widget";
 import { SessionExpiryController } from "@/components/auth/session-expiry-controller";
+import { CommandPaletteProvider } from "@/components/command-palette/command-palette-provider";
+import { CommandPalette } from "@/components/command-palette/command-palette";
 
 export default async function MainLayout({
   children,
@@ -46,38 +48,50 @@ export default async function MainLayout({
       canViewAllDepartments={activeWorkspace.canViewAllDepartments}
       initialIsAllSelected={activeWorkspace.isAllSelected}
     >
-      {/* MobileSidebarProvider: shared open/close state for the mobile
-          off-canvas drawer — the Topbar's hamburger button and the
-          Sidebar's drawer are siblings below, not parent/child, so both
-          need this common ancestor to coordinate through (same reason
-          HelpGuideProvider wraps this same subtree). */}
-      <MobileSidebarProvider>
-        <HelpGuideProvider>
-          <div className="flex h-screen overflow-hidden bg-background">
-            <Sidebar userRole={session.user.role} navFlags={navFlags} />
-            <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-              <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
-              {/* position:relative makes main the containing block for absolutely-positioned
-                  descendants (e.g. Radix Select's hidden native <select> for form bubbling).
-                  Without it, such elements anchor to <body> using their current viewport-relative
-                  top, which can land past main's own clipped bottom edge on a long scrolled page
-                  and inflate document.scrollHeight — a second, phantom window-level scrollbar.
-                  Padding shrinks slightly below `sm` (mobile) so page content gets more of the
-                  narrow viewport's width instead of losing 48px total to desktop-sized gutters. */}
-              <main className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6">{children}</main>
+      {/* CommandPaletteProvider wraps the WHOLE subtree below (not just
+          MobileSidebarProvider's) because the Topbar's ⌘K trigger button
+          (deep inside it) and the <CommandPalette /> dialog itself (a
+          sibling further down, next to SessionExpiryController) live in
+          different branches — both need this shared ancestor to coordinate
+          open/close state through. */}
+      <CommandPaletteProvider>
+        {/* MobileSidebarProvider: shared open/close state for the mobile
+            off-canvas drawer — the Topbar's hamburger button and the
+            Sidebar's drawer are siblings below, not parent/child, so both
+            need this common ancestor to coordinate through (same reason
+            HelpGuideProvider wraps this same subtree). */}
+        <MobileSidebarProvider>
+          <HelpGuideProvider>
+            <div className="flex h-screen overflow-hidden bg-background">
+              <Sidebar userRole={session.user.role} navFlags={navFlags} />
+              <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+                <Topbar user={{ ...session.user, image: avatarUser?.image ?? null, roleName: avatarUser?.customRole?.name ?? null }} />
+                {/* position:relative makes main the containing block for absolutely-positioned
+                    descendants (e.g. Radix Select's hidden native <select> for form bubbling).
+                    Without it, such elements anchor to <body> using their current viewport-relative
+                    top, which can land past main's own clipped bottom edge on a long scrolled page
+                    and inflate document.scrollHeight — a second, phantom window-level scrollbar.
+                    Padding shrinks slightly below `sm` (mobile) so page content gets more of the
+                    narrow viewport's width instead of losing 48px total to desktop-sized gutters. */}
+                <main className="relative flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6">{children}</main>
+              </div>
             </div>
-          </div>
-          <HelpGuideWidget />
-        </HelpGuideProvider>
-      </MobileSidebarProvider>
-      {/* Central, single mount point for absolute-8h session enforcement —
-          never one per page. See components/auth/session-expiry-controller.tsx. */}
-      <SessionExpiryController />
-      {/* Central, single mount point for background route warming — never a
-          per-page useEffect fetch. Must live inside ActiveWorkspaceProvider
-          (it reads useActiveWorkspace() to re-warm on workspace switches).
-          See components/navigation/app-route-prefetcher.tsx. */}
-      <AppRoutePrefetcher userRole={session.user.role} navFlags={navFlags} />
+            <HelpGuideWidget />
+          </HelpGuideProvider>
+        </MobileSidebarProvider>
+        {/* Central, single mount point for absolute-8h session enforcement —
+            never one per page. See components/auth/session-expiry-controller.tsx. */}
+        <SessionExpiryController />
+        {/* Central, single mount point for background route warming — never a
+            per-page useEffect fetch. Must live inside ActiveWorkspaceProvider
+            (it reads useActiveWorkspace() to re-warm on workspace switches).
+            See components/navigation/app-route-prefetcher.tsx. */}
+        <AppRoutePrefetcher userRole={session.user.role} navFlags={navFlags} />
+        {/* Central, single mount point for the global ⌘K/Ctrl+K
+            search-and-navigate overlay — never one per page. See
+            components/command-palette/command-palette.tsx. */}
+        <CommandPalette navFlags={navFlags} />
+      </CommandPaletteProvider>
     </ActiveWorkspaceProvider>
   );
 }

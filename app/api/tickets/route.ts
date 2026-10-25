@@ -106,12 +106,23 @@ export async function GET(req: NextRequest) {
 
     const where: any = { AND: andConditions };
 
-    const orderBy: any =
+    // `id` as a secondary key is required for deterministic skip/take
+    // pagination whenever rows can share the exact same primary sort value
+    // (e.g. several tickets created in the same millisecond, or the same
+    // priority/status) — without it, two separate paginated requests
+    // against the identical where/orderBy can return overlapping or
+    // missing rows, since Postgres is free to order ties differently each
+    // time. Same reasoning as lib/list-sort.ts's resolveListSort (used by
+    // app/(main)/tickets/page.tsx itself), which this intentionally mirrors
+    // without adopting its different default-direction-for-an-explicit-key
+    // behavior — this endpoint's own existing sortBy/sortDir semantics are
+    // unchanged, only now provably stable across pages.
+    const orderBy: any[] =
       sortBy === "priority"
-        ? { priority: { level: sortDir } }
+        ? [{ priority: { level: sortDir } }, { id: "asc" }]
         : sortBy === "status"
-        ? { status: { order: sortDir } }
-        : { [sortBy]: sortDir };
+        ? [{ status: { order: sortDir } }, { id: "asc" }]
+        : [{ [sortBy]: sortDir }, { id: "asc" }];
 
     const [tickets, total] = await Promise.all([
       prisma.ticket.findMany({

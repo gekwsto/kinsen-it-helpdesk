@@ -1,8 +1,9 @@
 "use client";
 
 import { signOut } from "next-auth/react";
-import { LogOut, User, ChevronDown, Menu } from "lucide-react";
+import { LogOut, User, ChevronDown, Menu, Search } from "lucide-react";
 import { useMobileSidebar } from "@/components/layout/mobile-sidebar-provider";
+import { useCommandPalette } from "@/components/command-palette/command-palette-provider";
 import { getInitials } from "@/lib/utils";
 import { Role } from "@prisma/client";
 import { getSessionSyncChannel, broadcastLogout } from "@/lib/client-session-broadcast";
@@ -51,6 +52,7 @@ interface TopbarProps {
 
 export function Topbar({ user }: TopbarProps) {
   const { toggle: toggleMobileSidebar, triggerRef } = useMobileSidebar();
+  const { setOpen: setCommandPaletteOpen } = useCommandPalette();
 
   return (
     <header className="h-16 border-b bg-background flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30">
@@ -74,6 +76,20 @@ export function Topbar({ user }: TopbarProps) {
       </div>
 
       <div className="flex items-center gap-3">
+        {/* Opens the global ⌘K/Ctrl+K palette — same instance the keyboard
+            shortcut opens (components/command-palette/command-palette.tsx),
+            coordinated through CommandPaletteProvider. */}
+        <button
+          type="button"
+          onClick={() => setCommandPaletteOpen(true)}
+          aria-label="Search tickets and projects"
+          className="flex items-center gap-2 h-9 px-3 rounded-lg border text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors"
+        >
+          <Search className="h-4 w-4" />
+          <span className="hidden lg:inline">Search…</span>
+          <kbd className="hidden lg:inline rounded border bg-muted px-1 py-0.5 text-[10px] font-mono">⌘K</kbd>
+        </button>
+
         <ThemeToggle />
 
         {/* Notifications */}
