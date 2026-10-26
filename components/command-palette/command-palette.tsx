@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CommandDialog, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
 import { useCommandPalette } from "@/components/command-palette/command-palette-provider";
-import { Plus, FileText, FolderKanban, Loader2, Ticket as TicketIcon } from "lucide-react";
+import { Plus, FolderKanban, Loader2, Ticket as TicketIcon } from "lucide-react";
 import type { NavVisibilityFlags } from "@/lib/services/department-scope-service";
 
 interface SearchTicket {

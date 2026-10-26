@@ -2,9 +2,10 @@
  * Live browser verification for the Ticket Kanban/Board view: the
  * Table/Board toggle persists in the URL, drag-and-drop moves a real
  * fixture ticket between columns and persists after a hard reload,
- * permission gating (a user without ticket.changeStatus and who isn't the
- * ticket's own requester sees a non-draggable but still-clickable card),
- * and the "All Workspaces" disabled state.
+ * per-column pagination ("Load more"), permission gating (a user without
+ * ticket.changeStatus and who isn't the ticket's own requester sees a
+ * non-draggable but still-clickable card), and the "All Workspaces"
+ * disabled state.
  *
  * Usage: BASE_URL=http://localhost:3000 npx tsx scripts/browser-verify-ticket-kanban.ts
  * Requires a reachable DATABASE_URL and a running dev server.
