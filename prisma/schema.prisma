@@ -237,6 +237,11 @@ model Company {
   // only, never used for any authorization/ownership decision (importSource
   // alone is the real ownership check).
   importRunId       String?
+  // Admin-approved SQLGeneral Company bridges pointing AT this Company —
+  // see SqlGeneralCompanyMapping's own doc comment. Never implies this
+  // Company is SQLGeneral-owned; it's simply the target of someone else's
+  // explicit, reviewed mapping.
+  sqlGeneralMappings SqlGeneralCompanyMapping[]
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 }
@@ -704,6 +709,46 @@ model SqlGeneralUserSyncAttempt {
   @@index([status])
 }
 
+// Explicit, admin-approved bridge from a SQLGeneral Company to an EXISTING
+// local Company — created ONLY by an admin reviewing one specific Company-
+// level Preview conflict (see SqlGeneralPreviewRow.localMatch's
+// "approved_external_mapping" value and
+// approveSqlGeneralCompanyMapping in lib/services/sqlgeneral-user-sync-service.ts),
+// NEVER inferred automatically from a name match — the whole reason today's
+// name-based Company resolution in both SQLGeneral and Microsoft Directory
+// Sync (organization-company-department-resolver.ts's resolveCompanyForSync,
+// same mechanism) can produce a real-world-correct-but-unverified collision
+// that must stay blocked until a human confirms it.
+//
+// `sqlGeneralCompanyId` is `String`, not `Int`/`BigInt`: SQLGeneral's own
+// UsersAndManagers.CompanyId numeric range/type was never independently
+// verified against a real sample value (field NAMES were confirmed, not raw
+// values) — storing it as an opaque string avoids committing to an
+// unverified numeric assumption, and matches the exact same convention
+// already used for every other SQLGeneral external id in this codebase
+// (SqlGeneralDepartmentRecord.id/hrDepartmentId are `string | number`,
+// always compared via String()).
+//
+// This table only ever READS the target Company — approving a mapping
+// never writes to Company.name/normalizedName/importSource/anything else;
+// that row's existing ownership (Graph-synced, manually-created, or
+// genuinely unowned) is completely unchanged. Deleting the Company this
+// points to cascades the mapping away (never a dangling reference); the
+// reverse is never true — removing a mapping never touches the Company.
+model SqlGeneralCompanyMapping {
+  id                  String   @id @default(cuid())
+  sqlGeneralCompanyId String   @unique
+  company             Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  companyId           String
+  approvedBy           User     @relation(fields: [approvedById], references: [id])
+  approvedById         String
+  approvedAt           DateTime @default(now())
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([companyId])
+}
+
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
 
 model User {
@@ -858,6 +903,7 @@ model User {
   accounts                            Account[]
   sessions                            Session[]
   sqlGeneralUserSyncAttempt           SqlGeneralUserSyncAttempt?
+  approvedSqlGeneralCompanyMappings   SqlGeneralCompanyMapping[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

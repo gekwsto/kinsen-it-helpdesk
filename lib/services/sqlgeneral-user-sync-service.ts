@@ -30,6 +30,7 @@ import {
   findSqlGeneralUserByUsername,
   listAllSqlGeneralDepartments,
   resolveSqlGeneralDepartmentPlacement,
+  verifySqlGeneralCompanyIdExists,
   type SqlGeneralDepartmentRecord,
   type ResolvedDepartmentPlacement,
 } from "@/lib/sqlgeneral-api-client";
@@ -173,8 +174,17 @@ export type ApplyOutcome = { ok: true } | { ok: false; reason: string };
  * exist yet is reported as a conflict rather than left half-provisioned.
  * Extending this to create Departments too is future work, gated on the
  * same decision as enabling real external calls in the first place.
+ *
+ * `sqlGeneralCompanyId` (the stable id from the matched SQLGeneral user row
+ * — see SqlGeneralCompanyMapping's own schema doc comment) is checked for
+ * an admin-approved mapping FIRST, INSIDE this same transaction (re-
+ * validated at write time, never trusting a stale read) — when one exists,
+ * it is used directly instead of any name-based company resolution, and
+ * the mapped Company's own fields/ownership are never written to. With no
+ * approved mapping, behavior is completely unchanged from before this
+ * feature: name-based find-or-create, conflict on any non-SQLGeneral owner.
  */
-async function applySqlGeneralDepartmentMembership(userId: string, placement: ResolvedDepartmentPlacement): Promise<ApplyOutcome> {
+async function applySqlGeneralDepartmentMembership(userId: string, placement: ResolvedDepartmentPlacement, sqlGeneralCompanyId: string | null): Promise<ApplyOutcome> {
   const companyName = placement.department.company;
   const departmentName = placement.department.description;
   if (!companyName) return { ok: false, reason: `Department ${placement.department.id} has no Company value — cannot safely place this user.` };
@@ -189,7 +199,14 @@ async function applySqlGeneralDepartmentMembership(userId: string, placement: Re
     const normalizedDepartmentName = normalizeDepartmentName(departmentName);
 
     return await prisma.$transaction(async (tx) => {
-      let company = await tx.company.findUnique({ where: { normalizedName: normalizedCompanyName } });
+      const approvedMapping = sqlGeneralCompanyId
+        ? await tx.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } })
+        : null;
+
+      let company = approvedMapping?.company ?? null;
+      if (!company) {
+        company = await tx.company.findUnique({ where: { normalizedName: normalizedCompanyName } });
+      }
       if (!company) {
         company = await tx.company.create({
           data: {
@@ -200,10 +217,13 @@ async function applySqlGeneralDepartmentMembership(userId: string, placement: Re
             importRunId: lockRunId,
           },
         });
-      } else if (company.importSource !== OrganizationNodeSource.SQLGENERAL) {
+      } else if (!approvedMapping && company.importSource !== OrganizationNodeSource.SQLGENERAL) {
         // A name collision against a Company this sync does not own (manual,
         // Microsoft-sourced, or no provenance at all) is always a conflict,
         // never claimed — see OrganizationNodeSource's own doc comment.
+        // An approved mapping is the one explicit, admin-reviewed exception —
+        // it bypasses this check entirely, but never touches the Company's
+        // own ownership/fields either way.
         return { ok: false, reason: `Company "${companyName}" already exists and is not owned by SQLGeneral sync.` };
       }
 
@@ -319,7 +339,8 @@ async function processOne(id: string, token: string, now: Date, departments: Sql
       return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `HrDepartmentId "${user.hrDepartmentId}" does not match any fetched SQLGeneral Department.`, now);
     }
 
-    const applied = await applySqlGeneralDepartmentMembership(attempt.userId, placementResult.placement);
+    const sqlGeneralCompanyId = user.companyId !== null ? String(user.companyId) : null;
+    const applied = await applySqlGeneralDepartmentMembership(attempt.userId, placementResult.placement, sqlGeneralCompanyId);
     if (!applied.ok) {
       return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, applied.reason, now);
     }
@@ -398,6 +419,8 @@ export interface SqlGeneralPreviewRow {
   userId: string;
   sqlGeneralUsername: string | null;
   usernameMatch: "unique" | "not_found" | "ambiguous" | "no_username_captured";
+  /** The SQLGeneral user row's own stable CompanyId (String — see SqlGeneralCompanyMapping's schema doc comment), the key an admin would use to approve a mapping. Null whenever usernameMatch isn't "unique" or the matched user has no CompanyId. */
+  sqlGeneralCompanyId: string | null;
   hrDepartmentId: string | number | null;
   departmentResolution: "resolved" | "department_not_found" | "n/a";
   departmentDescription: string | null;
@@ -406,7 +429,8 @@ export interface SqlGeneralPreviewRow {
   /** Root-to-immediate-parent department descriptions (or raw id if a link has no description) — built purely from ParentDepartmentId, never from names or manager chains. */
   parentChain: string[];
   missingParent: boolean;
-  localMatch: "none" | "existing_sqlgeneral_owned" | "conflict_other_owner";
+  /** "approved_external_mapping": resolved via an admin-approved SqlGeneralCompanyMapping — the target Company is NOT SQLGeneral-owned and never will be by this alone; distinct from "existing_sqlgeneral_owned" (which really is owned by this sync) so the two are never conflated. */
+  localMatch: "none" | "existing_sqlgeneral_owned" | "conflict_other_owner" | "approved_external_mapping";
   conflictDetail: string | null;
   /** Which node level the conflict is actually at — null whenever localMatch isn't conflict_other_owner. Distinct from conflictDetail's free text so a caller can branch on it structurally. */
   conflictLevel: "company" | "department" | null;
@@ -417,6 +441,7 @@ function emptyPreviewRow(userId: string, sqlGeneralUsername: string | null, user
     userId,
     sqlGeneralUsername,
     usernameMatch,
+    sqlGeneralCompanyId: null,
     hrDepartmentId: null,
     departmentResolution: "n/a",
     departmentDescription: null,
@@ -485,14 +510,15 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     }
 
     const { user } = matchResult;
+    const sqlGeneralCompanyId = user.companyId !== null ? String(user.companyId) : null;
     if (user.hrDepartmentId === null) {
-      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique"), company: user.company });
+      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique"), sqlGeneralCompanyId, company: user.company });
       continue;
     }
 
     const placementResult = resolveSqlGeneralDepartmentPlacement(user.hrDepartmentId, departments);
     if (placementResult.outcome === "department_not_found") {
-      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique"), hrDepartmentId: user.hrDepartmentId, departmentResolution: "department_not_found", company: user.company });
+      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique"), sqlGeneralCompanyId, hrDepartmentId: user.hrDepartmentId, departmentResolution: "department_not_found", company: user.company });
       continue;
     }
 
@@ -503,7 +529,28 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     let localMatch: SqlGeneralPreviewRow["localMatch"] = "none";
     let conflictDetail: string | null = null;
     let conflictLevel: SqlGeneralPreviewRow["conflictLevel"] = null;
-    if (companyName) {
+    const approvedMapping = sqlGeneralCompanyId ? await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } }) : null;
+    if (approvedMapping) {
+      // An admin has explicitly reviewed and approved this exact SQLGeneral
+      // CompanyId against this exact local Company — bypass the name-based
+      // check entirely, but this is NOT the same as SQLGeneral owning it
+      // (see localMatch's own doc comment); the Department-level check
+      // below still applies normally, unchanged.
+      localMatch = "approved_external_mapping";
+      const existingCompany = approvedMapping.company;
+      if (departmentName) {
+        const existingDept = await prisma.department.findUnique({
+          where: { companyId_normalizedName: { companyId: existingCompany.id, normalizedName: normalizeDepartmentName(departmentName) } },
+        });
+        if (existingDept && existingDept.importSource !== OrganizationNodeSource.SQLGENERAL) {
+          localMatch = "conflict_other_owner";
+          conflictLevel = "department";
+          conflictDetail = `Department "${departmentName}" already exists under mapped Company "${existingCompany.name}" and is not owned by SQLGeneral sync.`;
+        } else if (!existingDept) {
+          conflictDetail = `No existing Department "${departmentName}" under mapped Company "${existingCompany.name}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
+        }
+      }
+    } else if (companyName) {
       const existingCompany = await prisma.company.findUnique({ where: { normalizedName: normalizeCompanyName(companyName) } });
       if (existingCompany) {
         if (existingCompany.importSource !== OrganizationNodeSource.SQLGENERAL) {
@@ -532,10 +579,11 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       userId,
       sqlGeneralUsername,
       usernameMatch: "unique",
+      sqlGeneralCompanyId,
       hrDepartmentId: user.hrDepartmentId,
       departmentResolution: "resolved",
       departmentDescription: departmentName,
-      company: companyName,
+      company: approvedMapping ? approvedMapping.company.name : companyName,
       companyShortname: department.companyShortname,
       parentChain: parentChain.map((p) => p.description ?? String(p.id)),
       missingParent,
@@ -545,6 +593,113 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     });
   }
   return { ok: true, rows };
+}
+
+// ─── Explicit admin-approved Company mapping ───────────────────────────────
+
+export interface CompanyMappingCandidate {
+  sqlGeneralCompanyId: string;
+  /** The existing mapping for this sqlGeneralCompanyId, if any — present whether or not it matches `targetCompanyId`, so a caller can tell "already mapped to X" apart from "would create a NEW mapping to Y". */
+  existingMapping: { companyId: string; companyName: string; approvedById: string; approvedAt: Date } | null;
+  /** The company this approval would point at — null if targetCompanyId doesn't exist, which the caller must treat as a hard error, never a stub creation. */
+  targetCompany: { id: string; name: string; importSource: OrganizationNodeSource | null } | null;
+  /**
+   * OTHER already-approved SQLGeneral CompanyIds (never including this
+   * one) already pointing at targetCompanyId. A legitimate, allowed
+   * state (many-to-one is explicitly preserved, never blocked outright)
+   * — but approveSqlGeneralCompanyMapping requires `confirmMultipleMapping:
+   * true` before adding to it, so an admin never creates one by accident.
+   */
+  otherMappingsToSameTarget: string[];
+  /** Whether SQLGeneral itself confirms sqlGeneralCompanyId is a real, currently-used CompanyId — null if verification could not be performed at all (e.g. not configured), which the caller must treat as "cannot confirm", never as a pass. */
+  sourceVerified: boolean | null;
+  sourceVerificationError: string | null;
+}
+
+/**
+ * Read-only. Lets an admin see exactly what approving `{ sqlGeneralCompanyId,
+ * targetCompanyId }` would do BEFORE calling approveSqlGeneralCompanyMapping
+ * — whether a mapping already exists, whether targetCompanyId is a real
+ * Company, whether this would create a many-to-one mapping, and whether
+ * the source id itself is even real. Never writes anything.
+ */
+export async function previewSqlGeneralCompanyMappingCandidate(sqlGeneralCompanyId: string, targetCompanyId: string): Promise<CompanyMappingCandidate> {
+  const [existing, targetCompany, otherMappings, sourceCheck] = await Promise.all([
+    prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { companyId: true, approvedById: true, approvedAt: true, company: { select: { name: true } } } }),
+    prisma.company.findUnique({ where: { id: targetCompanyId }, select: { id: true, name: true, importSource: true } }),
+    prisma.sqlGeneralCompanyMapping.findMany({ where: { companyId: targetCompanyId, sqlGeneralCompanyId: { not: sqlGeneralCompanyId } }, select: { sqlGeneralCompanyId: true } }),
+    verifySqlGeneralCompanyIdExists(sqlGeneralCompanyId),
+  ]);
+  return {
+    sqlGeneralCompanyId,
+    existingMapping: existing ? { companyId: existing.companyId, companyName: existing.company.name, approvedById: existing.approvedById, approvedAt: existing.approvedAt } : null,
+    targetCompany: targetCompany ?? null,
+    otherMappingsToSameTarget: otherMappings.map((m) => m.sqlGeneralCompanyId),
+    sourceVerified: sourceCheck.ok ? sourceCheck.exists : null,
+    sourceVerificationError: sourceCheck.ok ? null : sourceCheck.reason,
+  };
+}
+
+export type ApproveCompanyMappingResult =
+  | { ok: true; mapping: { sqlGeneralCompanyId: string; companyId: string; approvedById: string; approvedAt: Date } }
+  | { ok: false; reason: string };
+
+/**
+ * The ONLY way a SqlGeneralCompanyMapping row is ever created — always an
+ * explicit admin action naming both ids, NEVER inferred from a name match.
+ * Revalidates everything at approval time, never trusting an earlier
+ * preview call:
+ *   1. sqlGeneralCompanyId must be independently confirmed to exist in
+ *      SQLGeneral's own live data (verifySqlGeneralCompanyIdExists) — a
+ *      verification FAILURE (not configured/network/etc.) is treated the
+ *      SAME as "does not exist": rejected, never approved on an unverifiable
+ *      identifier.
+ *   2. targetCompanyId must be a real, existing Company — never a stub
+ *      creation.
+ *   3. Re-pointing an EXISTING mapping for this sqlGeneralCompanyId at a
+ *      DIFFERENT company is rejected outright (duplicate-prevention);
+ *      re-approving the SAME pair is a safe, idempotent no-op.
+ *   4. Adding a genuinely NEW sqlGeneralCompanyId -> targetCompanyId
+ *      mapping when targetCompanyId ALREADY has one or more mappings from
+ *      OTHER sqlGeneralCompanyIds requires `confirmMultipleMapping: true`
+ *      — many-to-one is a legitimate, preserved state, never silently
+ *      created.
+ * Never writes to the target Company's own fields
+ * (name/normalizedName/importSource/domain) or to any User row.
+ */
+export async function approveSqlGeneralCompanyMapping(
+  sqlGeneralCompanyId: string,
+  targetCompanyId: string,
+  approvedById: string,
+  confirmMultipleMapping = false
+): Promise<ApproveCompanyMappingResult> {
+  const sourceCheck = await verifySqlGeneralCompanyIdExists(sqlGeneralCompanyId);
+  if (!sourceCheck.ok) return { ok: false, reason: `Could not verify SQLGeneral CompanyId "${sqlGeneralCompanyId}" against live SQLGeneral data (${sourceCheck.reason}) — never approving an unverifiable identifier.` };
+  if (!sourceCheck.exists) return { ok: false, reason: `SQLGeneral CompanyId "${sqlGeneralCompanyId}" was not found in current SQLGeneral data — refusing to approve an arbitrary/unknown identifier.` };
+
+  const targetCompany = await prisma.company.findUnique({ where: { id: targetCompanyId }, select: { id: true } });
+  if (!targetCompany) return { ok: false, reason: `No Company exists with id "${targetCompanyId}".` };
+
+  const existing = await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId } });
+  if (existing && existing.companyId !== targetCompanyId) {
+    return { ok: false, reason: `SQLGeneral CompanyId "${sqlGeneralCompanyId}" is already mapped to a different Company (id="${existing.companyId}") — remove that mapping first if it should change.` };
+  }
+  if (existing) {
+    // Idempotent re-approval of the exact same pair — safe no-op, not an error.
+    return { ok: true, mapping: { sqlGeneralCompanyId, companyId: existing.companyId, approvedById: existing.approvedById, approvedAt: existing.approvedAt } };
+  }
+
+  if (!confirmMultipleMapping) {
+    const otherMappingCount = await prisma.sqlGeneralCompanyMapping.count({ where: { companyId: targetCompanyId } });
+    if (otherMappingCount > 0) {
+      return { ok: false, reason: `Company "${targetCompanyId}" already has ${otherMappingCount} other approved SQLGeneral mapping(s) — this would create a many-to-one mapping. Pass confirmMultipleMapping: true to proceed; this is allowed, but never created without explicit confirmation.` };
+    }
+  }
+
+  const created = await prisma.sqlGeneralCompanyMapping.create({
+    data: { sqlGeneralCompanyId, companyId: targetCompanyId, approvedById },
+  });
+  return { ok: true, mapping: { sqlGeneralCompanyId: created.sqlGeneralCompanyId, companyId: created.companyId, approvedById: created.approvedById, approvedAt: created.approvedAt } };
 }
 
 // ─── Graph username backfill (existing Microsoft-linked users, no new login required) ─

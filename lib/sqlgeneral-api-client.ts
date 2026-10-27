@@ -347,6 +347,38 @@ export async function findSqlGeneralUserByUsername(username: string): Promise<Us
   return { outcome: "unique", user: toSqlGeneralUserRecord(result.rows[0]) };
 }
 
+/**
+ * CompanyId's real type (numeric vs string/GUID) was never independently
+ * verified (see SqlGeneralCompanyMapping's schema doc comment) — a
+ * stored-as-string value that's purely digits is sent unquoted (the only
+ * safe assumption for a genuinely numeric OData field); anything else is
+ * sent as an escaped string literal. Either way this never guesses the
+ * VALUE, only how to express an already-known value in a filter.
+ */
+function formatODataIdLiteral(value: string): string {
+  return /^\d+$/.test(value) ? value : `'${escapeODataStringLiteral(value)}'`;
+}
+
+export type CompanyIdExistsResult = { ok: true; exists: boolean } | { ok: false; reason: string };
+
+/**
+ * Verifies a SQLGeneral CompanyId is backed by at least one real
+ * UsersAndManagers row — Departments has no CompanyId field at all (see
+ * this file's header), so this is the only source that can confirm one.
+ * Used exclusively to gate Company mapping approval (REQUIRED #1: "never
+ * approve arbitrary identifiers") — never throws; a verification failure
+ * (config/network/etc.) is a typed `{ ok: false }`, which the caller must
+ * treat as "cannot confirm" and therefore reject the approval, never as a
+ * silent pass.
+ */
+export async function verifySqlGeneralCompanyIdExists(companyId: string): Promise<CompanyIdExistsResult> {
+  const filter = `CompanyId eq ${formatODataIdLiteral(companyId)}`;
+  const path = `/api/UsersAndManagers?$filter=${encodeURIComponent(filter)}&$first=1`;
+  const result = await fetchAllPages<RawSqlGeneralUser>(path);
+  if (!result.ok) return { ok: false, reason: result.reason };
+  return { ok: true, exists: result.rows.length > 0 };
+}
+
 // ─── Departments ────────────────────────────────────────────────────────────
 
 interface RawSqlGeneralDepartment {

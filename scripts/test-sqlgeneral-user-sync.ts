@@ -58,15 +58,20 @@ async function main() {
   const realClient = await import("@/lib/sqlgeneral-api-client");
   type FindUserFn = typeof realClient.findSqlGeneralUserByUsername;
   type ListDeptFn = typeof realClient.listAllSqlGeneralDepartments;
+  type VerifyCompanyIdFn = typeof realClient.verifySqlGeneralCompanyIdExists;
   let mockFindUserImpl: FindUserFn = async () => {
     throw new Error("mock: SQLGeneral external call failed");
   };
   let mockListDeptImpl: ListDeptFn = async () => ({ ok: true, departments: [] });
+  // Default: every CompanyId is confirmed to exist — individual tests
+  // override this to exercise the "unknown source id" rejection path.
+  let mockVerifyCompanyIdImpl: VerifyCompanyIdFn = async () => ({ ok: true, exists: true });
   mock.module("@/lib/sqlgeneral-api-client", {
     namedExports: {
       ...realClient,
       findSqlGeneralUserByUsername: (username: string) => mockFindUserImpl(username),
       listAllSqlGeneralDepartments: () => mockListDeptImpl(),
+      verifySqlGeneralCompanyIdExists: (companyId: string) => mockVerifyCompanyIdImpl(companyId),
     },
   });
 
@@ -257,12 +262,13 @@ async function main() {
     const FAKE_SALES = { id: "20", description: "Sales", isActive: true, parentDepartmentId: null, country: null, company: "Beta Co", companyShortname: "BETA", creationDate: null, updateTimestamp: null };
     mockListDeptImpl = async () => ({ ok: true, departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES] });
 
-    const fakeUser = (username: string, hrDepartmentId: string | null) => ({
-      username, mail: null, hrDepartmentId, department: null, companyId: null, company: "Acme Corp", active: true,
+    const fakeUser = (username: string, hrDepartmentId: string | null, companyId: string | null = null, company = "Acme Corp") => ({
+      username, mail: null, hrDepartmentId, department: null, companyId, company, active: true,
       managerAMAccountName: null, manager2AMAccountName: null, manager3AMAccountName: null,
     });
+    const CONFLICT_SQLGENERAL_COMPANY_ID = `sgcid-${RUN_ID}-acme`;
     mockFindUserImpl = async (username: string) => {
-      if (username === "preview-unique" || username === "preview-conflict") return { outcome: "unique" as const, user: fakeUser(username, "10") };
+      if (username === "preview-unique" || username === "preview-conflict") return { outcome: "unique" as const, user: fakeUser(username, "10", username === "preview-conflict" ? CONFLICT_SQLGENERAL_COMPANY_ID : null) };
       if (username === "preview-missingparent") return { outcome: "unique" as const, user: fakeUser(username, "99") };
       if (username === "preview-notfound") return { outcome: "not_found" as const };
       if (username === "preview-ambiguous") return { outcome: "ambiguous" as const, count: 2 };
@@ -329,7 +335,7 @@ async function main() {
       const conflictRow = byUser.get(uPvConflict);
       check(
         "33. Preview flags a conflict against an existing non-SQLGeneral-owned local Company — read-only, never claims or writes it",
-        conflictRow?.localMatch === "conflict_other_owner" && !!conflictRow.conflictDetail && conflictRow.conflictLevel === "company",
+        conflictRow?.localMatch === "conflict_other_owner" && !!conflictRow.conflictDetail && conflictRow.conflictLevel === "company" && conflictRow.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID,
         JSON.stringify(conflictRow)
       );
       check("33b. Preview never wrote anything to the DB — the conflicting Company row is untouched (still importSource null)", (await prisma.company.findUniqueOrThrow({ where: { id: existingCompany.id } })).importSource === null);
@@ -341,6 +347,97 @@ async function main() {
       );
       check("33d. ...and never writes to the conflicting Department either (still importSource null)", (await prisma.department.findUniqueOrThrow({ where: { id: salesDept.id } })).importSource === null);
     }
+
+    console.log("\nExplicit admin-approved Company mapping ===\n");
+    const companyMappingRoute = await import("@/app/api/admin/sqlgeneral-user-sync/company-mapping/route");
+    const bfMapAdmin = await makeUser("mapadmin", Role.ADMIN, null);
+
+    const beforePreview = await svc.previewSqlGeneralCompanyMappingCandidate(CONFLICT_SQLGENERAL_COMPANY_ID, existingCompany.id);
+    check("54. preview-candidate: no existing mapping yet, target Company resolves correctly", beforePreview.existingMapping === null && beforePreview.targetCompany?.id === existingCompany.id);
+
+    const invalidTarget = await svc.approveSqlGeneralCompanyMapping(CONFLICT_SQLGENERAL_COMPANY_ID, "not-a-real-company-id", bfMapAdmin);
+    check("55. approve() rejects a non-existent targetCompanyId — never creates a stub Company", invalidTarget.ok === false, invalidTarget.ok ? "unexpectedly ok" : invalidTarget.reason);
+    check("55b. ...and creates no mapping row either", !(await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId: CONFLICT_SQLGENERAL_COMPANY_ID } })));
+
+    const approved = await svc.approveSqlGeneralCompanyMapping(CONFLICT_SQLGENERAL_COMPANY_ID, existingCompany.id, bfMapAdmin);
+    check("56. approve() succeeds, records approvedBy + approvedAt", approved.ok === true && approved.ok && approved.mapping.approvedById === bfMapAdmin && !!approved.mapping.approvedAt, approved.ok ? JSON.stringify(approved.mapping) : approved.reason);
+    check("57. approving never modified the target Company's own fields (name/importSource unchanged)", (await prisma.company.findUniqueOrThrow({ where: { id: existingCompany.id } })).importSource === null && (await prisma.company.findUniqueOrThrow({ where: { id: existingCompany.id } })).name === "Acme Corp");
+
+    const reApproveSame = await svc.approveSqlGeneralCompanyMapping(CONFLICT_SQLGENERAL_COMPANY_ID, existingCompany.id, bfMapAdmin);
+    check("58. idempotency: re-approving the exact same pair is a safe no-op success, not an error", reApproveSame.ok === true && (await prisma.sqlGeneralCompanyMapping.count({ where: { sqlGeneralCompanyId: CONFLICT_SQLGENERAL_COMPANY_ID } })) === 1);
+
+    const betaCompanyForDup = betaCompany;
+    const duplicateDifferentTarget = await svc.approveSqlGeneralCompanyMapping(CONFLICT_SQLGENERAL_COMPANY_ID, betaCompanyForDup.id, bfMapAdmin);
+    check("59. duplicate prevention: approving the SAME sqlGeneralCompanyId against a DIFFERENT Company is rejected, never silently repointed", duplicateDifferentTarget.ok === false);
+    check("59b. ...the original mapping is still intact and unchanged", (await prisma.sqlGeneralCompanyMapping.findUniqueOrThrow({ where: { sqlGeneralCompanyId: CONFLICT_SQLGENERAL_COMPANY_ID } })).companyId === existingCompany.id);
+
+    const previewAfterApproval = await svc.previewSqlGeneralUserSync({ userIds: [uPvConflict] });
+    if (!previewAfterApproval.ok) {
+      check("60. Preview re-run after approval succeeded", false, previewAfterApproval.reason);
+    } else {
+      const rowAfter = previewAfterApproval.rows[0];
+      check(
+        "60. Preview now reports approved_external_mapping (NOT existing_sqlgeneral_owned, NOT conflict_other_owner) for the approved Company",
+        rowAfter?.localMatch === "approved_external_mapping" && rowAfter.conflictLevel === null,
+        JSON.stringify(rowAfter)
+      );
+    }
+
+    currentSession = { user: { id: bfMapAdmin, role: Role.ADMIN, customRoleId: null } };
+    const mappingGetReq = new NextRequest(`http://localhost/x?sqlGeneralCompanyId=${CONFLICT_SQLGENERAL_COMPANY_ID}&targetCompanyId=${existingCompany.id}`, { method: "GET" });
+    const mappingGetRes = await companyMappingRoute.GET(mappingGetReq);
+    check("61. Company-mapping GET (candidate preview) endpoint: ADMIN succeeds, returns the existing mapping", mappingGetRes.status === 200);
+    currentSession = { user: { id: bfMapAdmin, role: Role.USER, customRoleId: null } };
+    const mappingPostForbidden = await companyMappingRoute.POST(jsonReq("POST", { sqlGeneralCompanyId: CONFLICT_SQLGENERAL_COMPANY_ID, targetCompanyId: existingCompany.id }));
+    check("62. Company-mapping POST endpoint: a user without organization.sqlgeneralSync gets 403", mappingPostForbidden.status === 403);
+    currentSession = null;
+
+    console.log("\nCompany mapping safety: unknown source IDs + many-to-one confirmation ===\n");
+
+    const UNKNOWN_SOURCE_ID = `sgcid-${RUN_ID}-unknown`;
+    mockVerifyCompanyIdImpl = async () => ({ ok: true, exists: false });
+    const unknownSourceResult = await svc.approveSqlGeneralCompanyMapping(UNKNOWN_SOURCE_ID, existingCompany.id, bfMapAdmin);
+    check("63. approve() rejects a sqlGeneralCompanyId that SQLGeneral itself does not confirm exists — never approves an arbitrary identifier", unknownSourceResult.ok === false, unknownSourceResult.ok ? "unexpectedly ok" : unknownSourceResult.reason);
+    check("63b. ...and creates no mapping row", !(await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId: UNKNOWN_SOURCE_ID } })));
+
+    mockVerifyCompanyIdImpl = async () => ({ ok: false, reason: "mock: verification unavailable (simulating unconfigured/network failure)" });
+    const unverifiableResult = await svc.approveSqlGeneralCompanyMapping(UNKNOWN_SOURCE_ID, existingCompany.id, bfMapAdmin);
+    check("64. approve() treats a verification FAILURE (not configured/network) the same as unknown — rejects, never approves on an unverifiable identifier", unverifiableResult.ok === false, unverifiableResult.ok ? "unexpectedly ok" : unverifiableResult.reason);
+
+    mockVerifyCompanyIdImpl = async () => ({ ok: true, exists: true });
+    const NEW_VERIFIED_SOURCE_ID = `sgcid-${RUN_ID}-newverified`;
+
+    const candidateBeforeMulti = await svc.previewSqlGeneralCompanyMappingCandidate(NEW_VERIFIED_SOURCE_ID, existingCompany.id);
+    check(
+      "65. Preview candidate surfaces the ALREADY-approved mapping from a DIFFERENT sqlGeneralCompanyId to this same target (many-to-one warning)",
+      candidateBeforeMulti.otherMappingsToSameTarget.includes(CONFLICT_SQLGENERAL_COMPANY_ID) && candidateBeforeMulti.sourceVerified === true,
+      JSON.stringify(candidateBeforeMulti)
+    );
+
+    const multiWithoutConfirm = await svc.approveSqlGeneralCompanyMapping(NEW_VERIFIED_SOURCE_ID, existingCompany.id, bfMapAdmin);
+    check(
+      "66. approve() rejects a genuinely NEW many-to-one mapping without explicit confirmMultipleMapping — never created silently",
+      multiWithoutConfirm.ok === false,
+      multiWithoutConfirm.ok ? "unexpectedly ok" : multiWithoutConfirm.reason
+    );
+    check("66b. ...no mapping row was created", !(await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId: NEW_VERIFIED_SOURCE_ID } })));
+
+    const multiWithConfirm = await svc.approveSqlGeneralCompanyMapping(NEW_VERIFIED_SOURCE_ID, existingCompany.id, bfMapAdmin, true);
+    check("67. approve() with confirmMultipleMapping: true succeeds — many-to-one is a legitimate, preservable state", multiWithConfirm.ok === true, multiWithConfirm.ok ? "" : multiWithConfirm.reason);
+    const mappingsToTarget = await prisma.sqlGeneralCompanyMapping.findMany({ where: { companyId: existingCompany.id } });
+    check(
+      "68. BOTH mappings to the same target now coexist intact — the earlier one was never removed/overwritten",
+      mappingsToTarget.length === 2 && mappingsToTarget.some((m) => m.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID) && mappingsToTarget.some((m) => m.sqlGeneralCompanyId === NEW_VERIFIED_SOURCE_ID),
+      JSON.stringify(mappingsToTarget.map((m) => m.sqlGeneralCompanyId))
+    );
+    check(
+      "69. Company's own fields/ownership are STILL untouched after the second (multi) approval too",
+      (await prisma.company.findUniqueOrThrow({ where: { id: existingCompany.id } })).importSource === null && (await prisma.company.findUniqueOrThrow({ where: { id: existingCompany.id } })).name === "Acme Corp"
+    );
+
+    // Idempotent re-approval of an ALREADY-multi-mapped pair must not re-require confirmation.
+    const reApproveMultiNoConfirmFlag = await svc.approveSqlGeneralCompanyMapping(NEW_VERIFIED_SOURCE_ID, existingCompany.id, bfMapAdmin);
+    check("70. idempotency holds even for an already-multi-mapped pair: re-approving the SAME pair succeeds without needing confirmMultipleMapping again", reApproveMultiNoConfirmFlag.ok === true);
 
     console.log("\nPreview coverage: N/All must include eligible users with NO existing attempt row ===\n");
     const uPvNoAttempt = await makeUser("pv-noattempt"); // never enqueued — no SqlGeneralUserSyncAttempt row exists for this user at all
@@ -515,6 +612,9 @@ async function main() {
   } finally {
     console.log("\nCleaning up test data...\n");
     const steps: Array<[string, () => Promise<unknown>]> = [
+      // Must run BEFORE "users": approvedById is onDelete:Restrict, so a
+      // leftover mapping row would abort the whole user deleteMany batch.
+      ["sqlGeneral company mappings", () => prisma.sqlGeneralCompanyMapping.deleteMany({ where: { approvedById: { in: userIds } } })],
       ["sync attempts", () => prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } })],
       ["rolePermissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: roleKeys } } })],
       ["users", () => prisma.user.deleteMany({ where: { id: { in: userIds } } })],
