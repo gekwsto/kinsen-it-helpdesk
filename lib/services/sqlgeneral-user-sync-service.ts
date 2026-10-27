@@ -35,6 +35,7 @@ import {
 } from "@/lib/sqlgeneral-api-client";
 import { normalizeCompanyName, normalizeDepartmentName } from "@/lib/services/organization-normalization";
 import { resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
+import { fetchAllGraphUserIdentities, type GraphUserIdentity } from "@/lib/services/microsoft-directory-service";
 
 export const MAX_ATTEMPTS = 5;
 /** A PROCESSING claim older than this is considered abandoned by a crashed worker and becomes re-claimable — same idiom and default as mention-reminder-service.ts's STALE_CLAIM_TIMEOUT_MS. */
@@ -407,6 +408,8 @@ export interface SqlGeneralPreviewRow {
   missingParent: boolean;
   localMatch: "none" | "existing_sqlgeneral_owned" | "conflict_other_owner";
   conflictDetail: string | null;
+  /** Which node level the conflict is actually at — null whenever localMatch isn't conflict_other_owner. Distinct from conflictDetail's free text so a caller can branch on it structurally. */
+  conflictLevel: "company" | "department" | null;
 }
 
 function emptyPreviewRow(userId: string, sqlGeneralUsername: string | null, usernameMatch: SqlGeneralPreviewRow["usernameMatch"]): SqlGeneralPreviewRow {
@@ -423,6 +426,7 @@ function emptyPreviewRow(userId: string, sqlGeneralUsername: string | null, user
     missingParent: false,
     localMatch: "none",
     conflictDetail: null,
+    conflictLevel: null,
   };
 }
 
@@ -498,11 +502,13 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
 
     let localMatch: SqlGeneralPreviewRow["localMatch"] = "none";
     let conflictDetail: string | null = null;
+    let conflictLevel: SqlGeneralPreviewRow["conflictLevel"] = null;
     if (companyName) {
       const existingCompany = await prisma.company.findUnique({ where: { normalizedName: normalizeCompanyName(companyName) } });
       if (existingCompany) {
         if (existingCompany.importSource !== OrganizationNodeSource.SQLGENERAL) {
           localMatch = "conflict_other_owner";
+          conflictLevel = "company";
           conflictDetail = `Company "${companyName}" already exists and is not owned by SQLGeneral sync.`;
         } else {
           localMatch = "existing_sqlgeneral_owned";
@@ -512,6 +518,7 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
             });
             if (existingDept && existingDept.importSource !== OrganizationNodeSource.SQLGENERAL) {
               localMatch = "conflict_other_owner";
+              conflictLevel = "department";
               conflictDetail = `Department "${departmentName}" already exists under Company "${companyName}" and is not owned by SQLGeneral sync.`;
             } else if (!existingDept) {
               conflictDetail = `No existing Department "${departmentName}" under Company "${companyName}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
@@ -534,7 +541,152 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       missingParent,
       localMatch,
       conflictDetail,
+      conflictLevel,
     });
   }
   return { ok: true, rows };
+}
+
+// ─── Graph username backfill (existing Microsoft-linked users, no new login required) ─
+
+export type BackfillAction =
+  | "create_pending"
+  | "recover_pending"
+  | "no_change"
+  | "conflicting_username_skipped"
+  | "active_or_terminal_skipped"
+  | "no_graph_username";
+
+export interface BackfillCandidate {
+  userId: string;
+  graphId: string;
+  currentStatus: SqlGeneralUserSyncStatus | null;
+  currentUsername: string | null;
+  graphUsername: string | null;
+  action: BackfillAction;
+}
+
+export interface BackfillCounts {
+  total: number;
+  createPending: number;
+  recoverPending: number;
+  noChange: number;
+  conflictingUsernameSkipped: number;
+  activeOrTerminalSkipped: number;
+  noGraphUsername: number;
+}
+
+function summarizeBackfillCandidates(candidates: BackfillCandidate[]): BackfillCounts {
+  const counts: BackfillCounts = { total: candidates.length, createPending: 0, recoverPending: 0, noChange: 0, conflictingUsernameSkipped: 0, activeOrTerminalSkipped: 0, noGraphUsername: 0 };
+  for (const c of candidates) {
+    if (c.action === "create_pending") counts.createPending++;
+    else if (c.action === "recover_pending") counts.recoverPending++;
+    else if (c.action === "no_change") counts.noChange++;
+    else if (c.action === "conflicting_username_skipped") counts.conflictingUsernameSkipped++;
+    else if (c.action === "active_or_terminal_skipped") counts.activeOrTerminalSkipped++;
+    else if (c.action === "no_graph_username") counts.noGraphUsername++;
+  }
+  return counts;
+}
+
+/**
+ * Pure classification — no network, no writes. Matches each Graph identity
+ * to a local user EXCLUSIVELY via `graphId === User.microsoftUserId` (never
+ * email/UPN/name); a Graph row with no matching local user is silently
+ * dropped (not a candidate at all, not an error).
+ *
+ *   - no attempt row + a Graph username        -> create_pending (safe: enqueueOrRecoverSqlGeneralUserSync's own "no row" branch)
+ *   - SKIPPED_NO_USERNAME + a Graph username    -> recover_pending (safe: that function's own recovery branch)
+ *   - PENDING, current username null            -> recover_pending (same function fills it in place)
+ *   - PENDING, current username === Graph's     -> no_change
+ *   - PENDING, current username DIFFERS         -> conflicting_username_skipped — NEVER applied; this is the
+ *     one case enqueueOrRecoverSqlGeneralUserSync would normally overwrite silently when called from login
+ *     (a fresh, authoritative live value), which is correct for THAT caller but NOT safe for a bulk backfill
+ *     comparing against a snapshot — so this classifier deliberately withholds it rather than ever calling that
+ *     function for this case.
+ *   - PROCESSING / SUCCEEDED / FAILED_PERMANENT -> active_or_terminal_skipped — never touched, regardless of
+ *     what Graph says, preserving active and successful sync states exactly as required.
+ *   - no onPremisesSamAccountName on the Graph side -> no_graph_username (nothing to offer either way).
+ */
+async function classifySqlGeneralUsernameBackfill(identities: GraphUserIdentity[]): Promise<BackfillCandidate[]> {
+  const graphIds = identities.map((i) => i.graphId);
+  if (graphIds.length === 0) return [];
+
+  const users = await prisma.user.findMany({ where: { microsoftUserId: { in: graphIds } }, select: { id: true, microsoftUserId: true } });
+  const userIdByGraphId = new Map(users.filter((u) => u.microsoftUserId).map((u) => [u.microsoftUserId as string, u.id]));
+
+  const localUserIds = Array.from(userIdByGraphId.values());
+  const attempts = localUserIds.length > 0 ? await prisma.sqlGeneralUserSyncAttempt.findMany({ where: { userId: { in: localUserIds } } }) : [];
+  const attemptByUserId = new Map(attempts.map((a) => [a.userId, a]));
+
+  const candidates: BackfillCandidate[] = [];
+  for (const identity of identities) {
+    const userId = userIdByGraphId.get(identity.graphId);
+    if (!userId) continue; // no corresponding local user — never guessed, just irrelevant
+
+    const attempt = attemptByUserId.get(userId) ?? null;
+    const currentStatus = attempt?.status ?? null;
+    const currentUsername = attempt?.sqlGeneralUsername ?? null;
+    const graphUsername = identity.onPremisesSamAccountName;
+
+    if (!graphUsername) {
+      candidates.push({ userId, graphId: identity.graphId, currentStatus, currentUsername, graphUsername: null, action: "no_graph_username" });
+      continue;
+    }
+    if (!attempt) {
+      candidates.push({ userId, graphId: identity.graphId, currentStatus: null, currentUsername: null, graphUsername, action: "create_pending" });
+      continue;
+    }
+    if (attempt.status === SqlGeneralUserSyncStatus.SKIPPED_NO_USERNAME) {
+      candidates.push({ userId, graphId: identity.graphId, currentStatus, currentUsername, graphUsername, action: "recover_pending" });
+      continue;
+    }
+    if (attempt.status === SqlGeneralUserSyncStatus.PENDING) {
+      if (!currentUsername) {
+        candidates.push({ userId, graphId: identity.graphId, currentStatus, currentUsername, graphUsername, action: "recover_pending" });
+      } else if (currentUsername === graphUsername) {
+        candidates.push({ userId, graphId: identity.graphId, currentStatus, currentUsername, graphUsername, action: "no_change" });
+      } else {
+        candidates.push({ userId, graphId: identity.graphId, currentStatus, currentUsername, graphUsername, action: "conflicting_username_skipped" });
+      }
+      continue;
+    }
+    // PROCESSING / SUCCEEDED / FAILED_PERMANENT
+    candidates.push({ userId, graphId: identity.graphId, currentStatus, currentUsername, graphUsername, action: "active_or_terminal_skipped" });
+  }
+  return candidates;
+}
+
+export type BackfillPreviewResult = { ok: true; candidates: BackfillCandidate[]; counts: BackfillCounts } | { ok: false; reason: string };
+
+/** Read-only — fetches Graph identities + classifies, never writes. Admin-facing "what would the backfill do" report (REQUIRED #4). */
+export async function previewSqlGeneralUsernameBackfill(): Promise<BackfillPreviewResult> {
+  const identityResult = await fetchAllGraphUserIdentities();
+  if (!identityResult.ok) return { ok: false, reason: `Graph identity fetch failed: ${identityResult.reason}${identityResult.status ? ` (status ${identityResult.status})` : ""}` };
+  const candidates = await classifySqlGeneralUsernameBackfill(identityResult.identities);
+  return { ok: true, candidates, counts: summarizeBackfillCandidates(candidates) };
+}
+
+export type BackfillApplyResult = { ok: true; applied: number; counts: BackfillCounts } | { ok: false; reason: string };
+
+/**
+ * Re-runs the same classification, then applies ONLY the two provably-safe
+ * actions (create_pending / recover_pending) via the EXISTING, unmodified
+ * enqueueOrRecoverSqlGeneralUserSync — the exact same function login
+ * already calls. Every other action (no_change, conflicting_username_skipped,
+ * active_or_terminal_skipped, no_graph_username) is never written. Never
+ * touches User, never touches Department/Company/DepartmentMembership.
+ */
+export async function applySqlGeneralUsernameBackfill(): Promise<BackfillApplyResult> {
+  const preview = await previewSqlGeneralUsernameBackfill();
+  if (!preview.ok) return preview;
+
+  let applied = 0;
+  for (const candidate of preview.candidates) {
+    if (candidate.action === "create_pending" || candidate.action === "recover_pending") {
+      await enqueueOrRecoverSqlGeneralUserSync(candidate.userId, candidate.graphUsername);
+      applied++;
+    }
+  }
+  return { ok: true, applied, counts: preview.counts };
 }

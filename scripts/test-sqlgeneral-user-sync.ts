@@ -70,6 +70,16 @@ async function main() {
     },
   });
 
+  const realDirectoryService = await import("@/lib/services/microsoft-directory-service");
+  type FetchIdentitiesFn = typeof realDirectoryService.fetchAllGraphUserIdentities;
+  let mockFetchIdentitiesImpl: FetchIdentitiesFn = async () => ({ ok: true, identities: [] });
+  mock.module("@/lib/services/microsoft-directory-service", {
+    namedExports: {
+      ...realDirectoryService,
+      fetchAllGraphUserIdentities: () => mockFetchIdentitiesImpl(),
+    },
+  });
+
   let currentSession: { user: { id: string; role: Role; customRoleId: string | null } } | null = null;
   mock.module("@/lib/permissions", {
     namedExports: {
@@ -85,11 +95,13 @@ async function main() {
   const client = await import("@/lib/sqlgeneral-api-client");
   const workerRoute = await import("@/app/api/internal/sqlgeneral-user-sync/process/route");
   const adminRoute = await import("@/app/api/admin/sqlgeneral-user-sync/route");
+  const backfillRoute = await import("@/app/api/admin/sqlgeneral-user-sync/backfill-usernames/route");
 
   const userIds: string[] = [];
   const roleIds: string[] = [];
   const roleKeys: string[] = [];
   const companyIds: string[] = [];
+  const departmentIds: string[] = [];
 
   async function makeUser(tag: string, role: Role = Role.USER, customRoleId: string | null = null): Promise<string> {
     const u = await prisma.user.create({
@@ -242,7 +254,8 @@ async function main() {
     const FAKE_ROOT = { id: "1", description: "Root", isActive: true, parentDepartmentId: null, country: null, company: "Acme Corp", companyShortname: "ACME", creationDate: null, updateTimestamp: null };
     const FAKE_ENGINEERING = { id: "10", description: "Engineering", isActive: true, parentDepartmentId: "1", country: null, company: "Acme Corp", companyShortname: "ACME", creationDate: null, updateTimestamp: null };
     const FAKE_ORPHAN = { id: "99", description: "Orphan Team", isActive: true, parentDepartmentId: "404", country: null, company: "Acme Corp", companyShortname: "ACME", creationDate: null, updateTimestamp: null };
-    mockListDeptImpl = async () => ({ ok: true, departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN] });
+    const FAKE_SALES = { id: "20", description: "Sales", isActive: true, parentDepartmentId: null, country: null, company: "Beta Co", companyShortname: "BETA", creationDate: null, updateTimestamp: null };
+    mockListDeptImpl = async () => ({ ok: true, departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES] });
 
     const fakeUser = (username: string, hrDepartmentId: string | null) => ({
       username, mail: null, hrDepartmentId, department: null, companyId: null, company: "Acme Corp", active: true,
@@ -253,6 +266,7 @@ async function main() {
       if (username === "preview-missingparent") return { outcome: "unique" as const, user: fakeUser(username, "99") };
       if (username === "preview-notfound") return { outcome: "not_found" as const };
       if (username === "preview-ambiguous") return { outcome: "ambiguous" as const, count: 2 };
+      if (username === "preview-deptconflict") return { outcome: "unique" as const, user: fakeUser(username, "20") };
       throw new Error(`unexpected username in mock: ${username}`);
     };
 
@@ -277,14 +291,24 @@ async function main() {
     await svc.enqueueOrRecoverSqlGeneralUserSync(uPvAmbiguous, "preview-ambiguous");
     const uPvConflict = await makeUser("pv-conflict");
     await svc.enqueueOrRecoverSqlGeneralUserSync(uPvConflict, "preview-conflict");
+    const uPvDeptConflict = await makeUser("pv-deptconflict");
+    await svc.enqueueOrRecoverSqlGeneralUserSync(uPvDeptConflict, "preview-deptconflict");
 
     // A pre-existing LOCAL Company with the SAME normalized name, owned by
     // nobody (importSource null) — must be reported as a conflict, never claimed.
-    const { normalizeCompanyName } = await import("@/lib/services/organization-normalization");
+    const { normalizeCompanyName, normalizeDepartmentName } = await import("@/lib/services/organization-normalization");
     const existingCompany = await prisma.company.create({ data: { name: "Acme Corp", normalizedName: normalizeCompanyName("Acme Corp") } });
     companyIds.push(existingCompany.id);
 
-    const previewResult = await svc.previewSqlGeneralUserSync({ userIds: [uPvUnique, uPvMissingParent, uPvNotFound, uPvAmbiguous, uPvConflict] });
+    // Company-level ownership resolved (SQLGeneral-owned), but the specific
+    // Department under it is owned by someone else — must surface as a
+    // DEPARTMENT-level conflict, distinct from the company-level one above.
+    const betaCompany = await prisma.company.create({ data: { name: "Beta Co", normalizedName: normalizeCompanyName("Beta Co"), importSource: "SQLGENERAL" } });
+    companyIds.push(betaCompany.id);
+    const salesDept = await prisma.department.create({ data: { name: "Sales", normalizedName: normalizeDepartmentName("Sales"), slug: `sales-${RUN_ID}`, companyId: betaCompany.id } });
+    departmentIds.push(salesDept.id);
+
+    const previewResult = await svc.previewSqlGeneralUserSync({ userIds: [uPvUnique, uPvMissingParent, uPvNotFound, uPvAmbiguous, uPvConflict, uPvDeptConflict] });
     if (!previewResult.ok) {
       check("29-33. Preview call succeeded", false, previewResult.reason);
     } else {
@@ -305,10 +329,17 @@ async function main() {
       const conflictRow = byUser.get(uPvConflict);
       check(
         "33. Preview flags a conflict against an existing non-SQLGeneral-owned local Company — read-only, never claims or writes it",
-        conflictRow?.localMatch === "conflict_other_owner" && !!conflictRow.conflictDetail,
+        conflictRow?.localMatch === "conflict_other_owner" && !!conflictRow.conflictDetail && conflictRow.conflictLevel === "company",
         JSON.stringify(conflictRow)
       );
       check("33b. Preview never wrote anything to the DB — the conflicting Company row is untouched (still importSource null)", (await prisma.company.findUniqueOrThrow({ where: { id: existingCompany.id } })).importSource === null);
+      const deptConflictRow = byUser.get(uPvDeptConflict);
+      check(
+        "33c. Preview distinguishes a DEPARTMENT-level conflict (Company resolved/SQLGeneral-owned, Department owned by someone else) via structured conflictLevel",
+        deptConflictRow?.localMatch === "conflict_other_owner" && deptConflictRow.conflictLevel === "department" && !!deptConflictRow.conflictDetail,
+        JSON.stringify(deptConflictRow)
+      );
+      check("33d. ...and never writes to the conflicting Department either (still importSource null)", (await prisma.department.findUniqueOrThrow({ where: { id: salesDept.id } })).importSource === null);
     }
 
     console.log("\nPreview coverage: N/All must include eligible users with NO existing attempt row ===\n");
@@ -340,6 +371,99 @@ async function main() {
       );
     }
     await prisma.user.update({ where: { id: uIneligibleInactive }, data: { isActive: true } }); // restore before generic cleanup below (deleteMany doesn't care, but keeps intent clear)
+
+    console.log("\nGraph username backfill: ID matching, missing usernames, conflicts, state preservation ===\n");
+
+    const bfNoRow = await makeUser("bf-norow");
+    await prisma.user.update({ where: { id: bfNoRow }, data: { microsoftUserId: `graph-${RUN_ID}-norow` } });
+    const bfSkipped = await makeUser("bf-skipped");
+    await prisma.user.update({ where: { id: bfSkipped }, data: { microsoftUserId: `graph-${RUN_ID}-skipped` } });
+    await svc.enqueueOrRecoverSqlGeneralUserSync(bfSkipped, null); // SKIPPED_NO_USERNAME
+    const bfPendingSame = await makeUser("bf-pending-same");
+    await prisma.user.update({ where: { id: bfPendingSame }, data: { microsoftUserId: `graph-${RUN_ID}-pending-same` } });
+    await svc.enqueueOrRecoverSqlGeneralUserSync(bfPendingSame, "already.correct");
+    const bfPendingConflict = await makeUser("bf-pending-conflict");
+    await prisma.user.update({ where: { id: bfPendingConflict }, data: { microsoftUserId: `graph-${RUN_ID}-pending-conflict` } });
+    await svc.enqueueOrRecoverSqlGeneralUserSync(bfPendingConflict, "the.old.captured.one");
+    const bfSucceeded = await makeUser("bf-succeeded");
+    await prisma.user.update({ where: { id: bfSucceeded }, data: { microsoftUserId: `graph-${RUN_ID}-succeeded` } });
+    await svc.enqueueOrRecoverSqlGeneralUserSync(bfSucceeded, "already.synced");
+    await prisma.sqlGeneralUserSyncAttempt.update({ where: { userId: bfSucceeded }, data: { status: "SUCCEEDED" } });
+    const bfNoGraphUsername = await makeUser("bf-nographusername");
+    await prisma.user.update({ where: { id: bfNoGraphUsername }, data: { microsoftUserId: `graph-${RUN_ID}-nographusername` } });
+    const bfNotLinked = await makeUser("bf-notlinked"); // never Microsoft-linked at all — must never appear as a candidate, confirming matching is by id, not by anything else
+
+    mockFetchIdentitiesImpl = async () => ({
+      ok: true,
+      identities: [
+        { graphId: `graph-${RUN_ID}-norow`, onPremisesSamAccountName: "fresh.from.graph" },
+        { graphId: `graph-${RUN_ID}-skipped`, onPremisesSamAccountName: "recovered.from.graph" },
+        { graphId: `graph-${RUN_ID}-pending-same`, onPremisesSamAccountName: "already.correct" },
+        { graphId: `graph-${RUN_ID}-pending-conflict`, onPremisesSamAccountName: "a.totally.different.value" },
+        { graphId: `graph-${RUN_ID}-succeeded`, onPremisesSamAccountName: "a.value.that.would.overwrite.if.applied" },
+        { graphId: `graph-${RUN_ID}-nographusername`, onPremisesSamAccountName: null },
+        { graphId: `graph-${RUN_ID}-unmatched-ghost`, onPremisesSamAccountName: "nobody.local.has.this.id" },
+      ],
+    });
+
+    const bfPreview1 = await svc.previewSqlGeneralUsernameBackfill();
+    if (!bfPreview1.ok) {
+      check("38-44. backfill preview succeeded", false, bfPreview1.reason);
+    } else {
+      const byUser = new Map(bfPreview1.candidates.map((c) => [c.userId, c]));
+      check("38. Graph id -> User.microsoftUserId matching: a never-Microsoft-linked user never appears as a candidate", !byUser.has(bfNotLinked) && !bfPreview1.candidates.some((c) => c.graphId === `graph-${RUN_ID}-unmatched-ghost`));
+      check("39. no existing attempt row + a Graph username => create_pending (not yet written by preview)", byUser.get(bfNoRow)?.action === "create_pending" && byUser.get(bfNoRow)?.graphUsername === "fresh.from.graph");
+      check("40. SKIPPED_NO_USERNAME + a Graph username => recover_pending", byUser.get(bfSkipped)?.action === "recover_pending" && byUser.get(bfSkipped)?.graphUsername === "recovered.from.graph");
+      check("41. PENDING with the SAME username already captured => no_change", byUser.get(bfPendingSame)?.action === "no_change");
+      check(
+        "42. PENDING with a DIFFERENT username already captured => conflicting_username_skipped (never silently overwritten)",
+        byUser.get(bfPendingConflict)?.action === "conflicting_username_skipped" && byUser.get(bfPendingConflict)?.currentUsername === "the.old.captured.one" && byUser.get(bfPendingConflict)?.graphUsername === "a.totally.different.value"
+      );
+      check("43. SUCCEEDED (terminal, active/successful state) => active_or_terminal_skipped regardless of what Graph says — state preservation", byUser.get(bfSucceeded)?.action === "active_or_terminal_skipped");
+      check("44. a Graph identity with no onPremisesSamAccountName => no_graph_username", byUser.get(bfNoGraphUsername)?.action === "no_graph_username");
+    }
+
+    const beforeApply = {
+      skipped: await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { userId: bfSkipped } }),
+      pendingConflict: await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { userId: bfPendingConflict } }),
+      succeeded: await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { userId: bfSucceeded } }),
+      noRowExistsYet: await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { userId: bfNoRow } }),
+    };
+    check("45. precondition: preview alone wrote nothing (no_row user still has no attempt row)", !beforeApply.noRowExistsYet);
+
+    const applyResult1 = await svc.applySqlGeneralUsernameBackfill();
+    if (!applyResult1.ok) {
+      check("46-50. backfill apply succeeded", false, applyResult1.reason);
+    } else {
+      check("46. apply() actually creates the missing row as PENDING with the Graph username (never touching User)", (await prisma.sqlGeneralUserSyncAttempt.findUniqueOrThrow({ where: { userId: bfNoRow } })).status === "PENDING");
+      const recovered = await prisma.sqlGeneralUserSyncAttempt.findUniqueOrThrow({ where: { userId: bfSkipped } });
+      check("47. apply() recovers the SKIPPED_NO_USERNAME row to PENDING with the Graph username", recovered.status === "PENDING" && recovered.sqlGeneralUsername === "recovered.from.graph");
+      const stillPendingConflict = await prisma.sqlGeneralUserSyncAttempt.findUniqueOrThrow({ where: { userId: bfPendingConflict } });
+      check("48. apply() NEVER overwrites the conflicting username — row is byte-for-byte unchanged from before apply", stillPendingConflict.sqlGeneralUsername === beforeApply.pendingConflict?.sqlGeneralUsername && stillPendingConflict.updatedAt.getTime() === beforeApply.pendingConflict?.updatedAt.getTime());
+      const stillSucceeded = await prisma.sqlGeneralUserSyncAttempt.findUniqueOrThrow({ where: { userId: bfSucceeded } });
+      check("49. apply() never touches a SUCCEEDED row even though Graph offered a different value — active/successful state preserved", stillSucceeded.status === "SUCCEEDED" && stillSucceeded.sqlGeneralUsername === beforeApply.succeeded?.sqlGeneralUsername);
+      check("50. apply() never created or modified any User row (spot-check: microsoftUserId values untouched)", (await prisma.user.findUniqueOrThrow({ where: { id: bfNoRow } })).microsoftUserId === `graph-${RUN_ID}-norow`);
+    }
+
+    const applyResult2 = await svc.applySqlGeneralUsernameBackfill();
+    check(
+      "51. idempotency: running apply() a second time with the same Graph data makes no further changes (create_pending/recover_pending counts both now zero)",
+      applyResult2.ok === true && applyResult2.counts.createPending === 0 && applyResult2.counts.recoverPending === 0,
+      applyResult2.ok ? JSON.stringify(applyResult2.counts) : applyResult2.reason
+    );
+
+    console.log("\nBackfill admin endpoint authorization ===\n");
+    currentSession = { user: { id: bfNoRow, role: Role.USER, customRoleId: null } };
+    const backfillForbidden = await backfillRoute.POST(jsonReq("POST", {}));
+    check("52. backfill endpoint: a user without organization.sqlgeneralSync gets 403", backfillForbidden.status === 403);
+
+    const bfAdmin = await makeUser("bf-admin", Role.ADMIN, null);
+    currentSession = { user: { id: bfAdmin, role: Role.ADMIN, customRoleId: null } };
+    mockFetchIdentitiesImpl = async () => ({ ok: true, identities: [] });
+    const backfillAdminPreview = await backfillRoute.POST(jsonReq("POST", {}));
+    const backfillAdminPreviewBody = await backfillAdminPreview.json();
+    check("53. ADMIN bypasses the permission check; default (no apply flag) is preview-only and returns candidates+counts", backfillAdminPreview.status === 200 && Array.isArray(backfillAdminPreviewBody.candidates) && !!backfillAdminPreviewBody.counts);
+    currentSession = null;
 
     console.log("\nAdmin endpoint authorization ===\n");
     const noop = await (async () => {
@@ -395,6 +519,7 @@ async function main() {
       ["rolePermissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: roleKeys } } })],
       ["users", () => prisma.user.deleteMany({ where: { id: { in: userIds } } })],
       ["customRoles", () => prisma.customRole.deleteMany({ where: { id: { in: roleIds } } })],
+      ["departments", () => prisma.department.deleteMany({ where: { id: { in: departmentIds } } })],
       ["companies", () => prisma.company.deleteMany({ where: { id: { in: companyIds } } })],
     ];
     for (const [label, step] of steps) {

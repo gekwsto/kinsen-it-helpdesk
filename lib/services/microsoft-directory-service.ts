@@ -56,6 +56,15 @@ import { ALLOWED_ORGANIZATION_EMAIL_DOMAINS } from "@/lib/allowed-email-domains"
 
 const GRAPH_USERS_PAGE_URL =
   "https://graph.microsoft.com/v1.0/users?$select=id,department,jobTitle,userType,mail,userPrincipalName&$top=999";
+// Separate, minimal $select for the SQLGeneral username backfill
+// (lib/services/sqlgeneral-user-sync-service.ts) — only `id` (the Entra
+// object id, matched against User.microsoftUserId — the SAME identity
+// anchor every other Microsoft sync path in this codebase already uses;
+// never email/UPN/name) and onPremisesSamAccountName are needed. Kept
+// separate from GRAPH_USERS_PAGE_URL above (a different $select for a
+// different purpose) rather than widening that one's shape for every caller.
+const GRAPH_USERS_IDENTITY_PAGE_URL =
+  "https://graph.microsoft.com/v1.0/users?$select=id,onPremisesSamAccountName&$top=999";
 const REQUEST_TIMEOUT_MS = 15000;
 const MAX_PAGES = 200; // guards against a runaway @odata.nextLink loop; ~200k users at $top=999
 
@@ -253,6 +262,92 @@ export async function fetchAllGraphUserDirectoryValues(): Promise<DirectoryFetch
       otherDomainsObserved: Array.from(otherDomainsObserved).sort((a, b) => a.localeCompare(b)),
     },
   };
+}
+
+// ─── SQLGeneral username backfill support ──────────────────────────────────
+
+export interface GraphUserIdentity {
+  /** Entra object id (Graph `id`) — matched ONLY against User.microsoftUserId by the caller, never email/UPN/name. */
+  graphId: string;
+  /** Hybrid-only; null for a cloud-only account — a legitimate outcome, not a fetch failure. */
+  onPremisesSamAccountName: string | null;
+}
+
+interface RawGraphUserIdentity {
+  id?: unknown;
+  onPremisesSamAccountName?: unknown;
+}
+interface GraphUserIdentityPage {
+  value: RawGraphUserIdentity[];
+  "@odata.nextLink"?: string;
+}
+function isGraphUserIdentityPage(data: unknown): data is GraphUserIdentityPage {
+  return typeof data === "object" && data !== null && Array.isArray((data as Record<string, unknown>).value);
+}
+
+export type DirectoryIdentityFetchResult = { ok: true; identities: GraphUserIdentity[] } | { ok: false; reason: DirectoryFetchFailureReason; status?: number };
+
+/**
+ * Pages through the tenant's users (application token, Directory.Read.All —
+ * the SAME already-consented permission and token flow as
+ * fetchAllGraphUserDirectoryValues above) collecting ONLY `id` +
+ * `onPremisesSamAccountName`. No eligibility/domain filtering here — the
+ * real filter is the caller matching `graphId` against an EXISTING local
+ * User.microsoftUserId; a Graph row with no corresponding local user is
+ * simply irrelevant, never a reason to guess or infer one. Never throws —
+ * every failure is a typed result, same convention as every other function
+ * in this file.
+ */
+export async function fetchAllGraphUserIdentities(): Promise<DirectoryIdentityFetchResult> {
+  let token: string;
+  try {
+    token = await getAppOnlyGraphAccessToken();
+  } catch (err) {
+    if (err instanceof GraphConfigurationError) return { ok: false, reason: "configuration_error" };
+    return { ok: false, reason: "network_error" };
+  }
+
+  const identities: GraphUserIdentity[] = [];
+  let url: string | undefined = GRAPH_USERS_IDENTITY_PAGE_URL;
+  let pages = 0;
+
+  while (url && pages < MAX_PAGES) {
+    pages++;
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+    } catch {
+      return { ok: false, reason: "network_error" };
+    }
+
+    if (!response.ok) {
+      if (response.status === 401) return { ok: false, reason: "unauthorized", status: 401 };
+      if (response.status === 403) return { ok: false, reason: "no_permission", status: 403 };
+      if (response.status === 429) return { ok: false, reason: "rate_limited", status: 429 };
+      return { ok: false, reason: "server_error", status: response.status };
+    }
+
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      return { ok: false, reason: "malformed_response" };
+    }
+    if (!isGraphUserIdentityPage(data)) return { ok: false, reason: "malformed_response" };
+
+    for (const row of data.value) {
+      if (typeof row.id !== "string" || !row.id) continue;
+      const sam = typeof row.onPremisesSamAccountName === "string" ? row.onPremisesSamAccountName.trim() : "";
+      identities.push({ graphId: row.id, onPremisesSamAccountName: sam || null });
+    }
+
+    url = data["@odata.nextLink"];
+  }
+
+  return { ok: true, identities };
 }
 
 // Structural shape for the simple, `value`-only-unique directory-value
