@@ -19,6 +19,7 @@ export const MEMBERSHIP_SOURCE_LABELS: Record<MembershipSource, string> = {
   MICROSOFT_JOB_TITLE: "Microsoft — Job Title",
   MICROSOFT_GROUP: "Microsoft — Group",
   MICROSOFT_APP_ROLE: "Microsoft — App Role",
+  SQLGENERAL_DEPARTMENT: "SQLGeneral — Department",
 };
 
 export const MEMBERSHIP_SOURCE_COLORS: Record<MembershipSource, string> = {
@@ -27,6 +28,7 @@ export const MEMBERSHIP_SOURCE_COLORS: Record<MembershipSource, string> = {
   MICROSOFT_JOB_TITLE: "bg-blue-100 text-blue-700 border-blue-200",
   MICROSOFT_GROUP: "bg-blue-100 text-blue-700 border-blue-200",
   MICROSOFT_APP_ROLE: "bg-blue-100 text-blue-700 border-blue-200",
+  SQLGENERAL_DEPARTMENT: "bg-teal-100 text-teal-700 border-teal-200",
 };
 
 export const MAPPING_SOURCE_TYPE_LABELS: Record<MicrosoftMappingSourceType, string> = {

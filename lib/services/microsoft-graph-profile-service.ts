@@ -20,8 +20,19 @@
 // scope for the signed-in user's own `/me` — no new Azure/Entra permission
 // required. NOT verified against a real tenant in this environment (see
 // docs/microsoft-production-readiness-audit.md — dummy Graph credentials).
+//
+// onPremisesSamAccountName added for the SQLGeneral Organization Sync (see
+// lib/services/sqlgeneral-user-sync-service.ts) — it's the only field
+// matched against SQLGeneral's own username field. Hybrid-only: null for a
+// cloud-only Entra account (no on-prem AD Connect sync), which is a
+// legitimate, expected outcome (see SKIPPED_NO_USERNAME in
+// SqlGeneralUserSyncStatus), not a fetch failure. Deliberately captured
+// HERE, in this same delegated `/me` call, rather than by some later async
+// step — the delegated access token this call uses is short-lived and never
+// persisted, so there is no other opportunity to read this value for this
+// sign-in.
 const GRAPH_ME_URL =
-  "https://graph.microsoft.com/v1.0/me?$select=id,displayName,givenName,surname,mail,userPrincipalName,userType,companyName,department,jobTitle";
+  "https://graph.microsoft.com/v1.0/me?$select=id,displayName,givenName,surname,mail,userPrincipalName,userType,companyName,department,jobTitle,onPremisesSamAccountName";
 
 const REQUEST_TIMEOUT_MS = 5000;
 
@@ -36,6 +47,7 @@ export interface GraphUserProfile {
   companyName: string | null;
   department: string | null;
   jobTitle: string | null;
+  onPremisesSamAccountName: string | null;
 }
 
 export type GraphProfileFailureReason =
@@ -74,6 +86,7 @@ function toGraphUserProfile(data: Record<string, unknown> & { id: string }): Gra
     companyName: str(data.companyName),
     department: str(data.department),
     jobTitle: str(data.jobTitle),
+    onPremisesSamAccountName: str(data.onPremisesSamAccountName),
   };
 }
 

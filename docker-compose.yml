@@ -139,6 +139,37 @@ services:
     networks:
       - kinsen-helpdesk-net
 
+  # SQLGeneral Organization Sync worker — same sidecar pattern as the
+  # reminder workers above. Triggers /api/internal/sqlgeneral-user-sync/process
+  # every 5 minutes over the internal Docker network. Authenticated with
+  # CRON_SECRET from .env. Running more than one copy is safe: attempts are
+  # claimed atomically in the database, and the processor claims nothing at
+  # all while SQLGENERAL_SYNC_ENABLED is not "true" in .env.
+  kinsen-helpdesk-sqlgeneral-user-sync-worker:
+    image: curlimages/curl:8.11.0
+    container_name: kinsen-helpdesk-sqlgeneral-user-sync-worker
+    restart: unless-stopped
+    depends_on:
+      - kinsen-helpdesk
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          if [ -z "$$CRON_SECRET" ]; then
+            echo "[sqlgeneral-user-sync-worker] CRON_SECRET is not set in .env — skipping this run (the endpoint rejects unauthenticated requests in production)."
+          else
+            curl -fsS -m 55 -X POST "http://kinsen-helpdesk:3000/api/internal/sqlgeneral-user-sync/process" \
+              -H "Authorization: Bearer $$CRON_SECRET" \
+              -o /dev/null -w "[sqlgeneral-user-sync-worker] run finished, HTTP %{http_code}\n" \
+              || echo "[sqlgeneral-user-sync-worker] run failed (network error or non-2xx response)"
+          fi
+          sleep 300
+        done
+    networks:
+      - kinsen-helpdesk-net
+
 volumes:
   kinsen_helpdesk_db_data:
 

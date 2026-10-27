@@ -123,6 +123,7 @@ async function main() {
       companyName: "Kinsen",
       department: "Systems Operations",
       jobTitle: "IT Operations Assistant",
+      onPremisesSamAccountName: null,
     }
   );
   check("oid passed through", claims.oid === "test-oid-lamprini");
@@ -149,6 +150,7 @@ async function main() {
       companyName: null,
       department: null,
       jobTitle: null,
+      onPremisesSamAccountName: null,
     }
   );
   check("groups pass through untouched", claimsWithFallback.groups?.[0] === "IT-Team");

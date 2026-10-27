@@ -273,6 +273,12 @@ const PERMISSIONS = [
   // lib/services/organization-scope-service.ts.
   { key: "organization.sync", description: "Trigger a full/incremental Microsoft organization sync", module: "organization" },
   { key: "organization.tree.view", description: "View the full organization department/people tree (beyond one's own slice)", module: "organization" },
+  // SQLGeneral per-user Organization Sync explicit refresh ("Sync N"/"Sync
+  // All") — see app/api/admin/sqlgeneral-user-sync/route.ts and
+  // lib/services/sqlgeneral-user-sync-service.ts. Distinct from
+  // organization.sync (Microsoft Graph): the two sources are independent,
+  // so this is its own permission rather than reusing that key.
+  { key: "organization.sqlgeneralSync", description: "Trigger a manual SQLGeneral per-user organization-sync refresh", module: "organization" },
 ];
 
 // Every new permission key introduced above, grouped by the roleKey that
@@ -647,6 +653,7 @@ async function main() {
       "projectFeedback.view",
       "organization.sync",
       "organization.tree.view",
+      "organization.sqlgeneralSync",
       "company.create",
       "company.update",
       "company.delete",

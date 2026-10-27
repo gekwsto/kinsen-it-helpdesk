@@ -29,7 +29,7 @@ import { MEMBERSHIP_SOURCE_LABELS, MEMBERSHIP_SOURCE_COLORS } from "@/components
 interface Membership {
   id: string;
   userId: string;
-  source: "MANUAL" | "MICROSOFT_DEPARTMENT" | "MICROSOFT_GROUP" | "MICROSOFT_APP_ROLE" | "MICROSOFT_JOB_TITLE";
+  source: "MANUAL" | "MICROSOFT_DEPARTMENT" | "MICROSOFT_GROUP" | "MICROSOFT_APP_ROLE" | "MICROSOFT_JOB_TITLE" | "SQLGENERAL_DEPARTMENT";
   isActive: boolean;
   user: { id: string; name: string | null; email: string; image: string | null };
 }

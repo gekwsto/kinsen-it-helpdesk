@@ -76,6 +76,29 @@ enum MembershipSource {
   MICROSOFT_APP_ROLE
   MICROSOFT_JOB_TITLE
   MANUAL
+  // A DepartmentMembership row created by the SQLGeneral Organization Sync
+  // (lib/services/sqlgeneral-sync-service.ts) — an external Data API
+  // Builder/OData source, independent of Microsoft Graph. Added as its own
+  // value (never reusing MANUAL) so the same "never overwrite a manual
+  // decision" protection this enum already documents extends to this
+  // source too: a row with this source is only ever written by this sync,
+  // never touched by a human admin edit or by Graph sync.
+  SQLGENERAL_DEPARTMENT
+}
+
+// Marks a Department/Company row as created BY the SQLGeneral Organization
+// Sync (as opposed to manually by an admin, or by Microsoft Directory Sync,
+// which currently tags no provenance on nodes at all). Null on every
+// existing row today. Deliberately a separate, explicit field — never
+// inferred from companyId being set, from a name match, or from any other
+// structural signal, per this feature's own "never infer ownership from
+// matching names or IDs alone" requirement. A row is only ever updated or
+// deleted by SQLGeneral sync when THIS field already equals SQLGENERAL on
+// that exact row — a name/key collision against a null-provenance (or any
+// future non-SQLGENERAL) row is always reported as a conflict, never
+// claimed. See lib/services/sqlgeneral-sync-service.ts.
+enum OrganizationNodeSource {
+  SQLGENERAL
 }
 
 // How User.role (the GLOBAL role, distinct from DepartmentRole) was last
@@ -205,6 +228,15 @@ model Company {
   // under the same Company node).
   directDepartments Department[]   @relation("DepartmentDirectCompany")
   users             User[]
+  // Set only by SQLGeneral Organization Sync — see OrganizationNodeSource's
+  // own doc comment. Null for every Company that predates this feature, is
+  // manually admin-created, or originates from Microsoft Directory Sync.
+  importSource      OrganizationNodeSource?
+  importedAt        DateTime?
+  // The SqlGeneralSyncRun.id that created this row — audit/debugging trail
+  // only, never used for any authorization/ownership decision (importSource
+  // alone is the real ownership check).
+  importRunId       String?
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 }
@@ -271,6 +303,11 @@ model Department {
   activityStatusConfigs   ActivityStatusConfig[]
   activityPriorityConfigs ActivityPriorityConfig[]
   externalIntegrations    ExternalIntegration[]        @relation("IntegrationDepartment")
+  // Set only by SQLGeneral Organization Sync — see OrganizationNodeSource's
+  // own doc comment and Company.importSource above (identical semantics).
+  importSource            OrganizationNodeSource?
+  importedAt              DateTime?
+  importRunId             String?
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt
 
@@ -602,6 +639,71 @@ model OrganizationSyncLock {
   runId    String?
 }
 
+// Five-state model for one user's SQLGeneral organizational-placement sync —
+// see lib/services/sqlgeneral-user-sync-service.ts.
+//   (no row)             -> PENDING               (login captured a username)
+//   (no row)             -> SKIPPED_NO_USERNAME    (login found none)
+//   SKIPPED_NO_USERNAME  -> PENDING                (a LATER login captures one — recoverable, never a dead end)
+//   PENDING              -> PROCESSING             (worker claim: FOR UPDATE SKIP LOCKED + claimToken, same idiom as MentionReminder)
+//   PROCESSING           -> PENDING                (stale claim reclaimed, OR a transient failure with attemptCount < bound — deliberately the SAME state, so the claim query needs no extra branch)
+//   PROCESSING           -> SUCCEEDED              (matched + written)
+//   PROCESSING           -> FAILED_PERMANENT       (attemptCount reached the bound)
+//   SUCCEEDED / FAILED_PERMANENT / SKIPPED_NO_USERNAME
+//                        -> PENDING                (explicit admin Sync N / Sync All refresh ONLY — never automatic)
+//   PENDING / PROCESSING -> unchanged               (an admin refresh request never disturbs work already queued/in flight)
+enum SqlGeneralUserSyncStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED_PERMANENT
+  SKIPPED_NO_USERNAME
+}
+
+// One durable sync-state row per User, tracking that user's SQLGeneral-sourced
+// organizational placement (Department/Company + DepartmentMembership),
+// completely independent of Microsoft Graph. Enqueued idempotently right
+// after Microsoft first-login provisioning, the moment Graph's
+// onPremisesSamAccountName is known (see syncMicrosoftUserDepartment in
+// lib/services/microsoft-department-sync-service.ts) — captured there and
+// ONLY there, because the delegated access token used for that Graph call is
+// short-lived and never persisted, so it cannot be re-fetched later by an
+// async worker. `userId` is `@unique`: exactly one row per user, ever — a
+// later login or an admin refresh always updates this SAME row, never
+// creates a second one. Claimed atomically by the same FOR UPDATE SKIP
+// LOCKED + claimToken pattern as MentionReminder/ProjectRequestSetupReminder
+// (see SqlGeneralUserSyncStatus above for the full state diagram); a
+// PROCESSING row whose claimedAt is older than the stale timeout is
+// reclaimable, same crash-recovery guarantee. This table NEVER causes a
+// User row to be created, deleted or modified — userId only identifies whose
+// placement this tracks; the actual Department/Company/DepartmentMembership
+// write happens inside the EXISTING shared OrganizationSyncLock's critical
+// section (acquireOrganizationSyncLock/releaseOrganizationSyncLock, exported
+// from lib/services/organization-sync-orchestrator.ts for this reuse — no
+// second lock), with ownership re-validation and the write performed
+// atomically in the same transaction so the two can never be split by a
+// check-then-write race.
+model SqlGeneralUserSyncAttempt {
+  id     String                   @id @default(cuid())
+  user   User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId String                   @unique
+  status SqlGeneralUserSyncStatus @default(PENDING)
+  // Captured once per login from Graph's onPremisesSamAccountName — the only
+  // field matched against SQLGeneral's own username field. Null only while
+  // status = SKIPPED_NO_USERNAME; overwritten (never appended) the moment a
+  // later login supplies a non-null value, which also revives the row to
+  // PENDING (see enqueueOrRecoverSqlGeneralUserSync).
+  sqlGeneralUsername String?
+  attemptCount       Int                      @default(0)
+  // Sanitized only — never a raw stack trace, never a token/secret value.
+  lastError          String?                  @db.Text
+  claimedAt          DateTime?
+  claimToken         String?
+  createdAt          DateTime                 @default(now())
+  updatedAt          DateTime                 @updatedAt
+
+  @@index([status])
+}
+
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
 
 model User {
@@ -755,6 +857,7 @@ model User {
   pushSubscriptions                   PushSubscription[]
   accounts                            Account[]
   sessions                            Session[]
+  sqlGeneralUserSyncAttempt           SqlGeneralUserSyncAttempt?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

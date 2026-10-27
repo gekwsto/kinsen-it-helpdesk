@@ -23,8 +23,17 @@ const SINGLETON_LOCK_ID = "singleton";
  * UPDATEs, only one can match `isLocked: false`). A lock left over from a
  * crashed process (older than STALE_LOCK_TIMEOUT_MS) is force-released
  * first, so one crash can't permanently wedge future syncs.
+ *
+ * Exported so lib/services/sqlgeneral-user-sync-service.ts can reuse this
+ * EXACT lock instead of inventing a second one — `runId` is a plain
+ * nullable String (not an FK to OrganizationSyncRun), so a caller with no
+ * OrganizationSyncRun row of its own can pass any opaque identifier (e.g. its
+ * own attempt id). This is the only mutual-exclusion primitive in the
+ * schema; a second lock would let a Microsoft sync and a SQLGeneral sync run
+ * concurrently against the same Department/Company rows, which is exactly
+ * what this lock exists to prevent.
  */
-async function acquireOrganizationSyncLock(runId: string): Promise<boolean> {
+export async function acquireOrganizationSyncLock(runId: string): Promise<boolean> {
   await prisma.organizationSyncLock.upsert({
     where: { id: SINGLETON_LOCK_ID },
     update: {},
@@ -44,7 +53,7 @@ async function acquireOrganizationSyncLock(runId: string): Promise<boolean> {
   return result.count === 1;
 }
 
-async function releaseOrganizationSyncLock(runId: string): Promise<void> {
+export async function releaseOrganizationSyncLock(runId: string): Promise<void> {
   // Only releases if this run still holds the lock — never clears a lock
   // acquired by a later run (defensive, shouldn't happen given the
   // acquire/release pairing below, but cheap insurance).

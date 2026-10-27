@@ -25,6 +25,7 @@ import { upsertDiscoveredMicrosoftDirectoryValue } from "@/lib/services/microsof
 import { syncMicrosoftProfilePhoto } from "@/lib/services/microsoft-profile-photo-service";
 import { getOrganizationDirectoryEligibility, isOrganizationPlacementTrustedForAuthenticatedLogin, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
 import { createOrganizationResolutionCache, resolveOrganizationPlacement } from "@/lib/services/organization-company-department-resolver";
+import { enqueueOrRecoverSqlGeneralUserSync } from "@/lib/services/sqlgeneral-user-sync-service";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 export interface SyncMicrosoftUserDepartmentParams {
@@ -94,6 +95,16 @@ export async function syncMicrosoftUserDepartment(
   const { accessToken, userId, oid, email, name, fallbackGroups, fallbackRoles } = params;
 
   const result = await fetchMicrosoftGraphProfile(accessToken);
+
+  // SQLGeneral Organization Sync enqueue/recovery — deliberately right here,
+  // regardless of whether the REST of this function's department sync
+  // succeeds below, and BEFORE the early return on a failed Graph call. The
+  // delegated access token behind this exact call is short-lived and never
+  // persisted, so onPremisesSamAccountName can only ever be captured from
+  // THIS live result — see enqueueOrRecoverSqlGeneralUserSync's own doc
+  // comment. Never throws, never blocks or slows down login beyond this
+  // best-effort write.
+  await enqueueOrRecoverSqlGeneralUserSync(userId, result.ok ? result.profile.onPremisesSamAccountName : null);
 
   if (!result.ok) {
     console.warn("[microsoft-department-sync] Graph profile fetch failed, skipping sync this login", {

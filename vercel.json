@@ -11,6 +11,10 @@
     {
       "path": "/api/internal/project-request-setup-reminders/process",
       "schedule": "0 * * * *"
+    },
+    {
+      "path": "/api/internal/sqlgeneral-user-sync/process",
+      "schedule": "*/5 * * * *"
     }
   ]
 }
