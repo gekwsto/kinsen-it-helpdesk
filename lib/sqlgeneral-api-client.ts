@@ -211,15 +211,58 @@ function resolveNextUrl(baseUrl: string, nextLink: string): string {
  * `{ ok: true }` with missing rows (see this file's header: nextLink
  * mechanics are the one piece of this contract never observed live).
  */
-async function fetchAllPages<T>(pathAndQuery: string): Promise<{ ok: true; rows: T[] } | { ok: false; reason: string }> {
-  let baseUrl: string;
-  let token: string;
+interface OnePage<T> {
+  rows: T[];
+  nextUrl: string | null;
+}
+
+type FetchOnePageResult<T> = { ok: true; page: OnePage<T> } | { ok: false; reason: string };
+
+/** Fetches + parses exactly one page — the shared primitive both fetchAllPages (which follows nextUrl) and fetchFirstPageOnly (which deliberately never does) are built from. Never follows a link itself. */
+async function fetchOnePage<T>(url: string, token: string, baseUrl: string): Promise<FetchOnePageResult<T>> {
+  let response: Response;
   try {
-    baseUrl = readAndValidateSqlGeneralCredentials().baseUrl;
-    token = await getSqlGeneralAccessToken();
+    response = await fetch(url, {
+      headers: { Accept: "application/json", "X-MS-API-ROLE": API_ROLE, Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (err) {
+    return { ok: false, reason: `Network error fetching ${url}: ${err instanceof Error ? err.message : String(err)}` };
+  }
+
+  if (!response.ok) {
+    return { ok: false, reason: `SQLGeneral API returned ${response.status} ${response.statusText} for ${url}.` };
+  }
+
+  let data: { value?: unknown; nextLink?: string };
+  try {
+    data = await readJsonResponse(response, url);
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) };
   }
+
+  if (!Array.isArray(data.value)) {
+    return { ok: false, reason: `SQLGeneral API response for ${url} is missing a "value" array.` };
+  }
+
+  const nextUrl = typeof data.nextLink === "string" && data.nextLink.length > 0 ? resolveNextUrl(baseUrl, data.nextLink) : null;
+  return { ok: true, page: { rows: data.value as T[], nextUrl } };
+}
+
+async function resolveCredentialsAndToken(): Promise<{ ok: true; baseUrl: string; token: string } | { ok: false; reason: string }> {
+  try {
+    const baseUrl = readAndValidateSqlGeneralCredentials().baseUrl;
+    const token = await getSqlGeneralAccessToken();
+    return { ok: true, baseUrl, token };
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+async function fetchAllPages<T>(pathAndQuery: string): Promise<{ ok: true; rows: T[] } | { ok: false; reason: string }> {
+  const auth = await resolveCredentialsAndToken();
+  if (!auth.ok) return auth;
+  const { baseUrl, token } = auth;
   const initialUrl = resolveNextUrl(baseUrl, pathAndQuery);
 
   const rows: T[] = [];
@@ -232,37 +275,39 @@ async function fetchAllPages<T>(pathAndQuery: string): Promise<{ ok: true; rows:
     if (seenUrls.has(url)) return { ok: false, reason: "Pagination loop detected (a nextLink repeated) — treating as incomplete." };
     seenUrls.add(url);
 
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        headers: { Accept: "application/json", "X-MS-API-ROLE": API_ROLE, Authorization: `Bearer ${token}` },
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      });
-    } catch (err) {
-      return { ok: false, reason: `Network error fetching ${url}: ${err instanceof Error ? err.message : String(err)}` };
-    }
-
-    if (!response.ok) {
-      return { ok: false, reason: `SQLGeneral API returned ${response.status} ${response.statusText} for ${url}.` };
-    }
-
-    let data: { value?: unknown; nextLink?: string };
-    try {
-      data = await readJsonResponse(response, url);
-    } catch (err) {
-      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
-    }
-
-    if (!Array.isArray(data.value)) {
-      return { ok: false, reason: `SQLGeneral API response for ${url} is missing a "value" array.` };
-    }
-    rows.push(...(data.value as T[]));
+    const pageResult: FetchOnePageResult<T> = await fetchOnePage<T>(url, token, baseUrl);
+    if (!pageResult.ok) return pageResult;
+    rows.push(...pageResult.page.rows);
     pages++;
-
-    url = typeof data.nextLink === "string" && data.nextLink.length > 0 ? resolveNextUrl(baseUrl, data.nextLink) : null;
+    url = pageResult.page.nextUrl;
   }
 
   return { ok: true, rows };
+}
+
+/**
+ * Fetches ONLY the first page of a filtered query and NEVER follows
+ * nextLink — the correct primitive for an existence check, unlike
+ * fetchAllPages above (which exists specifically to guarantee COMPLETE
+ * results for bulk listings like Departments/Sync All, and must keep
+ * walking every page to honor that — left completely unchanged, still the
+ * only thing those callers use). Using fetchAllPages for an existence
+ * check was the real bug fixed here: `$first=1` only caps PAGE size, not
+ * the total match count — a `$filter=CompanyId eq 3` matching every real
+ * employee in that company still returns a nextLink for the rest of them,
+ * and fetchAllPages correctly (but pointlessly, for this use) walked every
+ * one of those pages until MAX_PAGES's safety guard fired. One request,
+ * one page, done — sufficient and correct for "does at least one match
+ * exist".
+ */
+async function fetchFirstPageOnly<T>(pathAndQuery: string): Promise<{ ok: true; rows: T[] } | { ok: false; reason: string }> {
+  const auth = await resolveCredentialsAndToken();
+  if (!auth.ok) return auth;
+  const { baseUrl, token } = auth;
+  const url = resolveNextUrl(baseUrl, pathAndQuery);
+  const pageResult: FetchOnePageResult<T> = await fetchOnePage<T>(url, token, baseUrl);
+  if (!pageResult.ok) return pageResult;
+  return { ok: true, rows: pageResult.page.rows };
 }
 
 function escapeODataStringLiteral(value: string): string {
@@ -374,9 +419,24 @@ export type CompanyIdExistsResult = { ok: true; exists: boolean } | { ok: false;
 export async function verifySqlGeneralCompanyIdExists(companyId: string): Promise<CompanyIdExistsResult> {
   const filter = `CompanyId eq ${formatODataIdLiteral(companyId)}`;
   const path = `/api/UsersAndManagers?$filter=${encodeURIComponent(filter)}&$first=1`;
-  const result = await fetchAllPages<RawSqlGeneralUser>(path);
+  // fetchFirstPageOnly, not fetchAllPages: this only needs to know "does at
+  // least one match exist" — see that function's own doc comment for the
+  // pagination bug this fixes (a filter matching many real employees used
+  // to walk every one of their pages before failing on MAX_PAGES).
+  const result = await fetchFirstPageOnly<RawSqlGeneralUser>(path);
   if (!result.ok) return { ok: false, reason: result.reason };
-  return { ok: true, exists: result.rows.length > 0 };
+  if (result.rows.length === 0) return { ok: true, exists: false };
+
+  // Defense in depth: confirm the returned row's OWN CompanyId really is
+  // the one requested, rather than trusting the filter was honored —
+  // fails closed (a verification failure, not a false "exists: true") if
+  // it doesn't match.
+  const returned = result.rows[0].CompanyId;
+  const returnedAsString = returned === null || returned === undefined ? null : String(returned);
+  if (returnedAsString !== companyId) {
+    return { ok: false, reason: `SQLGeneral returned a row for CompanyId filter "${companyId}" but its own CompanyId value ("${returnedAsString}") does not match — the filter may not have been honored; failing closed rather than trusting an unverified match.` };
+  }
+  return { ok: true, exists: true };
 }
 
 // ─── Departments ────────────────────────────────────────────────────────────

@@ -162,6 +162,52 @@ async function main() {
     const ambiguousMatch = await client.findSqlGeneralUserByUsername("dupe");
     check("9. more than one match is reported as ambiguous with the real count, never silently resolved to the first row", ambiguousMatch.outcome === "ambiguous" && (ambiguousMatch as { outcome: "ambiguous"; count: number }).count === 2);
 
+    console.log("\nCompany existence verification (the pagination bug fix) ===\n");
+    let companyCallCount = 0;
+    const companyRequestedUrls: string[] = [];
+    setMockFetch((req) => {
+      if (req.url.includes("login.microsoftonline.com")) return jsonResponse(200, { access_token: "t", token_type: "Bearer" });
+      if (req.url.includes("/api/UsersAndManagers") && req.url.includes("CompanyId")) {
+        companyCallCount++;
+        companyRequestedUrls.push(req.url);
+        if (req.url.includes("CompanyId%20eq%203")) {
+          // Exactly the production scenario: a real company with many
+          // employees. A nextLink IS present (there genuinely are more
+          // matching rows) — the fix must never follow it for an
+          // existence check, unlike fetchAllPages elsewhere.
+          return jsonResponse(200, { value: [{ Username: "emp1", CompanyId: 3 }], nextLink: "/api/UsersAndManagers?$first=1&$filter=CompanyId%20eq%203&$after=page2of500" });
+        }
+        if (req.url.includes("CompanyId%20eq%20999")) return jsonResponse(200, { value: [] });
+        if (req.url.includes("CompanyId%20eq%207")) return jsonResponse(200, { value: [{ Username: "mismatch-emp", CompanyId: 70 }] }); // backend returns a row whose OWN CompanyId doesn't match the filter
+        if (req.url.includes("CompanyId%20eq%20500")) return jsonResponse(503, { error: "service unavailable" });
+      }
+      return jsonResponse(200, { value: [] });
+    });
+
+    const validExisting = await client.verifySqlGeneralCompanyIdExists("3");
+    check(
+      "17. valid source ID: exists=true from a SINGLE request, even though the real backend offered a nextLink for hundreds more matching employees",
+      validExisting.ok === true && validExisting.exists === true && companyCallCount === 1,
+      JSON.stringify(validExisting) + ` calls=${companyCallCount}`
+    );
+    check("18. pagination termination: the existence check never followed the nextLink (exactly 1 request, not 2+)", companyRequestedUrls.length === 1);
+
+    companyCallCount = 0;
+    const unknownId = await client.verifySqlGeneralCompanyIdExists("999");
+    check("19. unknown ID: zero matches => exists=false, not an error", unknownId.ok === true && unknownId.exists === false);
+
+    companyCallCount = 0;
+    const mismatchResult = await client.verifySqlGeneralCompanyIdExists("7");
+    check(
+      "20. incorrect filter result: the backend returns a row, but its OWN CompanyId doesn't match the request — treated as a verification FAILURE, never a false exists=true",
+      mismatchResult.ok === false,
+      JSON.stringify(mismatchResult)
+    );
+
+    companyCallCount = 0;
+    const apiFailure = await client.verifySqlGeneralCompanyIdExists("500");
+    check("21. API failure (503): verification fails closed, never treated as exists=false", apiFailure.ok === false, JSON.stringify(apiFailure));
+
     console.log("\nPagination ===\n");
     let deptCallCount = 0;
     setMockFetch((req) => {
