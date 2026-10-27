@@ -87,12 +87,17 @@ export function TicketFilters({
   const searchParams = useSearchParams();
   const [, startTransition] = useTransition();
   const [showAdvanced, setShowAdvanced] = useState(() => {
-    // Auto-expand if any advanced filter is active
+    // Auto-expand if any advanced filter is active — deliberately NOT
+    // `source`: the Dashboard's "From Email" KPI card links straight to
+    // ?source=EMAIL, and auto-expanding the panel just for that one filter
+    // made that one card behave visibly differently from the other
+    // KPI cards (Total/In Progress, which use the separate `status` param
+    // and never expand it) — confirmed with the user as unwanted. Source is
+    // still visible/editable once the panel is opened for any other reason.
     return !!(
       searchParams.get("categoryId") ||
       searchParams.get("departmentId") ||
       searchParams.get("assignedAgentId") ||
-      searchParams.get("source") ||
       searchParams.get("createdAfter") ||
       searchParams.get("createdBefore") ||
       searchParams.get("unassigned") === "true" ||
