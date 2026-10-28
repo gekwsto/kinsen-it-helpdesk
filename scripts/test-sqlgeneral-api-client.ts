@@ -261,14 +261,17 @@ async function main() {
     const resolvedLeaf = client.resolveSqlGeneralDepartmentPlacement(3, depts);
     check(
       "15. a 3-level chain resolves root-to-immediate-parent in order",
-      resolvedLeaf.outcome === "resolved" && resolvedLeaf.placement.parentChain.map((d) => d.id).join(",") === "1,2" && !resolvedLeaf.placement.missingParent
+      resolvedLeaf.outcome === "resolved" && resolvedLeaf.placement.parentChain.map((d) => d.id).join(",") === "1,2" && !resolvedLeaf.placement.missingParent && !resolvedLeaf.placement.cycle
     );
     const cyclic = [
       { id: 1, description: "A", isActive: true, parentDepartmentId: 2, country: null, company: null, companyShortname: null, creationDate: null, updateTimestamp: null },
       { id: 2, description: "B", isActive: true, parentDepartmentId: 1, country: null, company: null, companyShortname: null, creationDate: null, updateTimestamp: null },
     ];
     const resolvedCyclic = client.resolveSqlGeneralDepartmentPlacement(1, cyclic);
-    check("16. a cycle in the external parent data breaks the walk rather than looping forever", resolvedCyclic.outcome === "resolved");
+    check(
+      "16. a cycle in the external parent data breaks the walk rather than looping forever, and is explicitly reported via cycle: true — never silently folded into a truncated-but-otherwise-normal chain",
+      resolvedCyclic.outcome === "resolved" && resolvedCyclic.placement.cycle === true && resolvedCyclic.placement.missingParent === false
+    );
   } finally {
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) delete process.env[key];

@@ -548,6 +548,8 @@ export interface ResolvedDepartmentPlacement {
   parentChain: SqlGeneralDepartmentRecord[];
   /** A ParentDepartmentId was present but not found in the given set — either the set is incomplete, or it's a dangling reference. Never silently dropped. */
   missingParent: boolean;
+  /** The ancestor walk revisited a node already on its own path — a genuine cycle in the external data, distinct from missingParent. Never silently folded into a shorter, truncated chain; callers must treat this the same as an unresolvable hierarchy. */
+  cycle: boolean;
 }
 
 export type DepartmentPlacementResult =
@@ -558,7 +560,9 @@ export type DepartmentPlacementResult =
  * Resolves a user's HrDepartmentId against an already-fetched Departments
  * set (see listAllSqlGeneralDepartments) and walks ParentDepartmentId
  * upward to build the chain. A cycle in the external data (never trusted to
- * be acyclic) breaks the walk rather than looping forever.
+ * be acyclic) breaks the walk rather than looping forever, and is reported
+ * via `cycle: true` — never silently treated as if the chain had simply
+ * ended.
  */
 export function resolveSqlGeneralDepartmentPlacement(hrDepartmentId: string | number, departments: SqlGeneralDepartmentRecord[]): DepartmentPlacementResult {
   const byId = new Map(departments.map((d) => [String(d.id), d]));
@@ -567,11 +571,15 @@ export function resolveSqlGeneralDepartmentPlacement(hrDepartmentId: string | nu
 
   const parentChain: SqlGeneralDepartmentRecord[] = [];
   let missingParent = false;
+  let cycle = false;
   let current = department;
   const visited = new Set<string>([String(department.id)]);
   while (current.parentDepartmentId !== null) {
     const parentKey = String(current.parentDepartmentId);
-    if (visited.has(parentKey)) break;
+    if (visited.has(parentKey)) {
+      cycle = true;
+      break;
+    }
     const parent = byId.get(parentKey);
     if (!parent) {
       missingParent = true;
@@ -581,5 +589,5 @@ export function resolveSqlGeneralDepartmentPlacement(hrDepartmentId: string | nu
     visited.add(parentKey);
     current = parent;
   }
-  return { outcome: "resolved", placement: { department, parentChain, missingParent } };
+  return { outcome: "resolved", placement: { department, parentChain, missingParent, cycle } };
 }
