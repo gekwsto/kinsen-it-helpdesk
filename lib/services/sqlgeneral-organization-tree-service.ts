@@ -24,6 +24,30 @@ import { listAllSqlGeneralDepartments, listAllSqlGeneralUsers, type SqlGeneralUs
 export type SqlGeneralTreeNode =
   | {
       id: string;
+      /**
+       * A top-level grouping layer — one node per distinct, VERIFIED
+       * SQLGeneral CompanyId, containing the root department(s) whose
+       * entire subtree carries that same CompanyId as live evidence.
+       * `companyId` is never invented or inferred from `Company`/
+       * `CompanyShortname` text: Departments carries no CompanyId field at
+       * all (see sqlgeneral-api-client.ts's header), so the ONLY source of
+       * a verified identity is a real UsersAndManagers row whose
+       * HrDepartmentId resolves into this root's own subtree and whose
+       * CompanyId is non-null. A root whose subtree has no such evidence,
+       * or conflicting evidence (more than one distinct CompanyId observed
+       * within the same subtree), is NEVER grouped — see
+       * groupRootsByVerifiedCompanyIdentity and
+       * UnresolvedSqlGeneralCompanyIdentity. `name` is a display label only
+       * (the most frequently observed `Company` string for this id, or
+       * "Company <id>" if none) — grouping itself never keys on it.
+       */
+      kind: "sqlgeneral-company";
+      companyId: string;
+      name: string;
+      children: SqlGeneralTreeNode[];
+    }
+  | {
+      id: string;
       kind: "sqlgeneral-department";
       sqlGeneralDepartmentId: string;
       name: string;
@@ -56,8 +80,29 @@ export interface UnresolvedSqlGeneralUser {
   reason: UnresolvedSqlGeneralUserReason;
 }
 
+/**
+ * A ROOT department whose Company identity could not be verified from
+ * SQLGeneral's own live data — it is still rendered (standalone, never
+ * dropped), just never grouped under a Company node. See
+ * groupRootsByVerifiedCompanyIdentity.
+ *   - "no_evidence": no UsersAndManagers row anywhere in this root's
+ *     subtree carries a non-null CompanyId.
+ *   - "conflicting_evidence": more than one distinct CompanyId was
+ *     observed within this root's own subtree — never silently picked one.
+ */
+export interface UnresolvedSqlGeneralCompanyIdentity {
+  sqlGeneralDepartmentId: string;
+  reason: "no_evidence" | "conflicting_evidence";
+}
+
 export type SqlGeneralOrganizationTreeResult =
-  | { ok: true; roots: SqlGeneralTreeNode[]; unresolvedDepartments: UnresolvedSqlGeneralDepartment[]; unresolvedUsers: UnresolvedSqlGeneralUser[] }
+  | {
+      ok: true;
+      roots: SqlGeneralTreeNode[];
+      unresolvedDepartments: UnresolvedSqlGeneralDepartment[];
+      unresolvedUsers: UnresolvedSqlGeneralUser[];
+      unresolvedCompanyIdentity: UnresolvedSqlGeneralCompanyIdentity[];
+    }
   | { ok: false; reason: string };
 
 function deptNodeId(sqlGeneralDepartmentId: string): string {
@@ -65,6 +110,109 @@ function deptNodeId(sqlGeneralDepartmentId: string): string {
 }
 function userNodeId(userId: string): string {
   return `sguser:${userId}`;
+}
+function companyNodeId(companyId: string): string {
+  return `sgcompany:${companyId}`;
+}
+
+/** Every Department id in `root`'s own subtree (itself included), via its already-built department-kind children only — ignores any already-attached user leaves. */
+function collectSubtreeDepartmentIds(root: SqlGeneralTreeNode & { kind: "sqlgeneral-department" }, into: string[] = []): string[] {
+  into.push(root.sqlGeneralDepartmentId);
+  for (const child of root.children) {
+    if (child.kind === "sqlgeneral-department") collectSubtreeDepartmentIds(child, into);
+  }
+  return into;
+}
+
+/**
+ * Groups the already-built, already-nested ROOT department nodes under a
+ * new Company layer — preserving every existing child/descendant exactly
+ * as built (REQUIRED #2 from the prior round, still honored: Company nodes
+ * are added only at this one new top layer; arbitrary Department nesting
+ * below a root is completely untouched).
+ *
+ * Grouping key is a VERIFIED SQLGeneral CompanyId, never `company`/
+ * `companyShortname` display text (see SqlGeneralTreeNode's own doc
+ * comment for why — Departments carries no CompanyId at all). "Verified"
+ * means: derived from a real, live UsersAndManagers row whose
+ * HrDepartmentId resolves somewhere inside this root's own subtree and
+ * whose CompanyId is non-null. If a root's subtree has no such evidence,
+ * or more than one distinct CompanyId appears within it, identity cannot
+ * be established — that root is reported in `unresolvedCompanyIdentity`
+ * and rendered standalone (never merged into any other root, verified or
+ * not — there is no "(no company)"/catch-all bucket; two unverifiable
+ * roots are never assumed to be the same unknown company).
+ */
+function groupRootsByVerifiedCompanyIdentity(
+  roots: Array<SqlGeneralTreeNode & { kind: "sqlgeneral-department" }>,
+  sqlGeneralUsers: SqlGeneralUserRecord[]
+): { topLevel: SqlGeneralTreeNode[]; unresolvedCompanyIdentity: UnresolvedSqlGeneralCompanyIdentity[] } {
+  const companyIdsByDeptId = new Map<string, Set<string>>();
+  const labelCountsByCompanyId = new Map<string, Map<string, number>>();
+  for (const u of sqlGeneralUsers) {
+    if (u.hrDepartmentId === null || u.companyId === null) continue;
+    const deptId = String(u.hrDepartmentId);
+    const companyId = String(u.companyId);
+    if (!companyIdsByDeptId.has(deptId)) companyIdsByDeptId.set(deptId, new Set());
+    companyIdsByDeptId.get(deptId)!.add(companyId);
+    if (u.company) {
+      if (!labelCountsByCompanyId.has(companyId)) labelCountsByCompanyId.set(companyId, new Map());
+      const counts = labelCountsByCompanyId.get(companyId)!;
+      counts.set(u.company, (counts.get(u.company) ?? 0) + 1);
+    }
+  }
+
+  function labelFor(companyId: string): string {
+    const counts = labelCountsByCompanyId.get(companyId);
+    if (!counts || counts.size === 0) return `Company ${companyId}`;
+    let best: string | null = null;
+    let bestCount = -1;
+    for (const [label, count] of counts) {
+      if (count > bestCount) {
+        best = label;
+        bestCount = count;
+      }
+    }
+    return best ?? `Company ${companyId}`;
+  }
+
+  const companiesById = new Map<string, SqlGeneralTreeNode & { kind: "sqlgeneral-company" }>();
+  const topLevel: SqlGeneralTreeNode[] = [];
+  const unresolvedCompanyIdentity: UnresolvedSqlGeneralCompanyIdentity[] = [];
+
+  for (const root of roots) {
+    const evidence = new Set<string>();
+    for (const deptId of collectSubtreeDepartmentIds(root)) {
+      const ids = companyIdsByDeptId.get(deptId);
+      if (ids) for (const cid of ids) evidence.add(cid);
+    }
+
+    if (evidence.size === 0) {
+      unresolvedCompanyIdentity.push({ sqlGeneralDepartmentId: root.sqlGeneralDepartmentId, reason: "no_evidence" });
+      topLevel.push(root);
+      continue;
+    }
+    if (evidence.size > 1) {
+      unresolvedCompanyIdentity.push({ sqlGeneralDepartmentId: root.sqlGeneralDepartmentId, reason: "conflicting_evidence" });
+      topLevel.push(root);
+      continue;
+    }
+
+    const companyId = evidence.values().next().value as string;
+    let companyNode = companiesById.get(companyId);
+    if (!companyNode) {
+      companyNode = { id: companyNodeId(companyId), kind: "sqlgeneral-company", companyId, name: labelFor(companyId), children: [] };
+      companiesById.set(companyId, companyNode);
+      topLevel.push(companyNode);
+    }
+    companyNode.children.push(root);
+  }
+
+  for (const node of companiesById.values()) {
+    node.children.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  }
+  topLevel.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+  return { topLevel, unresolvedCompanyIdentity };
 }
 
 /**
@@ -270,6 +418,7 @@ export async function getSqlGeneralOrganizationTree(): Promise<SqlGeneralOrganiz
     node.children.push(...leaves);
   }
 
-  const roots = rootIds.map((id) => nodesById.get(id)!).sort((a, b) => a.name.localeCompare(b.name));
-  return { ok: true, roots, unresolvedDepartments, unresolvedUsers };
+  const departmentRoots = rootIds.map((id) => nodesById.get(id)!).sort((a, b) => a.name.localeCompare(b.name));
+  const { topLevel: roots, unresolvedCompanyIdentity } = groupRootsByVerifiedCompanyIdentity(departmentRoots, userResult.users);
+  return { ok: true, roots, unresolvedDepartments, unresolvedUsers, unresolvedCompanyIdentity };
 }

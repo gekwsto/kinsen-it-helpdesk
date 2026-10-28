@@ -34,6 +34,10 @@ interface UnresolvedSqlGeneralUser {
   userId: string;
   reason: "not_found" | "ambiguous" | "no_hr_department" | "department_not_found" | "conflicting_attempt";
 }
+interface UnresolvedSqlGeneralCompanyIdentity {
+  sqlGeneralDepartmentId: string;
+  reason: "no_evidence" | "conflicting_evidence";
+}
 
 interface SearchResult {
   type: "user" | "department";
@@ -102,9 +106,14 @@ function ChartCanvas({
   highlightedIds: Set<string>;
 }) {
   const { fitView } = useReactFlow();
+  // SQLGeneral trees can run to hundreds of Departments, so they start
+  // collapsed one level shallower than the existing Departments/People
+  // modes to keep the initial render usable (DO #3).
+  const maxAutoExpandDepth = mode === "sqlgeneral" ? 1 : 2;
+
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => {
     const s = new Set<string>();
-    seedDefaultCollapsed(data, 0, mode === "departments" ? 2 : 2, s);
+    seedDefaultCollapsed(data, 0, maxAutoExpandDepth, s);
     return s;
   });
 
@@ -114,7 +123,7 @@ function ChartCanvas({
   const dataSignature = useMemo(() => JSON.stringify(flattenIds(data)), [data]);
   useEffect(() => {
     const s = new Set<string>();
-    seedDefaultCollapsed(data, 0, 2, s);
+    seedDefaultCollapsed(data, 0, maxAutoExpandDepth, s);
     // Always keep the path to a selected node expanded.
     if (selectedId) {
       const path = findPath(data, selectedId);
@@ -197,6 +206,26 @@ function ChartCanvas({
           onSelect: setSelectedId,
         };
         rfNodes.push({ id: n.id, type: "person", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
+      } else if (n.kind === "sqlgeneral-company") {
+        // Top-level grouping layer added over SQLGeneral root Departments
+        // (never created for existing modes). Reuses DepartmentNode as-is;
+        // no manager/company sub-label is meaningful at this layer, so both
+        // are left null.
+        const data0: DepartmentNodeData = {
+          label: n.name as string,
+          isActive: true,
+          managerName: null,
+          managerJobTitle: null,
+          activeUserCount: 0,
+          childCount: originalChildCount,
+          hasHiddenChildren,
+          isCollapsed,
+          isHighlighted: highlightedIds.has(n.id),
+          isSelected: n.id === selectedId,
+          onToggleCollapse: toggleCollapse,
+          onSelect: setSelectedId,
+        };
+        rfNodes.push({ id: n.id, type: "department", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
       } else if (n.kind === "sqlgeneral-department") {
         // SQLGeneral mode mixes department AND user-leaf nodes in ONE tree
         // (unlike the two existing modes, which are each uniformly one
@@ -304,6 +333,7 @@ export function OrganizationChartView() {
   const [syncing, setSyncing] = useState(false);
   const [unresolvedDepartments, setUnresolvedDepartments] = useState<UnresolvedSqlGeneralDepartment[]>([]);
   const [unresolvedUsers, setUnresolvedUsers] = useState<UnresolvedSqlGeneralUser[]>([]);
+  const [unresolvedCompanyIdentity, setUnresolvedCompanyIdentity] = useState<UnresolvedSqlGeneralCompanyIdentity[]>([]);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchTree = useCallback(async () => {
@@ -332,6 +362,7 @@ export function OrganizationChartView() {
       setFullAccess(Boolean(body.fullAccess));
       setUnresolvedDepartments(mode === "sqlgeneral" ? (body.unresolvedDepartments ?? []) : []);
       setUnresolvedUsers(mode === "sqlgeneral" ? (body.unresolvedUsers ?? []) : []);
+      setUnresolvedCompanyIdentity(mode === "sqlgeneral" ? (body.unresolvedCompanyIdentity ?? []) : []);
     } catch {
       setErrorState("network");
       setData(null);
@@ -497,7 +528,7 @@ export function OrganizationChartView() {
         </p>
       )}
 
-      {mode === "sqlgeneral" && (unresolvedDepartments.length > 0 || unresolvedUsers.length > 0) && (
+      {mode === "sqlgeneral" && (unresolvedDepartments.length > 0 || unresolvedUsers.length > 0 || unresolvedCompanyIdentity.length > 0) && (
         <Card className="flex items-start gap-2 border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <div>
@@ -510,6 +541,12 @@ export function OrganizationChartView() {
             {unresolvedUsers.length > 0 && (
               <p>
                 {unresolvedUsers.length} user{unresolvedUsers.length === 1 ? "" : "s"} not shown — unresolved SQLGeneral identity (see admin report for details).
+              </p>
+            )}
+            {unresolvedCompanyIdentity.length > 0 && (
+              <p>
+                {unresolvedCompanyIdentity.length} root department{unresolvedCompanyIdentity.length === 1 ? "" : "s"} shown without verified Company grouping — no or conflicting live
+                CompanyId evidence ({unresolvedCompanyIdentity.map((d) => `${d.sqlGeneralDepartmentId}: ${d.reason}`).join(", ")}).
               </p>
             )}
           </div>
