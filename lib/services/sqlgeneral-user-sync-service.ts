@@ -31,6 +31,7 @@ import {
   listAllSqlGeneralDepartments,
   resolveSqlGeneralDepartmentPlacement,
   verifySqlGeneralCompanyIdExists,
+  verifySqlGeneralDepartmentIdExists,
   type SqlGeneralDepartmentRecord,
   type ResolvedDepartmentPlacement,
 } from "@/lib/sqlgeneral-api-client";
@@ -227,13 +228,41 @@ async function applySqlGeneralDepartmentMembership(userId: string, placement: Re
         return { ok: false, reason: `Company "${companyName}" already exists and is not owned by SQLGeneral sync.` };
       }
 
-      const department = await tx.department.findUnique({
-        where: { companyId_normalizedName: { companyId: company.id, normalizedName: normalizedDepartmentName } },
-      });
+      const sqlGeneralDepartmentId = String(placement.department.id);
+      const approvedDeptMapping = await tx.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { department: true } });
+
+      let department = null as Awaited<ReturnType<typeof tx.department.findUnique>>;
+      if (approvedDeptMapping) {
+        // Re-validate the SAME hierarchy integrity at write time (REQUIRED
+        // #5, this round) — an approved mapping is never trusted blindly;
+        // the chain must still resolve as root/verified RIGHT NOW, inside
+        // this same transaction, never a separate, earlier check-then-write
+        // gap.
+        if (!approvedDeptMapping.department.companyId) {
+          return { ok: false, reason: `Approved Department mapping's target no longer has a Company — refusing to write.` };
+        }
+        const hierarchyValidation = await validateDepartmentHierarchy(
+          placement.parentChain,
+          placement.missingParent,
+          approvedDeptMapping.department.companyId,
+          (id) => tx.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: id }, select: { department: { select: { companyId: true } } } }).then((m) => (m ? { companyId: m.department.companyId } : null))
+        );
+        const hierarchyFailure = describeHierarchyValidationFailure(hierarchyValidation);
+        if (hierarchyFailure) return { ok: false, reason: `Approved Department mapping failed re-validation at write time: ${hierarchyFailure}` };
+        department = approvedDeptMapping.department;
+      }
+      if (!department) {
+        department = await tx.department.findUnique({
+          where: { companyId_normalizedName: { companyId: company.id, normalizedName: normalizedDepartmentName } },
+        });
+      }
       if (!department) {
         return { ok: false, reason: `No existing Department "${departmentName}" under Company "${companyName}" — SQLGeneral Department auto-creation is not yet implemented.` };
       }
-      if (department.importSource !== OrganizationNodeSource.SQLGENERAL) {
+      if (!approvedDeptMapping && department.importSource !== OrganizationNodeSource.SQLGENERAL) {
+        // Same explicit-mapping exception as the Company check above — an
+        // approved Department mapping bypasses this, but never touches the
+        // Department's own ownership/fields/hierarchy either way.
         return { ok: false, reason: `Department "${departmentName}" already exists and is not owned by SQLGeneral sync.` };
       }
 
@@ -525,31 +554,21 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     const { department, parentChain, missingParent } = placementResult.placement;
     const companyName = department.company ?? user.company;
     const departmentName = department.description;
+    const sqlGeneralDepartmentId = String(department.id);
 
     let localMatch: SqlGeneralPreviewRow["localMatch"] = "none";
     let conflictDetail: string | null = null;
     let conflictLevel: SqlGeneralPreviewRow["conflictLevel"] = null;
-    const approvedMapping = sqlGeneralCompanyId ? await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } }) : null;
-    if (approvedMapping) {
+    let resolvedCompany: { id: string; name: string } | null = null;
+
+    const approvedCompanyMapping = sqlGeneralCompanyId ? await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } }) : null;
+    if (approvedCompanyMapping) {
       // An admin has explicitly reviewed and approved this exact SQLGeneral
       // CompanyId against this exact local Company — bypass the name-based
       // check entirely, but this is NOT the same as SQLGeneral owning it
-      // (see localMatch's own doc comment); the Department-level check
-      // below still applies normally, unchanged.
+      // (see localMatch's own doc comment).
+      resolvedCompany = approvedCompanyMapping.company;
       localMatch = "approved_external_mapping";
-      const existingCompany = approvedMapping.company;
-      if (departmentName) {
-        const existingDept = await prisma.department.findUnique({
-          where: { companyId_normalizedName: { companyId: existingCompany.id, normalizedName: normalizeDepartmentName(departmentName) } },
-        });
-        if (existingDept && existingDept.importSource !== OrganizationNodeSource.SQLGENERAL) {
-          localMatch = "conflict_other_owner";
-          conflictLevel = "department";
-          conflictDetail = `Department "${departmentName}" already exists under mapped Company "${existingCompany.name}" and is not owned by SQLGeneral sync.`;
-        } else if (!existingDept) {
-          conflictDetail = `No existing Department "${departmentName}" under mapped Company "${existingCompany.name}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
-        }
-      }
     } else if (companyName) {
       const existingCompany = await prisma.company.findUnique({ where: { normalizedName: normalizeCompanyName(companyName) } });
       if (existingCompany) {
@@ -557,20 +576,41 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
           localMatch = "conflict_other_owner";
           conflictLevel = "company";
           conflictDetail = `Company "${companyName}" already exists and is not owned by SQLGeneral sync.`;
+          // Blocked at the Company level — the Department-level check below
+          // never runs; resolvedCompany stays null on purpose.
         } else {
+          resolvedCompany = existingCompany;
           localMatch = "existing_sqlgeneral_owned";
-          if (departmentName) {
-            const existingDept = await prisma.department.findUnique({
-              where: { companyId_normalizedName: { companyId: existingCompany.id, normalizedName: normalizeDepartmentName(departmentName) } },
-            });
-            if (existingDept && existingDept.importSource !== OrganizationNodeSource.SQLGENERAL) {
-              localMatch = "conflict_other_owner";
-              conflictLevel = "department";
-              conflictDetail = `Department "${departmentName}" already exists under Company "${companyName}" and is not owned by SQLGeneral sync.`;
-            } else if (!existingDept) {
-              conflictDetail = `No existing Department "${departmentName}" under Company "${companyName}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
-            }
-          }
+        }
+      }
+      // No existingCompany at all: resolvedCompany stays null, localMatch
+      // stays "none" — a brand-new Company (and therefore Department) would
+      // be created fresh; the Department-level check below doesn't apply.
+    }
+
+    // One shared Department-level check, reached whenever a Company was
+    // actually resolved above (approved-mapped, or SQLGeneral-owned) —
+    // consolidated from what used to be two near-identical copies so the
+    // NEW SqlGeneralDepartmentMapping check only has to be written once and
+    // applies identically to both paths (REQUIRED #6: "sync and preview
+    // both resolve approved mappings consistently").
+    if (resolvedCompany && departmentName) {
+      const approvedDeptMapping = await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { department: true } });
+      if (approvedDeptMapping) {
+        // An admin has explicitly approved THIS exact Department bridge —
+        // authoritative regardless of the existing Department's own
+        // ownership, which is never touched by this.
+        localMatch = "approved_external_mapping";
+      } else {
+        const existingDept = await prisma.department.findUnique({
+          where: { companyId_normalizedName: { companyId: resolvedCompany.id, normalizedName: normalizeDepartmentName(departmentName) } },
+        });
+        if (existingDept && existingDept.importSource !== OrganizationNodeSource.SQLGENERAL) {
+          localMatch = "conflict_other_owner";
+          conflictLevel = "department";
+          conflictDetail = `Department "${departmentName}" already exists under Company "${resolvedCompany.name}" and is not owned by SQLGeneral sync.`;
+        } else if (!existingDept) {
+          conflictDetail = `No existing Department "${departmentName}" under Company "${resolvedCompany.name}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
         }
       }
     }
@@ -583,7 +623,7 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       hrDepartmentId: user.hrDepartmentId,
       departmentResolution: "resolved",
       departmentDescription: departmentName,
-      company: approvedMapping ? approvedMapping.company.name : companyName,
+      company: resolvedCompany ? resolvedCompany.name : companyName,
       companyShortname: department.companyShortname,
       parentChain: parentChain.map((p) => p.description ?? String(p.id)),
       missingParent,
@@ -700,6 +740,212 @@ export async function approveSqlGeneralCompanyMapping(
     data: { sqlGeneralCompanyId, companyId: targetCompanyId, approvedById },
   });
   return { ok: true, mapping: { sqlGeneralCompanyId: created.sqlGeneralCompanyId, companyId: created.companyId, approvedById: created.approvedById, approvedAt: created.approvedAt } };
+}
+
+// ─── Explicit admin-approved Department mapping ────────────────────────────
+
+export interface DepartmentMappingCandidate {
+  sqlGeneralDepartmentId: string;
+  existingMapping: { departmentId: string; departmentName: string; approvedById: string; approvedAt: Date } | null;
+  targetDepartment: { id: string; name: string; companyId: string | null; importSource: OrganizationNodeSource | null } | null;
+  /** Other already-approved SQLGeneral DepartmentIds (never including this one) already pointing at this same target — same many-to-one semantics as CompanyMappingCandidate. */
+  otherMappingsToSameTarget: string[];
+  sourceVerified: boolean | null;
+  sourceVerificationError: string | null;
+  /**
+   * The approved SqlGeneralCompanyMapping for the target Department's OWN
+   * companyId, if any — null if the target has no companyId, or that
+   * Company has no approved mapping yet, which approveSqlGeneralDepartmentMapping
+   * treats as an unsafe parent relationship and refuses (REQUIRED #6): a
+   * Department mapping is only ever layered on top of an already-approved
+   * Company mapping, never standing alone.
+   */
+  companyMappingForTargetDepartment: { sqlGeneralCompanyId: string } | null;
+  /** Whether the SOURCE department's SQLGeneral parent chain is actually compatible with the TARGET's local placement — see validateDepartmentHierarchy's own doc comment for the exact rules. Never inferred from missingParent alone. */
+  hierarchyValidation: DepartmentHierarchyValidation;
+}
+
+export type DepartmentHierarchyValidation =
+  | { status: "root" }
+  | { status: "verified" }
+  | { status: "unresolved"; reason: string }
+  | { status: "unmapped_ancestor"; sqlGeneralDepartmentId: string }
+  | { status: "conflicting_ancestor"; sqlGeneralDepartmentId: string; mappedCompanyId: string | null };
+
+/**
+ * TicketApp's Department has NO self-referential parent — it nests under
+ * BusinessUnit or directly under Company, never under another Department,
+ * unlike SQLGeneral's Department -> Department chains (which can be
+ * several levels deep — see this session's own earlier hierarchy
+ * findings). So "parent-chain compatibility" can never be a literal
+ * node-by-node structural match; the only honest, verifiable notion of it
+ * is: every ancestor in the SOURCE chain, up to the root, must ALREADY
+ * have its own approved SqlGeneralDepartmentMapping, and every one of
+ * those already-mapped ancestors must point at a local Department in the
+ * SAME Company as the target being approved now. This enforces a strict
+ * top-down approval order (map the root first, then its children, etc.)
+ * and catches real conflicts (an ancestor already mapped into a DIFFERENT
+ * Company than the one being proposed for its child).
+ *
+ * Deliberately does NOT treat `missingParent: false` as sufficient on its
+ * own — that only proves the SOURCE chain resolves within SQLGeneral's own
+ * data; it says nothing about whether the LOCAL mapping chain is
+ * consistent, which is the actual thing being verified here. A genuine
+ * root (no ParentDepartmentId at all) has nothing to verify and is always
+ * "root" — compatible by construction, not by inference.
+ *
+ * `lookupApprovedMapping` is injected so this same pure chain-walking logic
+ * can run against either the live `prisma` client (Preview/approve) or a
+ * `tx` inside the write-path transaction (REQUIRED #5 — same validation at
+ * write time, so an approval can never be bypassed by a later change).
+ */
+async function validateDepartmentHierarchy(
+  parentChain: SqlGeneralDepartmentRecord[],
+  missingParent: boolean,
+  targetCompanyId: string,
+  lookupApprovedMapping: (sqlGeneralDepartmentId: string) => Promise<{ companyId: string | null } | null>
+): Promise<DepartmentHierarchyValidation> {
+  if (missingParent) {
+    return { status: "unresolved", reason: "A ParentDepartmentId in this department's chain does not resolve within the fetched SQLGeneral Departments set — ambiguous, cannot be verified." };
+  }
+  if (parentChain.length === 0) return { status: "root" };
+
+  for (const ancestor of parentChain) {
+    const ancestorSqlGeneralId = String(ancestor.id);
+    const mapped = await lookupApprovedMapping(ancestorSqlGeneralId);
+    if (!mapped) return { status: "unmapped_ancestor", sqlGeneralDepartmentId: ancestorSqlGeneralId };
+    if (mapped.companyId !== targetCompanyId) {
+      return { status: "conflicting_ancestor", sqlGeneralDepartmentId: ancestorSqlGeneralId, mappedCompanyId: mapped.companyId };
+    }
+  }
+  return { status: "verified" };
+}
+
+function describeHierarchyValidationFailure(v: DepartmentHierarchyValidation): string | null {
+  if (v.status === "root" || v.status === "verified") return null;
+  if (v.status === "unresolved") return v.reason;
+  if (v.status === "unmapped_ancestor") return `Ancestor SQLGeneral Departments.Id "${v.sqlGeneralDepartmentId}" has no approved SqlGeneralDepartmentMapping yet — map ancestors top-down before their children.`;
+  return `Ancestor SQLGeneral Departments.Id "${v.sqlGeneralDepartmentId}" is already mapped into a different Company than the one being proposed here.`;
+}
+
+/**
+ * Read-only. Mirrors previewSqlGeneralCompanyMappingCandidate exactly, plus
+ * the Department-specific "does the target's own Company already have an
+ * approved mapping" check and the parent-hierarchy validation above. Never
+ * writes anything.
+ */
+export async function previewSqlGeneralDepartmentMappingCandidate(sqlGeneralDepartmentId: string, targetDepartmentId: string): Promise<DepartmentMappingCandidate> {
+  const [existing, targetDepartment, otherMappings, sourceCheck, deptResult] = await Promise.all([
+    prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { departmentId: true, approvedById: true, approvedAt: true, department: { select: { name: true } } } }),
+    prisma.department.findUnique({ where: { id: targetDepartmentId }, select: { id: true, name: true, companyId: true, importSource: true } }),
+    prisma.sqlGeneralDepartmentMapping.findMany({ where: { departmentId: targetDepartmentId, sqlGeneralDepartmentId: { not: sqlGeneralDepartmentId } }, select: { sqlGeneralDepartmentId: true } }),
+    verifySqlGeneralDepartmentIdExists(sqlGeneralDepartmentId),
+    listAllSqlGeneralDepartments(),
+  ]);
+
+  const companyMapping = targetDepartment?.companyId
+    ? await prisma.sqlGeneralCompanyMapping.findFirst({ where: { companyId: targetDepartment.companyId }, select: { sqlGeneralCompanyId: true } })
+    : null;
+
+  let hierarchyValidation: DepartmentHierarchyValidation = { status: "unresolved", reason: "Could not be checked (see sourceVerificationError / targetDepartment)." };
+  if (targetDepartment?.companyId) {
+    if (!deptResult.ok) {
+      hierarchyValidation = { status: "unresolved", reason: deptResult.reason };
+    } else {
+      const placementResult = resolveSqlGeneralDepartmentPlacement(sqlGeneralDepartmentId, deptResult.departments);
+      hierarchyValidation =
+        placementResult.outcome === "department_not_found"
+          ? { status: "unresolved", reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" was not found in the fetched Departments set.` }
+          : await validateDepartmentHierarchy(placementResult.placement.parentChain, placementResult.placement.missingParent, targetDepartment.companyId, (id) =>
+              prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: id }, select: { department: { select: { companyId: true } } } }).then((m) => (m ? { companyId: m.department.companyId } : null))
+            );
+    }
+  }
+
+  return {
+    sqlGeneralDepartmentId,
+    existingMapping: existing ? { departmentId: existing.departmentId, departmentName: existing.department.name, approvedById: existing.approvedById, approvedAt: existing.approvedAt } : null,
+    targetDepartment: targetDepartment ?? null,
+    otherMappingsToSameTarget: otherMappings.map((m) => m.sqlGeneralDepartmentId),
+    sourceVerified: sourceCheck.ok ? sourceCheck.exists : null,
+    sourceVerificationError: sourceCheck.ok ? null : sourceCheck.reason,
+    companyMappingForTargetDepartment: companyMapping,
+    hierarchyValidation,
+  };
+}
+
+export type ApproveDepartmentMappingResult =
+  | { ok: true; mapping: { sqlGeneralDepartmentId: string; departmentId: string; approvedById: string; approvedAt: Date } }
+  | { ok: false; reason: string };
+
+/**
+ * The ONLY way a SqlGeneralDepartmentMapping row is ever created — mirrors
+ * approveSqlGeneralCompanyMapping's revalidation order exactly, plus two
+ * Department-specific preconditions: the target Department's own Company
+ * must ALREADY have an approved SqlGeneralCompanyMapping (REQUIRED #6 from
+ * the prior round), and the SOURCE department's own parent chain must
+ * validate as "root" or "verified" per validateDepartmentHierarchy above —
+ * "unresolved"/"unmapped_ancestor"/"conflicting_ancestor" are all refused.
+ * Never writes to the target Department's own fields (name/normalizedName/
+ * importSource/businessUnitId/companyId) or reparents it, and never
+ * touches any User row.
+ */
+export async function approveSqlGeneralDepartmentMapping(
+  sqlGeneralDepartmentId: string,
+  targetDepartmentId: string,
+  approvedById: string,
+  confirmMultipleMapping = false
+): Promise<ApproveDepartmentMappingResult> {
+  const sourceCheck = await verifySqlGeneralDepartmentIdExists(sqlGeneralDepartmentId);
+  if (!sourceCheck.ok) return { ok: false, reason: `Could not verify SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" against live SQLGeneral data (${sourceCheck.reason}) — never approving an unverifiable identifier.` };
+  if (!sourceCheck.exists) return { ok: false, reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" was not found in current SQLGeneral data — refusing to approve an arbitrary/unknown identifier.` };
+
+  const targetDepartment = await prisma.department.findUnique({ where: { id: targetDepartmentId }, select: { id: true, companyId: true } });
+  if (!targetDepartment) return { ok: false, reason: `No Department exists with id "${targetDepartmentId}".` };
+
+  if (!targetDepartment.companyId) {
+    return { ok: false, reason: `Department "${targetDepartmentId}" has no Company at all — an unsafe parent relationship; approve a Company mapping for its intended Company first.` };
+  }
+  const companyMapping = await prisma.sqlGeneralCompanyMapping.findFirst({ where: { companyId: targetDepartment.companyId }, select: { sqlGeneralCompanyId: true } });
+  if (!companyMapping) {
+    return { ok: false, reason: `Department "${targetDepartmentId}"'s Company ("${targetDepartment.companyId}") has no approved SqlGeneralCompanyMapping yet — an unsafe parent relationship; a Department mapping can only be approved on top of an already-approved Company mapping.` };
+  }
+
+  const deptResult = await listAllSqlGeneralDepartments();
+  if (!deptResult.ok) return { ok: false, reason: `Could not fetch SQLGeneral Departments to verify parent-hierarchy compatibility (${deptResult.reason}) — never approving an unverifiable hierarchy.` };
+  const placementResult = resolveSqlGeneralDepartmentPlacement(sqlGeneralDepartmentId, deptResult.departments);
+  if (placementResult.outcome === "department_not_found") {
+    return { ok: false, reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" was not found in the fetched Departments set — cannot verify its parent hierarchy.` };
+  }
+  const hierarchyValidation = await validateDepartmentHierarchy(
+    placementResult.placement.parentChain,
+    placementResult.placement.missingParent,
+    targetDepartment.companyId,
+    (id) => prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: id }, select: { department: { select: { companyId: true } } } }).then((m) => (m ? { companyId: m.department.companyId } : null))
+  );
+  const hierarchyFailure = describeHierarchyValidationFailure(hierarchyValidation);
+  if (hierarchyFailure) return { ok: false, reason: `Parent-hierarchy validation failed: ${hierarchyFailure}` };
+
+  const existing = await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId } });
+  if (existing && existing.departmentId !== targetDepartmentId) {
+    return { ok: false, reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" is already mapped to a different Department (id="${existing.departmentId}") — remove that mapping first if it should change.` };
+  }
+  if (existing) {
+    // Idempotent re-approval of the exact same pair — safe no-op, not an error.
+    return { ok: true, mapping: { sqlGeneralDepartmentId, departmentId: existing.departmentId, approvedById: existing.approvedById, approvedAt: existing.approvedAt } };
+  }
+
+  if (!confirmMultipleMapping) {
+    const otherMappingCount = await prisma.sqlGeneralDepartmentMapping.count({ where: { departmentId: targetDepartmentId } });
+    if (otherMappingCount > 0) {
+      return { ok: false, reason: `Department "${targetDepartmentId}" already has ${otherMappingCount} other approved SQLGeneral mapping(s) — this would create a many-to-one mapping. Pass confirmMultipleMapping: true to proceed; this is allowed, but never created without explicit confirmation.` };
+    }
+  }
+
+  const created = await prisma.sqlGeneralDepartmentMapping.create({
+    data: { sqlGeneralDepartmentId, departmentId: targetDepartmentId, approvedById },
+  });
+  return { ok: true, mapping: { sqlGeneralDepartmentId: created.sqlGeneralDepartmentId, departmentId: created.departmentId, approvedById: created.approvedById, approvedAt: created.approvedAt } };
 }
 
 // ─── Graph username backfill (existing Microsoft-linked users, no new login required) ─

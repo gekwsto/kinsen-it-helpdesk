@@ -313,6 +313,10 @@ model Department {
   importSource            OrganizationNodeSource?
   importedAt              DateTime?
   importRunId             String?
+  // Admin-approved SQLGeneral Department bridges pointing AT this
+  // Department — see SqlGeneralDepartmentMapping's own doc comment. Never
+  // implies this Department is SQLGeneral-owned.
+  sqlGeneralMappings      SqlGeneralDepartmentMapping[]
   createdAt               DateTime                     @default(now())
   updatedAt               DateTime                     @updatedAt
 
@@ -749,6 +753,35 @@ model SqlGeneralCompanyMapping {
   @@index([companyId])
 }
 
+// Explicit, admin-approved bridge from a SQLGeneral Department to an
+// EXISTING local Department — the Department-level counterpart of
+// SqlGeneralCompanyMapping above, same reasoning and same restrictions:
+// never inferred from a name match, never written automatically, never
+// touches the target Department's own fields (name/normalizedName/
+// importSource/businessUnitId/companyId) or hierarchy. Approving one
+// REQUIRES the target Department's own Company to already have an
+// approved SqlGeneralCompanyMapping (enforced in
+// approveSqlGeneralDepartmentMapping, lib/services/sqlgeneral-user-sync-service.ts)
+// — a Department mapping is only ever layered on top of an already-
+// approved Company mapping, never standing alone, so the two tables can
+// never silently diverge about which Company a Department really belongs
+// to. `sqlGeneralDepartmentId` is `String` for the same reason as
+// SqlGeneralCompanyMapping.sqlGeneralCompanyId: the real numeric range of
+// SQLGeneral's Departments.Id was never independently verified.
+model SqlGeneralDepartmentMapping {
+  id                     String     @id @default(cuid())
+  sqlGeneralDepartmentId String     @unique
+  department             Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  departmentId           String
+  approvedBy             User       @relation(fields: [approvedById], references: [id])
+  approvedById           String
+  approvedAt             DateTime   @default(now())
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+
+  @@index([departmentId])
+}
+
 // ─── Users & Auth ─────────────────────────────────────────────────────────────
 
 model User {
@@ -904,6 +937,7 @@ model User {
   sessions                            Session[]
   sqlGeneralUserSyncAttempt           SqlGeneralUserSyncAttempt?
   approvedSqlGeneralCompanyMappings   SqlGeneralCompanyMapping[]
+  approvedSqlGeneralDepartmentMappings SqlGeneralDepartmentMapping[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

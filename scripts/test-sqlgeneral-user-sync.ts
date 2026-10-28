@@ -59,19 +59,23 @@ async function main() {
   type FindUserFn = typeof realClient.findSqlGeneralUserByUsername;
   type ListDeptFn = typeof realClient.listAllSqlGeneralDepartments;
   type VerifyCompanyIdFn = typeof realClient.verifySqlGeneralCompanyIdExists;
+  type VerifyDepartmentIdFn = typeof realClient.verifySqlGeneralDepartmentIdExists;
   let mockFindUserImpl: FindUserFn = async () => {
     throw new Error("mock: SQLGeneral external call failed");
   };
   let mockListDeptImpl: ListDeptFn = async () => ({ ok: true, departments: [] });
-  // Default: every CompanyId is confirmed to exist — individual tests
-  // override this to exercise the "unknown source id" rejection path.
+  // Default: every CompanyId/DepartmentId is confirmed to exist —
+  // individual tests override this to exercise the "unknown source id"
+  // rejection path.
   let mockVerifyCompanyIdImpl: VerifyCompanyIdFn = async () => ({ ok: true, exists: true });
+  let mockVerifyDepartmentIdImpl: VerifyDepartmentIdFn = async () => ({ ok: true, exists: true });
   mock.module("@/lib/sqlgeneral-api-client", {
     namedExports: {
       ...realClient,
       findSqlGeneralUserByUsername: (username: string) => mockFindUserImpl(username),
       listAllSqlGeneralDepartments: () => mockListDeptImpl(),
       verifySqlGeneralCompanyIdExists: (companyId: string) => mockVerifyCompanyIdImpl(companyId),
+      verifySqlGeneralDepartmentIdExists: (departmentId: string) => mockVerifyDepartmentIdImpl(departmentId),
     },
   });
 
@@ -439,6 +443,164 @@ async function main() {
     const reApproveMultiNoConfirmFlag = await svc.approveSqlGeneralCompanyMapping(NEW_VERIFIED_SOURCE_ID, existingCompany.id, bfMapAdmin);
     check("70. idempotency holds even for an already-multi-mapped pair: re-approving the SAME pair succeeds without needing confirmMultipleMapping again", reApproveMultiNoConfirmFlag.ok === true);
 
+    console.log("\nExplicit admin-approved Department mapping ===\n");
+    const departmentMappingRoute = await import("@/app/api/admin/sqlgeneral-user-sync/department-mapping/route");
+    const ENGINEERING_SQLGENERAL_DEPARTMENT_ID = "10"; // FAKE_ENGINEERING's own id — matches department.id as resolved by Preview
+
+    // The real production scenario: an existing, non-SQLGeneral-owned local
+    // Department under a Company that DOES have an approved Company mapping.
+    const engineeringDept = await prisma.department.create({
+      data: { name: "Engineering", normalizedName: normalizeDepartmentName("Engineering"), slug: `engineering-${RUN_ID}`, companyId: existingCompany.id },
+    });
+    departmentIds.push(engineeringDept.id);
+
+    const previewDeptConflictBefore = await svc.previewSqlGeneralUserSync({ userIds: [uPvConflict] });
+    if (!previewDeptConflictBefore.ok) {
+      check("71. precondition preview succeeded", false, previewDeptConflictBefore.reason);
+    } else {
+      const rowBefore = previewDeptConflictBefore.rows[0];
+      check(
+        "71. precondition: with the Company mapping approved but no Department mapping yet, Preview now correctly reports a DEPARTMENT-level conflict against the real existing \"Engineering\" Department",
+        rowBefore?.localMatch === "conflict_other_owner" && rowBefore.conflictLevel === "department",
+        JSON.stringify(rowBefore)
+      );
+    }
+
+    mockVerifyDepartmentIdImpl = async () => ({ ok: true, exists: false });
+    const unknownDeptSource = await svc.approveSqlGeneralDepartmentMapping(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id, bfMapAdmin);
+    check("72. approve() rejects a sqlGeneralDepartmentId that SQLGeneral itself does not confirm exists", unknownDeptSource.ok === false, unknownDeptSource.ok ? "unexpectedly ok" : unknownDeptSource.reason);
+
+    mockVerifyDepartmentIdImpl = async () => ({ ok: false, reason: "mock: verification unavailable" });
+    const unverifiableDeptSource = await svc.approveSqlGeneralDepartmentMapping(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id, bfMapAdmin);
+    check("73. approve() treats a verification FAILURE the same as unknown — rejects, never approves on an unverifiable identifier", unverifiableDeptSource.ok === false);
+
+    mockVerifyDepartmentIdImpl = async () => ({ ok: true, exists: true });
+
+    // "Unsafe parent relationship": salesDept's Company (betaCompany) has
+    // importSource=SQLGENERAL set directly as a test fixture, but has NO
+    // actual approved SqlGeneralCompanyMapping row — approving a Department
+    // mapping under it must be refused.
+    const unsafeParent = await svc.approveSqlGeneralDepartmentMapping("20", salesDept.id, bfMapAdmin);
+    check(
+      "74. approve() refuses an unsafe parent relationship: target Department's own Company has no approved SqlGeneralCompanyMapping yet",
+      unsafeParent.ok === false,
+      unsafeParent.ok ? "unexpectedly ok" : unsafeParent.reason
+    );
+    check("74b. ...no mapping row was created", !(await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: "20" } })));
+
+    const deptCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id);
+    check(
+      "75. Department mapping candidate preview correctly reports the target's own Company HAS an approved Company mapping (safe to proceed)",
+      deptCandidate.companyMappingForTargetDepartment?.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID && deptCandidate.sourceVerified === true,
+      JSON.stringify(deptCandidate)
+    );
+    check(
+      "75b. candidate preview's hierarchyValidation correctly reports an UNMAPPED ancestor (\"Root\", id 1) — Company matches but hierarchy cannot yet be verified",
+      deptCandidate.hierarchyValidation.status === "unmapped_ancestor" && (deptCandidate.hierarchyValidation as { sqlGeneralDepartmentId: string }).sqlGeneralDepartmentId === "1",
+      JSON.stringify(deptCandidate.hierarchyValidation)
+    );
+
+    console.log("\nHierarchy validation: root, matching chain, unresolved and mismatched ancestor ===\n");
+
+    // Must NOT be approvable yet: Company matches, but the ancestor ("Root",
+    // id "1") has no approved mapping — "cannot be verified", not inferred
+    // from missingParent alone (missingParent is false here; the chain
+    // resolves fine on the SQLGeneral side, it's the LOCAL mapping chain
+    // that's incomplete).
+    const engineeringBeforeRoot = await svc.approveSqlGeneralDepartmentMapping(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id, bfMapAdmin);
+    check(
+      "83. approve() blocks an INTERMEDIATE department whose ancestor isn't mapped yet, even though Company matches and missingParent is false",
+      engineeringBeforeRoot.ok === false,
+      engineeringBeforeRoot.ok ? "unexpectedly ok" : engineeringBeforeRoot.reason
+    );
+
+    // ROOT Department: "Root" (id "1") has no ParentDepartmentId at all —
+    // always "root", verified by construction, no ancestors to check.
+    const rootDept = await prisma.department.create({
+      data: { name: "Root", normalizedName: normalizeDepartmentName("Root"), slug: `root-${RUN_ID}`, companyId: existingCompany.id },
+    });
+    departmentIds.push(rootDept.id);
+    const rootCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate("1", rootDept.id);
+    check("84. candidate preview correctly reports a ROOT department (no ParentDepartmentId) as hierarchy-verified with nothing to check", rootCandidate.hierarchyValidation.status === "root", JSON.stringify(rootCandidate.hierarchyValidation));
+    const rootApproved = await svc.approveSqlGeneralDepartmentMapping("1", rootDept.id, bfMapAdmin);
+    check("85. approve() succeeds for a ROOT Department mapping", rootApproved.ok === true, rootApproved.ok ? "" : rootApproved.reason);
+
+    // MATCHING parent chain: now that "Root" is mapped into existingCompany,
+    // "Engineering" (child of "Root") in the SAME company should verify and succeed.
+    const engineeringCandidateAfterRoot = await svc.previewSqlGeneralDepartmentMappingCandidate(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id);
+    check("86. candidate preview now reports \"verified\" once the ancestor is mapped into the SAME Company — a matching parent chain", engineeringCandidateAfterRoot.hierarchyValidation.status === "verified", JSON.stringify(engineeringCandidateAfterRoot.hierarchyValidation));
+    const deptApproved = await svc.approveSqlGeneralDepartmentMapping(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id, bfMapAdmin);
+    check("76. approve() succeeds for a safe, now-verified parent relationship, records approvedBy + approvedAt", deptApproved.ok === true && deptApproved.ok && deptApproved.mapping.approvedById === bfMapAdmin, deptApproved.ok ? JSON.stringify(deptApproved.mapping) : deptApproved.reason);
+    check(
+      "77. approving never modified the target Department's own fields (name/importSource/companyId unchanged)",
+      (await prisma.department.findUniqueOrThrow({ where: { id: engineeringDept.id } })).importSource === null &&
+        (await prisma.department.findUniqueOrThrow({ where: { id: engineeringDept.id } })).name === "Engineering" &&
+        (await prisma.department.findUniqueOrThrow({ where: { id: engineeringDept.id } })).companyId === existingCompany.id
+    );
+
+    // UNRESOLVED parent: "Orphan Team" (id "99") has a ParentDepartmentId
+    // ("404") that is NOT present in the fetched Departments set at all —
+    // missingParent is true, so this is "ambiguous, cannot be verified",
+    // blocked regardless of Company matching.
+    const orphanUnresolved = await svc.approveSqlGeneralDepartmentMapping("99", engineeringDept.id, bfMapAdmin, true);
+    check("87. approve() blocks a department with an UNRESOLVED parent (missingParent=true) — ambiguous, cannot be verified", orphanUnresolved.ok === false, orphanUnresolved.ok ? "unexpectedly ok" : orphanUnresolved.reason);
+
+    // MISMATCHED ancestor: a new SQLGeneral department ("11") also claims
+    // "Root" (id "1") as its parent — but "Root" is mapped into
+    // existingCompany, while THIS department is being proposed for a
+    // Department under a totally different, independently-approved Company.
+    mockListDeptImpl = async () => ({ ok: true, departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES, { id: "11", description: "Engineering Satellite", isActive: true, parentDepartmentId: "1", country: null, company: "Gamma Co", companyShortname: "GAMMA", creationDate: null, updateTimestamp: null }] });
+    const GAMMA_SQLGENERAL_COMPANY_ID = `sgcid-${RUN_ID}-gamma`;
+    mockVerifyCompanyIdImpl = async () => ({ ok: true, exists: true });
+    const gammaCompany = await prisma.company.create({ data: { name: "Gamma Co", normalizedName: normalizeCompanyName("Gamma Co") } });
+    companyIds.push(gammaCompany.id);
+    await svc.approveSqlGeneralCompanyMapping(GAMMA_SQLGENERAL_COMPANY_ID, gammaCompany.id, bfMapAdmin);
+    const gammaDept = await prisma.department.create({
+      data: { name: "Engineering Satellite", normalizedName: normalizeDepartmentName("Engineering Satellite"), slug: `eng-satellite-${RUN_ID}`, companyId: gammaCompany.id },
+    });
+    departmentIds.push(gammaDept.id);
+
+    const mismatchCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate("11", gammaDept.id);
+    check(
+      "88. candidate preview reports a MISMATCHED ancestor: \"Root\" is already mapped into a DIFFERENT Company than the one proposed here",
+      mismatchCandidate.hierarchyValidation.status === "conflicting_ancestor" && (mismatchCandidate.hierarchyValidation as { sqlGeneralDepartmentId: string }).sqlGeneralDepartmentId === "1",
+      JSON.stringify(mismatchCandidate.hierarchyValidation)
+    );
+    const mismatchApprove = await svc.approveSqlGeneralDepartmentMapping("11", gammaDept.id, bfMapAdmin);
+    check("89. approve() blocks a MISMATCHED parent relationship — Company matches (Gamma Co has its own approval) but the ancestor conflicts", mismatchApprove.ok === false, mismatchApprove.ok ? "unexpectedly ok" : mismatchApprove.reason);
+    check("89b. ...no mapping row was created for the mismatched department", !(await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: "11" } })));
+    check("89c. ...and gammaDept's own fields remain untouched", (await prisma.department.findUniqueOrThrow({ where: { id: gammaDept.id } })).importSource === null);
+
+    // Restore the department list mock for the remainder of the suite.
+    mockListDeptImpl = async () => ({ ok: true, departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES] });
+
+    const deptReApproveSame = await svc.approveSqlGeneralDepartmentMapping(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id, bfMapAdmin);
+    check("78. idempotency: re-approving the exact same Department pair is a safe no-op success", deptReApproveSame.ok === true && (await prisma.sqlGeneralDepartmentMapping.count({ where: { sqlGeneralDepartmentId: ENGINEERING_SQLGENERAL_DEPARTMENT_ID } })) === 1);
+
+    const deptDuplicateDifferentTarget = await svc.approveSqlGeneralDepartmentMapping(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, salesDept.id, bfMapAdmin);
+    check("79. duplicate prevention: approving the SAME sqlGeneralDepartmentId against a DIFFERENT Department is rejected, never silently repointed", deptDuplicateDifferentTarget.ok === false);
+
+    const previewDeptConflictAfter = await svc.previewSqlGeneralUserSync({ userIds: [uPvConflict] });
+    if (!previewDeptConflictAfter.ok) {
+      check("80. Preview re-run after Department approval succeeded", false, previewDeptConflictAfter.reason);
+    } else {
+      const rowAfter = previewDeptConflictAfter.rows[0];
+      check(
+        "80. Preview now resolves approved_external_mapping (sync and preview resolve the approved Department mapping consistently) — no more department-level conflict",
+        rowAfter?.localMatch === "approved_external_mapping" && rowAfter.conflictLevel === null,
+        JSON.stringify(rowAfter)
+      );
+    }
+
+    currentSession = { user: { id: bfMapAdmin, role: Role.ADMIN, customRoleId: null } };
+    const deptMappingGetReq = new NextRequest(`http://localhost/x?sqlGeneralDepartmentId=${ENGINEERING_SQLGENERAL_DEPARTMENT_ID}&targetDepartmentId=${engineeringDept.id}`, { method: "GET" });
+    const deptMappingGetRes = await departmentMappingRoute.GET(deptMappingGetReq);
+    check("81. Department-mapping GET (candidate preview) endpoint: ADMIN succeeds", deptMappingGetRes.status === 200);
+    currentSession = { user: { id: bfMapAdmin, role: Role.USER, customRoleId: null } };
+    const deptMappingPostForbidden = await departmentMappingRoute.POST(jsonReq("POST", { sqlGeneralDepartmentId: ENGINEERING_SQLGENERAL_DEPARTMENT_ID, targetDepartmentId: engineeringDept.id }));
+    check("82. Department-mapping POST endpoint: a user without organization.sqlgeneralSync gets 403", deptMappingPostForbidden.status === 403);
+    currentSession = null;
+
     console.log("\nPreview coverage: N/All must include eligible users with NO existing attempt row ===\n");
     const uPvNoAttempt = await makeUser("pv-noattempt"); // never enqueued — no SqlGeneralUserSyncAttempt row exists for this user at all
     check("34. precondition: no attempt row exists yet for this user", !(await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { userId: uPvNoAttempt } })));
@@ -615,6 +777,7 @@ async function main() {
       // Must run BEFORE "users": approvedById is onDelete:Restrict, so a
       // leftover mapping row would abort the whole user deleteMany batch.
       ["sqlGeneral company mappings", () => prisma.sqlGeneralCompanyMapping.deleteMany({ where: { approvedById: { in: userIds } } })],
+      ["sqlGeneral department mappings", () => prisma.sqlGeneralDepartmentMapping.deleteMany({ where: { approvedById: { in: userIds } } })],
       ["sync attempts", () => prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } })],
       ["rolePermissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: roleKeys } } })],
       ["users", () => prisma.user.deleteMany({ where: { id: { in: userIds } } })],

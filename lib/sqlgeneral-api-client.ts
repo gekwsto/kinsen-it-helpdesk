@@ -393,6 +393,20 @@ export async function findSqlGeneralUserByUsername(username: string): Promise<Us
 }
 
 /**
+ * Fetches the FULL UsersAndManagers listing — bounded, paginated via
+ * fetchAllPages (the SAME complete, fail-closed mechanism listAllSqlGeneralDepartments
+ * uses; never fetchFirstPageOnly, since this genuinely needs every row).
+ * Used by lib/services/sqlgeneral-organization-tree-service.ts to resolve
+ * many existing TicketApp users' HrDepartmentId placements in one shot,
+ * instead of one findSqlGeneralUserByUsername call per user.
+ */
+export async function listAllSqlGeneralUsers(): Promise<{ ok: true; users: SqlGeneralUserRecord[] } | { ok: false; reason: string }> {
+  const result = await fetchAllPages<RawSqlGeneralUser>("/api/UsersAndManagers?$first=100");
+  if (!result.ok) return result;
+  return { ok: true, users: result.rows.map(toSqlGeneralUserRecord) };
+}
+
+/**
  * CompanyId's real type (numeric vs string/GUID) was never independently
  * verified (see SqlGeneralCompanyMapping's schema doc comment) — a
  * stored-as-string value that's purely digits is sent unquoted (the only
@@ -497,6 +511,33 @@ export async function listAllSqlGeneralDepartments(): Promise<{ ok: true; depart
   const result = await fetchAllPages<RawSqlGeneralDepartment>("/api/Departments?$first=100");
   if (!result.ok) return result;
   return { ok: true, departments: result.rows.map(toSqlGeneralDepartmentRecord) };
+}
+
+export type DepartmentIdExistsResult = { ok: true; exists: boolean } | { ok: false; reason: string };
+
+/**
+ * Verifies a SQLGeneral Departments.Id is backed by at least one real
+ * row — the Department-level counterpart of verifySqlGeneralCompanyIdExists
+ * above, same reasoning: uses fetchFirstPageOnly (never fetchAllPages),
+ * since this only needs "does at least one match exist", and the exact
+ * same pagination overrun bug (a filter matching many rows still returns a
+ * nextLink even with $first=1) applies equally here. Never throws; a
+ * verification failure is a typed `{ ok: false }`, which the caller must
+ * treat as "cannot confirm", never as a silent pass.
+ */
+export async function verifySqlGeneralDepartmentIdExists(departmentId: string): Promise<DepartmentIdExistsResult> {
+  const filter = `Id eq ${formatODataIdLiteral(departmentId)}`;
+  const path = `/api/Departments?$filter=${encodeURIComponent(filter)}&$first=1`;
+  const result = await fetchFirstPageOnly<RawSqlGeneralDepartment>(path);
+  if (!result.ok) return { ok: false, reason: result.reason };
+  if (result.rows.length === 0) return { ok: true, exists: false };
+
+  const returned = result.rows[0].Id;
+  const returnedAsString = returned === null || returned === undefined ? null : String(returned);
+  if (returnedAsString !== departmentId) {
+    return { ok: false, reason: `SQLGeneral returned a row for Departments Id filter "${departmentId}" but its own Id value ("${returnedAsString}") does not match — the filter may not have been honored; failing closed rather than trusting an unverified match.` };
+  }
+  return { ok: true, exists: true };
 }
 
 // ─── Hierarchy resolution (pure — no network) ──────────────────────────────

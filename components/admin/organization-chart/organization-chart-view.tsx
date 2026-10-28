@@ -24,7 +24,16 @@ interface RawTreeNode {
   [key: string]: unknown;
 }
 
-type Mode = "departments" | "people";
+type Mode = "departments" | "people" | "sqlgeneral";
+
+interface UnresolvedSqlGeneralDepartment {
+  sqlGeneralDepartmentId: string;
+  reason: "missing_parent" | "cycle";
+}
+interface UnresolvedSqlGeneralUser {
+  userId: string;
+  reason: "not_found" | "ambiguous" | "no_hr_department" | "department_not_found" | "conflicting_attempt";
+}
 
 interface SearchResult {
   type: "user" | "department";
@@ -172,7 +181,7 @@ function ChartCanvas({
           onSelect: setSelectedId,
         };
         rfNodes.push({ id: n.id, type: "department", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
-      } else {
+      } else if (mode === "people") {
         const data0: PeopleNodeData = {
           label: (n.displayName as string | null) ?? "(no name)",
           jobTitle: n.jobTitle as string | null,
@@ -182,6 +191,46 @@ function ChartCanvas({
           directReportsCount: n.directReportsCount as number,
           hasHiddenChildren,
           isCollapsed,
+          isHighlighted: highlightedIds.has(n.id),
+          isSelected: n.id === selectedId,
+          onToggleCollapse: toggleCollapse,
+          onSelect: setSelectedId,
+        };
+        rfNodes.push({ id: n.id, type: "person", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
+      } else if (n.kind === "sqlgeneral-department") {
+        // SQLGeneral mode mixes department AND user-leaf nodes in ONE tree
+        // (unlike the two existing modes, which are each uniformly one
+        // type) — so, unlike the two branches above, this one checks each
+        // node's OWN kind rather than the whole-tree mode alone. Reuses
+        // DepartmentNode as-is; the "(SQLGeneral)" suffix plus any
+        // localMapping annotation is the only provenance distinction
+        // needed, per REQUIRED #4.
+        const localMapping = n.localMapping as { departmentId: string; departmentName: string } | null;
+        const data0: DepartmentNodeData = {
+          label: `${n.name as string}${localMapping ? ` (mapped: ${localMapping.departmentName})` : ""}`,
+          isActive: (n.isActive as boolean | null) ?? true,
+          managerName: null,
+          managerJobTitle: (n.company as string | null) ?? null,
+          activeUserCount: n.children.filter((c) => c.kind === "sqlgeneral-user").length,
+          childCount: originalChildCount,
+          hasHiddenChildren,
+          isCollapsed,
+          isHighlighted: highlightedIds.has(n.id),
+          isSelected: n.id === selectedId,
+          onToggleCollapse: toggleCollapse,
+          onSelect: setSelectedId,
+        };
+        rfNodes.push({ id: n.id, type: "department", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
+      } else {
+        const data0: PeopleNodeData = {
+          label: (n.name as string | null) ?? "(no name)",
+          jobTitle: null,
+          departmentName: (n.sqlGeneralUsername as string | null) ?? null,
+          email: n.email as string,
+          isActive: true,
+          directReportsCount: 0,
+          hasHiddenChildren: false,
+          isCollapsed: false,
           isHighlighted: highlightedIds.has(n.id),
           isSelected: n.id === selectedId,
           onToggleCollapse: toggleCollapse,
@@ -253,13 +302,20 @@ export function OrganizationChartView() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResponse | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [unresolvedDepartments, setUnresolvedDepartments] = useState<UnresolvedSqlGeneralDepartment[]>([]);
+  const [unresolvedUsers, setUnresolvedUsers] = useState<UnresolvedSqlGeneralUser[]>([]);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchTree = useCallback(async () => {
     setLoading(true);
     setErrorState(null);
     try {
-      const url = mode === "departments" ? `/api/organization/department-tree?activeOnly=${activeOnly}` : `/api/organization/people-tree?activeOnly=${activeOnly}`;
+      const url =
+        mode === "departments"
+          ? `/api/organization/department-tree?activeOnly=${activeOnly}`
+          : mode === "people"
+            ? `/api/organization/people-tree?activeOnly=${activeOnly}`
+            : `/api/admin/organization/sqlgeneral-tree`;
       const res = await fetch(url);
       if (res.status === 401 || res.status === 403) {
         setErrorState("permission");
@@ -274,6 +330,8 @@ export function OrganizationChartView() {
       const body = await res.json();
       setData(body.tree ?? []);
       setFullAccess(Boolean(body.fullAccess));
+      setUnresolvedDepartments(mode === "sqlgeneral" ? (body.unresolvedDepartments ?? []) : []);
+      setUnresolvedUsers(mode === "sqlgeneral" ? (body.unresolvedUsers ?? []) : []);
     } catch {
       setErrorState("network");
       setData(null);
@@ -372,6 +430,7 @@ export function OrganizationChartView() {
           <TabsList>
             <TabsTrigger value="departments">Departments</TabsTrigger>
             <TabsTrigger value="people">People / Reporting lines</TabsTrigger>
+            <TabsTrigger value="sqlgeneral">SQLGeneral source</TabsTrigger>
           </TabsList>
         </Tabs>
 
@@ -436,6 +495,25 @@ export function OrganizationChartView() {
               : "never completed"}
           {syncStatus.latestRun.status === "PARTIAL" && ` (${syncStatus.latestRun.errorCount} records skipped — see server logs)`}
         </p>
+      )}
+
+      {mode === "sqlgeneral" && (unresolvedDepartments.length > 0 || unresolvedUsers.length > 0) && (
+        <Card className="flex items-start gap-2 border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <div>
+            {unresolvedDepartments.length > 0 && (
+              <p>
+                {unresolvedDepartments.length} department{unresolvedDepartments.length === 1 ? "" : "s"} not shown — unresolved parent/cycle (
+                {unresolvedDepartments.map((d) => `${d.sqlGeneralDepartmentId}: ${d.reason}`).join(", ")}).
+              </p>
+            )}
+            {unresolvedUsers.length > 0 && (
+              <p>
+                {unresolvedUsers.length} user{unresolvedUsers.length === 1 ? "" : "s"} not shown — unresolved SQLGeneral identity (see admin report for details).
+              </p>
+            )}
+          </div>
+        </Card>
       )}
 
       <Card className="relative flex-1 overflow-hidden">
