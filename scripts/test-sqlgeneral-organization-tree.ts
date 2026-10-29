@@ -415,18 +415,94 @@ async function main() {
       findUserDelayMs = 0;
     }
 
+    console.log("\nPerformance: ground-truth lookups run CONCURRENTLY, never one sequential round-trip at a time ===\n");
+    {
+      // Isolated from roster size/page count entirely (a tiny roster, so
+      // that segment is near-instant) — isolates ONLY the lookup-batching
+      // win production actually hit: 8 inactive-manager links resolved
+      // one `await` at a time, each a full SQLGeneral round-trip. With
+      // LOOKUP_COUNT=10 distinct broken links at 30ms simulated latency
+      // each, sequential would take >= 300ms; concurrent should take
+      // roughly one round-trip's worth, regardless of how many there are.
+      const LOOKUP_COUNT = 10;
+      const LOOKUP_LATENCY_MS = 30;
+      const concurrentPerfUsers: ReturnType<typeof fakeSqlUser>[] = [];
+      for (let i = 0; i < LOOKUP_COUNT; i++) {
+        concurrentPerfUsers.push(fakeSqlUser(`concurrent-inactive-mgr-${i}`, null, { active: false }));
+        concurrentPerfUsers.push(fakeSqlUser(`concurrent-active-emp-${i}`, `concurrent-inactive-mgr-${i}`, { active: true }));
+      }
+      fixtureUsers = concurrentPerfUsers;
+      findUserDelayMs = LOOKUP_LATENCY_MS;
+      findUserCallCount = 0;
+
+      const concurrentStart = Date.now();
+      const concurrentResult = await treeService.getSqlGeneralOrganizationTree();
+      const concurrentElapsedMs = Date.now() - concurrentStart;
+
+      console.log(`    ${LOOKUP_COUNT} distinct inactive-manager lookups at ${LOOKUP_LATENCY_MS}ms simulated latency each ≈ ${concurrentElapsedMs}ms total (sequential would be >= ${LOOKUP_COUNT * LOOKUP_LATENCY_MS}ms)`);
+      check("34. the build still succeeds with every one of these resolved correctly", concurrentResult.ok === true, concurrentResult.ok ? "" : concurrentResult.reason);
+      check(
+        `35. ${LOOKUP_COUNT} distinct lookups complete in well under ${LOOKUP_COUNT * LOOKUP_LATENCY_MS}ms (sequential cost) — concrete proof they run CONCURRENTLY, not one `.trim() + " round-trip at a time",
+        concurrentElapsedMs < LOOKUP_COUNT * LOOKUP_LATENCY_MS * 0.6,
+        `${concurrentElapsedMs}ms vs sequential-would-be ${LOOKUP_COUNT * LOOKUP_LATENCY_MS}ms`
+      );
+      check("36. exactly 10 distinct lookups were made — never fewer (data loss) nor more (duplicate/unbatched calls)", findUserCallCount === LOOKUP_COUNT, `got ${findUserCallCount}`);
+
+      findUserDelayMs = 0;
+    }
+
+    console.log("\nPerformance: concurrency is BOUNDED, not an unbounded fan-out sized to the unresolved set ===\n");
+    {
+      const { MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS } = treeService;
+      // Deliberately more than one cap's worth of distinct broken links —
+      // if lookups ran with a truly unbounded Promise.all, ALL of them
+      // would fire in the SAME instant and this would still take only one
+      // round-trip's worth of time. A genuinely bounded pool of width
+      // MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS must instead take roughly
+      // ceil(COUNT / MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS) sequential waves.
+      const LOOKUP_COUNT = MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS * 2 + 5;
+      const LOOKUP_LATENCY_MS = 30;
+      const expectedWaves = Math.ceil(LOOKUP_COUNT / MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS);
+
+      const boundedPerfUsers: ReturnType<typeof fakeSqlUser>[] = [];
+      for (let i = 0; i < LOOKUP_COUNT; i++) {
+        boundedPerfUsers.push(fakeSqlUser(`bounded-inactive-mgr-${i}`, null, { active: false }));
+        boundedPerfUsers.push(fakeSqlUser(`bounded-active-emp-${i}`, `bounded-inactive-mgr-${i}`, { active: true }));
+      }
+      fixtureUsers = boundedPerfUsers;
+      findUserDelayMs = LOOKUP_LATENCY_MS;
+      findUserCallCount = 0;
+
+      const boundedStart = Date.now();
+      const boundedResult = await treeService.getSqlGeneralOrganizationTree();
+      const boundedElapsedMs = Date.now() - boundedStart;
+
+      console.log(
+        `    ${LOOKUP_COUNT} distinct links, cap=${MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS} => expected ~${expectedWaves} wave(s) * ${LOOKUP_LATENCY_MS}ms ≈ ${expectedWaves * LOOKUP_LATENCY_MS}ms; a TRUE unbounded fan-out would instead be ≈${LOOKUP_LATENCY_MS}ms. Measured: ${boundedElapsedMs}ms`
+      );
+      check("37. the build still succeeds even with MORE unresolved links than the concurrency cap", boundedResult.ok === true, boundedResult.ok ? "" : boundedResult.reason);
+      check("38. exactly every distinct link got looked up — bounding concurrency never drops or skips any of them", findUserCallCount === LOOKUP_COUNT, `expected ${LOOKUP_COUNT}, got ${findUserCallCount}`);
+      check(
+        `39. elapsed time clearly exceeds a SINGLE wave's latency (${LOOKUP_LATENCY_MS}ms) — a true unbounded fan-out would finish in roughly one wave regardless of count; this measured multi-wave cost proves the cap is real, not cosmetic`,
+        boundedElapsedMs >= LOOKUP_LATENCY_MS * (expectedWaves - 0.5),
+        `${boundedElapsedMs}ms, expected at least ~${LOOKUP_LATENCY_MS * (expectedWaves - 0.5)}ms for ${expectedWaves} waves (vs a single-wave ~${LOOKUP_LATENCY_MS}ms if unbounded)`
+      );
+
+      findUserDelayMs = 0;
+    }
+
     console.log("\nAdmin permission gate ===\n");
     fixtureUsers = [];
     const nonAdmin = await makeUser("nonadmin");
     currentSession = { user: { id: nonAdmin, role: Role.USER, customRoleId: null } };
     const forbiddenRes = await treeRoute.GET();
-    check("34. the SQLGeneral tree endpoint: a user without organization.sqlgeneralSync gets 403", forbiddenRes.status === 403);
+    check("40. the SQLGeneral tree endpoint: a user without organization.sqlgeneralSync gets 403", forbiddenRes.status === 403);
 
     const adminUser = await makeUser("admin", Role.ADMIN, null);
     currentSession = { user: { id: adminUser, role: Role.ADMIN, customRoleId: null } };
     const adminRes = await treeRoute.GET();
     const adminBody = await adminRes.json();
-    check("35. ADMIN bypasses the permission check and receives tree + unresolvedUsers + unresolvedManagerLinks", adminRes.status === 200 && Array.isArray(adminBody.tree) && Array.isArray(adminBody.unresolvedUsers) && Array.isArray(adminBody.unresolvedManagerLinks));
+    check("41. ADMIN bypasses the permission check and receives tree + unresolvedUsers + unresolvedManagerLinks", adminRes.status === 200 && Array.isArray(adminBody.tree) && Array.isArray(adminBody.unresolvedUsers) && Array.isArray(adminBody.unresolvedManagerLinks));
     currentSession = null;
 
     console.log("\nExisting Departments/People tree modes are completely unaffected ===\n");
@@ -442,8 +518,8 @@ async function main() {
     } catch {
       localPeopleTreeOk = false;
     }
-    check("36. the EXISTING local Department tree service (unmocked, untouched) still runs without error", localDeptTreeOk);
-    check("37. the EXISTING local People tree service (unmocked, untouched) still runs without error", localPeopleTreeOk);
+    check("42. the EXISTING local Department tree service (unmocked, untouched) still runs without error", localDeptTreeOk);
+    check("43. the EXISTING local People tree service (unmocked, untouched) still runs without error", localPeopleTreeOk);
   } finally {
     console.log("\nCleaning up test data...\n");
     const steps: Array<[string, () => Promise<unknown>]> = [

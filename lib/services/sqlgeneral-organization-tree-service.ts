@@ -239,6 +239,46 @@ async function getGroundTruth(username: string, cache: Map<string, GroundTruthLo
 }
 
 /**
+ * Bounded-concurrency cap on how many ground-truth lookups ever run at
+ * once for ONE tree build. An unusually large unresolved set (a real data-
+ * quality spike — hundreds of broken manager links, or a captured-
+ * username mismatch affecting many local accounts at once) must never
+ * translate into hundreds of simultaneous outbound requests hitting
+ * SQLGeneral at the same instant; a worker pool of this width still gets
+ * nearly all of concurrency's wall-clock benefit (the realistic case this
+ * round measured was single digits) while keeping the live backend's own
+ * load bounded and predictable regardless of how large the unresolved set
+ * ever gets.
+ */
+export const MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS = 10;
+
+/**
+ * Resolves every username in `usernames` into `cache`, running at most
+ * MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS lookups concurrently via a small
+ * fixed-size worker pool — never one sequential `await` at a time (the
+ * production-measured bottleneck this round fixes), and never one
+ * unbounded `Promise.all` fan-out sized to the unresolved set itself (the
+ * safeguard this round adds). getGroundTruth never throws (it catches and
+ * caches an "error" outcome itself), so no worker here needs its own
+ * try/catch — a failure for one username never stops the others; each
+ * failure is surfaced later, per-link, by refineUnresolvedManagerLinks/
+ * resolveSqlGeneralAnchors reading that cached "error" outcome and failing
+ * the WHOLE build closed, exactly as before this round.
+ */
+async function resolveGroundTruthBatch(usernames: Set<string>, cache: Map<string, GroundTruthLookup>): Promise<void> {
+  const queue = [...usernames];
+  let nextIndex = 0;
+  async function worker(): Promise<void> {
+    while (nextIndex < queue.length) {
+      const i = nextIndex++;
+      await getGroundTruth(queue[i], cache);
+    }
+  }
+  const workerCount = Math.min(MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS, queue.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+}
+
+/**
  * Resolves every existing TicketApp user with an already-captured SQLGeneral
  * username into an "anchor" — matched in memory against the already-fetched
  * ACTIVE-only `sqlGeneralUsers` listing, never a live per-user call for the
@@ -260,16 +300,84 @@ async function getGroundTruth(username: string, cache: Map<string, GroundTruthLo
  *     genuine not_found/ambiguous is still reported as such. Never trusts
  *     the active-only absence alone, exactly like refineUnresolvedManagerLinks.
  */
-async function resolveSqlGeneralAnchors(
-  sqlGeneralUsers: SqlGeneralUserRecord[],
-  groundTruthCache: Map<string, GroundTruthLookup>
-): Promise<{ ok: true; anchors: Map<string, { userId: string; name: string | null; email: string; jobTitle: string | null }>; unresolvedUsers: UnresolvedSqlGeneralUser[] } | { ok: false; reason: string }> {
-  const attempts = await prisma.sqlGeneralUserSyncAttempt.findMany({
+type LocalSyncAttempt = { userId: string; sqlGeneralUsername: string | null; user: { id: string; name: string | null; email: string; jobTitle: string | null } };
+
+/** The one DB read this file ever makes — extracted so the caller can time it independently of the (now-batched) live ground-truth lookups below. Query itself is byte-identical to before. */
+async function fetchLocalSyncAttempts(): Promise<LocalSyncAttempt[]> {
+  return prisma.sqlGeneralUserSyncAttempt.findMany({
     where: { sqlGeneralUsername: { not: null } },
     select: { userId: true, sqlGeneralUsername: true, user: { select: { id: true, name: true, email: true, jobTitle: true } } },
   });
+}
 
-  const attemptsByUsername = new Map<string, typeof attempts>();
+/**
+ * Every local anchor username this function will need live ground truth
+ * for (a captured SQLGeneral username absent from the active-only fetch,
+ * and not already a known local-side conflict) — pure, synchronous, no
+ * network. Computed once up front so getSqlGeneralOrganizationTree can
+ * batch-resolve ALL of this function's AND refineUnresolvedManagerLinks'
+ * needed lookups in ONE concurrent round, rather than resolveSqlGeneralAnchors
+ * discovering and awaiting them one at a time after the fact.
+ */
+function distinctZeroMatchAnchorUsernames(attempts: LocalSyncAttempt[], sqlGeneralUsers: SqlGeneralUserRecord[]): Set<string> {
+  const attemptsByUsername = new Map<string, LocalSyncAttempt[]>();
+  for (const a of attempts) {
+    const key = a.sqlGeneralUsername as string;
+    if (!attemptsByUsername.has(key)) attemptsByUsername.set(key, []);
+    attemptsByUsername.get(key)!.push(a);
+  }
+  const countByUsername = new Map<string, number>();
+  for (const u of sqlGeneralUsers) {
+    if (!u.username) continue;
+    countByUsername.set(u.username, (countByUsername.get(u.username) ?? 0) + 1);
+  }
+  const out = new Set<string>();
+  for (const [username, localAttempts] of attemptsByUsername) {
+    if (localAttempts.length > 1) continue; // conflicting_attempt — never needs a live lookup
+    if ((countByUsername.get(username) ?? 0) === 0) out.add(username);
+  }
+  return out;
+}
+
+/**
+ * Resolves every existing TicketApp user with an already-captured SQLGeneral
+ * username into an "anchor" — matched in memory against the already-fetched
+ * ACTIVE-only `sqlGeneralUsers` listing, never a live per-user call for the
+ * common case. Assumes `groundTruthCache` was already warmed (via
+ * distinctZeroMatchAnchorUsernames + resolveGroundTruthBatch's bounded
+ * worker pool, see getSqlGeneralOrganizationTree) for every username this
+ * function might need — every `getGroundTruth` call below is then a
+ * synchronous cache hit, never a fresh network round-trip triggered one
+ * at a time.
+ *
+ * Deduplicates and fails closed on identity conflicts, mirroring the prior
+ * round's exact semantics:
+ *   - Two or more DIFFERENT local userIds claiming the exact SAME SQLGeneral
+ *     username is a genuine local-side conflict — ALL of them are reported
+ *     unresolved ("conflicting_attempt"), none becomes an anchor.
+ *   - More-than-one ACTIVE SQLGeneral row sharing that Username is a
+ *     genuine ambiguity, same "ambiguous" reason findSqlGeneralUserByUsername
+ *     itself uses elsewhere.
+ *   - ZERO matches in the active-only listing is no longer automatically
+ *     "not_found" (new this round): a local user's OWN SQLGeneral identity
+ *     being correctly excluded by the active filter — found, just
+ *     inactive — is NOT an identity problem and is silently skipped (no
+ *     anchor, no unresolvedUsers entry, no node); only a live-confirmed
+ *     genuine not_found/ambiguous is still reported as such. Never trusts
+ *     the active-only absence alone, exactly like refineUnresolvedManagerLinks.
+ *     `excludedInactiveAnchorCount` on the result is exactly how many hit
+ *     this specific branch — the direct, measurable explanation for why the
+ *     tree's own matched-anchor count can be lower than before this round.
+ */
+async function resolveSqlGeneralAnchors(
+  attempts: LocalSyncAttempt[],
+  sqlGeneralUsers: SqlGeneralUserRecord[],
+  groundTruthCache: Map<string, GroundTruthLookup>
+): Promise<
+  | { ok: true; anchors: Map<string, { userId: string; name: string | null; email: string; jobTitle: string | null }>; unresolvedUsers: UnresolvedSqlGeneralUser[]; excludedInactiveAnchorCount: number }
+  | { ok: false; reason: string }
+> {
+  const attemptsByUsername = new Map<string, LocalSyncAttempt[]>();
   for (const a of attempts) {
     const key = a.sqlGeneralUsername as string;
     if (!attemptsByUsername.has(key)) attemptsByUsername.set(key, []);
@@ -284,6 +392,7 @@ async function resolveSqlGeneralAnchors(
 
   const anchors = new Map<string, { userId: string; name: string | null; email: string; jobTitle: string | null }>();
   const unresolvedUsers: UnresolvedSqlGeneralUser[] = [];
+  let excludedInactiveAnchorCount = 0;
 
   for (const [username, localAttempts] of attemptsByUsername) {
     if (localAttempts.length > 1) {
@@ -295,7 +404,10 @@ async function resolveSqlGeneralAnchors(
     if (count === 0) {
       const groundTruth = await getGroundTruth(username, groundTruthCache);
       if (groundTruth.outcome === "error") return { ok: false, reason: `Could not verify local user ${attempt.userId}'s SQLGeneral identity ("${username}") against SQLGeneral right now (${groundTruth.reason}).` };
-      if (groundTruth.outcome === "unique" && groundTruth.user.active === false) continue; // correctly excluded by the active filter — not an identity problem, never reported
+      if (groundTruth.outcome === "unique" && groundTruth.user.active === false) {
+        excludedInactiveAnchorCount++;
+        continue; // correctly excluded by the active filter — not an identity problem, never reported
+      }
       unresolvedUsers.push({ userId: attempt.userId, reason: groundTruth.outcome === "ambiguous" ? "ambiguous" : "not_found" });
       continue;
     }
@@ -306,7 +418,22 @@ async function resolveSqlGeneralAnchors(
     anchors.set(username, { userId: attempt.userId, name: attempt.user.name, email: attempt.user.email, jobTitle: attempt.user.jobTitle });
   }
 
-  return { ok: true, anchors, unresolvedUsers };
+  return { ok: true, anchors, unresolvedUsers, excludedInactiveAnchorCount };
+}
+
+/** The claimed-manager username behind every "missing_manager"/"ambiguous_manager" link — pure, synchronous, no network. Same pre-warming role as distinctZeroMatchAnchorUsernames above. */
+function distinctBrokenManagerLinkTargets(activeUsers: SqlGeneralUserRecord[], links: UnresolvedSqlGeneralManagerLink[]): Set<string> {
+  const claimedManagerByUsername = new Map<string, string>();
+  for (const u of activeUsers) {
+    if (u.username && u.managerAMAccountName?.trim()) claimedManagerByUsername.set(u.username, u.managerAMAccountName.trim());
+  }
+  const out = new Set<string>();
+  for (const link of links) {
+    if (link.reason !== "missing_manager" && link.reason !== "ambiguous_manager") continue;
+    const claimed = claimedManagerByUsername.get(link.sqlGeneralUsername);
+    if (claimed) out.add(claimed);
+  }
+  return out;
 }
 
 /**
@@ -316,9 +443,19 @@ async function resolveSqlGeneralAnchors(
  * inactive (and so was correctly excluded from the active-only fetch
  * buildManagerSkeleton ran against) — self_reference/cycle never need
  * this (they're confirmed purely from relationships WITHIN the already-
- * fetched active set, no external identity question to resolve). One
- * lookup per DISTINCT claimed-manager username (via the shared cache),
- * never once per affected employee.
+ * fetched active set, no external identity question to resolve).
+ *
+ * Assumes `groundTruthCache` was already warmed (via
+ * distinctBrokenManagerLinkTargets + resolveGroundTruthBatch's bounded
+ * worker pool, alongside resolveSqlGeneralAnchors' own candidates, see
+ * getSqlGeneralOrganizationTree) — every `getGroundTruth` call below is a
+ * synchronous cache hit, never a fresh network round-trip triggered one
+ * link at a time. Production measurement (1,203 active nodes, 8
+ * inactive-manager links): resolving these sequentially, one `await` at a
+ * time, meant 8 full SQLGeneral round-trips (EACH also re-fetching its own
+ * access token — this file's HTTP client never caches a token across
+ * calls) stacked back-to-back on the critical path; batching them
+ * concurrently collapses that to roughly the cost of the SLOWEST one.
  */
 async function refineUnresolvedManagerLinks(
   activeUsers: SqlGeneralUserRecord[],
@@ -375,23 +512,58 @@ function sortTreeInPlace(nodes: SqlGeneralManagerTreeNode[]): void {
  * `active === true` again regardless (defense in depth — correctness
  * never depends on the API filter actually being honored, only the
  * performance win does).
+ *
+ * Every distinct ground-truth lookup this build needs — both
+ * resolveSqlGeneralAnchors' zero-match anchors AND
+ * refineUnresolvedManagerLinks' broken manager links — is collected FIRST
+ * and resolved through resolveGroundTruthBatch's bounded worker pool (at
+ * most MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS at once — never guessed/sped
+ * ahead on the roster's OWN pagination itself, which must stay strictly
+ * sequential since each page's nextLink is only known from the previous
+ * page's response, and never an unbounded fan-out sized to however large
+ * the unresolved set happens to be — this batch is a completely separate,
+ * independent, WIDTH-CAPPED set of single-page lookups, not pagination).
+ * Measured against production's own reported shape (1,203 active nodes, 8
+ * inactive-manager links, comfortably under the cap): running those 8
+ * sequentially was a real, measured contributor to load time, since each
+ * is its own full SQLGeneral round-trip; running them concurrently (even
+ * capped well above 8) collapses that segment to roughly one round-trip's
+ * cost.
+ *
+ * Logs ONE line of narrowly-scoped timing/count diagnostics per build —
+ * page/call counts and millisecond durations only, never an employee
+ * name, email, username, or any token/credential value.
  */
 export async function getSqlGeneralOrganizationTree(): Promise<SqlGeneralOrganizationTreeResult> {
+  const rosterStartedAt = Date.now();
   const userResult = await listAllSqlGeneralUsers({ activeOnly: true });
+  const rosterMs = Date.now() - rosterStartedAt;
   if (!userResult.ok) return { ok: false, reason: `Could not fetch SQLGeneral UsersAndManagers: ${userResult.reason}` };
 
   const activeUsers = userResult.users.filter((u) => u.active === true);
 
+  const skeletonStartedAt = Date.now();
   const { nodeByUsername, parentOf, unresolvedManagerLinks: rawManagerLinks } = buildManagerSkeleton(activeUsers);
+  const skeletonMs = Date.now() - skeletonStartedAt;
 
+  const localDbStartedAt = Date.now();
+  const localAttempts = await fetchLocalSyncAttempts();
+  const localDbMs = Date.now() - localDbStartedAt;
+
+  const lookupStartedAt = Date.now();
+  const candidateUsernames = new Set<string>([...distinctBrokenManagerLinkTargets(activeUsers, rawManagerLinks), ...distinctZeroMatchAnchorUsernames(localAttempts, activeUsers)]);
   const groundTruthCache = new Map<string, GroundTruthLookup>();
+  await resolveGroundTruthBatch(candidateUsernames, groundTruthCache);
+  const lookupMs = Date.now() - lookupStartedAt;
+
+  const classifyStartedAt = Date.now();
   const linksResult = await refineUnresolvedManagerLinks(activeUsers, rawManagerLinks, groundTruthCache);
   if (!linksResult.ok) return { ok: false, reason: linksResult.reason };
   const unresolvedManagerLinks = linksResult.links;
 
-  const anchorsResult = await resolveSqlGeneralAnchors(activeUsers, groundTruthCache);
+  const anchorsResult = await resolveSqlGeneralAnchors(localAttempts, activeUsers, groundTruthCache);
   if (!anchorsResult.ok) return { ok: false, reason: anchorsResult.reason };
-  const { anchors, unresolvedUsers } = anchorsResult;
+  const { anchors, unresolvedUsers, excludedInactiveAnchorCount } = anchorsResult;
 
   for (const [username, local] of anchors) {
     const node = nodeByUsername.get(username);
@@ -419,6 +591,23 @@ export async function getSqlGeneralOrganizationTree(): Promise<SqlGeneralOrganiz
     }
   }
   sortTreeInPlace(roots);
+  const classifyMs = Date.now() - classifyStartedAt;
+
+  // DO #5's own invariant, confirmed structurally true by construction
+  // (every node above was built from `activeUsers`, already filtered to
+  // `active === true`) — checked again here explicitly rather than only
+  // trusted, since a silent violation would mean an inactive identity
+  // rendered in the Manager Explorer.
+  const inactiveNodesRendered = [...nodeByUsername.values()].filter((n) => n.isActive !== true).length;
+  if (inactiveNodesRendered > 0) {
+    console.error(`[sqlgeneral-tree] INVARIANT VIOLATION: ${inactiveNodesRendered} rendered node(s) have isActive !== true despite the active-only fetch — investigate before trusting this result.`);
+  }
+
+  console.log(
+    `[sqlgeneral-tree] roster=${rosterMs}ms(nodes=${activeUsers.length},pages~${Math.ceil(activeUsers.length / 100)}) localDb=${localDbMs}ms(attempts=${localAttempts.length}) ` +
+      `groundTruthLookups=${lookupMs}ms(distinctCalls=${candidateUsernames.size},maxConcurrency=${MAX_CONCURRENT_GROUND_TRUTH_LOOKUPS}) classify+assemble=${skeletonMs + classifyMs}ms ` +
+      `totalNodes=${nodeByUsername.size} roots=${roots.length} unresolvedManagerLinks=${unresolvedManagerLinks.length} matchedAnchors=${anchors.size} excludedInactiveAnchors=${excludedInactiveAnchorCount}`
+  );
 
   return { ok: true, roots, unresolvedUsers, unresolvedManagerLinks };
 }
