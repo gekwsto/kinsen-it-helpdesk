@@ -721,6 +721,74 @@ model SqlGeneralUserSyncAttempt {
   @@index([sqlGeneralUsername])
 }
 
+// Tracks every attempt to rebuild the persistent SQLGeneral Manager
+// Explorer snapshot (lib/services/sqlgeneral-tree-snapshot-service.ts) —
+// one row per attempt, CRON-triggered daily or ADMIN-triggered manually.
+// The "current" snapshot being served is simply the most recent row with
+// status = SUCCEEDED (`findFirst({ where: { status: "SUCCEEDED" },
+// orderBy: { completedAt: "desc" } })`) — there is deliberately no
+// separate "replace" step: a FAILED attempt is created, flagged FAILED,
+// and left alone; it never touches a prior SUCCEEDED row, so the last
+// known-good snapshot is always preserved automatically and a reader can
+// never observe a partial/failed result.
+//
+// `treeData` (the exact { roots, unresolvedUsers, unresolvedManagerLinks }
+// shape getSqlGeneralOrganizationTree() itself returns — this table never
+// reimplements that function's own hierarchy logic, only persists its
+// output) is populated ONLY in the SAME update that flips status to
+// SUCCEEDED — a RUNNING row never has tree data, so the GET route (which
+// only ever reads status = SUCCEEDED rows) can never observe a half-built
+// snapshot even without the separate SqlGeneralTreeSnapshotLock below.
+enum SqlGeneralTreeSnapshotStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum SqlGeneralTreeSnapshotTrigger {
+  CRON
+  MANUAL
+}
+
+model SqlGeneralOrganizationTreeSnapshot {
+  id          String                       @id @default(cuid())
+  status      SqlGeneralTreeSnapshotStatus @default(RUNNING)
+  startedAt   DateTime                     @default(now())
+  completedAt DateTime?
+  // The exact SqlGeneralOrganizationTreeResult payload (on success only) —
+  // written once, in the same update that sets status = SUCCEEDED.
+  treeData                   Json?
+  rootCount                  Int?
+  nodeCount                  Int?
+  unresolvedUserCount        Int?
+  unresolvedManagerLinkCount Int?
+  // Sanitized only — never a raw stack trace, never a token/secret value.
+  lastError   String?                       @db.Text
+  triggeredBy SqlGeneralTreeSnapshotTrigger
+  // Admin User.id for a manual refresh click; null for the daily CRON
+  // trigger. Plain opaque string, not a relation — same convention as
+  // OrganizationSyncRun.triggeredById.
+  triggeredById String?
+
+  @@index([status, completedAt])
+  @@index([startedAt])
+}
+
+// Singleton row (always id="singleton"), the SAME atomic compare-and-set
+// mutual-exclusion idiom as OrganizationSyncLock — kept as its OWN,
+// separate lock rather than reusing OrganizationSyncLock, since that lock
+// guards Microsoft-Graph-sourced Company/Department writes, a completely
+// unrelated subsystem; conflating the two would make an unrelated
+// Microsoft sync block/be blocked by this read-only SQLGeneral snapshot
+// rebuild for no reason. See acquireSqlGeneralTreeSnapshotLock in
+// lib/services/sqlgeneral-tree-snapshot-service.ts.
+model SqlGeneralTreeSnapshotLock {
+  id       String    @id @default("singleton")
+  isLocked Boolean   @default(false)
+  lockedAt DateTime?
+  runId    String?
+}
+
 // Explicit, admin-approved bridge from a SQLGeneral Company to an EXISTING
 // local Company — created ONLY by an admin reviewing one specific Company-
 // level Preview conflict (see SqlGeneralPreviewRow.localMatch's

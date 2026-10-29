@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireAuth, hasPermission } from "@/lib/permissions";
-import { getSqlGeneralOrganizationTree } from "@/lib/services/sqlgeneral-organization-tree-service";
-import { apiError, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
+import { getLatestSuccessfulSqlGeneralTreeSnapshot, type TreeSnapshotPayload } from "@/lib/services/sqlgeneral-tree-snapshot-service";
+import { unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 
 // GET /api/admin/organization/sqlgeneral-tree — read-only, admin-only
 // (organization.sqlgeneralSync, same permission as every other SQLGeneral
@@ -13,18 +13,29 @@ import { apiError, unauthorizedResponse, forbiddenResponse, internalErrorRespons
 // any approved SqlGeneralCompanyMapping/SqlGeneralDepartmentMapping to
 // render. unresolvedUsers/unresolvedManagerLinks are always returned
 // explicitly — never silently dropped.
+//
+// Reads ONLY the persistent snapshot (lib/services/sqlgeneral-tree-snapshot-service.ts)
+// — ZERO SQLGeneral API calls on a normal page load. The tree itself is
+// rebuilt separately, once a day, by the CRON worker or an ADMIN's manual
+// Refresh (POST .../refresh). If no snapshot has EVER succeeded yet, this
+// returns `{ initialized: false }` rather than silently falling back to a
+// live fetch — the UI shows an explicit "not yet initialized" state.
 export async function GET() {
   try {
     const session = await requireAuth();
     const allowed = await hasPermission(session.user.role, "organization.sqlgeneralSync", session.user.customRoleId);
     if (!allowed) return forbiddenResponse("You do not have permission to view the SQLGeneral organization tree.");
 
-    const result = await getSqlGeneralOrganizationTree();
-    if (!result.ok) return NextResponse.json(apiError("sqlgeneral_tree_unavailable", result.reason), { status: 502 });
+    const snapshot = await getLatestSuccessfulSqlGeneralTreeSnapshot();
+    if (!snapshot) return NextResponse.json({ initialized: false });
+
+    const data = snapshot.treeData as unknown as TreeSnapshotPayload;
     return NextResponse.json({
-      tree: result.roots,
-      unresolvedUsers: result.unresolvedUsers,
-      unresolvedManagerLinks: result.unresolvedManagerLinks,
+      initialized: true,
+      tree: data.roots,
+      unresolvedUsers: data.unresolvedUsers,
+      unresolvedManagerLinks: data.unresolvedManagerLinks,
+      lastSuccessfulSyncAt: snapshot.completedAt,
     });
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();

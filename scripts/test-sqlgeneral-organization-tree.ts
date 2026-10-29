@@ -502,7 +502,14 @@ async function main() {
     currentSession = { user: { id: adminUser, role: Role.ADMIN, customRoleId: null } };
     const adminRes = await treeRoute.GET();
     const adminBody = await adminRes.json();
-    check("41. ADMIN bypasses the permission check and receives tree + unresolvedUsers + unresolvedManagerLinks", adminRes.status === 200 && Array.isArray(adminBody.tree) && Array.isArray(adminBody.unresolvedUsers) && Array.isArray(adminBody.unresolvedManagerLinks));
+    // The route now reads the persistent snapshot (see
+    // lib/services/sqlgeneral-tree-snapshot-service.ts and
+    // scripts/test-sqlgeneral-tree-snapshot.ts, which exercises the full
+    // snapshot-backed response shape/content end-to-end) — this test's own
+    // DB never creates one, so `initialized: false` is the correct,
+    // expected response here; this check is purely about the permission
+    // gate itself (ADMIN bypasses, never a 403), not tree content.
+    check("41. ADMIN bypasses the permission check (never a 403) — tree content/shape is the snapshot service's own concern, covered in test-sqlgeneral-tree-snapshot.ts", adminRes.status === 200 && adminBody.initialized === false, JSON.stringify(adminBody));
     currentSession = null;
 
     console.log("\nExisting Departments/People tree modes are completely unaffected ===\n");

@@ -170,6 +170,40 @@ services:
     networks:
       - kinsen-helpdesk-net
 
+  # SQLGeneral Organization Tree Snapshot worker — same sidecar pattern as
+  # the workers above. Triggers /api/internal/sqlgeneral-tree-snapshot/process
+  # every 5 minutes over the internal Docker network, but a real rebuild
+  # only actually happens ONCE PER CALENDAR DAY, targeting 03:00
+  # Europe/Athens (DST-safe) — the endpoint's own isDueForDailySqlGeneralTreeRefresh
+  # guard makes every other trigger a cheap no-op DB read, never a live
+  # SQLGeneral fetch. Authenticated with CRON_SECRET from .env. Running
+  # more than one copy is safe: overlapping rebuilds are rejected by the
+  # snapshot's own lock, never started concurrently.
+  kinsen-helpdesk-sqlgeneral-tree-snapshot-worker:
+    image: curlimages/curl:8.11.0
+    container_name: kinsen-helpdesk-sqlgeneral-tree-snapshot-worker
+    restart: unless-stopped
+    depends_on:
+      - kinsen-helpdesk
+    env_file:
+      - .env
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          if [ -z "$$CRON_SECRET" ]; then
+            echo "[sqlgeneral-tree-snapshot-worker] CRON_SECRET is not set in .env — skipping this run (the endpoint rejects unauthenticated requests in production)."
+          else
+            curl -fsS -m 55 -X POST "http://kinsen-helpdesk:3000/api/internal/sqlgeneral-tree-snapshot/process" \
+              -H "Authorization: Bearer $$CRON_SECRET" \
+              -o /dev/null -w "[sqlgeneral-tree-snapshot-worker] run finished, HTTP %{http_code}\n" \
+              || echo "[sqlgeneral-tree-snapshot-worker] run failed (network error or non-2xx response)"
+          fi
+          sleep 300
+        done
+    networks:
+      - kinsen-helpdesk-net
+
 volumes:
   kinsen_helpdesk_db_data:
 

@@ -47,6 +47,12 @@ interface SyncStatusResponse {
   running: boolean;
 }
 
+interface SqlGeneralTreeStatusResponse {
+  latestSuccessful: { completedAt: string; rootCount: number | null; nodeCount: number | null; unresolvedUserCount: number | null; unresolvedManagerLinkCount: number | null } | null;
+  latestRun: { id: string; status: string; startedAt: string; completedAt: string | null; triggeredBy: string; lastError: string | null } | null;
+  running: boolean;
+}
+
 const nodeTypes = { department: DepartmentNode, person: PeopleNode };
 
 function flattenIds(nodes: RawTreeNode[]): string[] {
@@ -490,6 +496,9 @@ export function OrganizationChartView() {
   const [syncing, setSyncing] = useState(false);
   const [unresolvedUsers, setUnresolvedUsers] = useState<UnresolvedSqlGeneralUser[]>([]);
   const [unresolvedManagerLinks, setUnresolvedManagerLinks] = useState<UnresolvedSqlGeneralManagerLink[]>([]);
+  const [sqlGeneralNotInitialized, setSqlGeneralNotInitialized] = useState(false);
+  const [sqlGeneralTreeStatus, setSqlGeneralTreeStatus] = useState<SqlGeneralTreeStatusResponse | null>(null);
+  const [sqlGeneralRefreshing, setSqlGeneralRefreshing] = useState(false);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchTree = useCallback(async () => {
@@ -514,6 +523,14 @@ export function OrganizationChartView() {
         return;
       }
       const body = await res.json();
+      if (mode === "sqlgeneral" && body.initialized === false) {
+        setSqlGeneralNotInitialized(true);
+        setData([]);
+        setUnresolvedUsers([]);
+        setUnresolvedManagerLinks([]);
+        return;
+      }
+      setSqlGeneralNotInitialized(false);
       setData(body.tree ?? []);
       setFullAccess(Boolean(body.fullAccess));
       setUnresolvedUsers(mode === "sqlgeneral" ? (body.unresolvedUsers ?? []) : []);
@@ -525,6 +542,46 @@ export function OrganizationChartView() {
       setLoading(false);
     }
   }, [mode, activeOnly]);
+
+  const fetchSqlGeneralTreeStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/organization/sqlgeneral-tree/status");
+      if (!res.ok) return; // 403 = no sqlgeneralSync access, silently skip (not an error state for this widget)
+      const body: SqlGeneralTreeStatusResponse = await res.json();
+      setSqlGeneralTreeStatus(body);
+    } catch {
+      // best-effort widget, never surfaces its own error state
+    }
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "sqlgeneral") return;
+    fetchSqlGeneralTreeStatus();
+  }, [mode, fetchSqlGeneralTreeStatus]);
+
+  useEffect(() => {
+    if (mode !== "sqlgeneral" || !sqlGeneralTreeStatus?.running) return;
+    const interval = setInterval(fetchSqlGeneralTreeStatus, 3000);
+    return () => clearInterval(interval);
+  }, [mode, sqlGeneralTreeStatus?.running, fetchSqlGeneralTreeStatus]);
+
+  const handleSqlGeneralRefresh = async () => {
+    setSqlGeneralRefreshing(true);
+    try {
+      const res = await fetch("/api/admin/organization/sqlgeneral-tree/refresh", { method: "POST" });
+      const body = await res.json();
+      if (!res.ok) {
+        toast.error(body?.message ?? "SQLGeneral tree refresh failed.");
+      } else {
+        toast.success("SQLGeneral tree snapshot refreshed.");
+        await Promise.all([fetchTree(), fetchSqlGeneralTreeStatus()]);
+      }
+    } catch {
+      toast.error("Could not reach the server to start the refresh.");
+    } finally {
+      setSqlGeneralRefreshing(false);
+    }
+  };
 
   useEffect(() => {
     fetchTree();
@@ -672,6 +729,13 @@ export function OrganizationChartView() {
               {syncing || syncStatus?.running ? "Syncing…" : "Sync organization"}
             </Button>
           )}
+
+          {mode === "sqlgeneral" && (
+            <Button size="sm" onClick={handleSqlGeneralRefresh} disabled={sqlGeneralRefreshing || sqlGeneralTreeStatus?.running}>
+              <RefreshCw className={`h-3.5 w-3.5 ${sqlGeneralRefreshing || sqlGeneralTreeStatus?.running ? "animate-spin" : ""}`} />
+              {sqlGeneralRefreshing || sqlGeneralTreeStatus?.running ? "Refreshing…" : "Refresh snapshot"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -684,6 +748,20 @@ export function OrganizationChartView() {
               ? "in progress…"
               : "never completed"}
           {syncStatus.latestRun.status === "PARTIAL" && ` (${syncStatus.latestRun.errorCount} records skipped — see server logs)`}
+        </p>
+      )}
+
+      {mode === "sqlgeneral" && (
+        <p className="text-xs text-muted-foreground">
+          {sqlGeneralTreeStatus?.latestSuccessful
+            ? <>Snapshot last updated: {new Date(sqlGeneralTreeStatus.latestSuccessful.completedAt).toLocaleString()}</>
+            : sqlGeneralTreeStatus
+              ? "No snapshot has been built yet."
+              : null}
+          {sqlGeneralTreeStatus?.running && " — a refresh is currently in progress…"}
+          {sqlGeneralTreeStatus?.latestRun?.status === "FAILED" &&
+            (!sqlGeneralTreeStatus.latestSuccessful || new Date(sqlGeneralTreeStatus.latestRun.startedAt) > new Date(sqlGeneralTreeStatus.latestSuccessful.completedAt)) &&
+            ` (most recent refresh attempt failed — see server logs)`}
         </p>
       )}
 
@@ -733,7 +811,21 @@ export function OrganizationChartView() {
           </div>
         )}
 
-        {!loading && !errorState && data && data.length === 0 && (
+        {!loading && !errorState && mode === "sqlgeneral" && sqlGeneralNotInitialized && (
+          <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center text-muted-foreground">
+            <Inbox className="h-8 w-8" />
+            <p className="font-medium text-foreground">No SQLGeneral snapshot has been built yet.</p>
+            <p className="max-w-md text-sm">
+              The Manager Explorer reads a persistent, daily-refreshed snapshot rather than fetching SQLGeneral live on every visit. Build the first one to get started.
+            </p>
+            <Button size="sm" onClick={handleSqlGeneralRefresh} disabled={sqlGeneralRefreshing || sqlGeneralTreeStatus?.running}>
+              <RefreshCw className={`h-3.5 w-3.5 ${sqlGeneralRefreshing || sqlGeneralTreeStatus?.running ? "animate-spin" : ""}`} />
+              {sqlGeneralRefreshing || sqlGeneralTreeStatus?.running ? "Building…" : "Build initial snapshot"}
+            </Button>
+          </div>
+        )}
+
+        {!loading && !errorState && !(mode === "sqlgeneral" && sqlGeneralNotInitialized) && data && data.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-muted-foreground">
             <Inbox className="h-8 w-8" />
             <p>
