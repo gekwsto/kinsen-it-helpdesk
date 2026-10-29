@@ -66,6 +66,21 @@
  * a mocked app-only /users page — same pattern as
  * test-microsoft-first-login-sync.ts's Case 5).
  *
+ * ROLLOUT GATE (SQLGeneral Authoritative Primary Placement round): every
+ * scenario below runs with SQLGENERAL_PRIMARY_PLACEMENT_ENABLED unset
+ * (false — the default, and the state immediately after that round's code
+ * deploys), under which Microsoft's PRIMARY placement behavior — exactly
+ * what this file has always tested — is deliberately UNCHANGED (REQUIRED:
+ * "preserve existing Microsoft placement behavior while SQLGeneral primary
+ * authority is disabled; new authority must activate only through an
+ * explicit rollout gate" — no accidental access regression immediately
+ * after deployment). Scenario 13 at the end of this file is the one new
+ * addition: it proves the OTHER half of that same gate — flipping the
+ * SAME flag true (in-process only, never written to .env) suppresses
+ * Microsoft's placement entirely, and flipping it back off restores it —
+ * so the two states are a true toggle, never a one-way migration this
+ * file would otherwise fail to catch a regression in.
+ *
  * Usage: npx tsx scripts/test-microsoft-organization-placement-integrity.ts
  * Requires a reachable DATABASE_URL.
  */
@@ -77,6 +92,7 @@ import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
 import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { normalizeDepartmentName, normalizeCompanyName } from "@/lib/services/organization-normalization";
 import { runOrganizationDirectorySync } from "@/lib/services/organization-directory-sync-service";
+import { isSqlGeneralPrimaryPlacementEnabled } from "@/lib/sqlgeneral-api-client";
 
 let passed = 0;
 let failed = 0;
@@ -506,6 +522,43 @@ async function main() {
       check("12. Department name matches between both entry points", afterDirectorySync?.department?.name === afterLogin?.department?.name && afterDirectorySync?.department?.name === CONVERGE_DEPT);
       const primaryCount = await prisma.departmentMembership.count({ where: { userId: user.id, isPrimary: true, isActive: true } });
       check("12. Still exactly one active primary membership after both entry points ran", primaryCount === 1);
+    }
+
+    // ── 13. Rollout gate (authority activation) is a true two-way toggle ──
+    console.log("\n13. Rollout gate: flipping SQLGENERAL_PRIMARY_PLACEMENT_ENABLED suppresses Microsoft placement, and flipping it back restores it\n");
+    {
+      check("13. Sanity: the gate is unset/false for every other scenario in this file", !isSqlGeneralPrimaryPlacementEnabled());
+      const AUTHORITY_VALUE = `Authority Dept ${RUN_ID}`;
+
+      // Gate ON (in-process only, never written to .env): Microsoft must
+      // stop placing entirely, same invariant as every scenario in
+      // scripts/test-sqlgeneral-primary-placement.ts.
+      const userOn = await createTestUser("t13-gate-on");
+      userIds.push(userOn.id);
+      process.env.SQLGENERAL_PRIMARY_PLACEMENT_ENABLED = "true";
+      mockGraphMe({ companyName: `Kinsen Hellas ${RUN_ID}`, department: AUTHORITY_VALUE, oid: nextId("oid13on") });
+      await syncMicrosoftUserDepartment({ accessToken: "fake", userId: userOn.id, oid: `oid13on-${RUN_ID}`, email: userOn.email, name: "T13On" });
+      const afterOn = await prisma.user.findUnique({ where: { id: userOn.id } });
+      check("13. Gate ON: companyId stays null — Microsoft does not place while SQLGeneral authority is active", afterOn?.companyId === null);
+      check("13. Gate ON: departmentId stays null", afterOn?.departmentId === null);
+      const primaryOnCount = await prisma.departmentMembership.count({ where: { userId: userOn.id, isPrimary: true } });
+      check("13. Gate ON: zero primary memberships created", primaryOnCount === 0);
+
+      // Gate back OFF: the EXACT SAME flow for a different user, same
+      // profile shape, must now place correctly again — restored default
+      // behavior, not a one-way migration.
+      delete process.env.SQLGENERAL_PRIMARY_PLACEMENT_ENABLED;
+      const userOff = await createTestUser("t13-gate-off");
+      userIds.push(userOff.id);
+      mockGraphMe({ companyName: `Kinsen Hellas ${RUN_ID}`, department: AUTHORITY_VALUE, oid: nextId("oid13off") });
+      await syncMicrosoftUserDepartment({ accessToken: "fake", userId: userOff.id, oid: `oid13off-${RUN_ID}`, email: userOff.email, name: "T13Off" });
+      const afterOff = await prisma.user.findUnique({ where: { id: userOff.id }, include: { department: true, company: true } });
+      if (afterOff?.companyId) companyIds.push(afterOff.companyId);
+      if (afterOff?.departmentId) departmentIds.push(afterOff.departmentId);
+      check("13. Gate OFF again: companyId resolves normally (restored, not a one-way migration)", afterOff?.company?.name === `Kinsen Hellas ${RUN_ID}`);
+      check("13. Gate OFF again: departmentId resolves to the real Graph department", afterOff?.department?.name === AUTHORITY_VALUE);
+      const primaryOffCount = await prisma.departmentMembership.count({ where: { userId: userOff.id, isPrimary: true, isActive: true } });
+      check("13. Gate OFF again: exactly one active primary membership", primaryOffCount === 1);
     }
   } finally {
     console.log("\nCleaning up test data...\n");

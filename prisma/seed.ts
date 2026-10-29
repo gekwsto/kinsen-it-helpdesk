@@ -93,6 +93,30 @@ const PERMISSIONS = [
   // Seeded ADMIN-only by default, same as projectRequest.approve — never
   // auto-granted to every user/manager/existing custom role.
   { key: "projectRequest.intermediateApprove", description: "Be selectable as an intermediate approver on Project Requests, and decide requests where assigned", module: "projectRequests" },
+  // Lets the REQUESTER'S OWN submission skip the entire intermediate stage
+  // above — never inferred from job title, Director role, or SQLGeneral
+  // hierarchy position; purely an explicit admin grant (see
+  // hasExplicitSkipIntermediateApprovalGrant in lib/services/project-
+  // request-approver-eligibility-service.ts — global grant -> every
+  // department; department-scoped grant -> that department only, same
+  // union projectRequest.approve/project.edit/gantt.view already use for
+  // the SCOPE shape). DELIBERATELY DIFFERENT from every other permission
+  // in this codebase in one specific way: the check NEVER bypasses for
+  // Role.ADMIN (hasPermission's own unconditional shortcut) or for any
+  // canViewAllDepartments role such as DIRECTOR (canActOnEntity's own
+  // shortcut) — this key has ZERO default RolePermission rows, not even
+  // ADMIN's usual cosmetic one, because for THIS key that row would be a
+  // REAL, operative grant (not cosmetic) once the bypass-free check reads
+  // it. Confirmed by this exact codebase's own pre-existing fixtures (an
+  // ADMIN-role requester with a real SQLGeneral manager chain is expected
+  // to still go through the normal intermediate-approval flow like anyone
+  // else — see test-project-request-department-eligibility.ts's
+  // managerlessAdmin). When held, SQLGeneral identity/manager-chain
+  // validation and intermediate-approver selection are bypassed ENTIRELY —
+  // the request goes straight to PENDING_APPROVAL (Final Approval), with
+  // ProjectRequest.intermediateApprovalSkipReason recorded as
+  // PERMISSION_BYPASS for audit.
+  { key: "projectRequest.skipIntermediateApproval", description: "Skip intermediate approval on your own Project Request submissions, going straight to Final Approval", module: "projectRequests" },
   // Goals
   { key: "goal.view", description: "View yearly goals", module: "goals" },
   { key: "goal.create", description: "Create yearly goals", module: "goals" },

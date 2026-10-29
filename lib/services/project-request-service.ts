@@ -11,7 +11,7 @@ import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/servic
 import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
 import { findSqlGeneralUserByUsername, type SqlGeneralUserRecord } from "@/lib/sqlgeneral-api-client";
 import { wholeCalendarDaysBetween } from "@/lib/date-only";
-import { Role, type ProjectRequestStatus, type Prisma } from "@prisma/client";
+import { Role, type ProjectRequestStatus, type IntermediateApprovalSkipReason, type Prisma } from "@prisma/client";
 
 // ─── Department resolution ──────────────────────────────────────────────────
 
@@ -257,7 +257,7 @@ export async function resolveIntermediateApproverCandidates(requesterId: string)
 }
 
 export type IntermediateApproverResolution =
-  | { ok: true; approverIds: string[]; skipIntermediateStage: boolean }
+  | { ok: true; approverIds: string[]; skipIntermediateStage: boolean; skipReason: IntermediateApprovalSkipReason | null }
   | { ok: false; reason: "no_approvers_selected" | "invalid_approver" | "unresolved_manager"; detail?: string };
 
 /**
@@ -265,6 +265,15 @@ export type IntermediateApproverResolution =
  * trusted as-is. Re-derives the candidate pool fresh from
  * resolveIntermediateApproverCandidates (never a stale/client-supplied
  * pool):
+ *   - `hasSkipPermission` true (the requester holds projectRequest.
+ *     skipIntermediateApproval, checked by the CALLER against the
+ *     request's own resolved department — this function has no opinion on
+ *     scope, it only trusts the boolean it's handed) bypasses the ENTIRE
+ *     stage, including this call's own fresh SQLGeneral identity/manager-
+ *     chain lookup below — resolveIntermediateApproverCandidates is never
+ *     even invoked. Any selectedIds a (possibly stale) client still sent
+ *     are simply ignored, never validated — this requester is routing
+ *     straight to Final Approval regardless (REQUIRED #2, #4).
  *   - "unresolved" fails the WHOLE submission — never silently skips the
  *     stage and never silently requires an empty selection either.
  *   - "no_manager" requires an EMPTY selection (a non-empty one here is a
@@ -276,21 +285,29 @@ export type IntermediateApproverResolution =
  *     single forged/stale id fails the WHOLE submission, never silently
  *     dropped and never substituted.
  */
-export async function resolveIntermediateApprovers(requesterId: string, selectedIds: string[]): Promise<IntermediateApproverResolution> {
+export async function resolveIntermediateApprovers(
+  requesterId: string,
+  selectedIds: string[],
+  hasSkipPermission: boolean = false
+): Promise<IntermediateApproverResolution> {
+  if (hasSkipPermission) {
+    return { ok: true, approverIds: [], skipIntermediateStage: true, skipReason: "PERMISSION_BYPASS" };
+  }
+
   const candidateResolution = await resolveIntermediateApproverCandidates(requesterId);
   if (candidateResolution.status === "unresolved") {
     return { ok: false, reason: "unresolved_manager", detail: candidateResolution.reason };
   }
   if (candidateResolution.status === "no_manager") {
     if (selectedIds.length > 0) return { ok: false, reason: "invalid_approver" };
-    return { ok: true, approverIds: [], skipIntermediateStage: true };
+    return { ok: true, approverIds: [], skipIntermediateStage: true, skipReason: "NO_MANAGER" };
   }
   if (selectedIds.length === 0) return { ok: false, reason: "no_approvers_selected" };
   const eligibleIds = new Set(candidateResolution.candidates.map((u) => u.id));
   for (const id of selectedIds) {
     if (!eligibleIds.has(id)) return { ok: false, reason: "invalid_approver" };
   }
-  return { ok: true, approverIds: selectedIds, skipIntermediateStage: false };
+  return { ok: true, approverIds: selectedIds, skipIntermediateStage: false, skipReason: null };
 }
 
 /** Submission-time notification to every SELECTED intermediate approver — best-effort, called only after the ProjectRequest + ProjectRequestIntermediateApprover rows have actually committed. The final stage's own eligible approvers are deliberately NOT notified yet — see notifyEligibleApproversOfSubmission's new call site in decideIntermediateApproval, fired only once intermediate approval is unanimously complete. */

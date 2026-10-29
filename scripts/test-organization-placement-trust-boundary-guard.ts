@@ -29,6 +29,15 @@
  * scan. SECTION B is the small set of explicitly-requested behavioral
  * regressions, run against a real DATABASE_URL.
  *
+ * ROLLOUT GATE (SQLGeneral Authoritative Primary Placement round): every
+ * check below runs with SQLGENERAL_PRIMARY_PLACEMENT_ENABLED unset (the
+ * default) — under which Microsoft's PRIMARY placement is deliberately
+ * UNCHANGED from what this file has always asserted (REQUIRED: "preserve
+ * existing Microsoft placement behavior while SQLGeneral primary
+ * authority is disabled"). The "gate flipped on" half of that behavior is
+ * covered once, end-to-end, by scripts/test-microsoft-organization-placement-
+ * integrity.ts's scenario 13 — not duplicated here.
+ *
  * Usage: npx tsx scripts/test-organization-placement-trust-boundary-guard.ts
  */
 import fs from "fs/promises";

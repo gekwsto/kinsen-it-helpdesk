@@ -35,6 +35,15 @@
  *  27. Their memberships (primary + secondary) don't change.
  *  28. Their role doesn't change.
  *
+ * ROLLOUT GATE (SQLGeneral Authoritative Primary Placement round): every
+ * test below runs with SQLGENERAL_PRIMARY_PLACEMENT_ENABLED unset (the
+ * default) — under which Microsoft's PRIMARY placement (what this file has
+ * always asserted, tests 21-24) is deliberately UNCHANGED (REQUIRED:
+ * "preserve existing Microsoft placement behavior while SQLGeneral primary
+ * authority is disabled"). The "gate flipped on" half is covered once,
+ * end-to-end, by scripts/test-microsoft-organization-placement-integrity.ts's
+ * scenario 13 — not duplicated here.
+ *
  * Usage: npx tsx scripts/test-organization-sync-convergence-and-safety.ts
  * Requires a reachable DATABASE_URL — skips (not fails) if unreachable.
  */

@@ -143,6 +143,24 @@ export function isSqlGeneralSyncEnabled(): boolean {
   return process.env.SQLGENERAL_SYNC_ENABLED === "true";
 }
 
+/**
+ * Second, independent kill-switch — gates ONLY whether the worker (already
+ * itself gated on isSqlGeneralSyncEnabled above) also claims PRIMARY
+ * Company/Department placement authority for a resolved user, via
+ * applySqlGeneralPrimaryPlacement in sqlgeneral-user-sync-service.ts.
+ * Deliberately separate from isSqlGeneralSyncEnabled so the existing,
+ * lower-risk SECONDARY-membership sync can be enabled/rolled back entirely
+ * independently of this much higher-blast-radius behavior (it decides
+ * which department a user's workspace defaults to, and can gate their
+ * login access entirely until first resolved — see workspace-service.ts's
+ * resolveActiveWorkspace). BOTH flags must be "true" for primary placement
+ * to ever run; this one alone, with the other false, does nothing — the
+ * worker never runs at all in that case.
+ */
+export function isSqlGeneralPrimaryPlacementEnabled(): boolean {
+  return process.env.SQLGENERAL_PRIMARY_PLACEMENT_ENABLED === "true";
+}
+
 // ─── HTTP plumbing ──────────────────────────────────────────────────────────
 
 const REQUEST_TIMEOUT_MS = 10_000;

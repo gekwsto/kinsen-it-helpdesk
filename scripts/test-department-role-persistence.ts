@@ -186,7 +186,7 @@ async function main() {
     const u12p = await makeUser(`u12p-${RUN_ID}@example.com`);
     const d12p = await makeDept(`Dept12p ${RUN_ID}`);
     await setPrimaryDepartmentMembership(u12p.id, d12p.id, MembershipSource.MANUAL, { role: DepartmentRole.AGENT_ASSIGNEE });
-    await setPrimaryDepartmentMembership(u12p.id, d12p.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteMicrosoftPrimary: true });
+    await setPrimaryDepartmentMembership(u12p.id, d12p.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteAutomaticPrimary: true });
     const row12p = await prisma.departmentMembership.findUniqueOrThrow({ where: { userId_departmentId: { userId: u12p.id, departmentId: d12p.id } } });
     check("12. setPrimaryDepartmentMembership never overwrites a MANUAL primary role via a Microsoft sync call either", row12p.role === DepartmentRole.AGENT_ASSIGNEE && row12p.source === MembershipSource.MANUAL);
 
@@ -213,7 +213,7 @@ async function main() {
     step = await prisma.departmentMembership.findUniqueOrThrow({ where: { userId_departmentId: { userId: u12e.id, departmentId: d12e.id } } });
     check("   Step 2/3: role AGENT_ASSIGNEE, source now MANUAL", step.role === DepartmentRole.AGENT_ASSIGNEE && step.source === MembershipSource.MANUAL);
     // Step 4: re-run the corresponding sync/reconciliation (both the primary-placement call AND the secondary-mapping sync a real login would trigger).
-    await setPrimaryDepartmentMembership(u12e.id, d12e.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteMicrosoftPrimary: true });
+    await setPrimaryDepartmentMembership(u12e.id, d12e.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteAutomaticPrimary: true });
     await syncDepartmentMemberships(u12e.id, []);
     // Step 5: manual role remains exactly the same.
     step = await prisma.departmentMembership.findUniqueOrThrow({ where: { userId_departmentId: { userId: u12e.id, departmentId: d12e.id } } });

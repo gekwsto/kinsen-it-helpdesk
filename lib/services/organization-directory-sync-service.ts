@@ -30,7 +30,7 @@ import { AuthProvider, MembershipSource } from "@prisma/client";
 import { getAppOnlyGraphAccessToken, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { fetchWithGraphRetry } from "@/lib/microsoft-graph-retry";
 import { resolveDepartmentMemberships } from "@/lib/services/microsoft-mapping-service";
-import { syncDepartmentMemberships, setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
+import { syncDepartmentMemberships, setPrimaryDepartmentMembership, isPrimaryCompanySqlGeneralAuthoritative } from "@/lib/services/department-membership-service";
 import { normalizeEmail } from "@/lib/services/email-identity";
 import { resolveDefaultGlobalRoleAssignment, resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
 import {
@@ -39,6 +39,7 @@ import {
   type OrganizationResolutionCache,
 } from "@/lib/services/organization-company-department-resolver";
 import { getOrganizationDirectoryEligibility, extractEmailDomain } from "@/lib/services/organization-directory-eligibility-service";
+import { isSqlGeneralPrimaryPlacementEnabled } from "@/lib/sqlgeneral-api-client";
 import type { MicrosoftIdentityClaims } from "@/types/department";
 
 const GRAPH_USERS_SELECT = [
@@ -342,7 +343,16 @@ async function upsertOneDirectoryUser(
     // setPrimaryDepartmentMembership (called from the membership-resolution
     // loop below, once dbUserId is known) — see the canonical-membership
     // architecture. companyId has no membership-table equivalent and stays
-    // a direct write, unrelated to this.
+    // a direct write, unrelated to that — EXCEPT once SQLGeneral has
+    // already become authoritative for THIS EXISTING user's Company
+    // (isPrimaryCompanySqlGeneralAuthoritative — their current active
+    // primary is SQLGENERAL_DEPARTMENT-sourced), in which case Microsoft
+    // must never overwrite it again, on this or any subsequent sync
+    // (REQUIRED: resolve the User.companyId dual-writer precedence).
+    // Checked unconditionally (not gated on isSqlGeneralPrimaryPlacementEnabled)
+    // so the precedence holds even across a rollout-flag rollback. Never
+    // applies to a brand-new user below (create path) — there is no prior
+    // primary to defer to yet.
     const commonFields = {
       name: user.displayName ?? undefined,
       givenName: user.givenName ?? undefined,
@@ -353,16 +363,16 @@ async function upsertOneDirectoryUser(
       entraAccountEnabled: user.accountEnabled ?? undefined,
       entraUserType: user.userType ?? undefined,
       organizationSyncedAt: new Date(),
-      companyId: placement.companyId,
     };
 
     if (existing) {
+      const sqlGeneralIsAuthoritative = await isPrimaryCompanySqlGeneralAuthoritative(existing.id);
       // microsoftUserId is written unconditionally here (a no-op when action
       // is "updated" — it already matched; the actual backfill when action
       // is "linked").
       const updated = await prisma.user.update({
         where: { id: existing.id },
-        data: { ...commonFields, microsoftUserId: user.id },
+        data: { ...commonFields, ...(sqlGeneralIsAuthoritative ? {} : { companyId: placement.companyId }), microsoftUserId: user.id },
         select: { id: true, name: true },
       });
       console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action, company: placement.companyName, department: placement.departmentName });
@@ -553,40 +563,41 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
   // file's own header comment on the production incident that rule exists
   // to prevent).
   //
-  // Step 1 — PRIMARY: the multi-company Company/Department placement
-  // resolved during the upsert above (organization-company-department-resolver.ts,
-  // `synced.resolvedDepartmentId`) becomes this user's primary organizational
-  // department via setPrimaryDepartmentMembership — the single canonical
-  // write path for User.departmentId + the active primary DepartmentMembership
-  // together (see the User/Department/Member canonical-membership
-  // architecture). This is what used to write User.departmentId directly in
-  // upsertOneDirectoryUser above WITHOUT ever creating a matching
-  // membership — the real bug this closes. Resolves to the configured
-  // Default Department Role (lib/services/default-role-service.ts) — or the
-  // pre-existing DepartmentRole.REQUESTER/no-custom-role fallback when none
-  // is configured — since Microsoft sync never does mapping-based role
-  // resolution for the PRIMARY placement (see this file's own role-
-  // protection rules below); this is just the starting DepartmentRole for a
-  // membership that exists purely to reflect organizational placement.
-  // deactivateObsoleteMicrosoftPrimary: true — an organizational move
-  // detected by Microsoft sync must not leave a stale Microsoft-granted
-  // primary department access behind (a MANUAL primary is never touched
-  // regardless — setPrimaryDepartmentMembership's own protection).
+  // Step 1 — PRIMARY: a ROLLOUT-GATED hand-off (REQUIRED: "preserve
+  // existing Microsoft placement behavior while SQLGeneral primary
+  // authority is disabled; new authority must activate only through an
+  // explicit rollout gate" — the SAME flag the login path and the
+  // SQLGeneral worker itself check, never a second independent switch).
+  // isSqlGeneralPrimaryPlacementEnabled() === false (the default):
+  // Microsoft keeps setting PRIMARY placement from this batch sync exactly
+  // as it always did — no accidental access regression immediately after
+  // this round's code deploys. Once an admin deliberately flips that SAME
+  // flag true, this loop stops attempting primary placement entirely —
+  // SQLGeneral (applySqlGeneralPrimaryPlacement) or an explicit MANUAL
+  // admin edit are the only automatic/manual paths from then on.
   //
   // Step 2 — SECONDARY: reuses the exact same MicrosoftDepartmentMapping-
   // based functions the login path calls (lib/services/microsoft-mapping-service.ts,
-  // lib/services/department-membership-service.ts) for any OTHER explicit
-  // admin-configured mapping (group/app-role/job-title) — completely
-  // independent of the primary placement above, and never touches MANUAL
-  // memberships (syncDepartmentMemberships's own existing protection).
-  const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
+  // lib/services/department-membership-service.ts) for any explicit
+  // admin-configured mapping (group/app-role/job-title) — unchanged, and
+  // never touches MANUAL or primary memberships (syncDepartmentMemberships's
+  // own existing protection).
+  const primaryPlacementRolledOut = isSqlGeneralPrimaryPlacementEnabled();
+  const departmentDefault = primaryPlacementRolledOut ? null : await resolveDefaultDepartmentRoleAssignment();
   for (const synced of syncedForMembership) {
-    if (synced.resolvedDepartmentId) {
+    // Same "skip the WHOLE attempt, not just the Company field" precedence
+    // rule as the login path (microsoft-department-sync-service.ts) —
+    // SQLGeneral having already become authoritative for this specific
+    // user (even while the rollout gate is currently off, a rollback)
+    // blocks this batch sync from moving their primary DEPARTMENT too, not
+    // only their companyId (upsertOneDirectoryUser's own, separate check).
+    const sqlGeneralIsAuthoritative = !primaryPlacementRolledOut && (await isPrimaryCompanySqlGeneralAuthoritative(synced.dbUserId));
+    if (!primaryPlacementRolledOut && !sqlGeneralIsAuthoritative && synced.resolvedDepartmentId) {
       try {
         await setPrimaryDepartmentMembership(synced.dbUserId, synced.resolvedDepartmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
-          role: departmentDefault.role,
-          customRoleId: departmentDefault.customRoleId,
-          deactivateObsoleteMicrosoftPrimary: true,
+          role: departmentDefault!.role,
+          customRoleId: departmentDefault!.customRoleId,
+          deactivateObsoleteAutomaticPrimary: true,
         });
       } catch (err) {
         errorCount++;
@@ -606,13 +617,16 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
         jobTitle: synced.jobTitle,
       };
       const resolved = await resolveDepartmentMemberships(claims, synced.domain);
-      // autoPromoteSoleActiveMembership: false — same root-cause fix as
-      // microsoft-department-sync-service.ts's identical call: this loop
-      // ALWAYS attempts setPrimaryDepartmentMembership above first (Step 1);
-      // if that attempt threw (caught, errorCount++, logged), a purely
-      // SECONDARY mapping match here must never be silently promoted to
-      // isPrimary as a result — see department-membership-service.ts's
-      // syncDepartmentMemberships doc comment for the full mechanism.
+      // autoPromoteSoleActiveMembership: false — same rule as
+      // microsoft-department-sync-service.ts's identical call, now for the
+      // DO #2 reason specifically: a purely SECONDARY Microsoft mapping
+      // match must NEVER be silently promoted to isPrimary, since that
+      // would grant real workspace access before this user's first
+      // verified SQLGeneral placement — exactly the loophole
+      // workspace-service.ts's resolveActiveWorkspace also closes on the
+      // READ side (see its own pending-access comment). Primary placement
+      // is SQLGeneral's (or an explicit MANUAL admin edit's) job only, now
+      // that this function no longer sets it at all.
       await syncDepartmentMemberships(synced.dbUserId, resolved, { autoPromoteSoleActiveMembership: false });
     } catch (err) {
       errorCount++;

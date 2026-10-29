@@ -118,11 +118,6 @@ async function main() {
     userIds.push(u.id);
     return u;
   }
-  async function findResolvedPrimaryDepartment(rawDepartmentName: string) {
-    resolvedDeptNames.add(rawDepartmentName);
-    return prisma.department.findFirst({ where: { companyId: null, normalizedName: normalizeDepartmentName(rawDepartmentName) } });
-  }
-
   try {
     // ══════════════ Fixture roles ══════════════
     const globalDefaultRole = await makeCustomRole("GLOBAL_DEFAULT", RoleScope.GLOBAL);
@@ -148,20 +143,31 @@ async function main() {
     userIds.push(createdA2.id);
     check("A2. Inbound-email-created user's customRoleId is the configured Default Global Role", createdA2.customRoleId === globalDefaultRole.id);
 
-    console.log("\n=== B. New DepartmentMembership gets Default Department Role (primary placement) ===\n");
+    console.log("\n=== B. New DepartmentMembership gets Default Department Role (automatic primary placement) ===\n");
+    // syncMicrosoftUserDepartment no longer sets PRIMARY placement at all
+    // (REQUIRED: "Remove Microsoft automatic Primary placement") — the
+    // ONLY remaining automatic (non-MANUAL) primary-placement caller is
+    // SQLGeneral's applySqlGeneralPrimaryPlacement
+    // (sqlgeneral-user-sync-service.ts), which resolves Company/Department
+    // via its OWN mapping logic and then calls setPrimaryDepartmentMembership
+    // with EXACTLY this same resolveDefaultDepartmentRoleAssignment() ->
+    // {role, customRoleId} shape — reproduced directly here (same pattern
+    // Section D2 below already uses) so this check exercises the real
+    // Default Department Role config mechanism without needing to mock
+    // the whole SQLGeneral API client just for a role-config test.
     await setDefaultDepartmentRole(departmentDefaultRole.id);
     const userB = await makeUser("b", { role: Role.USER, globalRoleSource: GlobalRoleSource.SYSTEM });
-    const deptValueB = `DRC Unmapped Dept B ${RUN_ID}`;
-    mockGraphMeOnce(deptValueB, `oid-b-${RUN_ID}`);
-    await syncMicrosoftUserDepartment({ accessToken: "fake-token", userId: userB.id, oid: `oid-b-${RUN_ID}`, email: userB.email, name: "Test B" });
-    const resolvedDeptB = await findResolvedPrimaryDepartment(deptValueB);
-    check("B. Organization resolver created/found the department", !!resolvedDeptB);
-    const membershipB = resolvedDeptB
-      ? await prisma.departmentMembership.findUnique({ where: { userId_departmentId: { userId: userB.id, departmentId: resolvedDeptB.id } } })
-      : null;
-    check("B. New primary DepartmentMembership's customRoleId is the configured Default Department Role", membershipB?.customRoleId === departmentDefaultRole.id);
-    check("B. DepartmentMembership.role is the VIEWER placeholder (matches grantManualMembership's own convention for a custom-role row)", membershipB?.role === DepartmentRole.VIEWER);
-    check("B. Membership is marked primary, source MICROSOFT_DEPARTMENT", membershipB?.isPrimary === true && membershipB?.source === MembershipSource.MICROSOFT_DEPARTMENT);
+    const deptB = await prisma.department.create({ data: { name: `DRC Unmapped Dept B ${RUN_ID}`, slug: `drc-unmapped-dept-b-${RUN_ID}` } });
+    resolvedDeptNames.add(deptB.name);
+    const deptDefaultForB = await resolveDefaultDepartmentRoleAssignment();
+    const resultB = await setPrimaryDepartmentMembership(userB.id, deptB.id, MembershipSource.SQLGENERAL_DEPARTMENT, {
+      role: deptDefaultForB.role,
+      customRoleId: deptDefaultForB.customRoleId,
+      deactivateObsoleteAutomaticPrimary: true,
+    });
+    check("B. New primary DepartmentMembership's customRoleId is the configured Default Department Role", resultB.primaryMembership.customRoleId === departmentDefaultRole.id);
+    check("B. DepartmentMembership.role is the VIEWER placeholder (matches grantManualMembership's own convention for a custom-role row)", resultB.primaryMembership.role === DepartmentRole.VIEWER);
+    check("B. Membership is marked primary, source SQLGENERAL_DEPARTMENT", resultB.primaryMembership.isPrimary === true && resultB.primaryMembership.source === MembershipSource.SQLGENERAL_DEPARTMENT);
 
     console.log("\n=== C. Explicit Microsoft mapping beats the configured default on creation ===\n");
     const mappedDeptValue = `DRC Mapped Dept C ${RUN_ID}`;
@@ -213,7 +219,7 @@ async function main() {
     const resultD2 = await setPrimaryDepartmentMembership(userD2.id, deptD2.id, MembershipSource.MICROSOFT_DEPARTMENT, {
       role: deptDefaultForD2.role,
       customRoleId: deptDefaultForD2.customRoleId,
-      deactivateObsoleteMicrosoftPrimary: true,
+      deactivateObsoleteAutomaticPrimary: true,
     });
     check("D. MANUAL department customRoleId is UNTOUCHED by a later Microsoft-sourced call carrying the default", resultD2.primaryMembership.customRoleId === manualDeptRole.id);
     check("D. MANUAL department membership source stays MANUAL", resultD2.primaryMembership.source === MembershipSource.MANUAL);

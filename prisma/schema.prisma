@@ -348,6 +348,21 @@ model DepartmentMembership {
   source       MembershipSource
   isPrimary    Boolean          @default(false)
   isActive     Boolean          @default(true)
+  // Explicit, auditable ADMIN override of PRIMARY-placement authority — set
+  // ONLY via a dedicated "Lock this user's primary department" admin
+  // action (lib/services/department-membership-service.ts's
+  // setPrimaryDepartmentLock), never implicitly by the plain "change
+  // primary department" edit that already exists. Deliberately NOT the
+  // same signal as `source === MANUAL`: an admin manually setting a
+  // primary (a routine correction) does not by itself mean "permanently
+  // exempt this user from SQLGeneral-authoritative placement going
+  // forward" — only this explicit lock does. When set,
+  // setPrimaryDepartmentMembership refuses to move this row for ANY
+  // non-MANUAL caller (Microsoft or SQLGeneral), regardless of its
+  // `source`. Both fields are set/cleared together; `primaryLockedById`
+  // null means unlocked.
+  primaryLockedById String?
+  primaryLockedAt   DateTime?
   createdAt    DateTime         @default(now())
   updatedAt    DateTime         @updatedAt
 
@@ -2067,6 +2082,12 @@ enum IntermediateApprovalStatus {
   REJECTED
 }
 
+// See ProjectRequest.intermediateApprovalSkipReason's own doc comment.
+enum IntermediateApprovalSkipReason {
+  NO_MANAGER
+  PERMISSION_BYPASS
+}
+
 // A user-submitted request to start a new Project, routed through a SINGLE
 // department-scoped approval stage before anyone is authorized to act on
 // it — see lib/services/project-request-service.ts for the full state
@@ -2136,6 +2157,21 @@ model ProjectRequest {
   // APPROVED/REJECTED and are left exactly as they were — this default
   // only governs NEW rows, see this migration's own doc comment.
   status ProjectRequestStatus @default(PENDING_INTERMEDIATE_APPROVAL)
+
+  // Auditable record of WHY the intermediate stage never applied to this
+  // request — null for every request that went through the normal
+  // unanimous intermediate-approval flow (the overwhelming majority).
+  // NO_MANAGER: the requester's own SQLGeneral record verified they have
+  // no manager at all (resolveIntermediateApproverCandidates). PERMISSION_
+  // BYPASS: the requester held the explicit `projectRequest.
+  // skipIntermediateApproval` permission at submission time, so the
+  // SQLGeneral identity/manager-chain lookup was never even attempted —
+  // see resolveIntermediateApprovers in lib/services/project-request-
+  // service.ts. Both values only ever accompany
+  // status !== PENDING_INTERMEDIATE_APPROVAL at creation time (this
+  // request skipped straight to PENDING_APPROVAL); never set/changed after
+  // submission.
+  intermediateApprovalSkipReason IntermediateApprovalSkipReason?
 
   // Every user the REQUESTER selected, at submission time, as an
   // intermediate approver for THIS request — a snapshot (see

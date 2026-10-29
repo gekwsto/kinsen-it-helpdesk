@@ -52,11 +52,23 @@ interface ProjectRequestFormProps {
    * straight to Final Approval.
    */
   intermediateApproverOptions: IntermediateApproverOption[];
+  /**
+   * True when the server-rendering page already determined this requester
+   * holds `projectRequest.skipIntermediateApproval` (a UI hint only — see
+   * app/(main)/project-requests/new/page.tsx's own comment on why this can
+   * legitimately disagree with the submission route's own, authoritative,
+   * per-submission check for an ambiguous multi-department requester).
+   * Purely cosmetic here: `intermediateApproverOptions` is already empty
+   * whenever this is true (the page never resolved candidates in that
+   * case), so this prop only changes WHICH explanatory message is shown —
+   * it never changes form behavior or what gets submitted.
+   */
+  canSkipIntermediateApproval?: boolean;
 }
 
 const IMPORTANCE_LEVELS = [1, 2, 3] as const;
 
-export function ProjectRequestForm({ departments, defaultDepartmentId, intermediateApproverOptions }: ProjectRequestFormProps) {
+export function ProjectRequestForm({ departments, defaultDepartmentId, intermediateApproverOptions, canSkipIntermediateApproval = false }: ProjectRequestFormProps) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
 
@@ -266,7 +278,9 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
             </div>
           ) : (
             <p className="text-xs text-muted-foreground">
-              You have no manager on record — this request will go straight to final approval.
+              {canSkipIntermediateApproval
+                ? "Your role allows this request to skip intermediate approval — it will go straight to final approval."
+                : "You have no manager on record — this request will go straight to final approval."}
             </p>
           )}
 

@@ -27,6 +27,7 @@ import { prisma } from "@/lib/prisma";
 import { acquireOrganizationSyncLock, releaseOrganizationSyncLock } from "@/lib/services/organization-sync-orchestrator";
 import {
   isSqlGeneralSyncEnabled,
+  isSqlGeneralPrimaryPlacementEnabled,
   findSqlGeneralUserByUsername,
   listAllSqlGeneralDepartments,
   listAllSqlGeneralUsers,
@@ -39,6 +40,7 @@ import {
 } from "@/lib/sqlgeneral-api-client";
 import { normalizeCompanyName, normalizeDepartmentName } from "@/lib/services/organization-normalization";
 import { resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
+import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { fetchAllGraphUserIdentities, type GraphUserIdentity } from "@/lib/services/microsoft-directory-service";
 
 export const MAX_ATTEMPTS = 5;
@@ -187,103 +189,134 @@ export type ApplyOutcome = { ok: true } | { ok: false; reason: string };
  * approved mapping, behavior is completely unchanged from before this
  * feature: name-based find-or-create, conflict on any non-SQLGeneral owner.
  */
-async function applySqlGeneralDepartmentMembership(userId: string, placement: ResolvedDepartmentPlacement, sqlGeneralCompanyId: string | null): Promise<ApplyOutcome> {
+type ResolvedPlacementTarget =
+  | { ok: true; company: { id: string; name: string }; department: { id: string; importSource: OrganizationNodeSource | null } }
+  | { ok: false; reason: string };
+
+/**
+ * The shared Company/Department resolution core — mapping-first
+ * (SqlGeneralCompanyMapping/SqlGeneralDepartmentMapping, re-validated at
+ * write time), then local name-match, NEVER auto-creating a Department
+ * (only a Company, same as before), NEVER claiming a name collision
+ * against a non-SQLGeneral-owned row. Extracted verbatim from the
+ * pre-existing applySqlGeneralDepartmentMembership logic (REQUIRED: "never
+ * duplicate hierarchy/mapping logic") — reused identically by that
+ * function (secondary membership) AND applySqlGeneralPrimaryPlacement
+ * below (primary placement), so both converge on the exact same
+ * Company/Department for the same SQLGeneral user, by construction. Must
+ * run inside the caller's own transaction (`tx`) under the caller's own
+ * acquireOrganizationSyncLock hold — this function acquires/releases
+ * nothing itself.
+ */
+async function resolveSqlGeneralPlacementTarget(
+  tx: Prisma.TransactionClient,
+  placement: ResolvedDepartmentPlacement,
+  sqlGeneralCompanyId: string | null,
+  lockRunId: string
+): Promise<ResolvedPlacementTarget> {
   const companyName = placement.department.company;
   const departmentName = placement.department.description;
   if (!companyName) return { ok: false, reason: `Department ${placement.department.id} has no Company value — cannot safely place this user.` };
   if (!departmentName) return { ok: false, reason: `Department ${placement.department.id} has no Description value — cannot safely match/create a local Department without a name.` };
 
+  const normalizedCompanyName = normalizeCompanyName(companyName);
+  const normalizedDepartmentName = normalizeDepartmentName(departmentName);
+
+  const approvedMapping = sqlGeneralCompanyId
+    ? await tx.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } })
+    : null;
+
+  let company = approvedMapping?.company ?? null;
+  if (!company) {
+    company = await tx.company.findUnique({ where: { normalizedName: normalizedCompanyName } });
+  }
+  if (!company) {
+    company = await tx.company.create({
+      data: {
+        name: companyName,
+        normalizedName: normalizedCompanyName,
+        importSource: OrganizationNodeSource.SQLGENERAL,
+        importedAt: new Date(),
+        importRunId: lockRunId,
+      },
+    });
+  } else if (!approvedMapping && company.importSource !== OrganizationNodeSource.SQLGENERAL) {
+    // A name collision against a Company this sync does not own (manual,
+    // Microsoft-sourced, or no provenance at all) is always a conflict,
+    // never claimed — see OrganizationNodeSource's own doc comment.
+    // An approved mapping is the one explicit, admin-reviewed exception —
+    // it bypasses this check entirely, but never touches the Company's
+    // own ownership/fields either way.
+    return { ok: false, reason: `Company "${companyName}" already exists and is not owned by SQLGeneral sync.` };
+  }
+
+  const sqlGeneralDepartmentId = String(placement.department.id);
+  const approvedDeptMapping = await tx.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { department: true } });
+
+  let department = null as Awaited<ReturnType<typeof tx.department.findUnique>>;
+  if (approvedDeptMapping) {
+    // Re-validate at write time — an approved mapping is never trusted
+    // blindly. Two checks, both against VERIFIED source data, never
+    // against any ancestor's own local mapping (the local schema cannot
+    // represent SQLGeneral's recursive Department ancestry, so ancestors
+    // are never required to be separately mapped at all, here or at
+    // approval time):
+    //   1. The SOURCE chain must still be structurally sound right now
+    //      (no missing parent, no cycle) — a fresh resolution, not the
+    //      one from whenever this mapping was approved.
+    //   2. If this specific matched SQLGeneral user carries their own
+    //      verified CompanyId, it must still agree with the Company
+    //      this mapping is approved under — never written on a
+    //      conflicting identity.
+    if (!approvedDeptMapping.department.companyId) {
+      return { ok: false, reason: `Approved Department mapping's target no longer has a Company — refusing to write.` };
+    }
+    const structure = classifySqlGeneralChainStructure(placement.parentChain, placement.missingParent, placement.cycle);
+    if (structure.status === "unresolved") {
+      return { ok: false, reason: `Approved Department mapping failed re-validation at write time: ${structure.reason}` };
+    }
+    if (sqlGeneralCompanyId !== null) {
+      const companyMapping = await tx.sqlGeneralCompanyMapping.findFirst({ where: { companyId: approvedDeptMapping.department.companyId }, select: { sqlGeneralCompanyId: true } });
+      if (!companyMapping) {
+        return { ok: false, reason: `Approved Department mapping's target Company no longer has an approved SqlGeneralCompanyMapping — refusing to write.` };
+      }
+      if (sqlGeneralCompanyId !== companyMapping.sqlGeneralCompanyId) {
+        return {
+          ok: false,
+          reason: `This user's own verified SQLGeneral CompanyId ("${sqlGeneralCompanyId}") conflicts with the Company this Department mapping is approved under ("${companyMapping.sqlGeneralCompanyId}") — refusing to write on a conflicting identity.`,
+        };
+      }
+    }
+    department = approvedDeptMapping.department;
+  }
+  if (!department) {
+    department = await tx.department.findUnique({
+      where: { companyId_normalizedName: { companyId: company.id, normalizedName: normalizedDepartmentName } },
+    });
+  }
+  if (!department) {
+    return { ok: false, reason: `No existing Department "${departmentName}" under Company "${companyName}" — SQLGeneral Department auto-creation is not yet implemented.` };
+  }
+  if (!approvedDeptMapping && department.importSource !== OrganizationNodeSource.SQLGENERAL) {
+    // Same explicit-mapping exception as the Company check above — an
+    // approved Department mapping bypasses this, but never touches the
+    // Department's own ownership/fields/hierarchy either way.
+    return { ok: false, reason: `Department "${departmentName}" already exists and is not owned by SQLGeneral sync.` };
+  }
+
+  return { ok: true, company, department };
+}
+
+async function applySqlGeneralDepartmentMembership(userId: string, placement: ResolvedDepartmentPlacement, sqlGeneralCompanyId: string | null): Promise<ApplyOutcome> {
   const lockRunId = `sqlgeneral:${randomUUID()}`;
   const acquired = await acquireOrganizationSyncLock(lockRunId);
   if (!acquired) return { ok: false, reason: "Organization sync lock is held by another sync run." };
 
   try {
-    const normalizedCompanyName = normalizeCompanyName(companyName);
-    const normalizedDepartmentName = normalizeDepartmentName(departmentName);
-
     return await prisma.$transaction(async (tx) => {
-      const approvedMapping = sqlGeneralCompanyId
-        ? await tx.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } })
-        : null;
-
-      let company = approvedMapping?.company ?? null;
-      if (!company) {
-        company = await tx.company.findUnique({ where: { normalizedName: normalizedCompanyName } });
-      }
-      if (!company) {
-        company = await tx.company.create({
-          data: {
-            name: companyName,
-            normalizedName: normalizedCompanyName,
-            importSource: OrganizationNodeSource.SQLGENERAL,
-            importedAt: new Date(),
-            importRunId: lockRunId,
-          },
-        });
-      } else if (!approvedMapping && company.importSource !== OrganizationNodeSource.SQLGENERAL) {
-        // A name collision against a Company this sync does not own (manual,
-        // Microsoft-sourced, or no provenance at all) is always a conflict,
-        // never claimed — see OrganizationNodeSource's own doc comment.
-        // An approved mapping is the one explicit, admin-reviewed exception —
-        // it bypasses this check entirely, but never touches the Company's
-        // own ownership/fields either way.
-        return { ok: false, reason: `Company "${companyName}" already exists and is not owned by SQLGeneral sync.` };
-      }
-
-      const sqlGeneralDepartmentId = String(placement.department.id);
-      const approvedDeptMapping = await tx.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { department: true } });
-
-      let department = null as Awaited<ReturnType<typeof tx.department.findUnique>>;
-      if (approvedDeptMapping) {
-        // Re-validate at write time (REQUIRED #5, this round) — an approved
-        // mapping is never trusted blindly. Two checks, both against
-        // VERIFIED source data, never against any ancestor's own local
-        // mapping (REQUIRED #4 — the local schema cannot represent
-        // SQLGeneral's recursive Department ancestry, so ancestors are
-        // never required to be separately mapped at all, here or at
-        // approval time):
-        //   1. The SOURCE chain must still be structurally sound right now
-        //      (no missing parent, no cycle) — a fresh resolution, not the
-        //      one from whenever this mapping was approved.
-        //   2. If this specific matched SQLGeneral user carries their own
-        //      verified CompanyId, it must still agree with the Company
-        //      this mapping is approved under — never written on a
-        //      conflicting identity.
-        if (!approvedDeptMapping.department.companyId) {
-          return { ok: false, reason: `Approved Department mapping's target no longer has a Company — refusing to write.` };
-        }
-        const structure = classifySqlGeneralChainStructure(placement.parentChain, placement.missingParent, placement.cycle);
-        if (structure.status === "unresolved") {
-          return { ok: false, reason: `Approved Department mapping failed re-validation at write time: ${structure.reason}` };
-        }
-        if (sqlGeneralCompanyId !== null) {
-          const companyMapping = await tx.sqlGeneralCompanyMapping.findFirst({ where: { companyId: approvedDeptMapping.department.companyId }, select: { sqlGeneralCompanyId: true } });
-          if (!companyMapping) {
-            return { ok: false, reason: `Approved Department mapping's target Company no longer has an approved SqlGeneralCompanyMapping — refusing to write.` };
-          }
-          if (sqlGeneralCompanyId !== companyMapping.sqlGeneralCompanyId) {
-            return {
-              ok: false,
-              reason: `This user's own verified SQLGeneral CompanyId ("${sqlGeneralCompanyId}") conflicts with the Company this Department mapping is approved under ("${companyMapping.sqlGeneralCompanyId}") — refusing to write on a conflicting identity.`,
-            };
-          }
-        }
-        department = approvedDeptMapping.department;
-      }
-      if (!department) {
-        department = await tx.department.findUnique({
-          where: { companyId_normalizedName: { companyId: company.id, normalizedName: normalizedDepartmentName } },
-        });
-      }
-      if (!department) {
-        return { ok: false, reason: `No existing Department "${departmentName}" under Company "${companyName}" — SQLGeneral Department auto-creation is not yet implemented.` };
-      }
-      if (!approvedDeptMapping && department.importSource !== OrganizationNodeSource.SQLGENERAL) {
-        // Same explicit-mapping exception as the Company check above — an
-        // approved Department mapping bypasses this, but never touches the
-        // Department's own ownership/fields/hierarchy either way.
-        return { ok: false, reason: `Department "${departmentName}" already exists and is not owned by SQLGeneral sync.` };
-      }
+      const resolved = await resolveSqlGeneralPlacementTarget(tx, placement, sqlGeneralCompanyId, lockRunId);
+      if (!resolved.ok) return resolved;
+      const { department } = resolved;
 
       const existingMembership = await tx.departmentMembership.findUnique({ where: { userId_departmentId: { userId, departmentId: department.id } } });
       if (existingMembership) {
@@ -307,6 +340,53 @@ async function applySqlGeneralDepartmentMembership(userId: string, placement: Re
       });
       return { ok: true };
     });
+  } finally {
+    await releaseOrganizationSyncLock(lockRunId);
+  }
+}
+
+/**
+ * SQLGeneral-authoritative PRIMARY Company/Department placement (REQUIRED
+ * DO #3) — gated by isSqlGeneralPrimaryPlacementEnabled (checked by the
+ * caller, processOne, not here) and reached only after the caller has
+ * already confirmed the matched SQLGeneral user is Active. Resolves the
+ * exact same Company/Department as applySqlGeneralDepartmentMembership
+ * (shared resolveSqlGeneralPlacementTarget, never a second resolution
+ * algorithm), then calls setPrimaryDepartmentMembership — the ONE
+ * canonical primary writer — with source: SQLGENERAL_DEPARTMENT and
+ * deactivateObsoleteAutomaticPrimary: true (REQUIRED DO #5: the obsolete
+ * old primary, including an unlocked MANUAL one, is fully deactivated on
+ * an A->B move). A locked current primary is reported back as a specific,
+ * distinguishable failure reason rather than a generic one, so the
+ * worker's own retry/FAILED_PERMANENT bookkeeping and the preview surface
+ * can both tell "blocked by an explicit admin lock" apart from "a real
+ * resolution failure." Also writes User.companyId directly (the only
+ * thing SQLGeneral ever needs to write outside
+ * setPrimaryDepartmentMembership's own column) — SQLGeneral is
+ * authoritative for Company too, per the same REQUIRED.
+ */
+async function applySqlGeneralPrimaryPlacement(userId: string, placement: ResolvedDepartmentPlacement, sqlGeneralCompanyId: string | null): Promise<ApplyOutcome> {
+  const lockRunId = `sqlgeneral-primary:${randomUUID()}`;
+  const acquired = await acquireOrganizationSyncLock(lockRunId);
+  if (!acquired) return { ok: false, reason: "Organization sync lock is held by another sync run." };
+
+  try {
+    const resolved = await prisma.$transaction((tx) => resolveSqlGeneralPlacementTarget(tx, placement, sqlGeneralCompanyId, lockRunId));
+    if (!resolved.ok) return resolved;
+    const { company, department } = resolved;
+
+    const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
+    const result = await setPrimaryDepartmentMembership(userId, department.id, MembershipSource.SQLGENERAL_DEPARTMENT, {
+      role: departmentDefault.role,
+      customRoleId: departmentDefault.customRoleId,
+      deactivateObsoleteAutomaticPrimary: true,
+    });
+    if (result.outcome === "blocked_primary_protected") {
+      return { ok: false, reason: "This user's primary department is explicitly locked against automatic placement — an admin must unlock it first." };
+    }
+
+    await prisma.user.update({ where: { id: userId }, data: { companyId: company.id } });
+    return { ok: true };
   } finally {
     await releaseOrganizationSyncLock(lockRunId);
   }
@@ -388,6 +468,29 @@ async function processOne(id: string, token: string, now: Date, departments: Sql
     }
 
     const sqlGeneralCompanyId = user.companyId !== null ? String(user.companyId) : null;
+
+    // Independent, second gate (isSqlGeneralSyncEnabled above only decides
+    // whether this worker claims/runs at all) — REQUIRED DO #3. When off
+    // (default), behavior is byte-identical to before: the existing
+    // SECONDARY-only applySqlGeneralDepartmentMembership path, unchanged.
+    if (isSqlGeneralPrimaryPlacementEnabled()) {
+      // REQUIRED: only place/move a PRIMARY from a matched row whose
+      // Active === true — an inactive HR record is treated as a stable,
+      // not-yet-resolvable state for primary-placement purposes, never
+      // used to place (or implicitly vacate) a user's real workspace
+      // access. Retried/eventually FAILED_PERMANENT via the SAME existing
+      // bounded-retry mechanism as every other failure reason here
+      // (REQUIRED DO #8: no new state machine).
+      if (user.active !== true) {
+        return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `SQLGeneral user "${attempt.sqlGeneralUsername}" is not Active — primary placement requires an active HR record.`, now);
+      }
+      const appliedPrimary = await applySqlGeneralPrimaryPlacement(attempt.userId, placementResult.placement, sqlGeneralCompanyId);
+      if (!appliedPrimary.ok) {
+        return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, appliedPrimary.reason, now);
+      }
+      return (await finalize(id, token, { status: "SUCCEEDED", attemptCount: attempt.attemptCount + 1, lastError: null }, now)) ? "succeeded" : "lost_claim";
+    }
+
     const applied = await applySqlGeneralDepartmentMembership(attempt.userId, placementResult.placement, sqlGeneralCompanyId);
     if (!applied.ok) {
       return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, applied.reason, now);
@@ -482,9 +585,48 @@ export interface SqlGeneralPreviewRow {
   conflictDetail: string | null;
   /** Which node level the conflict is actually at — null whenever localMatch isn't conflict_other_owner. Distinct from conflictDetail's free text so a caller can branch on it structurally. */
   conflictLevel: "company" | "department" | null;
+
+  // ─── PRIMARY-placement dimension (REQUIRED DO #7) — independent of the
+  // SECONDARY-membership resolution fields above, which are computed the
+  // same way regardless. Always populated, even when
+  // isSqlGeneralPrimaryPlacementEnabled() is currently false, so an admin
+  // can review the full would-be impact BEFORE ever turning that flag on. ──
+
+  /** This user's CURRENT active primary, before any change — null if they have none at all (pending/never placed). */
+  currentPrimaryDepartmentId: string | null;
+  currentPrimarySource: MembershipSource | null;
+  /** True when the current primary has an explicit admin lock (primaryLockedById set) — see setPrimaryDepartmentLock. */
+  currentPrimaryLocked: boolean;
+  /**
+   * What applySqlGeneralPrimaryPlacement would actually do for this user
+   * right now: "would_place" (a real, resolvable change — new placement or
+   * a genuine A->B move), "already_aligned" (current primary already
+   * matches the resolved department, source SQLGENERAL_DEPARTMENT — a
+   * no-op), or one of the blocked_* reasons, each corresponding exactly to
+   * a real failure/skip condition in processOne/applySqlGeneralPrimaryPlacement
+   * — never a guess. "n/a" only when usernameMatch/departmentResolution
+   * never got far enough to have an opinion (covered by the more specific
+   * blocked_* reasons otherwise).
+   */
+  primaryChangeOutcome: "would_place" | "already_aligned" | "blocked_locked" | "blocked_inactive_hr" | "blocked_unmapped_department" | "blocked_identity_unresolved" | "blocked_local_conflict" | "n/a";
 }
 
-function emptyPreviewRow(userId: string, sqlGeneralUsername: string | null, usernameMatch: SqlGeneralPreviewRow["usernameMatch"]): SqlGeneralPreviewRow {
+/** Shared by every early-exit branch of previewSqlGeneralUserSync — one lookup per user, reused for the primary-placement dimension regardless of how far SECONDARY resolution got. */
+async function currentPrimaryPreviewFields(userId: string): Promise<Pick<SqlGeneralPreviewRow, "currentPrimaryDepartmentId" | "currentPrimarySource" | "currentPrimaryLocked">> {
+  const current = await prisma.departmentMembership.findFirst({ where: { userId, isPrimary: true, isActive: true }, select: { departmentId: true, source: true, primaryLockedById: true } });
+  return {
+    currentPrimaryDepartmentId: current?.departmentId ?? null,
+    currentPrimarySource: current?.source ?? null,
+    currentPrimaryLocked: current ? current.primaryLockedById !== null : false,
+  };
+}
+
+function emptyPreviewRow(
+  userId: string,
+  sqlGeneralUsername: string | null,
+  usernameMatch: SqlGeneralPreviewRow["usernameMatch"],
+  current: Pick<SqlGeneralPreviewRow, "currentPrimaryDepartmentId" | "currentPrimarySource" | "currentPrimaryLocked">
+): SqlGeneralPreviewRow {
   return {
     userId,
     sqlGeneralUsername,
@@ -500,6 +642,8 @@ function emptyPreviewRow(userId: string, sqlGeneralUsername: string | null, user
     localMatch: "none",
     conflictDetail: null,
     conflictLevel: null,
+    ...current,
+    primaryChangeOutcome: usernameMatch === "unique" ? "n/a" : "blocked_identity_unresolved",
   };
 }
 
@@ -539,9 +683,10 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
 
   const rows: SqlGeneralPreviewRow[] = [];
   for (const userId of targetUserIds) {
+    const current = await currentPrimaryPreviewFields(userId);
     const attemptRow = attemptByUserId.get(userId);
     if (!attemptRow?.sqlGeneralUsername) {
-      rows.push(emptyPreviewRow(userId, attemptRow?.sqlGeneralUsername ?? null, "no_username_captured"));
+      rows.push(emptyPreviewRow(userId, attemptRow?.sqlGeneralUsername ?? null, "no_username_captured", current));
       continue;
     }
     const sqlGeneralUsername = attemptRow.sqlGeneralUsername;
@@ -553,20 +698,20 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
     if (matchResult.outcome !== "unique") {
-      rows.push(emptyPreviewRow(userId, sqlGeneralUsername, matchResult.outcome));
+      rows.push(emptyPreviewRow(userId, sqlGeneralUsername, matchResult.outcome, current));
       continue;
     }
 
     const { user } = matchResult;
     const sqlGeneralCompanyId = user.companyId !== null ? String(user.companyId) : null;
     if (user.hrDepartmentId === null) {
-      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique"), sqlGeneralCompanyId, company: user.company });
+      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique", current), sqlGeneralCompanyId, company: user.company, primaryChangeOutcome: "blocked_unmapped_department" });
       continue;
     }
 
     const placementResult = resolveSqlGeneralDepartmentPlacement(user.hrDepartmentId, departments);
     if (placementResult.outcome === "department_not_found") {
-      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique"), sqlGeneralCompanyId, hrDepartmentId: user.hrDepartmentId, departmentResolution: "department_not_found", company: user.company });
+      rows.push({ ...emptyPreviewRow(userId, sqlGeneralUsername, "unique", current), sqlGeneralCompanyId, hrDepartmentId: user.hrDepartmentId, departmentResolution: "department_not_found", company: user.company, primaryChangeOutcome: "blocked_unmapped_department" });
       continue;
     }
 
@@ -613,6 +758,7 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     // NEW SqlGeneralDepartmentMapping check only has to be written once and
     // applies identically to both paths (REQUIRED #6: "sync and preview
     // both resolve approved mappings consistently").
+    let proposedDepartmentId: string | null = null;
     if (resolvedCompany && departmentName) {
       const approvedDeptMapping = await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { department: true } });
       if (approvedDeptMapping) {
@@ -620,6 +766,7 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
         // authoritative regardless of the existing Department's own
         // ownership, which is never touched by this.
         localMatch = "approved_external_mapping";
+        proposedDepartmentId = approvedDeptMapping.department.id;
       } else {
         const existingDept = await prisma.department.findUnique({
           where: { companyId_normalizedName: { companyId: resolvedCompany.id, normalizedName: normalizeDepartmentName(departmentName) } },
@@ -630,8 +777,41 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
           conflictDetail = `Department "${departmentName}" already exists under Company "${resolvedCompany.name}" and is not owned by SQLGeneral sync.`;
         } else if (!existingDept) {
           conflictDetail = `No existing Department "${departmentName}" under Company "${resolvedCompany.name}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
+        } else {
+          proposedDepartmentId = existingDept.id;
         }
       }
+    }
+
+    // REQUIRED DO #7 — mirrors processOne/applySqlGeneralPrimaryPlacement's
+    // own checks exactly, so this preview is never more optimistic than
+    // what a real run would actually do:
+    //   - a local conflict (company OR department) always blocks, same as
+    //     applySqlGeneralPlacementTarget's own fail-closed resolution.
+    //   - an inactive HR record blocks (processOne's own gate), reported
+    //     distinctly from a resolution problem.
+    //   - an explicit admin lock on the CURRENT primary blocks ANY
+    //     automatic change, even one that would otherwise resolve cleanly.
+    //   - otherwise: already aligned (no-op) if the current primary is
+    //     already SQLGENERAL_DEPARTMENT-sourced and points at the exact
+    //     same department; a real, applicable change otherwise.
+    let primaryChangeOutcome: SqlGeneralPreviewRow["primaryChangeOutcome"];
+    if (localMatch === "conflict_other_owner") {
+      primaryChangeOutcome = "blocked_local_conflict";
+    } else if (proposedDepartmentId === null) {
+      // localMatch stays "none" for this case — a Company may still have
+      // been auto-creatable, but Department auto-creation is not
+      // implemented (same fail-closed reason resolveSqlGeneralPlacementTarget
+      // itself returns) — distinct from a genuine ownership conflict.
+      primaryChangeOutcome = "blocked_unmapped_department";
+    } else if (user.active !== true) {
+      primaryChangeOutcome = "blocked_inactive_hr";
+    } else if (current.currentPrimaryLocked) {
+      primaryChangeOutcome = "blocked_locked";
+    } else if (current.currentPrimaryDepartmentId === proposedDepartmentId && current.currentPrimarySource === MembershipSource.SQLGENERAL_DEPARTMENT) {
+      primaryChangeOutcome = "already_aligned";
+    } else {
+      primaryChangeOutcome = "would_place";
     }
 
     rows.push({
@@ -649,6 +829,8 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       localMatch,
       conflictDetail,
       conflictLevel,
+      ...current,
+      primaryChangeOutcome,
     });
   }
   return { ok: true, rows };

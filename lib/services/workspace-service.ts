@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { cache } from "react";
-import { Role } from "@prisma/client";
+import { MembershipSource, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { canViewAllDepartments } from "@/lib/permissions";
@@ -167,11 +167,45 @@ export async function resolveActiveWorkspace(
   }
 
   const memberships = await getUserDepartmentMemberships(userId);
+  const primary = memberships.find((m) => m.isPrimary);
+
+  // Pending-access gate (REQUIRED, DO #2 — broadened to close a second,
+  // related gap). Distinguishes two shapes that both look like "no primary
+  // membership" but must be treated oppositely:
+  //
+  //   - PENDING first-time placement: every membership this user holds is
+  //     purely AUTOMATIC (any non-MANUAL source — Microsoft mapping or a
+  //     SQLGeneral SECONDARY grant), with no primary among them at all.
+  //     No human admin has ever made an explicit access decision for this
+  //     user — they are, by definition, still awaiting their first
+  //     verified placement (SQLGeneral, or an explicit MANUAL admin edit).
+  //     They must NOT gain access through EITHER the single-membership
+  //     convenience fallback below OR the "2+ memberships, ambiguous ->
+  //     full union" fallback further down — both are real loopholes a
+  //     purely-automatic membership set could otherwise ride through,
+  //     regardless of how many such memberships happen to exist. This is
+  //     deliberately independent of isSqlGeneralPrimaryPlacementEnabled():
+  //     while the rollout gate is off, Microsoft still places a real
+  //     primary on every trusted login (see microsoft-department-sync-
+  //     service.ts), so this condition only becomes reachable once SQLGeneral
+  //     is live and a user hasn't been resolved yet — exactly the window
+  //     this gate exists to protect.
+  //   - LEGITIMATE secondary-only access: at least one membership is
+  //     MANUAL-sourced — a human admin deliberately granted this user
+  //     access independent of primary placement (e.g. the pre-existing
+  //     "member of A, B, C, no primary" shape — see
+  //     test-ticket-list-department-scope-regression.ts's noPrimaryUser).
+  //     This is untouched by this gate and keeps falling through to the
+  //     existing fallbacks exactly as before — "preserve previously
+  //     authorized secondary-only behavior."
+  const hasAnyManualMembership = memberships.some((m) => m.source === MembershipSource.MANUAL);
+  if (!primary && memberships.length > 0 && !hasAnyManualMembership) {
+    return { departmentId: null, isSystemAdmin: false, canViewAllDepartments: false, isAllSelected: false, departments: [] };
+  }
 
   const requestedValid = requestedDepartmentId
     ? memberships.find((m) => m.departmentId === requestedDepartmentId)
     : undefined;
-  const primary = memberships.find((m) => m.isPrimary);
 
   let departmentId: string | null = null;
   if (requestedValid) {

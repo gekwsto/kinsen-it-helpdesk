@@ -160,13 +160,13 @@ async function main() {
 
     // ══════════════ 8. Survives organization directory (full tenant) sync ══════════════
     console.log("\n=== 8. Custom role survives the full organization directory sync's primary-placement call ===\n");
-    await setPrimaryDepartmentMembership(user16.id, dept16.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteMicrosoftPrimary: true });
+    await setPrimaryDepartmentMembership(user16.id, dept16.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteAutomaticPrimary: true });
     db = await prisma.departmentMembership.findUniqueOrThrow({ where: { userId_departmentId: { userId: user16.id, departmentId: dept16.id } } });
     check("8. A full-tenant-sync-style call (source MICROSOFT_DEPARTMENT) never overwrites the existing MANUAL custom role", db.customRoleId === custom16.id && db.source === "MANUAL");
 
     // ══════════════ 9. Survives first-login reconciliation (same primitives, matching syncMicrosoftUserDepartment's exact sequence) ══════════════
     console.log("\n=== 9. Custom role survives a first-login-style reconciliation (primary placement + secondary mapping sync, in order) ===\n");
-    await setPrimaryDepartmentMembership(user16.id, dept16.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteMicrosoftPrimary: true });
+    await setPrimaryDepartmentMembership(user16.id, dept16.id, MembershipSource.MICROSOFT_DEPARTMENT, { role: DepartmentRole.REQUESTER, deactivateObsoleteAutomaticPrimary: true });
     await syncDepartmentMemberships(user16.id, []);
     db = await prisma.departmentMembership.findUniqueOrThrow({ where: { userId_departmentId: { userId: user16.id, departmentId: dept16.id } } });
     const finalPageRead = await readViaRealPageLoadQuery(user16.id, dept16.id);

@@ -4,7 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAdmin, requireAuth, hasPermission, canAssignUserToDepartment } from "@/lib/permissions";
 import { updateUserRoleSchema } from "@/lib/validations";
 import { translateGlobalRoleToDepartmentRole } from "@/lib/services/department-role-translation";
-import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
+import { setPrimaryDepartmentMembership, setPrimaryDepartmentLock } from "@/lib/services/department-membership-service";
 import { assertGlobalRoleAssignable, GlobalRoleAssignmentError, type GlobalRoleSelection } from "@/lib/services/global-role-assignment-service";
 
 const USER_INCLUDE = {
@@ -101,6 +101,14 @@ export async function PATCH(
       return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
     }
 
+    // Locking/unlocking primary-placement authority is an explicit,
+    // deliberately gated admin action (REQUIRED DO #4) — the SAME
+    // permission that gates every other account-level field, never the
+    // narrower department-assignment permission alone.
+    if (data.primaryDepartmentLocked !== undefined && !canManageUsers) {
+      return NextResponse.json({ error: "Forbidden", code: "missing_permission" }, { status: 403 });
+    }
+
     if (departmentSettingToValue) {
       const department = await prisma.department.findUnique({ where: { id: departmentId! }, select: { id: true } });
       if (!department) {
@@ -159,6 +167,16 @@ export async function PATCH(
     if (departmentSettingToValue) {
       const desiredRole = translateGlobalRoleToDepartmentRole(data.role);
       await setPrimaryDepartmentMembership(id, departmentId!, MembershipSource.MANUAL, { role: desiredRole });
+    }
+
+    // Applied AFTER any department change above, so a request that changes
+    // the primary department AND locks it in the same save locks the NEW
+    // row, never a now-stale previous one. Silently no-ops
+    // (ok:false, reason:"no_active_primary") if the user genuinely has no
+    // active primary at all (e.g. still pending first SQLGeneral
+    // placement) — nothing to lock yet; never fabricates one.
+    if (data.primaryDepartmentLocked !== undefined) {
+      await setPrimaryDepartmentLock(id, data.primaryDepartmentLocked, session.user.id);
     }
 
     const user = await prisma.user.findUnique({ where: { id }, include: USER_INCLUDE });

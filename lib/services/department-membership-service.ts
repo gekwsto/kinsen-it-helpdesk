@@ -412,7 +412,7 @@ export async function ensurePrimaryDepartmentMembership(
   });
 }
 
-export type SetPrimaryDepartmentMembershipOutcome = "unchanged" | "aligned" | "switched" | "blocked_manual_primary_protected";
+export type SetPrimaryDepartmentMembershipOutcome = "unchanged" | "aligned" | "switched" | "blocked_primary_protected";
 
 export interface SetPrimaryDepartmentMembershipOptions {
   /** Role to apply to the target row — ignored (existing value preserved) for an existing MANUAL-source or custom-role row, same protection as ensurePrimaryDepartmentMembership. */
@@ -430,18 +430,25 @@ export interface SetPrimaryDepartmentMembershipOptions {
    */
   customRoleId?: string | null;
   /**
-   * Microsoft-sourced calls ONLY (organization-directory-sync-service.ts,
-   * microsoft-department-sync-service.ts): when the CURRENT primary is being
-   * replaced and its source is itself Microsoft-derived (not MANUAL), fully
-   * deactivate it (isActive:false) instead of just demoting it to a
-   * secondary membership — "Microsoft organizational placement δεν πρέπει
-   * να αφήνει πίσω παλιό Microsoft-granted department access χωρίς λόγο."
-   * Admin-driven (source: MANUAL) calls must never pass this — an explicit
-   * admin primary change should never silently revoke the old department's
-   * access; the old primary is always just demoted to isPrimary:false,
-   * isActive unchanged, for a MANUAL call. Defaults to false.
+   * Automatic (non-MANUAL) calls ONLY — organization-directory-sync-service.ts,
+   * microsoft-department-sync-service.ts, and the SQLGeneral worker's
+   * applySqlGeneralPrimaryPlacement: when the CURRENT primary is being
+   * replaced, fully deactivate it (isActive:false) instead of just
+   * demoting it to a secondary membership — an automated placement should
+   * never leave behind old automated department access with no reason.
+   * Renamed from deactivateObsoleteMicrosoftPrimary: no longer
+   * Microsoft-specific, and no longer conditioned on the OLD row's own
+   * source being non-MANUAL — REQUIRED (DO #5): once a primary is
+   * unlocked, it is fully deactivated when superseded regardless of
+   * whether it happens to be MANUAL-sourced; only primaryLockedById
+   * protects a row from ever being reached this way at all (see the
+   * blocked_primary_protected check below). Admin-driven (source: MANUAL)
+   * calls must never pass this — an explicit admin primary change should
+   * never silently revoke the old department's access; the old primary is
+   * always just demoted to isPrimary:false, isActive unchanged, for a
+   * MANUAL call. Defaults to false.
    */
-  deactivateObsoleteMicrosoftPrimary?: boolean;
+  deactivateObsoleteAutomaticPrimary?: boolean;
 }
 
 export interface SetPrimaryDepartmentMembershipResult {
@@ -469,14 +476,17 @@ export interface SetPrimaryDepartmentMembershipResult {
  *   - a MANUAL secondary membership is NEVER touched by this function at all
  *     (only the current/target primary rows are ever written here).
  *
- * MANUAL-primary protection: if the user's CURRENT active primary is itself
- * source: MANUAL (an admin explicitly chose it) and this call's `source` is
- * anything else (a Microsoft sync signal), the primary is left completely
- * untouched and `outcome: "blocked_manual_primary_protected"` is returned —
- * mirrors syncDepartmentMemberships's existing "MANUAL rows are never
- * modified by sync" rule, applied to the primary designation too. A MANUAL
- * call (an admin explicitly re-choosing) always wins over any previous
- * MANUAL primary, same as it always did.
+ * EXPLICIT PRIMARY LOCK PROTECTION: if the user's CURRENT active primary
+ * has `primaryLockedById` set (an admin took the SEPARATE, DELIBERATE
+ * "Lock this user's primary department" action — see
+ * setPrimaryDepartmentLock below, never implied merely by source: MANUAL)
+ * and this call's `source` is anything other than MANUAL, the primary is
+ * left completely untouched and `outcome: "blocked_primary_protected"` is
+ * returned — an explicit, auditable override, not an inferred one. A
+ * MANUAL call (an admin directly re-choosing, via the Edit User flow)
+ * always proceeds regardless of lock state — "manual edits remain
+ * explicitly authorized" — the lock exists to stop AUTOMATIC writers
+ * (Microsoft, SQLGeneral), never a human admin acting directly.
  */
 export async function setPrimaryDepartmentMembership(
   userId: string,
@@ -484,21 +494,38 @@ export async function setPrimaryDepartmentMembership(
   source: MembershipSource,
   options: SetPrimaryDepartmentMembershipOptions
 ): Promise<SetPrimaryDepartmentMembershipResult> {
-  const { role, customRoleId = null, deactivateObsoleteMicrosoftPrimary = false } = options;
+  const { role, customRoleId = null, deactivateObsoleteAutomaticPrimary = false } = options;
 
   return prisma.$transaction(async (tx) => {
     const allMemberships = await tx.departmentMembership.findMany({ where: { userId } });
     const currentPrimary = allMemberships.find((m) => m.isPrimary && m.isActive) ?? null;
     const previousPrimaryDepartmentId = currentPrimary?.departmentId ?? null;
 
+    // Two independent protections against a non-MANUAL caller trying to
+    // move a DIFFERENT department's worth of primary onto this user:
+    //   1. An explicit admin lock (primaryLockedById) blocks ANY automatic
+    //      caller — Microsoft or SQLGeneral alike (REQUIRED DO #4, prior
+    //      round).
+    //   2. Microsoft specifically (source === MICROSOFT_DEPARTMENT) also
+    //      NEVER overrides a MANUAL-sourced primary, locked or not — this
+    //      restores Microsoft's original, pre-SQLGeneral-round behavior
+    //      (REQUIRED: "preserve existing Microsoft placement behavior" —
+    //      that behavior always fully protected a MANUAL choice from
+    //      Microsoft, unconditionally). Deliberately NOT extended to
+    //      SQLGENERAL_DEPARTMENT: the prior round's explicit decision that
+    //      an UNLOCKED MANUAL row may legitimately be moved by SQLGeneral
+    //      (a routine admin edit should not permanently block correct
+    //      SQLGeneral placement) stays exactly as it was — only an
+    //      explicit lock protects a MANUAL row from SQLGeneral.
     if (
       currentPrimary &&
-      currentPrimary.source === MembershipSource.MANUAL &&
       source !== MembershipSource.MANUAL &&
-      currentPrimary.departmentId !== departmentId
+      currentPrimary.departmentId !== departmentId &&
+      (currentPrimary.primaryLockedById !== null ||
+        (currentPrimary.source === MembershipSource.MANUAL && source === MembershipSource.MICROSOFT_DEPARTMENT))
     ) {
       return {
-        outcome: "blocked_manual_primary_protected" as const,
+        outcome: "blocked_primary_protected" as const,
         primaryMembership: currentPrimary,
         previousPrimaryDepartmentId,
       };
@@ -571,11 +598,16 @@ export async function setPrimaryDepartmentMembership(
     }
 
     if (currentPrimary && currentPrimary.id !== targetRow.id) {
-      const oldIsManual = currentPrimary.source === MembershipSource.MANUAL;
-      const shouldDeactivate = !oldIsManual && deactivateObsoleteMicrosoftPrimary;
+      // No `!oldIsManual` check here (REQUIRED, DO #5) — a LOCKED old
+      // primary already blocked this whole call above for any non-MANUAL
+      // caller, so by the time execution reaches here the old primary is
+      // either unlocked (safe to fully deactivate, including an unlocked
+      // MANUAL-sourced one) or this call is itself MANUAL (an admin
+      // directly superseding it, which never passes
+      // deactivateObsoleteAutomaticPrimary anyway).
       await tx.departmentMembership.update({
         where: { id: currentPrimary.id },
-        data: shouldDeactivate ? { isPrimary: false, isActive: false } : { isPrimary: false },
+        data: deactivateObsoleteAutomaticPrimary ? { isPrimary: false, isActive: false } : { isPrimary: false },
       });
     }
 
@@ -601,4 +633,53 @@ export async function setPrimaryDepartmentMembership(
 
     return { outcome, primaryMembership: targetRow, previousPrimaryDepartmentId };
   });
+}
+
+export type SetPrimaryDepartmentLockResult = { ok: true; locked: boolean } | { ok: false; reason: "no_active_primary" };
+
+/**
+ * The ONE place that ever writes `DepartmentMembership.primaryLockedById`/
+ * `primaryLockedAt` — a deliberate, separate admin action ("Lock this
+ * user's primary department against SQLGeneral/Microsoft"), never implied
+ * by source: MANUAL and never set as a side effect of
+ * setPrimaryDepartmentMembership itself. Locks/unlocks whichever row is
+ * CURRENTLY the user's active primary at call time — if that row is later
+ * replaced (e.g. a subsequent MANUAL admin change targets a different
+ * department), the lock does NOT carry over to the new row automatically;
+ * an admin must explicitly re-lock if they want the new department locked
+ * too. Fails closed (`no_active_primary`) rather than locking nothing or
+ * guessing a department, if the user currently has no active primary at
+ * all (e.g. still pending first SQLGeneral placement).
+ */
+export async function setPrimaryDepartmentLock(userId: string, locked: boolean, lockedById: string): Promise<SetPrimaryDepartmentLockResult> {
+  const currentPrimary = await prisma.departmentMembership.findFirst({ where: { userId, isPrimary: true, isActive: true } });
+  if (!currentPrimary) return { ok: false, reason: "no_active_primary" };
+  await prisma.departmentMembership.update({
+    where: { id: currentPrimary.id },
+    data: locked ? { primaryLockedById: lockedById, primaryLockedAt: new Date() } : { primaryLockedById: null, primaryLockedAt: null },
+  });
+  return { ok: true, locked };
+}
+
+/**
+ * True when this user's CURRENT active primary DepartmentMembership is
+ * SQLGENERAL_DEPARTMENT-sourced — the one existing signal both Microsoft
+ * sync entry points (login, lib/services/microsoft-department-sync-service.ts;
+ * full tenant scan, lib/services/organization-directory-sync-service.ts)
+ * check before writing User.companyId, so SQLGeneral's verified Company is
+ * never silently clobbered by a later Microsoft sync once it has become
+ * authoritative for this user (REQUIRED: resolve the User.companyId
+ * dual-writer precedence). Deliberately reuses the EXISTING primary-
+ * membership source signal — no new field, no new mechanism — and is
+ * checked independently of isSqlGeneralPrimaryPlacementEnabled() so the
+ * precedence holds even across a rollout-flag rollback (flipped ON long
+ * enough to place a user, then OFF again): Microsoft must still never
+ * reclaim a Company it is no longer authoritative for.
+ */
+export async function isPrimaryCompanySqlGeneralAuthoritative(userId: string): Promise<boolean> {
+  const currentPrimary = await prisma.departmentMembership.findFirst({
+    where: { userId, isPrimary: true, isActive: true },
+    select: { source: true },
+  });
+  return currentPrimary?.source === MembershipSource.SQLGENERAL_DEPARTMENT;
 }

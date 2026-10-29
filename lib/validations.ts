@@ -524,6 +524,14 @@ export const updateUserRoleSchema = z.object({
   // as the same write (see app/api/admin/users/[id]/route.ts).
   departmentId: z.string().nullable().optional(),
   primaryDepartmentId: z.string().nullable().optional(),
+  // Explicit, separate action (REQUIRED DO #4) — never implied by setting
+  // primaryDepartmentId above. Omitted entirely: lock state is left
+  // exactly as it was. true/false: lock/unlock the user's CURRENT active
+  // primary (see setPrimaryDepartmentLock). Composable with a primary
+  // department change in the SAME request — the route applies the
+  // department change first, then locks/unlocks whichever row ends up
+  // primary as a result.
+  primaryDepartmentLocked: z.boolean().optional(),
   businessUnitId: z.string().nullable().optional(),
   isActive: z.boolean().optional(),
   email: z
