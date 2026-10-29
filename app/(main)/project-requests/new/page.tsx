@@ -26,16 +26,20 @@ export default async function NewProjectRequestPage() {
   const departments = workspace.departments;
   const defaultDepartmentId = workspace.isAllSelected ? undefined : workspace.departmentId ?? undefined;
 
-  // The requester's OWN verified SQLGeneral direct manager — never
-  // Company/Department, never a permission-holder pool. Three outcomes:
-  //   - "has_candidates": show the (usually single) verified manager for
-  //     explicit selection, exactly like the prior picker, just restricted.
-  //   - "no_manager": a VERIFIED fact about this requester's own SQLGeneral
-  //     record — the form renders with zero intermediate-approver UI, and
-  //     submits straight to Final Approval.
-  //   - "unresolved": anything short of a verified fact either way (API
-  //     failure, unmatched/ambiguous identity, no TicketApp account,
-  //     inactive account) — submission is blocked entirely. Never treated
+  // The requester's OWN verified SQLGeneral manager CHAIN (direct manager,
+  // that manager's own manager, and so on) — never Company/Department,
+  // never a permission-holder pool. Three outcomes:
+  //   - "has_candidates": every eligible manager in the chain, each
+  //     carrying its own real hierarchy `level` (1 = direct manager), for
+  //     explicit selection — exactly like the prior single-manager picker,
+  //     just extended to the full chain.
+  //   - "no_manager": a VERIFIED fact — either the requester has no
+  //     manager at all, or the whole chain was walked to a genuine root
+  //     with zero eligible candidates found — the form renders with zero
+  //     intermediate-approver UI, and submits straight to Final Approval.
+  //   - "unresolved": the chain's own STRUCTURE couldn't be fully, honestly
+  //     verified (API failure, unmatched/ambiguous identity, self-
+  //     reference, cycle) — submission is blocked entirely. Never treated
   //     as "no manager".
   const candidateResolution = await resolveIntermediateApproverCandidates(session.user.id);
 

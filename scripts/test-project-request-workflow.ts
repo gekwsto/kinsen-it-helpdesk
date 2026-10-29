@@ -52,6 +52,11 @@ async function runCleanup(steps: [string, () => Promise<unknown>][]) {
 }
 
 let currentSession: { user: { id: string; role: any; customRoleId: string | null } } | null = null;
+// Outside Next's bundler there is no "react-server" resolve condition, so the
+// "server-only" package's conditional-exports guard always resolves to its
+// throwing stub. Mock it to a no-op so that notification creation's real
+// transitive import of it (via lib/web-push.ts) succeeds under plain node.
+mock.module("server-only", { namedExports: {} });
 mock.module("@/lib/auth", { namedExports: { auth: async () => currentSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
 
 const RUN_ID = Date.now();
@@ -83,8 +88,22 @@ async function main() {
   // captureSqlGeneralUsername below), preserving this file's own
   // clearIntermediate helper exactly as before.
   const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
-  const sqlGeneralBulkUsers: any[] = [];
-  mock.module("@/lib/sqlgeneral-api-client", { namedExports: { ...realSqlGeneralClient, listAllSqlGeneralUsers: async () => ({ ok: true, users: sqlGeneralBulkUsers }) } });
+  // resolveIntermediateApproverCandidates now resolves each identity via a
+  // single exact lookup (findSqlGeneralUserByUsername), never the full
+  // paginated roster — mocked accordingly, keyed by username, one entry
+  // per ROW (an array per key so an ambiguous username can be represented).
+  const sqlGeneralRowsByUsername = new Map<string, any[]>();
+  mock.module("@/lib/sqlgeneral-api-client", {
+    namedExports: {
+      ...realSqlGeneralClient,
+      findSqlGeneralUserByUsername: async (username: string) => {
+        const rows = sqlGeneralRowsByUsername.get(username) ?? [];
+        if (rows.length === 0) return { outcome: "not_found" as const };
+        if (rows.length > 1) return { outcome: "ambiguous" as const, count: rows.length };
+        return { outcome: "unique" as const, user: rows[0] };
+      },
+    },
+  });
 
   const { NextRequest } = await import("next/server");
   const { Role, RoleScope, DepartmentRole, MembershipSource, AuthProvider } = await import("@prisma/client");
@@ -117,7 +136,8 @@ async function main() {
     return u;
   }
   function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
-    sqlGeneralBulkUsers.push({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+    if (!sqlGeneralRowsByUsername.has(username)) sqlGeneralRowsByUsername.set(username, []);
+    sqlGeneralRowsByUsername.get(username)!.push({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
   }
   async function captureSqlGeneralUsername(userId: string, username: string) {
     await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId, sqlGeneralUsername: username, status: "SUCCEEDED" } });

@@ -9,7 +9,7 @@ import { ALL_WORKSPACES_VALUE } from "@/types/department";
 import { createInAppNotification, dispatchCreatedNotification } from "@/lib/notifications/create-notification";
 import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/services/project-request-setup-reminder-service";
 import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
-import { listAllSqlGeneralUsers } from "@/lib/sqlgeneral-api-client";
+import { findSqlGeneralUserByUsername, type SqlGeneralUserRecord } from "@/lib/sqlgeneral-api-client";
 import { wholeCalendarDaysBetween } from "@/lib/date-only";
 import { Role, type ProjectRequestStatus, type Prisma } from "@prisma/client";
 
@@ -77,37 +77,103 @@ export async function notifyEligibleApproversOfSubmission(departmentId: string, 
 
 // ─── Intermediate stage: requester-selected, unanimous, multi-approver ─────
 
+export interface IntermediateApproverCandidate {
+  id: string;
+  name: string | null;
+  email: string;
+  /**
+   * The candidate's REAL depth in the requester's verified SQLGeneral
+   * chain — 1 = direct manager, 2 = that manager's own manager, etc. —
+   * NEVER renumbered when an intervening level is skipped (no TicketApp
+   * account / inactive / claimed by more than one local account), so a
+   * level-2 candidate is always honestly labeled "2", never silently
+   * promoted to "1" just because level 1 wasn't selectable.
+   */
+  level: number;
+}
+
 export type IntermediateApproverCandidateResolution =
-  | { status: "has_candidates"; candidates: { id: string; name: string | null; email: string }[] }
-  // A VERIFIED fact about the requester's own SQLGeneral record: their
-  // managerAMAccountName is genuinely null. The intermediate stage is
-  // skipped entirely for this request (see resolveIntermediateApprovers).
+  | { status: "has_candidates"; candidates: IntermediateApproverCandidate[] }
+  // A VERIFIED fact, and ONLY this fact: the requester's OWN SQLGeneral
+  // record has a genuinely null managerAMAccountName — they have no
+  // manager at all, so there was never a chain to walk in the first
+  // place. NEVER returned just because a real chain yielded zero eligible
+  // candidates — see "unresolved" below for that case, which is
+  // deliberately distinct and still blocks submission.
   | { status: "no_manager" }
-  // Anything that stops short of a verified "this requester has no
-  // manager" — the requester's own SQLGeneral identity isn't captured/
-  // doesn't resolve/is ambiguous, the SQLGeneral API/pagination failed, the
-  // manager's own identity doesn't resolve/is ambiguous, the manager has no
-  // TicketApp account, or the manager's TicketApp account is inactive.
-  // NEVER treated as "no_manager" — see this function's own doc comment.
+  // Everything that stops short of the ONE verified "no_manager" fact
+  // above: the chain's own STRUCTURE couldn't be fully, honestly verified
+  // (a SQLGeneral API/pagination failure, the requester's own identity
+  // isn't captured/doesn't resolve/is ambiguous, or SOMEWHERE in the chain
+  // a claimed manager doesn't resolve/is ambiguous/self-references/
+  // cycles) — OR the requester genuinely HAS a verified manager chain, but
+  // not one ancestor along it currently has an eligible active TicketApp
+  // account to act as approver. Both block submission outright; neither is
+  // ever treated as "no_manager" — a real manager existing, just not yet
+  // onboarded to TicketApp, must never be silently skipped as if no
+  // approval step were required at all.
   | { status: "unresolved"; reason: string };
 
+/** Walking up to this many levels before giving up — the SAME defensive bound getOrganizationContext (organization-tree-service.ts) uses for its own local manager-chain walk. Real cycles are already caught explicitly below; this only guards a pathologically/corruptly deep chain. */
+const MAX_MANAGER_CHAIN_DEPTH = 50;
+
+type SqlGeneralIdentityLookup = { outcome: "unique"; user: SqlGeneralUserRecord } | { outcome: "not_found" } | { outcome: "ambiguous" } | { outcome: "error"; reason: string };
+
 /**
- * The requester's intermediate-approver candidate pool is their own
- * VERIFIED SQLGeneral direct manager — never Company/Department, never
- * inferred, never a global permission grant (the prior design; see
- * decideIntermediateApproval's own doc comment for the matching
- * authorization change this round makes). Resolution mirrors the
- * manager-chain logic in sqlgeneral-organization-tree-service.ts exactly
- * (same fail-closed semantics for an ambiguous SQLGeneral username), scoped
- * to a single requester rather than the whole roster.
+ * Resolves exactly ONE SQLGeneral identity via a single exact OData filter
+ * (findSqlGeneralUserByUsername's own `$filter=Username eq '...'`) — never
+ * the full paginated roster (listAllSqlGeneralUsers), which is what made
+ * resolving even one manager level expensive regardless of chain depth.
+ * findSqlGeneralUserByUsername throws on an API/pagination failure (see its
+ * own doc comment) rather than returning a typed failure — caught here and
+ * converted into the same "error" outcome every other failure mode in this
+ * file already uses, so every caller has one uniform shape to check.
+ */
+async function lookupSqlGeneralIdentity(username: string): Promise<SqlGeneralIdentityLookup> {
+  try {
+    const result = await findSqlGeneralUserByUsername(username);
+    if (result.outcome === "unique") return { outcome: "unique", user: result.user };
+    if (result.outcome === "not_found") return { outcome: "not_found" };
+    return { outcome: "ambiguous" };
+  } catch (err) {
+    return { outcome: "error", reason: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * The requester's intermediate-approver candidate pool is every eligible
+ * manager in their own VERIFIED SQLGeneral chain (direct manager, that
+ * manager's own manager, and so on) — never Company/Department, never
+ * inferred, never a global permission grant, and never manager2AMAccountName/
+ * manager3AMAccountName (see this file's header for why — those fields are
+ * read by the SQLGeneral API client but deliberately never consulted for
+ * placement anywhere in this codebase, "never skip levels").
  *
- * Fails CLOSED to "unresolved", never "no_manager", at every step except
- * one: only a requester's own SQLGeneral row with a genuinely null
- * managerAMAccountName is "no_manager". An API/pagination failure, an
- * unmatched/ambiguous requester or manager identity, a manager with no
- * TicketApp account, or an inactive manager account are all "unresolved" —
- * the business rule this exists to enforce ("Unresolved manager/API
- * failure must never be treated as no manager").
+ * Two genuinely different kinds of problem are handled differently,
+ * deliberately:
+ *   - A STRUCTURAL problem anywhere in the chain (the requester's own
+ *     identity, or ANY ancestor's) — not found, ambiguous, self-reference,
+ *     cycle, or a live API/pagination failure — fails the WHOLE resolution
+ *     closed ("unresolved"), discarding any candidates already found. Once
+ *     the chain's own shape can't be fully, honestly verified up to a real
+ *     root, nothing beyond the break is knowable, so presenting only the
+ *     candidates found below it would misrepresent an incomplete list as a
+ *     complete one — never silently truncated.
+ *   - A LOCAL-ACCOUNT problem on one SPECIFIC, structurally-verified
+ *     ancestor (no TicketApp account, claimed by more than one TicketApp
+ *     account, or an inactive account) only excludes THAT ancestor from
+ *     being offered as a candidate — the walk continues upward through
+ *     them regardless, since their own place in the verified chain, and
+ *     their own managerAMAccountName, are still real, known facts.
+ *
+ * "no_manager" is reserved EXCLUSIVELY for a requester whose OWN
+ * managerAMAccountName is verified null — there was never a chain to walk.
+ * A requester who DOES have a manager chain, walked cleanly to a genuine
+ * root with no structural problem anywhere, but with zero ELIGIBLE
+ * (local, active TicketApp) candidates found along the way, gets
+ * "unresolved" instead — a real manager existing with nobody currently
+ * able to act on it must still block submission, never be silently
+ * treated as if no manager existed at all.
  */
 export async function resolveIntermediateApproverCandidates(requesterId: string): Promise<IntermediateApproverCandidateResolution> {
   const requesterAttempt = await prisma.sqlGeneralUserSyncAttempt.findUnique({
@@ -118,49 +184,76 @@ export async function resolveIntermediateApproverCandidates(requesterId: string)
     return { status: "unresolved", reason: "Your SQLGeneral identity has not been captured yet — sign out and back in, or contact an administrator." };
   }
 
-  const usersResult = await listAllSqlGeneralUsers();
-  if (!usersResult.ok) {
-    return { status: "unresolved", reason: `Could not verify your manager against SQLGeneral right now (${usersResult.reason}).` };
+  const requesterLookup = await lookupSqlGeneralIdentity(requesterAttempt.sqlGeneralUsername);
+  if (requesterLookup.outcome === "error") return { status: "unresolved", reason: `Could not verify your manager chain against SQLGeneral right now (${requesterLookup.reason}).` };
+  if (requesterLookup.outcome === "not_found") return { status: "unresolved", reason: "Your SQLGeneral identity was not found in current SQLGeneral data." };
+  if (requesterLookup.outcome === "ambiguous") return { status: "unresolved", reason: "Your SQLGeneral identity is ambiguous (it matches more than one SQLGeneral record)." };
+
+  const visitedUsernames = new Set<string>([requesterLookup.user.username]);
+  const candidates: IntermediateApproverCandidate[] = [];
+  let current = requesterLookup.user;
+  let level = 0;
+  // True the moment the requester's OWN managerAMAccountName is confirmed
+  // non-null — i.e., a real chain exists to walk at all. "no_manager" is
+  // reserved EXCLUSIVELY for this flag staying false (the requester's own
+  // record verifies they have no manager, full stop) — never for a real
+  // chain that simply yields zero ELIGIBLE (active-TicketApp-account)
+  // candidates along the way, which is a distinct, blocking "unresolved"
+  // outcome (see the end of this function) — a verified manager existing
+  // with nobody currently able to act on it must never be silently treated
+  // as if no manager existed, since that would skip a real, required
+  // approval step.
+  let hasManagerChain = false;
+
+  while (true) {
+    level++;
+    if (level > MAX_MANAGER_CHAIN_DEPTH) {
+      return { status: "unresolved", reason: "Your SQLGeneral manager chain is unexpectedly deep — cannot be safely verified." };
+    }
+
+    const managerUsername = current.managerAMAccountName?.trim() || null;
+    if (managerUsername === null) break; // a genuine, verified root — the chain is fully, honestly resolved
+    hasManagerChain = true;
+
+    if (managerUsername === current.username || visitedUsernames.has(managerUsername)) {
+      return { status: "unresolved", reason: "Your SQLGeneral manager chain contains a cycle or self-reference — cannot be safely verified." };
+    }
+
+    const managerLookup = await lookupSqlGeneralIdentity(managerUsername);
+    if (managerLookup.outcome === "error") return { status: "unresolved", reason: `Could not verify your manager chain against SQLGeneral right now (${managerLookup.reason}).` };
+    if (managerLookup.outcome === "not_found") return { status: "unresolved", reason: `A manager in your chain (SQLGeneral identity "${managerUsername}") was not found in current SQLGeneral data.` };
+    if (managerLookup.outcome === "ambiguous") return { status: "unresolved", reason: `A manager in your chain (SQLGeneral identity "${managerUsername}") is ambiguous in SQLGeneral data.` };
+
+    visitedUsernames.add(managerUsername);
+
+    const localAttempts = await prisma.sqlGeneralUserSyncAttempt.findMany({
+      where: { sqlGeneralUsername: managerUsername },
+      select: { user: { select: { id: true, name: true, email: true, isActive: true } } },
+    });
+    if (localAttempts.length === 1 && localAttempts[0].user.isActive) {
+      candidates.push({ id: localAttempts[0].user.id, name: localAttempts[0].user.name, email: localAttempts[0].user.email, level });
+    }
+    // localAttempts.length === 0 (no TicketApp account), > 1 (claimed by
+    // more than one local account), or an inactive account: this ancestor
+    // is skipped as a candidate — never a structural failure (their own
+    // SQLGeneral identity just above was verified fine) — and the walk
+    // continues through them regardless, per this function's own doc
+    // comment.
+
+    current = managerLookup.user;
   }
 
-  const requesterMatches = usersResult.users.filter((u) => u.username === requesterAttempt.sqlGeneralUsername);
-  if (requesterMatches.length === 0) {
-    return { status: "unresolved", reason: "Your SQLGeneral identity was not found in current SQLGeneral data." };
+  if (candidates.length === 0) {
+    if (!hasManagerChain) return { status: "no_manager" };
+    // A real, verified, structurally-sound manager chain exists, but not a
+    // single ancestor in it currently has an eligible active TicketApp
+    // account — this is NEVER "no_manager" (a real manager genuinely
+    // exists; approval cannot be silently skipped just because they
+    // haven't been onboarded to TicketApp yet) — block submission closed,
+    // same as any other unresolved case.
+    return { status: "unresolved", reason: "Your verified SQLGeneral manager chain exists, but none of your managers currently have an active TicketApp account to intermediate-approve this request. Contact an administrator." };
   }
-  if (requesterMatches.length > 1) {
-    return { status: "unresolved", reason: "Your SQLGeneral identity is ambiguous (it matches more than one SQLGeneral record)." };
-  }
-
-  const managerUsername = requesterMatches[0].managerAMAccountName?.trim() || null;
-  if (managerUsername === null) return { status: "no_manager" };
-  if (managerUsername === requesterMatches[0].username) {
-    return { status: "unresolved", reason: "Your SQLGeneral record claims you as your own manager — cannot be verified." };
-  }
-
-  const managerMatches = usersResult.users.filter((u) => u.username === managerUsername);
-  if (managerMatches.length === 0) {
-    return { status: "unresolved", reason: "Your manager's SQLGeneral identity was not found in current SQLGeneral data." };
-  }
-  if (managerMatches.length > 1) {
-    return { status: "unresolved", reason: "Your manager's SQLGeneral identity is ambiguous (it matches more than one SQLGeneral record)." };
-  }
-
-  const localAttempts = await prisma.sqlGeneralUserSyncAttempt.findMany({
-    where: { sqlGeneralUsername: managerUsername },
-    select: { userId: true, user: { select: { id: true, name: true, email: true, isActive: true } } },
-  });
-  if (localAttempts.length === 0) {
-    return { status: "unresolved", reason: "Your manager does not have a TicketApp account yet — contact an administrator." };
-  }
-  if (localAttempts.length > 1) {
-    return { status: "unresolved", reason: "Your manager's SQLGeneral identity is claimed by more than one TicketApp account — contact an administrator." };
-  }
-  const managerUser = localAttempts[0].user;
-  if (!managerUser.isActive) {
-    return { status: "unresolved", reason: "Your manager's TicketApp account is inactive — contact an administrator." };
-  }
-
-  return { status: "has_candidates", candidates: [{ id: managerUser.id, name: managerUser.name, email: managerUser.email }] };
+  return { status: "has_candidates", candidates };
 }
 
 export type IntermediateApproverResolution =

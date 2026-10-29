@@ -711,6 +711,14 @@ model SqlGeneralUserSyncAttempt {
   updatedAt          DateTime                 @updatedAt
 
   @@index([status])
+  // Looked up by sqlGeneralUsername (never userId, already @unique) to
+  // resolve a verified SQLGeneral identity to its local TicketApp account —
+  // see resolveIntermediateApproverCandidates in
+  // lib/services/project-request-service.ts, which does this once per
+  // manager-chain level, and the SQLGeneral manager-first org chart's own
+  // anchor resolution. Without this index every such lookup is a full
+  // table scan.
+  @@index([sqlGeneralUsername])
 }
 
 // Explicit, admin-approved bridge from a SQLGeneral Company to an EXISTING
