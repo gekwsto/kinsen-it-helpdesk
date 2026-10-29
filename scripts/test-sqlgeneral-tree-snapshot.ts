@@ -114,7 +114,8 @@ async function main() {
     namedExports: { ...realClient, listAllSqlGeneralUsers: (o?: { activeOnly?: boolean }) => mockListAllUsers(o), findSqlGeneralUserByUsername: (u: string) => mockFindUserByUsername(u) },
   });
 
-  const { Role, AuthProvider, SqlGeneralTreeSnapshotTrigger } = await import("@prisma/client");
+  const { Role, AuthProvider, SqlGeneralTreeSnapshotTrigger, RoleScope } = await import("@prisma/client");
+  const { hasPermission } = await import("@/lib/permissions");
   const snapshotService = await import("@/lib/services/sqlgeneral-tree-snapshot-service");
   const treeRoute = await import("@/app/api/admin/organization/sqlgeneral-tree/route");
   const refreshRoute = await import("@/app/api/admin/organization/sqlgeneral-tree/refresh/route");
@@ -310,12 +311,45 @@ async function main() {
     const adminStatusBody = await adminStatusRes.json();
     check("8d. ADMIN gets 200 on .../status with latestSuccessful + latestRun + running fields", adminStatusRes.status === 200 && !!adminStatusBody.latestSuccessful && !!adminStatusBody.latestRun && typeof adminStatusBody.running === "boolean", JSON.stringify(adminStatusBody));
 
+    console.log("\n=== 8e. A NON-ADMIN user who nonetheless holds organization.sqlgeneralSync (via a custom role) sees the tree but NEVER the raw diagnostic arrays ===\n");
+    const diagCustomRole = await prisma.customRole.create({ data: { key: `SGTREE_DIAG_${RUN_ID}`, name: `SGTree Diag ${RUN_ID}`, isBuiltIn: false, scope: RoleScope.GLOBAL, isActive: true } });
+    const sqlgeneralSyncPermission = await prisma.permission.findUnique({ where: { key: "organization.sqlgeneralSync" } });
+    if (!sqlgeneralSyncPermission) {
+      check("8e. (setup) organization.sqlgeneralSync permission is seeded", false, "not found — cannot run this check");
+    } else {
+      await prisma.rolePermission.create({ data: { roleKey: diagCustomRole.key, permissionId: sqlgeneralSyncPermission.id } });
+      const nonAdminWithView = await makeUser("nonadminview", Role.USER);
+      await prisma.user.update({ where: { id: nonAdminWithView }, data: { customRoleId: diagCustomRole.id } });
+
+      const sanityCheck = await hasPermission(Role.USER, "organization.sqlgeneralSync", diagCustomRole.id);
+      check("8e. (setup) the custom role really does grant organization.sqlgeneralSync to a non-ADMIN role", sanityCheck === true);
+
+      currentSession = { user: { id: nonAdminWithView, role: Role.USER, customRoleId: diagCustomRole.id } };
+      const nonAdminTreeRes = await treeRoute.GET();
+      const nonAdminTreeBody = await nonAdminTreeRes.json();
+      check("8f. a non-ADMIN with view permission still gets 200 (never 403) — they CAN see the tree itself", nonAdminTreeRes.status === 200);
+      check("8g. ...and the tree DATA is still present for them", Array.isArray(nonAdminTreeBody.tree));
+      check(
+        "8h. ...but unresolvedUsers/unresolvedManagerLinks are COMPLETELY ABSENT from their response — never even an empty array, never exposed to a non-ADMIN caller",
+        nonAdminTreeBody.unresolvedUsers === undefined && nonAdminTreeBody.unresolvedManagerLinks === undefined,
+        JSON.stringify(nonAdminTreeBody)
+      );
+
+      const nonAdminStatusRes = await statusRoute.GET();
+      check("8i. a non-ADMIN with view permission also gets 200 (not 403) on .../status — status itself isn't admin-only, only the raw diagnostic arrays on the tree route are", nonAdminStatusRes.status === 200);
+
+      await prisma.rolePermission.deleteMany({ where: { roleKey: diagCustomRole.key } });
+      await prisma.customRole.delete({ where: { id: diagCustomRole.id } });
+    }
+    currentSession = null;
+
     console.log("\n=== 9. Project Request's OWN SQLGeneral lookups are completely independent of this snapshot's state ===\n");
     // Wipe every snapshot row entirely — if Project Request's manager-chain
     // resolution were somehow coupled to this table, it would now fail/behave
     // differently. It must not: it does its own direct, live
     // findSqlGeneralUserByUsername calls, never touching the snapshot table.
     await prisma.sqlGeneralOrganizationTreeSnapshot.deleteMany({});
+    sessionFor(admin, Role.ADMIN); // explicit — never relies on whatever session an earlier section happened to leave active
     fixtureUsers = [fakeSqlUser("pr-root-mgr", null)];
     const prRequester = await makeUser("prrequester", Role.USER);
     await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: prRequester, sqlGeneralUsername: "pr-root-mgr", status: "PENDING" } });

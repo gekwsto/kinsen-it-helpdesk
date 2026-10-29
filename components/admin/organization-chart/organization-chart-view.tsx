@@ -24,7 +24,12 @@ interface RawTreeNode {
   [key: string]: unknown;
 }
 
-type Mode = "departments" | "people" | "sqlgeneral";
+// "people" (People / Reporting Lines) was removed from this UI — the
+// underlying service/route/components it used
+// (lib/services/organization-tree-service.ts's getPeopleTree,
+// /api/organization/people-tree, PeopleNode) are untouched and still
+// reused by "sqlgeneral" mode's own rendering below.
+type Mode = "departments" | "sqlgeneral";
 
 interface UnresolvedSqlGeneralUser {
   userId: string;
@@ -32,7 +37,7 @@ interface UnresolvedSqlGeneralUser {
 }
 interface UnresolvedSqlGeneralManagerLink {
   sqlGeneralUsername: string;
-  reason: "self_reference" | "missing_manager" | "ambiguous_manager" | "cycle";
+  reason: "self_reference" | "missing_manager" | "ambiguous_manager" | "inactive_manager" | "cycle";
 }
 
 interface SearchResult {
@@ -135,8 +140,8 @@ function ChartCanvas({
 }) {
   const { fitView } = useReactFlow();
   // SQLGeneral trees can run to hundreds of Departments, so they start
-  // collapsed one level shallower than the existing Departments/People
-  // modes to keep the initial render usable (DO #3).
+  // collapsed one level shallower than the Departments mode to keep the
+  // initial render usable.
   const maxAutoExpandDepth = mode === "sqlgeneral" ? 1 : 2;
 
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(() => {
@@ -218,22 +223,6 @@ function ChartCanvas({
           onSelect: setSelectedId,
         };
         rfNodes.push({ id: n.id, type: "department", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
-      } else if (mode === "people") {
-        const data0: PeopleNodeData = {
-          label: (n.displayName as string | null) ?? "(no name)",
-          jobTitle: n.jobTitle as string | null,
-          departmentName: (n.department as { name: string } | null)?.name ?? null,
-          email: n.email as string,
-          isActive: n.isActive as boolean,
-          directReportsCount: n.directReportsCount as number,
-          hasHiddenChildren,
-          isCollapsed,
-          isHighlighted: highlightedIds.has(n.id),
-          isSelected: n.id === selectedId,
-          onToggleCollapse: toggleCollapse,
-          onSelect: setSelectedId,
-        };
-        rfNodes.push({ id: n.id, type: "person", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
       } else {
         // mode === "sqlgeneral" — manager-first: ONE node kind only
         // ("sqlgeneral-person"), reusing PeopleNode as-is. Company/
@@ -301,7 +290,7 @@ function ChartCanvas({
       minZoom={0.1}
       maxZoom={2}
       proOptions={{ hideAttribution: true }}
-      aria-label={mode === "departments" ? "Department organization chart" : mode === "people" ? "People reporting-line chart" : "SQLGeneral manager subtree chart"}
+      aria-label={mode === "departments" ? "Department organization chart" : "SQLGeneral manager subtree chart"}
     >
       <Background />
       <Controls showInteractive={false} />
@@ -381,15 +370,25 @@ function SqlGeneralManagerExplorer({
     return find(data);
   }, [data, focusRootId]);
 
-  // Still a valid focus even if the employee is at the very top — findPath
-  // returns a root-to-target path, so path[0] is always that employee's
-  // ultimate top-level manager (REQUIRED #3: "locate the correct
-  // management tree"); setSelectedId reuses the SAME highlight/expand-path
-  // machinery ChartCanvas already has for the Departments/People modes.
+  // Focuses on the EMPLOYEE'S OWN direct manager (one level up), never on
+  // path[0] (their ultimate top-level manager) — focusing on the
+  // ultimate root renders that root's ENTIRE subtree, which for anyone
+  // deep in a large, single-rooted company is effectively the whole
+  // organization again, defeating the entire point of this "one
+  // manager's subtree at a time" explorer. Rooting at the direct manager
+  // instead reuses the EXACT SAME mechanism "Browse by manager" already
+  // uses (setFocusRootId), scoped to a small, relevant slice: the direct
+  // manager (immediate upward context), the searched employee highlighted
+  // among their siblings, and — via the SAME auto-expand-to-selectedId
+  // effect ChartCanvas already runs — the employee's own subordinate
+  // subtree expanded automatically. An employee with NO manager (already
+  // a root themselves) is focused on their own node directly, same as
+  // clicking them from the manager directory would.
   function focusOnEmployee(employeeId: string) {
     const path = findPath(data, employeeId);
     if (!path || path.length === 0) return;
-    setFocusRootId(path[0]);
+    const focusId = path.length >= 2 ? path[path.length - 2] : path[path.length - 1];
+    setFocusRootId(focusId);
     setSelectedId(employeeId);
     setEmployeeQuery("");
   }
@@ -496,6 +495,11 @@ export function OrganizationChartView() {
   const [syncing, setSyncing] = useState(false);
   const [unresolvedUsers, setUnresolvedUsers] = useState<UnresolvedSqlGeneralUser[]>([]);
   const [unresolvedManagerLinks, setUnresolvedManagerLinks] = useState<UnresolvedSqlGeneralManagerLink[]>([]);
+  // The API only ever includes unresolvedUsers/unresolvedManagerLinks for
+  // an ADMIN caller (see app/api/admin/organization/sqlgeneral-tree/route.ts)
+  // — their presence in the response IS the admin signal, so the summary
+  // banner below never needs a separate "am I admin" field or request.
+  const [sqlGeneralCanSeeDiagnostics, setSqlGeneralCanSeeDiagnostics] = useState(false);
   const [sqlGeneralNotInitialized, setSqlGeneralNotInitialized] = useState(false);
   const [sqlGeneralTreeStatus, setSqlGeneralTreeStatus] = useState<SqlGeneralTreeStatusResponse | null>(null);
   const [sqlGeneralRefreshing, setSqlGeneralRefreshing] = useState(false);
@@ -505,12 +509,7 @@ export function OrganizationChartView() {
     setLoading(true);
     setErrorState(null);
     try {
-      const url =
-        mode === "departments"
-          ? `/api/organization/department-tree?activeOnly=${activeOnly}`
-          : mode === "people"
-            ? `/api/organization/people-tree?activeOnly=${activeOnly}`
-            : `/api/admin/organization/sqlgeneral-tree`;
+      const url = mode === "departments" ? `/api/organization/department-tree?activeOnly=${activeOnly}` : `/api/admin/organization/sqlgeneral-tree`;
       const res = await fetch(url);
       if (res.status === 401 || res.status === 403) {
         setErrorState("permission");
@@ -528,6 +527,7 @@ export function OrganizationChartView() {
         setData([]);
         setUnresolvedUsers([]);
         setUnresolvedManagerLinks([]);
+        setSqlGeneralCanSeeDiagnostics(false);
         return;
       }
       setSqlGeneralNotInitialized(false);
@@ -535,6 +535,7 @@ export function OrganizationChartView() {
       setFullAccess(Boolean(body.fullAccess));
       setUnresolvedUsers(mode === "sqlgeneral" ? (body.unresolvedUsers ?? []) : []);
       setUnresolvedManagerLinks(mode === "sqlgeneral" ? (body.unresolvedManagerLinks ?? []) : []);
+      setSqlGeneralCanSeeDiagnostics(mode === "sqlgeneral" && Array.isArray(body.unresolvedManagerLinks));
     } catch {
       setErrorState("network");
       setData(null);
@@ -619,7 +620,11 @@ export function OrganizationChartView() {
         const res = await fetch(`/api/organization/search?q=${encodeURIComponent(searchQuery)}`);
         if (!res.ok) return;
         const body = await res.json();
-        setSearchResults(body.results ?? []);
+        // /api/organization/search (shared, unchanged) can still return
+        // "user" results — this component just no longer has a mode to
+        // navigate one to, now that People / Reporting Lines is gone, so
+        // they're filtered out here rather than left as a dead-end click.
+        setSearchResults((body.results ?? []).filter((r: SearchResult) => r.type === "department"));
       } catch {
         // best-effort — search box just shows no results
       }
@@ -647,6 +652,9 @@ export function OrganizationChartView() {
     }
   };
 
+  const sqlGeneralInactiveManagerCount = useMemo(() => unresolvedManagerLinks.filter((d) => d.reason === "inactive_manager").length, [unresolvedManagerLinks]);
+  const sqlGeneralOtherManagerIssueCount = unresolvedManagerLinks.length - sqlGeneralInactiveManagerCount;
+
   const highlightedIds = useMemo(() => {
     if (!selectedId || !data) return new Set<string>();
     const path = findPath(data, selectedId);
@@ -672,8 +680,7 @@ export function OrganizationChartView() {
         <Tabs value={mode} onValueChange={(v) => { setMode(v as Mode); setSelectedId(null); }}>
           <TabsList>
             <TabsTrigger value="departments">Departments</TabsTrigger>
-            <TabsTrigger value="people">People / Reporting lines</TabsTrigger>
-            <TabsTrigger value="sqlgeneral">SQLGeneral source</TabsTrigger>
+            <TabsTrigger value="sqlgeneral">Org. Chart</TabsTrigger>
           </TabsList>
         </Tabs>
 
@@ -684,7 +691,7 @@ export function OrganizationChartView() {
               <Input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search name, email, department..."
+                placeholder="Search departments..."
                 className="h-9 pl-7 text-sm"
                 aria-label="Search organization"
               />
@@ -699,8 +706,7 @@ export function OrganizationChartView() {
                         setSelectedId(r.id);
                         setSearchQuery("");
                         setSearchResults([]);
-                        if (r.type === "department") setMode("departments");
-                        else setMode("people");
+                        setMode("departments");
                       }}
                     >
                       <span className="font-medium">{r.label}</span>
@@ -765,19 +771,28 @@ export function OrganizationChartView() {
         </p>
       )}
 
-      {mode === "sqlgeneral" && (unresolvedUsers.length > 0 || unresolvedManagerLinks.length > 0) && (
+      {/* ADMIN-only (the API itself omits unresolvedUsers/unresolvedManagerLinks
+          for any non-ADMIN caller — see app/api/admin/organization/sqlgeneral-tree/route.ts
+          — sqlGeneralCanSeeDiagnostics being true IS that signal), and
+          deliberately a plain-language count rather than raw usernames/
+          reason codes. */}
+      {mode === "sqlgeneral" && sqlGeneralCanSeeDiagnostics && (unresolvedUsers.length > 0 || unresolvedManagerLinks.length > 0) && (
         <Card className="flex items-start gap-2 border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <div>
-            {unresolvedUsers.length > 0 && (
+          <div className="space-y-0.5">
+            {sqlGeneralInactiveManagerCount > 0 && (
               <p>
-                {unresolvedUsers.length} user{unresolvedUsers.length === 1 ? "" : "s"} not shown — unresolved SQLGeneral identity (see admin report for details).
+                {sqlGeneralInactiveManagerCount} employee{sqlGeneralInactiveManagerCount === 1 ? " has a" : "s have"} reporting relationship{sqlGeneralInactiveManagerCount === 1 ? "" : "s"} linked to inactive manager{sqlGeneralInactiveManagerCount === 1 ? "" : "s"} in SQLGeneral.
               </p>
             )}
-            {unresolvedManagerLinks.length > 0 && (
+            {sqlGeneralOtherManagerIssueCount > 0 && (
               <p>
-                {unresolvedManagerLinks.length} manager relationship{unresolvedManagerLinks.length === 1 ? "" : "s"} could not be verified — shown as a root instead (
-                {unresolvedManagerLinks.map((d) => `${d.sqlGeneralUsername}: ${d.reason}`).join(", ")}).
+                {sqlGeneralOtherManagerIssueCount} other reporting relationship{sqlGeneralOtherManagerIssueCount === 1 ? "" : "s"} could not be verified in SQLGeneral.
+              </p>
+            )}
+            {unresolvedUsers.length > 0 && (
+              <p>
+                {unresolvedUsers.length} local account{unresolvedUsers.length === 1 ? " has" : "s have"} an unresolved SQLGeneral identity.
               </p>
             )}
           </div>
@@ -829,7 +844,7 @@ export function OrganizationChartView() {
           <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-muted-foreground">
             <Inbox className="h-8 w-8" />
             <p>
-              No {mode === "departments" ? "departments" : mode === "people" ? "people" : "SQLGeneral identities"} to show{!activeOnly ? "" : mode === "sqlgeneral" ? "" : " — try including inactive ones"}.
+              No {mode === "departments" ? "departments" : "SQLGeneral identities"} to show{!activeOnly ? "" : mode === "sqlgeneral" ? "" : " — try including inactive ones"}.
             </p>
           </div>
         )}
@@ -851,7 +866,7 @@ export function OrganizationChartView() {
             <>
               <DialogHeader>
                 <DialogTitle>
-                  {mode === "departments" ? (selectedRawNode.name as string) : mode === "people" ? (selectedRawNode.displayName as string | null) ?? "(no name)" : sqlGeneralLabel(selectedRawNode)}
+                  {mode === "departments" ? (selectedRawNode.name as string) : sqlGeneralLabel(selectedRawNode)}
                 </DialogTitle>
                 <DialogDescription>
                   {mode === "departments"
@@ -869,13 +884,6 @@ export function OrganizationChartView() {
                   {(selectedRawNode.manager as { displayName: string | null } | null) && (
                     <p>Manager: {(selectedRawNode.manager as { displayName: string | null }).displayName}</p>
                   )}
-                </div>
-              ) : mode === "people" ? (
-                <div className="space-y-1 text-sm">
-                  <p>Email: {selectedRawNode.email as string}</p>
-                  <p>Department: {(selectedRawNode.department as { name: string } | null)?.name ?? "None"}</p>
-                  <p>Direct reports: {selectedRawNode.directReportsCount as number}</p>
-                  <p>Status: {selectedRawNode.isActive ? "Active" : "Inactive"}</p>
                 </div>
               ) : (
                 <div className="space-y-1 text-sm">

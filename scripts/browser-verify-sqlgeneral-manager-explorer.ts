@@ -105,7 +105,20 @@ async function main() {
     attachCapture(page, consoleErrors, failedRequests);
 
     await page.route("**/api/admin/organization/sqlgeneral-tree", async (route) => {
-      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ tree: buildFixtureTree(), unresolvedUsers: [], unresolvedManagerLinks: [] }) });
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          initialized: true,
+          tree: buildFixtureTree(),
+          unresolvedUsers: [],
+          // One fabricated inactive_manager relationship, exactly like the
+          // real 8-employee production report — proves the friendly,
+          // ADMIN-only summary wording (never raw usernames/reason codes).
+          unresolvedManagerLinks: [{ sqlGeneralUsername: "someone-else", reason: "inactive_manager" }],
+          lastSuccessfulSyncAt: new Date().toISOString(),
+        }),
+      });
     });
 
     console.log("\n=== Login ===\n");
@@ -115,12 +128,22 @@ async function main() {
     await Promise.all([page.waitForURL((url) => !url.pathname.includes("/login"), { timeout: 15000 }), page.click('button:has-text("Sign in as Admin")')]);
     check("Logged in successfully (left /login)", !page.url().includes("/login"));
 
-    console.log("\n=== Navigate to Organization tab, SQLGeneral source mode ===\n");
+    console.log("\n=== Navigate to Organization tab, Org. Chart mode (renamed from 'SQLGeneral source') ===\n");
     await page.goto(`${BASE_URL}/organization`, { waitUntil: "load" });
     await page.waitForTimeout(1500);
-    await page.getByRole("tab", { name: /SQLGeneral source/i }).click();
+    check("0. The old 'SQLGeneral source' label is gone", !(await page.getByRole("tab", { name: /SQLGeneral source/i }).isVisible().catch(() => false)));
+    check("0b. 'People / Reporting lines' is no longer a selectable tab", !(await page.getByRole("tab", { name: /People/i }).isVisible().catch(() => false)));
+    await page.getByRole("tab", { name: /^Org\. Chart$/i }).click();
     await page.waitForTimeout(1000);
     await page.screenshot({ path: `${SCREENSHOT_DIR}/01-initial-sqlgeneral-view.png`, fullPage: true });
+
+    console.log("\n=== ADMIN-only friendly diagnostics summary (never raw usernames/reason codes) ===\n");
+    check(
+      "0c. The friendly summary sentence is visible (plain language, matching the production wording)",
+      await page.getByText(/reporting relationship.*linked to inactive manager/i).isVisible().catch(() => false)
+    );
+    check("0d. The RAW SQLGeneral username from the fixture is NEVER shown in the summary", !(await page.getByText("someone-else", { exact: false }).isVisible().catch(() => false)));
+    check("0e. The raw technical reason code is NEVER shown in the summary", !(await page.getByText("inactive_manager", { exact: false }).isVisible().catch(() => false)));
 
     console.log("\n=== Root cause: initial view must NEVER render the whole forest in ReactFlow ===\n");
     const initialNodeCount = await page.locator(".react-flow__node").count();
@@ -163,13 +186,39 @@ async function main() {
     await page.waitForTimeout(300);
     await page.screenshot({ path: `${SCREENSHOT_DIR}/03-thoche-focused.png`, fullPage: true });
     check(
-      "11. Searching thoche opens geokos's subtree (thoche's ultimate top-level manager), not a different/empty one",
+      "11. Searching thoche opens geokos's subtree (thoche's DIRECT manager — which happens to equal thoche's ultimate top-level manager in this fixture, since thoche reports straight to geokos)",
       await page.getByText("Georgios Kostopoulos", { exact: false }).first().isVisible().catch(() => false)
     );
     check("12. thoche himself is visible, focused, in the rendered subtree", await page.getByText("thoche", { exact: false }).first().isVisible().catch(() => false));
     const selectedCard = page.locator('[aria-selected="true"]');
     check("13. Exactly one node is marked aria-selected (thoche, the focused employee)", (await selectedCard.count()) >= 1);
     check("14. nikpap (thoche's own report, multi-level) is also visible — searching an intermediate manager keeps their own subtree intact", await page.getByText("Niko Papadopoulos", { exact: false }).isVisible().catch(() => false));
+
+    console.log('\n=== THE ACTUAL BUG FIX: searching "nikpap" (3 levels deep: geokos -> thoche -> nikpap) focuses on nikpap\'s DIRECT manager (thoche), never the ultimate root (geokos) ===\n');
+    await page.getByRole("button", { name: /Directory/i }).click();
+    await page.waitForTimeout(300);
+    await page.getByLabel("Search SQLGeneral employees").fill("nikpap");
+    await page.waitForTimeout(400);
+    const nikpapResult = page.getByRole("button", { name: /nikpap|Niko Papadopoulos/i }).first();
+    check("14b. Searching 'nikpap' surfaces a matching result", await nikpapResult.isVisible().catch(() => false));
+    await nikpapResult.click();
+    await page.waitForTimeout(800);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(300);
+    await page.screenshot({ path: `${SCREENSHOT_DIR}/03b-nikpap-focused.png`, fullPage: true });
+    check(
+      "14c. The view is focused on thoche (nikpap's DIRECT manager) — never relabeled back to the ultimate root geokos",
+      await page.getByText("thoche", { exact: false }).first().isVisible().catch(() => false) && !(await page.getByText("Georgios Kostopoulos", { exact: false }).isVisible().catch(() => false))
+    );
+    check("14d. nikpap himself is visible, focused, in the rendered subtree", await page.getByText("Niko Papadopoulos", { exact: false }).first().isVisible().catch(() => false));
+    check(
+      "14e. THE FIX: konkef/chapav/stekam (geokos's OTHER direct reports, completely unrelated to nikpap's own branch) do NOT leak into this focused view — proves this is nikpap's own small, relevant subtree, never the entire organization",
+      !(await page.getByText("Kostas Konstantinou", { exact: false }).isVisible().catch(() => false)) &&
+        !(await page.getByText("chapav", { exact: false }).isVisible().catch(() => false)) &&
+        !(await page.getByText("stekam", { exact: false }).isVisible().catch(() => false))
+    );
+    const nikpapNodeCount = await page.locator(".react-flow__node").count();
+    check("14f. The rendered node count for nikpap's focused view is small (thoche + nikpap only — 1 or 2 nodes), not geokos's full 5-person team", nikpapNodeCount > 0 && nikpapNodeCount <= 2);
 
     console.log("\n=== Expand/collapse and hover remain functional within a focused subtree ===\n");
     const canvas = page.locator('[aria-label="SQLGeneral manager subtree chart"]');
@@ -183,14 +232,12 @@ async function main() {
       check("16. Collapsing a node reduces the visible node count", after < before);
     }
 
-    console.log("\n=== Existing Departments/People modes are completely unaffected ===\n");
+    console.log("\n=== Existing Departments mode is completely unaffected (People / Reporting Lines was removed entirely) ===\n");
     await page.getByRole("tab", { name: /^Departments$/i }).click();
     await page.waitForTimeout(1000);
     check("17. Switching to Departments mode still renders its own full-tree canvas (unchanged behavior)", await page.getByLabel("Search organization").isVisible().catch(() => false));
     check("17b. Departments mode does not crash", !(await page.textContent("body"))?.includes("Application error"));
-    await page.getByRole("tab", { name: /People/i }).click();
-    await page.waitForTimeout(1000);
-    check("18. Switching to People mode still works (unchanged behavior)", !(await page.textContent("body"))?.includes("Application error"));
+    check("18. There is no 'People' tab to click at all anymore — only Departments and Org. Chart", (await page.getByRole("tab").count()) === 2);
 
     console.log("\n=== Console/network health ===\n");
     check("No uncaught console/page errors during the whole session", consoleErrors.length === 0);

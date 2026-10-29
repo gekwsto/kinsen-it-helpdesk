@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { Role } from "@prisma/client";
 import { requireAuth, hasPermission } from "@/lib/permissions";
 import { getLatestSuccessfulSqlGeneralTreeSnapshot, type TreeSnapshotPayload } from "@/lib/services/sqlgeneral-tree-snapshot-service";
 import { unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
@@ -11,8 +12,16 @@ import { unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "
 // Completely independent of the canonical local tree
 // (/api/organization/department-tree, unchanged) and never dependent on
 // any approved SqlGeneralCompanyMapping/SqlGeneralDepartmentMapping to
-// render. unresolvedUsers/unresolvedManagerLinks are always returned
-// explicitly — never silently dropped.
+// render.
+//
+// unresolvedUsers/unresolvedManagerLinks (real local userIds and raw
+// SQLGeneral usernames/reasons — technical diagnostics, not something a
+// non-admin viewer needs) are included ONLY when the caller's role is
+// ADMIN specifically — never merely whoever holds the view permission
+// (organization.sqlgeneralSync can be granted to a non-ADMIN custom
+// role). A non-ADMIN response omits both fields entirely rather than
+// sending empty arrays, so the UI's own ADMIN-only banner has nothing to
+// render from and no technical detail is exposed over the wire either.
 //
 // Reads ONLY the persistent snapshot (lib/services/sqlgeneral-tree-snapshot-service.ts)
 // — ZERO SQLGeneral API calls on a normal page load. The tree itself is
@@ -30,11 +39,11 @@ export async function GET() {
     if (!snapshot) return NextResponse.json({ initialized: false });
 
     const data = snapshot.treeData as unknown as TreeSnapshotPayload;
+    const isAdmin = session.user.role === Role.ADMIN;
     return NextResponse.json({
       initialized: true,
       tree: data.roots,
-      unresolvedUsers: data.unresolvedUsers,
-      unresolvedManagerLinks: data.unresolvedManagerLinks,
+      ...(isAdmin ? { unresolvedUsers: data.unresolvedUsers, unresolvedManagerLinks: data.unresolvedManagerLinks } : {}),
       lastSuccessfulSyncAt: snapshot.completedAt,
     });
   } catch (error: any) {
