@@ -39,6 +39,14 @@
  *     list given) — resolveSqlGeneralDepartmentPlacement below implements
  *     the lookup assuming they are, and reports "department_not_found"
  *     rather than silently guessing when a lookup fails.
+ *   - That `Active eq true` (standard unquoted OData v4 boolean literal) is
+ *     accepted and honored by this specific deployment as a `$filter` on
+ *     UsersAndManagers (listAllSqlGeneralUsers' optional `activeOnly`) — a
+ *     reasonable, standard-conforming assumption, never independently
+ *     confirmed live. Every caller of that option re-filters the returned
+ *     rows for `active === true` again itself regardless, so correctness
+ *     never depends on this filter actually being honored — only the
+ *     performance win (fewer pages fetched) does.
  */
 
 const OBVIOUS_PLACEHOLDER_PATTERNS = [
@@ -396,12 +404,24 @@ export async function findSqlGeneralUserByUsername(username: string): Promise<Us
  * Fetches the FULL UsersAndManagers listing — bounded, paginated via
  * fetchAllPages (the SAME complete, fail-closed mechanism listAllSqlGeneralDepartments
  * uses; never fetchFirstPageOnly, since this genuinely needs every row).
- * Used by lib/services/sqlgeneral-organization-tree-service.ts to resolve
- * many existing TicketApp users' HrDepartmentId placements in one shot,
- * instead of one findSqlGeneralUserByUsername call per user.
+ * Used by lib/services/sqlgeneral-user-sync-service.ts (the sync worker +
+ * Preview, which deliberately need EVERY identity, active or not, to detect
+ * deactivations) and by lib/services/sqlgeneral-organization-tree-service.ts
+ * (the Manager Explorer, which only ever wants the active population — see
+ * `activeOnly` below).
+ *
+ * `activeOnly` (default false, preserving every existing caller's exact
+ * prior behavior unchanged) adds an API-side `$filter=Active eq true` —
+ * fewer matching rows means fewer sequential pages to walk, which is the
+ * actual lever on load time (see this file's header: the filter itself is
+ * unverified against this specific deployment). Never the sole source of
+ * truth either way — see toSqlGeneralUserRecord's `active` field, which
+ * every `activeOnly: true` caller re-checks itself before trusting a row is
+ * really active.
  */
-export async function listAllSqlGeneralUsers(): Promise<{ ok: true; users: SqlGeneralUserRecord[] } | { ok: false; reason: string }> {
-  const result = await fetchAllPages<RawSqlGeneralUser>("/api/UsersAndManagers?$first=100");
+export async function listAllSqlGeneralUsers(options?: { activeOnly?: boolean }): Promise<{ ok: true; users: SqlGeneralUserRecord[] } | { ok: false; reason: string }> {
+  const path = options?.activeOnly ? `/api/UsersAndManagers?$first=100&$filter=${encodeURIComponent("Active eq true")}` : "/api/UsersAndManagers?$first=100";
+  const result = await fetchAllPages<RawSqlGeneralUser>(path);
   if (!result.ok) return result;
   return { ok: true, users: result.rows.map(toSqlGeneralUserRecord) };
 }

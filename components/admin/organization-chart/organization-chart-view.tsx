@@ -655,10 +655,12 @@ export function OrganizationChartView() {
             </div>
           )}
 
-          <label className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Switch checked={!activeOnly} onCheckedChange={(v) => setActiveOnly(!v)} aria-label="Include inactive" />
-            Include inactive
-          </label>
+          {mode !== "sqlgeneral" && (
+            <label className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Switch checked={!activeOnly} onCheckedChange={(v) => setActiveOnly(!v)} aria-label="Include inactive" />
+              Include inactive
+            </label>
+          )}
 
           <Button variant="outline" size="sm" onClick={fetchTree} aria-label="Refresh">
             <RefreshCw className="h-3.5 w-3.5" />

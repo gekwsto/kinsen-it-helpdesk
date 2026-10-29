@@ -252,6 +252,108 @@ async function main() {
     const networkErrorResult = await client.listAllSqlGeneralDepartments();
     check("14. a network error (fetch throws) is an explicit failure, never an uncaught rejection", networkErrorResult.ok === false && /network/i.test((networkErrorResult as { ok: false; reason: string }).reason));
 
+    console.log("\nlistAllSqlGeneralUsers: activeOnly filter — generated request, multi-page honesty, and bounded failure ===\n");
+    let usersCallCount = 0;
+    const usersRequestedUrls: string[] = [];
+    setMockFetch((req) => {
+      if (req.url.includes("login.microsoftonline.com")) return jsonResponse(200, { access_token: "t", token_type: "Bearer" });
+      if (req.url.includes("/api/UsersAndManagers")) {
+        usersCallCount++;
+        usersRequestedUrls.push(req.url);
+        return jsonResponse(200, { value: [{ Username: "noFilterUser", Active: true }] });
+      }
+      return jsonResponse(200, { value: [] });
+    });
+    const noFilterResult = await client.listAllSqlGeneralUsers();
+    check(
+      "22. listAllSqlGeneralUsers() with NO options — the exact call shape every existing SQLGeneral Sync caller uses — sends NO Active filter at all (sync behavior stays byte-identical)",
+      noFilterResult.ok === true && !usersRequestedUrls[usersRequestedUrls.length - 1].includes("Active"),
+      usersRequestedUrls[usersRequestedUrls.length - 1]
+    );
+
+    usersCallCount = 0;
+    usersRequestedUrls.length = 0;
+    const activeOnlyResult = await client.listAllSqlGeneralUsers({ activeOnly: true });
+    check(
+      "23. listAllSqlGeneralUsers({ activeOnly: true }) sends EXACTLY the standard, unquoted OData v4 boolean filter \"$filter=Active eq true\" (percent-encoded), combined correctly with the existing $first=100 page size",
+      activeOnlyResult.ok === true && usersRequestedUrls[0].includes("$first=100") && usersRequestedUrls[0].includes(`$filter=${encodeURIComponent("Active eq true")}`),
+      usersRequestedUrls[0]
+    );
+
+    console.log("\nlistAllSqlGeneralUsers: a REAL multi-page response (server's own nextLink already carries the filter, exactly like a live OData/DAB backend) is followed completely, never truncated ===\n");
+    usersCallCount = 0;
+    usersRequestedUrls.length = 0;
+    setMockFetch((req) => {
+      if (req.url.includes("login.microsoftonline.com")) return jsonResponse(200, { access_token: "t", token_type: "Bearer" });
+      if (req.url.includes("/api/UsersAndManagers")) {
+        usersCallCount++;
+        usersRequestedUrls.push(req.url);
+        if (usersCallCount === 1) {
+          check("24. page 1's OWN request already carries the Active filter (this client sends it on every page, never only the first)", req.url.includes(`$filter=${encodeURIComponent("Active eq true")}`), req.url);
+          return jsonResponse(200, {
+            value: [{ Username: "page1-a", Active: true }, { Username: "page1-b", Active: true }],
+            // A real DAB nextLink normally re-states the SAME filter itself —
+            // simulated here exactly that way, confirming this client passes
+            // the SERVER's own continuation link through verbatim (never
+            // reconstructing or dropping the filter on later pages itself).
+            nextLink: `/api/UsersAndManagers?$first=100&$filter=${encodeURIComponent("Active eq true")}&$after=page2token`,
+          });
+        }
+        check("25. page 2's request URL is the server's OWN nextLink, unmodified — still carrying the Active filter, never dropped by THIS client on a later page", req.url.includes(`$filter=${encodeURIComponent("Active eq true")}`), req.url);
+        return jsonResponse(200, { value: [{ Username: "page2-a", Active: true }] });
+      }
+      return jsonResponse(200, { value: [] });
+    });
+    const multiPageActiveResult = await client.listAllSqlGeneralUsers({ activeOnly: true });
+    check(
+      "26. ALL rows across BOTH pages are concatenated — never truncated to just the first page, never deduplicated/dropped",
+      multiPageActiveResult.ok === true && multiPageActiveResult.users.length === 3 && multiPageActiveResult.users.map((u) => u.username).join(",") === "page1-a,page1-b,page2-a",
+      JSON.stringify(multiPageActiveResult)
+    );
+    check("27. exactly 2 HTTP requests were made for 2 real pages — never re-fetching a page, never stopping early", usersCallCount === 2);
+
+    console.log("\nlistAllSqlGeneralUsers: pagination-loop / malformed-envelope failures apply identically with activeOnly (fetchAllPages is the SAME shared primitive, never bypassed) ===\n");
+    usersCallCount = 0;
+    setMockFetch((req) => {
+      if (req.url.includes("login.microsoftonline.com")) return jsonResponse(200, { access_token: "t", token_type: "Bearer" });
+      usersCallCount++;
+      // Always the SAME nextLink -> loop, exactly like the Departments loop test above.
+      return jsonResponse(200, { value: [{ Username: "stuck", Active: true }], nextLink: `/api/UsersAndManagers?$first=100&$filter=${encodeURIComponent("Active eq true")}&$after=stuck` });
+    });
+    const usersLoopResult = await client.listAllSqlGeneralUsers({ activeOnly: true });
+    check(
+      "28. a repeating nextLink while fetching the ACTIVE-only listing is still detected as a loop and fails closed — never a silent partial/truncated result just because activeOnly is set",
+      usersLoopResult.ok === false && /loop/i.test((usersLoopResult as { ok: false; reason: string }).reason)
+    );
+
+    console.log("\nlistAllSqlGeneralUsers: a large roster referencing a FEW distinct unresolved usernames costs exactly ONE lookup per distinct username, never one per referencing employee ===\n");
+    let findUserCallCount = 0;
+    const findUserRequestedUsernames: string[] = [];
+    setMockFetch((req) => {
+      if (req.url.includes("login.microsoftonline.com")) return jsonResponse(200, { access_token: "t", token_type: "Bearer" });
+      if (req.url.includes("/api/UsersAndManagers") && req.url.includes("Username%20eq")) {
+        findUserCallCount++;
+        const m = req.url.match(/Username%20eq%20'([^']+)'/);
+        if (m) findUserRequestedUsernames.push(m[1]);
+        return jsonResponse(200, { value: [{ Username: m?.[1] ?? "", Active: false }] });
+      }
+      return jsonResponse(200, { value: [] });
+    });
+    // 50 DIFFERENT callers all asking about the SAME one username — this
+    // file's own findSqlGeneralUserByUsername has no cache (by design, it's
+    // a single-identity lookup); the bounded-call guarantee tested in
+    // lib/services/sqlgeneral-organization-tree-service.ts's own test suite
+    // (test 31, "Performance") is the CALLER's responsibility — this check
+    // instead confirms the lower-level primitive itself issues exactly ONE
+    // real HTTP request per call, never silently re-fetching extra pages or
+    // retrying, so that caller-side bound is never undermined by excess
+    // requests hiding one level down.
+    for (let i = 0; i < 50; i++) await client.findSqlGeneralUserByUsername("same-username-every-time");
+    check(
+      "29. 50 calls for the SAME username make exactly 50 HTTP requests (one each, no hidden retries/extra pages per call) — the organization-tree-service's OWN cache above this layer is what keeps the real total bounded, never this primitive silently amplifying it",
+      findUserCallCount === 50 && new Set(findUserRequestedUsernames).size === 1
+    );
+
     console.log("\nHierarchy resolution (pure, no network) ===\n");
     const depts = [
       { id: 1, description: "Root", isActive: true, parentDepartmentId: null, country: null, company: "Acme", companyShortname: "AC", creationDate: null, updateTimestamp: null },
