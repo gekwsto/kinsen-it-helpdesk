@@ -1,9 +1,9 @@
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
-import { getIntermediateApproverOptions } from "@/lib/services/project-request-service";
+import { resolveIntermediateApproverCandidates } from "@/lib/services/project-request-service";
 import { ProjectRequestForm } from "@/components/project-requests/project-request-form";
-import { FileText } from "lucide-react";
+import { FileText, AlertTriangle } from "lucide-react";
 
 export default async function NewProjectRequestPage() {
   const session = await auth();
@@ -26,19 +26,26 @@ export default async function NewProjectRequestPage() {
   const departments = workspace.departments;
   const defaultDepartmentId = workspace.isAllSelected ? undefined : workspace.departmentId ?? undefined;
 
-  // Every real, currently-eligible intermediate approver, system-wide —
-  // never department-scoped. This stage is mandatory (fail closed): if
-  // nobody currently holds projectRequest.intermediateApprove, submission
-  // must be blocked below rather than silently skipping the stage.
-  const intermediateApproverOptions = await getIntermediateApproverOptions();
+  // The requester's OWN verified SQLGeneral direct manager — never
+  // Company/Department, never a permission-holder pool. Three outcomes:
+  //   - "has_candidates": show the (usually single) verified manager for
+  //     explicit selection, exactly like the prior picker, just restricted.
+  //   - "no_manager": a VERIFIED fact about this requester's own SQLGeneral
+  //     record — the form renders with zero intermediate-approver UI, and
+  //     submits straight to Final Approval.
+  //   - "unresolved": anything short of a verified fact either way (API
+  //     failure, unmatched/ambiguous identity, no TicketApp account,
+  //     inactive account) — submission is blocked entirely. Never treated
+  //     as "no manager".
+  const candidateResolution = await resolveIntermediateApproverCandidates(session.user.id);
 
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h1 className="text-2xl font-bold">Project Request Form</h1>
         <p className="text-muted-foreground mt-1">
-          Submit a request for a new Project — select who should intermediate-approve it; once they all approve, it
-          goes to final approval.
+          Submit a request for a new Project — your verified SQLGeneral manager must intermediate-approve it before
+          it goes to final approval.
         </p>
       </div>
 
@@ -50,19 +57,18 @@ export default async function NewProjectRequestPage() {
             administrator.
           </p>
         </div>
-      ) : intermediateApproverOptions.length === 0 ? (
+      ) : candidateResolution.status === "unresolved" ? (
         <div className="text-center py-20 border rounded-lg">
-          <FileText className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
+          <AlertTriangle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
           <p className="text-muted-foreground">
-            No one is currently assigned the intermediate approval permission. The Project Request cannot be
-            submitted for approval. Contact an administrator.
+            {candidateResolution.reason} A Project Request cannot be submitted until this can be verified.
           </p>
         </div>
       ) : (
         <ProjectRequestForm
           departments={departments}
           defaultDepartmentId={defaultDepartmentId}
-          intermediateApproverOptions={intermediateApproverOptions}
+          intermediateApproverOptions={candidateResolution.status === "has_candidates" ? candidateResolution.candidates : []}
         />
       )}
     </div>

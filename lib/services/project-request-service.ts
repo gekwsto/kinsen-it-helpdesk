@@ -9,16 +9,9 @@ import { ALL_WORKSPACES_VALUE } from "@/types/department";
 import { createInAppNotification, dispatchCreatedNotification } from "@/lib/notifications/create-notification";
 import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/services/project-request-setup-reminder-service";
 import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
+import { listAllSqlGeneralUsers } from "@/lib/sqlgeneral-api-client";
 import { wholeCalendarDaysBetween } from "@/lib/date-only";
 import { Role, type ProjectRequestStatus, type Prisma } from "@prisma/client";
-
-// The intermediate stage, ahead of APPROVE_PERMISSION_KEY above. Holding
-// this permission is NECESSARY but NOT SUFFICIENT to decide any given
-// request — the requester must have ALSO explicitly selected that exact
-// user as one of THIS request's own intermediate approvers at submission
-// time (see ProjectRequestIntermediateApprover) — never inferred, never
-// department-scoped, never derived from the org-chart manager relationship.
-const INTERMEDIATE_APPROVE_PERMISSION_KEY = "projectRequest.intermediateApprove";
 
 // ─── Department resolution ──────────────────────────────────────────────────
 
@@ -84,69 +77,127 @@ export async function notifyEligibleApproversOfSubmission(departmentId: string, 
 
 // ─── Intermediate stage: requester-selected, unanimous, multi-approver ─────
 
+export type IntermediateApproverCandidateResolution =
+  | { status: "has_candidates"; candidates: { id: string; name: string | null; email: string }[] }
+  // A VERIFIED fact about the requester's own SQLGeneral record: their
+  // managerAMAccountName is genuinely null. The intermediate stage is
+  // skipped entirely for this request (see resolveIntermediateApprovers).
+  | { status: "no_manager" }
+  // Anything that stops short of a verified "this requester has no
+  // manager" — the requester's own SQLGeneral identity isn't captured/
+  // doesn't resolve/is ambiguous, the SQLGeneral API/pagination failed, the
+  // manager's own identity doesn't resolve/is ambiguous, the manager has no
+  // TicketApp account, or the manager's TicketApp account is inactive.
+  // NEVER treated as "no_manager" — see this function's own doc comment.
+  | { status: "unresolved"; reason: string };
+
 /**
- * Every ACTIVE user who holds `permissionKey` GLOBALLY — via their own Role
- * enum grant or their own top-level User.customRoleId grant — deliberately
- * NEVER via a department-scoped DepartmentMembership customRole grant
- * (unlike getEligibleApproverUserIds above, which IS department-scoped by
- * design). Used for the intermediate-approver picker: the requester must be
- * able to choose from EVERY such user system-wide, regardless of
- * department. Same two-phase cheap-prefilter-then-exact-check shape as
- * getEligibleApproverUserIds, minus the department-membership OR-branches
- * that don't apply to a non-department-scoped permission.
+ * The requester's intermediate-approver candidate pool is their own
+ * VERIFIED SQLGeneral direct manager — never Company/Department, never
+ * inferred, never a global permission grant (the prior design; see
+ * decideIntermediateApproval's own doc comment for the matching
+ * authorization change this round makes). Resolution mirrors the
+ * manager-chain logic in sqlgeneral-organization-tree-service.ts exactly
+ * (same fail-closed semantics for an ambiguous SQLGeneral username), scoped
+ * to a single requester rather than the whole roster.
+ *
+ * Fails CLOSED to "unresolved", never "no_manager", at every step except
+ * one: only a requester's own SQLGeneral row with a genuinely null
+ * managerAMAccountName is "no_manager". An API/pagination failure, an
+ * unmatched/ambiguous requester or manager identity, a manager with no
+ * TicketApp account, or an inactive manager account are all "unresolved" —
+ * the business rule this exists to enforce ("Unresolved manager/API
+ * failure must never be treated as no manager").
  */
-export async function getUsersWithGlobalPermission(permissionKey: string): Promise<{ id: string; name: string | null; email: string }[]> {
-  const rows = await prisma.rolePermission.findMany({ where: { permission: { key: permissionKey } }, select: { roleKey: true } });
-  const roleKeys = rows.map((r) => r.roleKey);
-  const globalRoleValues = new Set<string>(Object.values(Role));
-  const globalRoles = roleKeys.filter((k): k is Role => globalRoleValues.has(k));
-  // Includes custom-role keys too, matched against User.customRole.key.
-  const allRoleKeys = roleKeys;
-
-  const orConditions: Record<string, unknown>[] = [];
-  if (globalRoles.length > 0) orConditions.push({ role: { in: globalRoles } });
-  if (allRoleKeys.length > 0) orConditions.push({ customRole: { key: { in: allRoleKeys } } });
-  if (orConditions.length === 0) return [];
-
-  const candidates = await prisma.user.findMany({
-    where: { isActive: true, OR: orConditions },
-    select: { id: true, role: true, customRoleId: true, name: true, email: true },
+export async function resolveIntermediateApproverCandidates(requesterId: string): Promise<IntermediateApproverCandidateResolution> {
+  const requesterAttempt = await prisma.sqlGeneralUserSyncAttempt.findUnique({
+    where: { userId: requesterId },
+    select: { sqlGeneralUsername: true },
   });
-
-  const eligible: { id: string; name: string | null; email: string }[] = [];
-  for (const candidate of candidates) {
-    if (await hasPermission(candidate.role, permissionKey, candidate.customRoleId)) {
-      eligible.push({ id: candidate.id, name: candidate.name, email: candidate.email });
-    }
+  if (!requesterAttempt?.sqlGeneralUsername) {
+    return { status: "unresolved", reason: "Your SQLGeneral identity has not been captured yet — sign out and back in, or contact an administrator." };
   }
-  return eligible;
-}
 
-/** The real, current pool the New Project Request form's intermediate-approver picker offers — every active user who genuinely holds projectRequest.intermediateApprove right now. */
-export async function getIntermediateApproverOptions(): Promise<{ id: string; name: string | null; email: string }[]> {
-  return getUsersWithGlobalPermission(INTERMEDIATE_APPROVE_PERMISSION_KEY);
+  const usersResult = await listAllSqlGeneralUsers();
+  if (!usersResult.ok) {
+    return { status: "unresolved", reason: `Could not verify your manager against SQLGeneral right now (${usersResult.reason}).` };
+  }
+
+  const requesterMatches = usersResult.users.filter((u) => u.username === requesterAttempt.sqlGeneralUsername);
+  if (requesterMatches.length === 0) {
+    return { status: "unresolved", reason: "Your SQLGeneral identity was not found in current SQLGeneral data." };
+  }
+  if (requesterMatches.length > 1) {
+    return { status: "unresolved", reason: "Your SQLGeneral identity is ambiguous (it matches more than one SQLGeneral record)." };
+  }
+
+  const managerUsername = requesterMatches[0].managerAMAccountName?.trim() || null;
+  if (managerUsername === null) return { status: "no_manager" };
+  if (managerUsername === requesterMatches[0].username) {
+    return { status: "unresolved", reason: "Your SQLGeneral record claims you as your own manager — cannot be verified." };
+  }
+
+  const managerMatches = usersResult.users.filter((u) => u.username === managerUsername);
+  if (managerMatches.length === 0) {
+    return { status: "unresolved", reason: "Your manager's SQLGeneral identity was not found in current SQLGeneral data." };
+  }
+  if (managerMatches.length > 1) {
+    return { status: "unresolved", reason: "Your manager's SQLGeneral identity is ambiguous (it matches more than one SQLGeneral record)." };
+  }
+
+  const localAttempts = await prisma.sqlGeneralUserSyncAttempt.findMany({
+    where: { sqlGeneralUsername: managerUsername },
+    select: { userId: true, user: { select: { id: true, name: true, email: true, isActive: true } } },
+  });
+  if (localAttempts.length === 0) {
+    return { status: "unresolved", reason: "Your manager does not have a TicketApp account yet — contact an administrator." };
+  }
+  if (localAttempts.length > 1) {
+    return { status: "unresolved", reason: "Your manager's SQLGeneral identity is claimed by more than one TicketApp account — contact an administrator." };
+  }
+  const managerUser = localAttempts[0].user;
+  if (!managerUser.isActive) {
+    return { status: "unresolved", reason: "Your manager's TicketApp account is inactive — contact an administrator." };
+  }
+
+  return { status: "has_candidates", candidates: [{ id: managerUser.id, name: managerUser.name, email: managerUser.email }] };
 }
 
 export type IntermediateApproverResolution =
-  | { ok: true; approverIds: string[] }
-  | { ok: false; reason: "no_approvers_selected" | "invalid_approver" };
+  | { ok: true; approverIds: string[]; skipIntermediateStage: boolean }
+  | { ok: false; reason: "no_approvers_selected" | "invalid_approver" | "unresolved_manager"; detail?: string };
 
 /**
  * Server-side re-verification of the requester's own selection — never
- * trusted as-is. Every id must belong to a real, ACTIVE user who genuinely
- * holds projectRequest.intermediateApprove GLOBALLY at this exact moment;
- * a single forged/stale/no-longer-eligible id fails the WHOLE submission
- * (fail closed — never silently drops the bad one and proceeds with the
- * rest, and never silently skips the stage entirely).
+ * trusted as-is. Re-derives the candidate pool fresh from
+ * resolveIntermediateApproverCandidates (never a stale/client-supplied
+ * pool):
+ *   - "unresolved" fails the WHOLE submission — never silently skips the
+ *     stage and never silently requires an empty selection either.
+ *   - "no_manager" requires an EMPTY selection (a non-empty one here is a
+ *     forged/stale submission, rejected as invalid_approver) and signals
+ *     the stage should be skipped entirely.
+ *   - "has_candidates" requires at least one real candidate id selected
+ *     (REQUIRED #4 — explicit selection, never auto-selected), and every
+ *     selected id must be exactly one of the verified candidates — a
+ *     single forged/stale id fails the WHOLE submission, never silently
+ *     dropped and never substituted.
  */
-export async function resolveIntermediateApprovers(selectedIds: string[]): Promise<IntermediateApproverResolution> {
+export async function resolveIntermediateApprovers(requesterId: string, selectedIds: string[]): Promise<IntermediateApproverResolution> {
+  const candidateResolution = await resolveIntermediateApproverCandidates(requesterId);
+  if (candidateResolution.status === "unresolved") {
+    return { ok: false, reason: "unresolved_manager", detail: candidateResolution.reason };
+  }
+  if (candidateResolution.status === "no_manager") {
+    if (selectedIds.length > 0) return { ok: false, reason: "invalid_approver" };
+    return { ok: true, approverIds: [], skipIntermediateStage: true };
+  }
   if (selectedIds.length === 0) return { ok: false, reason: "no_approvers_selected" };
-  const eligible = await getIntermediateApproverOptions();
-  const eligibleIds = new Set(eligible.map((u) => u.id));
+  const eligibleIds = new Set(candidateResolution.candidates.map((u) => u.id));
   for (const id of selectedIds) {
     if (!eligibleIds.has(id)) return { ok: false, reason: "invalid_approver" };
   }
-  return { ok: true, approverIds: selectedIds };
+  return { ok: true, approverIds: selectedIds, skipIntermediateStage: false };
 }
 
 /** Submission-time notification to every SELECTED intermediate approver — best-effort, called only after the ProjectRequest + ProjectRequestIntermediateApprover rows have actually committed. The final stage's own eligible approvers are deliberately NOT notified yet — see notifyEligibleApproversOfSubmission's new call site in decideIntermediateApproval, fired only once intermediate approval is unanimously complete. */
@@ -578,15 +629,18 @@ export async function createProjectFromApprovedRequest(
 }
 
 /**
- * Approve/Reject at the INTERMEDIATE stage — requires BOTH: the acting user
- * genuinely holds `projectRequest.intermediateApprove` GLOBALLY right now
- * (re-checked fresh, never trusted from a stale session), AND the requester
- * explicitly selected that exact user as one of THIS request's own
- * intermediate approvers at submission time (a real
- * ProjectRequestIntermediateApprover row must exist for this
- * (requestId, userId) pair — holding the permission alone is NEVER
- * sufficient, and never grants reach into another requester's chosen
- * approvers).
+ * Approve/Reject at the INTERMEDIATE stage — authorization is simply that
+ * a real ProjectRequestIntermediateApprover row exists for this
+ * (requestId, userId) pair. There is no separate global-permission check
+ * any more (the prior design, before candidates became SQLGeneral-manager-
+ * sourced): the row itself is now the strong guarantee, since it can ONLY
+ * ever have been created by resolveIntermediateApprovers against the
+ * requester's own freshly-verified SQLGeneral direct manager — selection
+ * is no longer an arbitrary choice among permission-holders, so requiring
+ * the decider to ALSO separately hold a global RBAC permission would be
+ * redundant and would, in practice, block the very manager this stage
+ * exists to route to (resolving a manager to a local TicketApp user never
+ * grants them any permission — see resolveIntermediateApproverCandidates).
  *
  * Reject: immediately terminal — the WHOLE request moves straight to
  * REJECTED, regardless of how many other approvers were selected or already
@@ -621,8 +675,6 @@ export async function createProjectFromApprovedRequest(
 export async function decideIntermediateApproval(
   requestId: string,
   userId: string,
-  role: Role,
-  customRoleId: string | null | undefined,
   decision: "approve" | "reject",
   businessAssessment?: string
 ): Promise<ApprovalActionResult> {
@@ -637,20 +689,25 @@ export async function decideIntermediateApproval(
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
 
-  // Never selected for THIS request at all -> forbidden, regardless of
-  // whether they hold the permission globally. This is the "necessary but
-  // not sufficient" guarantee — checked BEFORE the global-permission check
-  // so an arbitrary permission-holder with zero relationship to this
-  // specific request gets the same forbidden outcome either way, never a
-  // different error that would leak which check failed.
+  // Never selected for THIS request at all -> forbidden. Selection IS the
+  // authorization now (see this function's own doc comment).
   const myRow = await prisma.projectRequestIntermediateApprover.findUnique({
     where: { projectRequestId_approverId: { projectRequestId: requestId, approverId: userId } },
     select: { id: true, status: true },
   });
   if (!myRow) return { ok: false, error: { code: "forbidden" } };
 
-  const hasGlobalPermission = await hasPermission(role, INTERMEDIATE_APPROVE_PERMISSION_KEY, customRoleId);
-  if (!hasGlobalPermission) return { ok: false, error: { code: "forbidden" } };
+  // A fresh, DB-level re-check — never trusted from the session alone. This
+  // app's isActive=false enforcement happens at JWT/session level (see
+  // lib/auth.ts's jwt callback), which is a SNAPSHOT taken at login and
+  // never re-synced for the life of that session — an approver who was
+  // genuinely active when resolveIntermediateApproverCandidates verified
+  // them at submission time could be deactivated afterward and still carry
+  // a live (stale) session. This mirrors that SAME submission-time
+  // guarantee ("resolve managers to ACTIVE TicketApp users") onto the
+  // decision itself, closing that window.
+  const decidingUser = await prisma.user.findUnique({ where: { id: userId }, select: { isActive: true } });
+  if (!decidingUser?.isActive) return { ok: false, error: { code: "forbidden" } };
 
   if (existing.status !== "PENDING_INTERMEDIATE_APPROVAL") {
     return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };

@@ -1,27 +1,27 @@
 /**
  * Regression coverage for the Project Request INTERMEDIATE approval stage —
- * the new, requester-selected, unanimous-multi-approver stage that now sits
- * ahead of the pre-existing, untouched, department-scoped FINAL approval
- * stage (lib/services/project-request-service.ts's decideApproval, never
- * modified by this feature).
+ * restricted this round to the requester's own VERIFIED SQLGeneral direct
+ * manager (lib/services/project-request-service.ts's
+ * resolveIntermediateApproverCandidates/resolveIntermediateApprovers),
+ * replacing the prior global-permission-holder picker entirely. The
+ * pre-existing, untouched, department-scoped FINAL approval stage
+ * (decideApproval) is exercised too, to prove it's genuinely unaffected.
  *
- * Design (confirmed with the user): at submission, the requester selects one
- * or more approvers from EVERY active user system-wide who holds the new
- * `projectRequest.intermediateApprove` permission (global, never
- * department-scoped, never org-chart/manager-derived). ALL selected
- * approvers must approve (unanimous) before the request advances to the
- * final stage; a REJECT from any single selected approver immediately
- * terminalizes the whole request. Holding the permission is NECESSARY but
- * NOT SUFFICIENT — only an explicitly selected user may decide a given
- * request.
- *
- * This file does not re-prove what the retrofitted sibling test files
- * already cover incidentally (basic submission plumbing, cost-snapshot
- * untouched, replacement-description untouched, list/table wiring,
- * notification-hygiene cleanup) — it focuses on the intermediate stage's OWN
- * behavior: permission-vs-assignment separation, unanimous multi-approver
- * completion, immediate-rejection short-circuit, the final-stage gate, audit
- * trail separation, snapshot immutability, and race/tamper resistance.
+ * Design (this round): candidates are never Company/Department-derived,
+ * never a permission grant — they are the requester's own verified
+ * managerAMAccountName, resolved to an ACTIVE local TicketApp user via
+ * SqlGeneralUserSyncAttempt. Explicit selection is still required when a
+ * candidate exists (never auto-selected). A requester whose own SQLGeneral
+ * record VERIFIES they have no manager at all (managerAMAccountName is
+ * genuinely null) skips the intermediate stage entirely and starts at
+ * PENDING_APPROVAL. Anything short of that verified fact — an unmatched/
+ * ambiguous identity, a SQLGeneral API failure, a manager with no
+ * TicketApp account, or an inactive manager account — is "unresolved" and
+ * blocks submission outright; it is NEVER treated as "no manager".
+ * Authorization to DECIDE a request no longer requires a separate global
+ * permission either — a real ProjectRequestIntermediateApprover row is
+ * now sufficient on its own, since it can only ever have been created
+ * against a freshly-verified manager.
  *
  * Usage: node --require ./scripts/test-support-server-only-stub.cjs --experimental-test-module-mocks --import tsx scripts/test-project-request-intermediate-approval.ts
  */
@@ -59,6 +59,10 @@ mock.module("@/lib/auth", { namedExports: { auth: async () => currentSession, ha
 
 const RUN_ID = Date.now();
 
+function fakeSqlUser(username: string, managerAMAccountName: string | null) {
+  return { username, mail: `${username}@example.com`, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null };
+}
+
 async function main() {
   let prisma: typeof import("@/lib/prisma").prisma;
   try {
@@ -78,6 +82,26 @@ async function main() {
     return;
   }
 
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  type ListUsersFn = typeof realSqlGeneralClient.listAllSqlGeneralUsers;
+  // The bulk fixture every test below shares unless a specific test
+  // overrides it (e.g. to simulate an API failure for one call only).
+  let mockListUsersImpl: ListUsersFn = async () => ({
+    ok: true,
+    users: [
+      fakeSqlUser("geokos", null), // a genuine, verified root — the manager
+      fakeSqlUser("konsym", "geokos"), // the named example from the spec: geokos -> konsym
+      fakeSqlUser("toporoot", null), // a different, independent verified root (no-manager requester)
+      fakeSqlUser("mgr-no-ticketapp", null), // exists in SQLGeneral, but gets NO local SqlGeneralUserSyncAttempt below
+      fakeSqlUser("nolocalmgr-emp", "mgr-no-ticketapp"),
+      fakeSqlUser("inactive-boss", null), // exists, has a local account, but that account is isActive=false
+      fakeSqlUser("inactivemgr-emp", "inactive-boss"),
+      fakeSqlUser("deactmgr", null), // ACTIVE at submission time; deactivated AFTER being selected, before deciding
+      fakeSqlUser("deactreq", "deactmgr"),
+    ],
+  });
+  mock.module("@/lib/sqlgeneral-api-client", { namedExports: { ...realSqlGeneralClient, listAllSqlGeneralUsers: () => mockListUsersImpl() } });
+
   const { NextRequest } = await import("next/server");
   const { Role, DepartmentRole, MembershipSource, AuthProvider } = await import("@prisma/client");
   const { createDepartment } = await import("@/lib/services/department-service");
@@ -95,20 +119,21 @@ async function main() {
   const jsonReq = (body?: unknown) =>
     new NextRequest("http://localhost/x", { method: "POST", headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
-  async function makeUser(email: string, customRoleId: string | null = null) {
-    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId } });
+  async function makeUser(email: string, isActive = true) {
+    const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive } });
     userIds.push(u.id);
     return u;
   }
-  /** GLOBAL-scope custom role granting `permissionKey` — set directly on the user's own top-level customRoleId (the reverse-lookup used by getUsersWithGlobalPermission/resolveIntermediateApprovers reads that DB column, never a DepartmentMembership's, and never the mocked session alone). */
-  async function makeGlobalUser(tag: string, email: string, permissionKey: string) {
-    const role = await prisma.customRole.create({ data: { key: `PR_IA_${tag}_${RUN_ID}`, name: `${tag} ${RUN_ID}`, isBuiltIn: false, scope: "GLOBAL" as any, isActive: true } });
-    customRoleIds.push(role.id);
-    customRoleKeys.push(role.key);
-    const perm = await prisma.permission.findUniqueOrThrow({ where: { key: permissionKey } });
-    await prisma.rolePermission.create({ data: { roleKey: role.key, permissionId: perm.id } });
-    const user = await makeUser(email, role.id);
-    return { role, user };
+  /** Captures this local user's verified SQLGeneral username — exactly what SqlGeneralUserSyncAttempt would hold after a real Microsoft login resolved it (see sqlgeneral-user-sync-service.ts), never created by this feature itself. */
+  async function captureSqlGeneralUsername(userId: string, username: string) {
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId, sqlGeneralUsername: username, status: "SUCCEEDED" } });
+  }
+  async function makeDeptMember(departmentId: string, email: string) {
+    const user = await makeUser(email);
+    await prisma.departmentMembership.create({
+      data: { userId: user.id, departmentId, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
+    });
+    return user;
   }
   async function makeDeptApprover(tag: string, departmentId: string) {
     const role = await prisma.customRole.create({ data: { key: `PR_IA_DEPT_${tag}_${RUN_ID}`, name: `${tag} ${RUN_ID}`, isBuiltIn: false, scope: "DEPARTMENT" as any, isActive: true } });
@@ -116,9 +141,6 @@ async function main() {
     customRoleKeys.push(role.key);
     const perm = await prisma.permission.findUniqueOrThrow({ where: { key: "projectRequest.approve" } });
     await prisma.rolePermission.create({ data: { roleKey: role.key, permissionId: perm.id } });
-    // Also project-assignable, via the SAME role — this user doubles as
-    // the chosen owner of the Project auto-created on approval (see
-    // decideApproval), no separate fixture needed just for that.
     const assignablePerm = await prisma.permission.findUniqueOrThrow({ where: { key: "project.assignable" } });
     await prisma.rolePermission.create({ data: { roleKey: role.key, permissionId: assignablePerm.id } });
     const user = await makeUser(`pr-ia-${tag.toLowerCase()}-${RUN_ID}@kinsen.gr`);
@@ -134,14 +156,15 @@ async function main() {
     const type = await prisma.taskType.create({ data: { name: `PR IA Type ${RUN_ID}` } });
     typeIds.push(type.id);
 
-    const requester = await makeUser(`pr-ia-requester-${RUN_ID}@kinsen.gr`);
+    const geokos = await makeUser(`pr-ia-geokos-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(geokos.id, "geokos");
     await prisma.departmentMembership.create({
-      data: { userId: requester.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
+      data: { userId: geokos.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
     });
 
-    const { user: approver1 } = await makeGlobalUser("APPROVER1", `pr-ia-approver1-${RUN_ID}@kinsen.gr`, "projectRequest.intermediateApprove");
-    const { user: approver2 } = await makeGlobalUser("APPROVER2", `pr-ia-approver2-${RUN_ID}@kinsen.gr`, "projectRequest.intermediateApprove");
-    const { user: unselectedHolder } = await makeGlobalUser("UNSELECTED", `pr-ia-unselected-${RUN_ID}@kinsen.gr`, "projectRequest.intermediateApprove");
+    const konsym = await makeDeptMember(dept.id, `pr-ia-konsym-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(konsym.id, "konsym");
+
     const finalApprover = await makeDeptApprover("FINAL", dept.id);
 
     const basePayload = {
@@ -158,184 +181,177 @@ async function main() {
       currentSession = { user: { id: user.id, role, customRoleId } };
     }
 
-    // ══════════════════════ 1. Permission alone is NECESSARY but NOT SUFFICIENT ══════════════════════
-    console.log("\n=== 1. A global permission-holder who was NOT selected for this request cannot decide it ===\n");
-    sessionFor(requester);
-    const soloSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Solo ${RUN_ID}`, intermediateApproverIds: [approver1.id] }));
-    check("Submission with a single valid intermediate approver -> 201", soloSubmitRes.status === 201);
-    const soloSubmit = await soloSubmitRes.json();
-    requestIds.push(soloSubmit.id);
-    const soloRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: soloSubmit.id } });
-    check("...status starts at PENDING_INTERMEDIATE_APPROVAL", soloRow.status === "PENDING_INTERMEDIATE_APPROVAL");
+    // ══════════════════════ 1. geokos -> konsym: the named production relationship, end to end through BOTH stages ══════════════════════
+    console.log("\n=== 1. geokos is verified as konsym's direct manager — explicit selection, decision, and the unchanged FINAL stage ===\n");
+    sessionFor(konsym);
+    const konsymSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA geokos-konsym ${RUN_ID}`, intermediateApproverIds: [geokos.id] }));
+    check("1. konsym submits selecting geokos (their verified manager) -> 201", konsymSubmitRes.status === 201);
+    const konsymSubmit = await konsymSubmitRes.json();
+    requestIds.push(konsymSubmit.id);
+    const konsymRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: konsymSubmit.id } });
+    check("...status starts at PENDING_INTERMEDIATE_APPROVAL", konsymRow.status === "PENDING_INTERMEDIATE_APPROVAL");
+    const konsymApproverRow = await prisma.projectRequestIntermediateApprover.findUniqueOrThrow({ where: { projectRequestId_approverId: { projectRequestId: konsymSubmit.id, approverId: geokos.id } } });
+    check("...exactly one ProjectRequestIntermediateApprover row was created, for geokos, PENDING", konsymApproverRow.status === "PENDING");
 
-    sessionFor(unselectedHolder, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: unselectedHolder.id } })).customRoleId);
-    const unselectedAttemptRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "I hold the permission, let me in." }), { params: Promise.resolve({ id: soloSubmit.id }) });
-    check("1. A real, active holder of projectRequest.intermediateApprove who was NEVER selected for THIS request -> 403, not 200", unselectedAttemptRes.status === 403);
-    const soloRowUnchanged = await prisma.projectRequest.findUniqueOrThrow({ where: { id: soloSubmit.id } });
-    check("...the request's status is completely untouched by the forbidden attempt", soloRowUnchanged.status === "PENDING_INTERMEDIATE_APPROVAL");
-
-    console.log("\n-- A user with NEITHER the permission NOR a selection gets the SAME forbidden outcome (no information leak) --\n");
-    const nobodyRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Trying anyway." }), { params: Promise.resolve({ id: soloSubmit.id }) });
-    void nobodyRes; // same session (unselectedHolder) reused is enough to prove the 403 path; a second distinct no-permission user is exercised in section 7 below.
-    check("Resubmitting the forbidden attempt again -> still 403, not escalated to any other error", (await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Still trying." }), { params: Promise.resolve({ id: soloSubmit.id }) })).status === 403);
-
-    // ══════════════════════ 2. The sole selected approver clears a single-approver request normally ══════════════════════
-    console.log("\n=== 2. The sole, correctly selected approver clears the stage normally ===\n");
-    sessionFor(approver1, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver1.id } })).customRoleId);
-    const soloApproveRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Looks fine, approving." }), { params: Promise.resolve({ id: soloSubmit.id }) });
-    check("The selected approver -> 200", soloApproveRes.status === 200);
-    const soloRowApproved = await prisma.projectRequest.findUniqueOrThrow({ where: { id: soloSubmit.id } });
-    check("...status advances to PENDING_APPROVAL (final stage unlocked)", soloRowApproved.status === "PENDING_APPROVAL");
-    check("...the FINAL stage's own fields (approver/approvedAt/businessAssessment) are completely untouched by the intermediate decision", soloRowApproved.approverId === null && soloRowApproved.approvedAt === null && soloRowApproved.businessAssessment === null);
-    const soloApproverRow = await prisma.projectRequestIntermediateApprover.findUniqueOrThrow({ where: { projectRequestId_approverId: { projectRequestId: soloSubmit.id, approverId: approver1.id } } });
-    check("...the intermediate row itself records APPROVED + the approver's OWN businessAssessment, on its OWN field", soloApproverRow.status === "APPROVED" && soloApproverRow.businessAssessment === "Looks fine, approving.");
-
-    console.log("\n-- Deciding the same row a second time -> 409, never a silent no-op success --\n");
-    const doubleDecideRes = await intermediateApprovalPOST(jsonReq({ decision: "reject", businessAssessment: "Changed my mind." }), { params: Promise.resolve({ id: soloSubmit.id }) });
-    check("A second decision attempt on an already-decided row -> 409 invalid_status", doubleDecideRes.status === 409);
-    const soloRowStillApproved = await prisma.projectRequest.findUniqueOrThrow({ where: { id: soloSubmit.id } });
-    check("...the first decision's outcome is completely unaffected", soloRowStillApproved.status === "PENDING_APPROVAL");
-
-    console.log("\n-- The FINAL stage now works completely normally, exactly as before this feature ever existed --\n");
     sessionFor(finalApprover);
-    const finalDecideRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Final sign-off, approved.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: soloSubmit.id }) });
-    check("The department-scoped final approver -> 200", finalDecideRes.status === 200);
-    const soloRowFinal = await prisma.projectRequest.findUniqueOrThrow({ where: { id: soloSubmit.id } });
-    check("...status -> APPROVED", soloRowFinal.status === "APPROVED");
-    check("...and NOW the final stage's own fields ARE populated, independently of the intermediate stage's", soloRowFinal.approverId === finalApprover.id && soloRowFinal.businessAssessment === "Final sign-off, approved.");
+    const earlyFinalRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Jumping ahead.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: konsymSubmit.id }) });
+    check("1. The final stage still refuses to act while intermediate approval is pending (unchanged gate)", earlyFinalRes.status === 409);
 
-    // ══════════════════════ 3. Unanimous multi-approver: both must approve before the final stage unlocks ══════════════════════
-    console.log("\n=== 3. Multi-approver UNANIMOUS approval: the final stage unlocks only once BOTH selected approvers have approved ===\n");
-    sessionFor(requester);
-    const multiSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Multi ${RUN_ID}`, intermediateApproverIds: [approver1.id, approver2.id] }));
-    check("Submission with TWO intermediate approvers -> 201", multiSubmitRes.status === 201);
-    const multiSubmit = await multiSubmitRes.json();
-    requestIds.push(multiSubmit.id);
-    const multiRows = await prisma.projectRequestIntermediateApprover.findMany({ where: { projectRequestId: multiSubmit.id } });
-    check("...exactly 2 ProjectRequestIntermediateApprover rows were created, one per selected approver, both PENDING", multiRows.length === 2 && multiRows.every((r) => r.status === "PENDING"));
+    sessionFor(geokos);
+    const geokosApproveRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Approved by direct manager." }), { params: Promise.resolve({ id: konsymSubmit.id }) });
+    check("1. geokos (the verified manager, selected) can decide -> 200", geokosApproveRes.status === 200);
+    const konsymRowAfterApprove = await prisma.projectRequest.findUniqueOrThrow({ where: { id: konsymSubmit.id } });
+    check("...status advances to PENDING_APPROVAL (final stage unlocked)", konsymRowAfterApprove.status === "PENDING_APPROVAL");
 
-    sessionFor(approver1, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver1.id } })).customRoleId);
-    const firstApproveRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "I approve my part." }), { params: Promise.resolve({ id: multiSubmit.id }) });
-    check("approver1 approves -> 200", firstApproveRes.status === 200);
-    const multiRowAfterFirst = await prisma.projectRequest.findUniqueOrThrow({ where: { id: multiSubmit.id } });
-    check("3. After only ONE of two required approvals, the request is STILL PENDING_INTERMEDIATE_APPROVAL — not yet unlocked", multiRowAfterFirst.status === "PENDING_INTERMEDIATE_APPROVAL");
-
-    sessionFor(approver2, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver2.id } })).customRoleId);
-    const beforeSecondApproveNotifCount = await prisma.notification.count({ where: { userId: finalApprover.id, link: `/project-requests/${multiSubmit.id}` } });
-    check("Before the second (final) approval, the department-scoped final approver has NOT yet been notified at all", beforeSecondApproveNotifCount === 0);
-    const secondApproveRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "I approve too." }), { params: Promise.resolve({ id: multiSubmit.id }) });
-    check("approver2 (the SECOND and last required approval) -> 200", secondApproveRes.status === 200);
-    const multiRowAfterSecond = await prisma.projectRequest.findUniqueOrThrow({ where: { id: multiSubmit.id } });
-    check("3. Only NOW, with BOTH approvals in, does the request advance to PENDING_APPROVAL", multiRowAfterSecond.status === "PENDING_APPROVAL");
-    const afterSecondApproveNotifs = await prisma.notification.findMany({ where: { userId: finalApprover.id, link: `/project-requests/${multiSubmit.id}` } });
-    check("...and the final approver is notified EXACTLY once now — not once per intermediate approver, not zero", afterSecondApproveNotifs.length === 1);
-
-    // ══════════════════════ 4. A single REJECT short-circuits the whole request, regardless of other pending approvers ══════════════════════
-    console.log("\n=== 4. A single REJECT from one of several selected approvers immediately terminalizes the whole request ===\n");
-    sessionFor(requester);
-    const rejectSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Reject ${RUN_ID}`, intermediateApproverIds: [approver1.id, approver2.id] }));
-    check("Submission with TWO intermediate approvers -> 201", rejectSubmitRes.status === 201);
-    const rejectSubmit = await rejectSubmitRes.json();
-    requestIds.push(rejectSubmit.id);
-
-    sessionFor(approver1, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver1.id } })).customRoleId);
-    const rejectRes = await intermediateApprovalPOST(jsonReq({ decision: "reject", businessAssessment: "This should not proceed." }), { params: Promise.resolve({ id: rejectSubmit.id }) });
-    check("approver1 rejects -> 200", rejectRes.status === 200);
-    const rejectRowAfter = await prisma.projectRequest.findUniqueOrThrow({ where: { id: rejectSubmit.id } });
-    check("4. The WHOLE request is immediately REJECTED — never waits for approver2's own decision", rejectRowAfter.status === "REJECTED");
-    check("...rejectedAt is set", rejectRowAfter.rejectedAt !== null);
-    const rejectorRow = await prisma.projectRequestIntermediateApprover.findUniqueOrThrow({ where: { projectRequestId_approverId: { projectRequestId: rejectSubmit.id, approverId: approver1.id } } });
-    check("...the rejecting approver's OWN row records REJECTED with their own assessment", rejectorRow.status === "REJECTED" && rejectorRow.businessAssessment === "This should not proceed.");
-    const otherApproverRow = await prisma.projectRequestIntermediateApprover.findUniqueOrThrow({ where: { projectRequestId_approverId: { projectRequestId: rejectSubmit.id, approverId: approver2.id } } });
-    check("...the OTHER (never-decided) approver's row is left exactly as it was — still PENDING, never fabricated as rejected/approved on their behalf", otherApproverRow.status === "PENDING");
-
-    sessionFor(approver2, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver2.id } })).customRoleId);
-    const lateApproveRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Too late, trying anyway." }), { params: Promise.resolve({ id: rejectSubmit.id }) });
-    check("4. approver2's later decision attempt on the already-rejected request -> 409, not a silent success", lateApproveRes.status === 409);
-    const rejectRowStill = await prisma.projectRequest.findUniqueOrThrow({ where: { id: rejectSubmit.id } });
-    check("...the request remains REJECTED, untouched by the late attempt", rejectRowStill.status === "REJECTED");
-
-    console.log("\n-- The requester was notified of the rejection; the final-stage approver was NEVER notified for this request at all --\n");
-    const rejectRequesterNotif = await prisma.notification.findFirst({ where: { userId: requester.id, link: `/project-requests/${rejectSubmit.id}` } });
-    check("The requester received a rejection notification", rejectRequesterNotif !== null && rejectRequesterNotif.body.includes("rejected during intermediate approval"));
-    const finalApproverNotifsForRejected = await prisma.notification.count({ where: { userId: finalApprover.id, link: `/project-requests/${rejectSubmit.id}` } });
-    check("The final-stage approver was never notified for this request (it never reached the final stage)", finalApproverNotifsForRejected === 0);
-
-    console.log("\n-- The FINAL approval route itself refuses to act on a request still stuck at (or past) the intermediate stage — the gate falls out of the existing status guard, with zero new code in decideApproval --\n");
+    console.log("\n-- The FINAL stage now works completely normally — unchanged by this round's intermediate-stage redesign --\n");
     sessionFor(finalApprover);
-    const finalOnRejectedRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Trying to override.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: rejectSubmit.id }) });
-    check("A final approver attempting to decide a REJECTED (at the intermediate stage) request -> 409, never 200", finalOnRejectedRes.status === 409);
-    const rejectRowAfterFinalAttempt = await prisma.projectRequest.findUniqueOrThrow({ where: { id: rejectSubmit.id } });
-    check("...status is untouched, still REJECTED, never silently flipped to APPROVED", rejectRowAfterFinalAttempt.status === "REJECTED");
+    const finalDecideRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Final sign-off, approved.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: konsymSubmit.id }) });
+    check("1. The department-scoped final approver -> 200", finalDecideRes.status === 200);
+    const konsymRowFinal = await prisma.projectRequest.findUniqueOrThrow({ where: { id: konsymSubmit.id } });
+    check("...status -> APPROVED, final stage's own fields populated independently", konsymRowFinal.status === "APPROVED" && konsymRowFinal.approverId === finalApprover.id);
 
-    // ══════════════════════ 5. The final stage is blocked while intermediate is still genuinely PENDING ══════════════════════
-    console.log("\n=== 5. The final approval route is blocked while the intermediate stage is still PENDING (not yet unanimous) ===\n");
-    sessionFor(requester);
-    const pendingGateSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA PendingGate ${RUN_ID}`, intermediateApproverIds: [approver1.id, approver2.id] }));
-    const pendingGateSubmit = await pendingGateSubmitRes.json();
-    requestIds.push(pendingGateSubmit.id);
-    sessionFor(finalApprover);
-    const prematureFinalRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Jumping the queue.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: pendingGateSubmit.id }) });
-    check("5. A final approver attempting to decide a request still PENDING_INTERMEDIATE_APPROVAL (zero approvals in) -> 409, never 200", prematureFinalRes.status === 409);
-    const pendingGateRowAfter = await prisma.projectRequest.findUniqueOrThrow({ where: { id: pendingGateSubmit.id } });
-    check("...status untouched, still PENDING_INTERMEDIATE_APPROVAL", pendingGateRowAfter.status === "PENDING_INTERMEDIATE_APPROVAL");
-    // Clean up this fixture's own intermediate stage so it doesn't linger as
-    // a dangling PENDING request after the run (cosmetic only — the
-    // runCleanup below deletes it by id regardless of status).
-
-    // ══════════════════════ 6. Submission snapshot is immutable — a NEW global permission holder never retroactively joins an existing request's approver set ══════════════════════
-    console.log("\n=== 6. The selected-approver snapshot is frozen at submission — a newly-eligible user never retroactively appears ===\n");
-    const snapshotRowsBefore = await prisma.projectRequestIntermediateApprover.findMany({ where: { projectRequestId: multiSubmit.id }, select: { approverId: true } });
-    const { user: lateJoiner } = await makeGlobalUser("LATEJOIN", `pr-ia-latejoin-${RUN_ID}@kinsen.gr`, "projectRequest.intermediateApprove");
-    const snapshotRowsAfter = await prisma.projectRequestIntermediateApprover.findMany({ where: { projectRequestId: multiSubmit.id }, select: { approverId: true } });
-    check("6. A brand-new global permission holder created AFTER submission never appears on an already-submitted request's approver set", snapshotRowsAfter.length === snapshotRowsBefore.length && !snapshotRowsAfter.some((r) => r.approverId === lateJoiner.id));
-    sessionFor(lateJoiner, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: lateJoiner.id } })).customRoleId);
-    const lateJoinerAttemptRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Let me in too." }), { params: Promise.resolve({ id: multiSubmit.id }) });
-    void lateJoinerAttemptRes; // multiSubmit already reached PENDING_APPROVAL above (section 3) — this attempt will 409 either way; the real proof is the snapshot-row check above.
-
-    // ══════════════════════ 7. Fail-closed submission: resolveIntermediateApprovers rejects a forged/stale/no-permission id, the WHOLE submission fails ══════════════════════
-    console.log("\n=== 7. A forged/ineligible intermediateApproverIds entry fails the WHOLE submission — never silently drops it and proceeds ===\n");
-    const noPermUser = await makeUser(`pr-ia-noperm-${RUN_ID}@kinsen.gr`);
-    sessionFor(requester);
-    const countBeforeForged = await prisma.projectRequest.count();
-    const forgedApproverRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Forged ${RUN_ID}`, intermediateApproverIds: [approver1.id, noPermUser.id] }));
-    check("7. A submission mixing one valid approver with one user who does NOT hold the permission -> 400, the whole thing fails", forgedApproverRes.status === 400);
-    const countAfterForged = await prisma.projectRequest.count();
-    check("...zero ProjectRequest rows created — never a partial 'approver1-only' fallback", countBeforeForged === countAfterForged);
-
-    console.log("\n-- An empty selection is also rejected server-side (fail closed — an empty intermediate pool must never silently skip the stage) --\n");
+    // ══════════════════════ 2. Explicit selection required — never auto-selected ══════════════════════
+    console.log("\n=== 2. Explicit selection is required when a verified manager candidate exists — never auto-selected ===\n");
+    sessionFor(konsym);
     const emptySelectionRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Empty ${RUN_ID}`, intermediateApproverIds: [] }));
-    check("7. intermediateApproverIds: [] -> 422 (zod's own min(1) rejects it before it even reaches the server-side resolver)", emptySelectionRes.status === 422);
+    check("2. Submitting with ZERO approvers, even though a real verified manager exists, -> 400 (never auto-selects geokos for them)", emptySelectionRes.status === 400);
+    const countAfterEmpty = await prisma.projectRequest.count({ where: { title: `PR IA Empty ${RUN_ID}` } });
+    check("...no ProjectRequest row was created", countAfterEmpty === 0);
 
-    // ══════════════════════ 8. not_found and invalid_assessment paths ══════════════════════
-    console.log("\n=== 8. not_found and invalid_assessment error paths ===\n");
-    sessionFor(approver1, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver1.id } })).customRoleId);
+    // ══════════════════════ 3. Unauthorized approver injection ══════════════════════
+    console.log("\n=== 3. Submitting an approver who is NOT the requester's verified manager fails the WHOLE submission ===\n");
+    const impostor = await makeUser(`pr-ia-impostor-${RUN_ID}@kinsen.gr`);
+    sessionFor(konsym);
+    const countBeforeForged = await prisma.projectRequest.count();
+    const forgedRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Forged ${RUN_ID}`, intermediateApproverIds: [impostor.id] }));
+    check("3. A requester submitting ANYONE other than their own verified manager -> 400", forgedRes.status === 400);
+    const countAfterForged = await prisma.projectRequest.count();
+    check("...zero ProjectRequest rows created — never a partial fallback", countBeforeForged === countAfterForged);
+
+    console.log("\n-- A user who was never selected for a request cannot decide it, even if they ARE someone else's verified manager --\n");
+    const secondSubmitRes = (async () => {
+      sessionFor(konsym);
+      return requestsPOST(jsonReq({ ...basePayload, title: `PR IA Second ${RUN_ID}`, intermediateApproverIds: [geokos.id] }));
+    })();
+    const secondSubmitJson = await (await secondSubmitRes).json();
+    requestIds.push(secondSubmitJson.id);
+    sessionFor(impostor);
+    const impostorDecideRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Let me approve this too." }), { params: Promise.resolve({ id: secondSubmitJson.id }) });
+    check("3. A user with no ProjectRequestIntermediateApprover row for this request -> 403, never 200", impostorDecideRes.status === 403);
+    const secondRowUnchanged = await prisma.projectRequest.findUniqueOrThrow({ where: { id: secondSubmitJson.id } });
+    check("...the request's status is completely untouched by the forbidden attempt", secondRowUnchanged.status === "PENDING_INTERMEDIATE_APPROVAL");
+
+    console.log("\n-- A selected approver who is DEACTIVATED after submission (but before deciding) is rejected, even with a live session --\n");
+    const deactMgr = await makeUser(`pr-ia-deactmgr-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(deactMgr.id, "deactmgr");
+    const deactReq = await makeDeptMember(dept.id, `pr-ia-deactreq-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(deactReq.id, "deactreq");
+    sessionFor(deactReq);
+    const deactSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Deact ${RUN_ID}`, intermediateApproverIds: [deactMgr.id] }));
+    check("3b. Submission with a genuinely active, verified manager -> 201", deactSubmitRes.status === 201);
+    const deactSubmit = await deactSubmitRes.json();
+    requestIds.push(deactSubmit.id);
+    // Deactivated AFTER being validly selected — simulates a real admin
+    // deactivation mid-session; this app's isActive=false enforcement is a
+    // JWT/session-level SNAPSHOT taken at login (see lib/auth.ts), so the
+    // mocked `currentSession` below deliberately still reports a "live"
+    // session for deactMgr, exactly like a stale, not-yet-expired real one.
+    await prisma.user.update({ where: { id: deactMgr.id }, data: { isActive: false } });
+    sessionFor(deactMgr);
+    const deactDecideRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Trying to approve while deactivated." }), { params: Promise.resolve({ id: deactSubmit.id }) });
+    check("3b. A selected approver who was deactivated AFTER submission -> 403, never 200, despite a live session and a real selected row", deactDecideRes.status === 403);
+    const deactRowUnchanged = await prisma.projectRequest.findUniqueOrThrow({ where: { id: deactSubmit.id } });
+    check("...the request's status is completely untouched by the forbidden attempt", deactRowUnchanged.status === "PENDING_INTERMEDIATE_APPROVAL");
+    const deactMyRowUnchanged = await prisma.projectRequestIntermediateApprover.findUniqueOrThrow({ where: { projectRequestId_approverId: { projectRequestId: deactSubmit.id, approverId: deactMgr.id } } });
+    check("...and their own ProjectRequestIntermediateApprover row is still PENDING, never fabricated as decided", deactMyRowUnchanged.status === "PENDING");
+
+    // ══════════════════════ 4. No-manager bypass: a VERIFIED "no manager" record skips the intermediate stage entirely ══════════════════════
+    console.log("\n=== 4. A requester whose SQLGeneral record VERIFIES they have no manager skips straight to Final Approval ===\n");
+    const toporoot = await makeDeptMember(dept.id, `pr-ia-toporoot-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(toporoot.id, "toporoot");
+    sessionFor(toporoot);
+    const notifBeforeSkip = await prisma.notification.count({ where: { userId: finalApprover.id } });
+    const skipSubmitRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Skip ${RUN_ID}`, intermediateApproverIds: [] }));
+    check("4. A verified-no-manager requester submitting with an EMPTY approver list -> 201", skipSubmitRes.status === 201);
+    const skipSubmit = await skipSubmitRes.json();
+    requestIds.push(skipSubmit.id);
+    const skipRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: skipSubmit.id } });
+    check("4. status starts DIRECTLY at PENDING_APPROVAL — the intermediate stage is never entered", skipRow.status === "PENDING_APPROVAL");
+    const skipApproverRows = await prisma.projectRequestIntermediateApprover.count({ where: { projectRequestId: skipSubmit.id } });
+    check("...zero ProjectRequestIntermediateApprover rows were created", skipApproverRows === 0);
+    const notifAfterSkip = await prisma.notification.count({ where: { userId: finalApprover.id } });
+    check("...the final-stage approver is notified IMMEDIATELY (same as the unanimous-completion transition), not left waiting", notifAfterSkip > notifBeforeSkip);
+
+    console.log("\n-- The final stage already works immediately for a skipped request, no intermediate approval ever required --\n");
+    sessionFor(finalApprover);
+    const skipFinalRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Approved directly.", projectOwnerId: finalApprover.id }), { params: Promise.resolve({ id: skipSubmit.id }) });
+    check("4. The final approver can decide it immediately -> 200", skipFinalRes.status === 200);
+
+    console.log("\n-- A non-empty selection for a VERIFIED no-manager requester is rejected too — fail closed, never a silent override --\n");
+    const skipForgedRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA SkipForged ${RUN_ID}`, intermediateApproverIds: [geokos.id] }));
+    check("4. A verified-no-manager requester submitting a non-empty approver list -> 400", skipForgedRes.status === 400);
+
+    // ══════════════════════ 5. Unresolved manager/API failure — NEVER treated as "no manager" ══════════════════════
+    console.log('\n=== 5. "Unresolved" (API failure / no TicketApp account / inactive account) NEVER behaves like "no manager" ===\n');
+
+    console.log("\n-- A SQLGeneral API/pagination failure blocks submission entirely --\n");
+    const realImpl = mockListUsersImpl;
+    mockListUsersImpl = async () => ({ ok: false, reason: "Pagination exceeded 200 pages." });
+    sessionFor(konsym);
+    const apiFailRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA ApiFail ${RUN_ID}`, intermediateApproverIds: [] }));
+    check('5. An API failure while resolving the requester\'s manager -> 400, NEVER 201 ("no manager" would also submit with [])', apiFailRes.status === 400);
+    const apiFailCount = await prisma.projectRequest.count({ where: { title: `PR IA ApiFail ${RUN_ID}` } });
+    check("...no ProjectRequest row was created", apiFailCount === 0);
+    mockListUsersImpl = realImpl;
+
+    console.log("\n-- A manager who exists in SQLGeneral but has NO local TicketApp account blocks submission --\n");
+    const noLocalMgrEmp = await makeDeptMember(dept.id, `pr-ia-nolocalmgr-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(noLocalMgrEmp.id, "nolocalmgr-emp");
+    sessionFor(noLocalMgrEmp);
+    const noLocalMgrRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA NoLocalMgr ${RUN_ID}`, intermediateApproverIds: [] }));
+    check("5. A requester whose verified manager has no TicketApp account -> 400, never skipped", noLocalMgrRes.status === 400);
+
+    console.log("\n-- A manager whose local TicketApp account is INACTIVE blocks submission --\n");
+    const inactiveBoss = await makeUser(`pr-ia-inactiveboss-${RUN_ID}@kinsen.gr`, false);
+    await captureSqlGeneralUsername(inactiveBoss.id, "inactive-boss");
+    const inactiveMgrEmp = await makeDeptMember(dept.id, `pr-ia-inactivemgr-${RUN_ID}@kinsen.gr`);
+    await captureSqlGeneralUsername(inactiveMgrEmp.id, "inactivemgr-emp");
+    sessionFor(inactiveMgrEmp);
+    const inactiveMgrRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA InactiveMgr ${RUN_ID}`, intermediateApproverIds: [] }));
+    check("5. A requester whose verified manager's TicketApp account is inactive -> 400, never skipped", inactiveMgrRes.status === 400);
+    check("...and never 201 with inactiveBoss as a usable candidate either", inactiveMgrRes.status !== 201);
+    const inactiveBossAsApproverRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA InactiveMgrForce ${RUN_ID}`, intermediateApproverIds: [inactiveBoss.id] }));
+    check("...and explicitly selecting the inactive manager also fails (they are never a valid candidate)", inactiveBossAsApproverRes.status === 400);
+
+    console.log("\n-- A requester whose own SQLGeneral identity was never captured at all is unresolved, never no-manager --\n");
+    const uncaptured = await makeDeptMember(dept.id, `pr-ia-uncaptured-${RUN_ID}@kinsen.gr`);
+    sessionFor(uncaptured);
+    const uncapturedRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Uncaptured ${RUN_ID}`, intermediateApproverIds: [] }));
+    check("5. A requester with no captured SQLGeneral username at all -> 400, never skipped", uncapturedRes.status === 400);
+
+    // ══════════════════════ 6. not_found / invalid_assessment / double-decide — unchanged generic behaviors ══════════════════════
+    console.log("\n=== 6. not_found, double-decide, and businessAssessment validation are unaffected by this round's redesign ===\n");
+    sessionFor(geokos);
     const notFoundRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Doesn't matter." }), { params: Promise.resolve({ id: "cmx0000000000000000000099" }) });
-    check("8. Deciding a nonexistent request id -> 404", notFoundRes.status === 404);
+    check("6. Deciding a nonexistent request id -> 404", notFoundRes.status === 404);
 
-    console.log("\n-- Unlike the FINAL stage, businessAssessment is OPTIONAL here (confirmed with the user: the intermediate stage asks for a decision only, no written justification) --\n");
-    sessionFor(requester);
-    const assessmentFixtureRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Assessment ${RUN_ID}`, intermediateApproverIds: [approver1.id] }));
+    sessionFor(konsym);
+    const assessmentFixtureRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA Assessment ${RUN_ID}`, intermediateApproverIds: [geokos.id] }));
     const assessmentFixture = await assessmentFixtureRes.json();
     requestIds.push(assessmentFixture.id);
-    sessionFor(approver1, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver1.id } })).customRoleId);
+    sessionFor(geokos);
     const whitespaceAssessmentRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "   \n\t  " }), { params: Promise.resolve({ id: assessmentFixture.id }) });
-    check("8. Whitespace-only businessAssessment -> 200, never rejected (optional at this stage)", whitespaceAssessmentRes.status === 200);
-    const assessmentRowAfter = await prisma.projectRequest.findUniqueOrThrow({ where: { id: assessmentFixture.id } });
-    check("...the decision still took effect (advanced past intermediate, the sole approver's decision)", assessmentRowAfter.status === "PENDING_APPROVAL");
-    const myDecidedRow = await prisma.projectRequestIntermediateApprover.findUniqueOrThrow({ where: { projectRequestId_approverId: { projectRequestId: assessmentFixture.id, approverId: approver1.id } } });
-    check("...and the whitespace-only text is stored as null, never as a blank-but-technically-present string", myDecidedRow.businessAssessment === null);
+    check("6. Whitespace-only businessAssessment -> 200, never rejected (optional at this stage)", whitespaceAssessmentRes.status === 200);
+    const doubleDecideRes = await intermediateApprovalPOST(jsonReq({ decision: "reject", businessAssessment: "Changed my mind." }), { params: Promise.resolve({ id: assessmentFixture.id }) });
+    check("...deciding the same row a second time -> 409, never a silent no-op success", doubleDecideRes.status === 409);
 
-    console.log("\n-- An over-length businessAssessment is still rejected, even though it's optional --\n");
-    sessionFor(requester);
-    const overLengthFixtureRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA OverLength ${RUN_ID}`, intermediateApproverIds: [approver1.id] }));
+    sessionFor(konsym);
+    const overLengthFixtureRes = await requestsPOST(jsonReq({ ...basePayload, title: `PR IA OverLength ${RUN_ID}`, intermediateApproverIds: [geokos.id] }));
     const overLengthFixture = await overLengthFixtureRes.json();
     requestIds.push(overLengthFixture.id);
-    sessionFor(approver1, Role.USER, (await prisma.user.findUniqueOrThrow({ where: { id: approver1.id } })).customRoleId);
+    sessionFor(geokos);
     const overLengthRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "x".repeat(5001) }), { params: Promise.resolve({ id: overLengthFixture.id }) });
-    check("8. Over-length (5001 chars) businessAssessment -> 422", overLengthRes.status === 422);
-    const overLengthRowUnaffected = await prisma.projectRequest.findUniqueOrThrow({ where: { id: overLengthFixture.id } });
-    check("...the request's status is completely untouched by the failed validation", overLengthRowUnaffected.status === "PENDING_INTERMEDIATE_APPROVAL");
+    check("6. Over-length (5001 chars) businessAssessment -> 422", overLengthRes.status === 422);
   } finally {
     console.log("\nCleaning up test data...\n");
     await runCleanup([
@@ -344,6 +360,7 @@ async function main() {
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["sqlgeneral sync attempts", () => prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

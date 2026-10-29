@@ -3,7 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { createProjectRequestSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, internalErrorResponse } from "@/lib/api-errors";
-import { resolveDepartmentForRequest, resolveIntermediateApprovers, notifyIntermediateApprovers } from "@/lib/services/project-request-service";
+import { resolveDepartmentForRequest, resolveIntermediateApprovers, notifyIntermediateApprovers, notifyEligibleApproversOfSubmission } from "@/lib/services/project-request-service";
 
 // POST — submit a new Project Request. Every trust-sensitive field
 // (requesterId, department membership, status) is resolved/verified
@@ -57,26 +57,29 @@ export async function POST(req: NextRequest) {
     // string.
     const replacementDescription = data.replacesExisting ? data.replacementDescription! : null;
 
-    // Intermediate approvers: the requester's OWN selection, re-verified
-    // here against who ACTUALLY holds projectRequest.intermediateApprove
-    // GLOBALLY right now — a single forged/stale id fails the WHOLE
-    // submission (fail closed), never silently dropped or skipped. This is
-    // the mandatory gate ahead of final approval; there is no path that
-    // creates a ProjectRequest without at least one real intermediate
-    // approver.
-    const intermediateResolution = await resolveIntermediateApprovers(data.intermediateApproverIds);
+    // Intermediate approvers: the requester's OWN selection among their
+    // verified SQLGeneral direct manager(s), re-verified here fresh — a
+    // single forged/stale id fails the WHOLE submission (fail closed),
+    // never silently dropped. "unresolved" (the requester's or manager's
+    // SQLGeneral identity can't be verified right now, or the SQLGeneral
+    // API itself failed) ALSO fails the whole submission — never treated as
+    // "no manager" and never silently skips the stage. Only a requester
+    // whose own SQLGeneral record VERIFIES they have no manager at all
+    // skips straight to PENDING_APPROVAL below.
+    const intermediateResolution = await resolveIntermediateApprovers(session.user.id, data.intermediateApproverIds);
     if (!intermediateResolution.ok) {
       const message =
         intermediateResolution.reason === "no_approvers_selected"
-          ? "Select at least one intermediate approver."
-          : "One or more selected intermediate approvers are no longer eligible. Please re-select.";
+          ? "Select your manager as the intermediate approver."
+          : intermediateResolution.reason === "unresolved_manager"
+            ? (intermediateResolution.detail ?? "Could not verify your manager right now. Please try again, or contact an administrator.")
+            : "The selected intermediate approver is not your verified manager. Please re-select.";
       return NextResponse.json(apiError("invalid_intermediate_approvers", message, { field: "intermediateApproverIds" }), { status: 400 });
     }
 
-    // The ProjectRequest row and its full set of
-    // ProjectRequestIntermediateApprover rows are created atomically — a
-    // request can never exist with zero approvers because one half of this
-    // write failed.
+    // The ProjectRequest row and (when the intermediate stage isn't being
+    // skipped) its full set of ProjectRequestIntermediateApprover rows are
+    // created atomically.
     const created = await prisma.$transaction(async (tx) => {
       const request = await tx.projectRequest.create({
         data: {
@@ -90,25 +93,36 @@ export async function POST(req: NextRequest) {
           requesterId: session.user.id,
           departmentId: departmentResolution.departmentId,
           // status defaults to PENDING_INTERMEDIATE_APPROVAL at the schema
-          // level — the mandatory intermediate stage, never skipped.
+          // level — overridden to PENDING_APPROVAL only when the requester
+          // has a VERIFIED "no manager" record (skipIntermediateStage).
+          ...(intermediateResolution.skipIntermediateStage ? { status: "PENDING_APPROVAL" as const } : {}),
         },
         select: { id: true, title: true },
       });
-      await tx.projectRequestIntermediateApprover.createMany({
-        data: intermediateResolution.approverIds.map((approverId) => ({ projectRequestId: request.id, approverId })),
-      });
+      if (intermediateResolution.approverIds.length > 0) {
+        await tx.projectRequestIntermediateApprover.createMany({
+          data: intermediateResolution.approverIds.map((approverId) => ({ projectRequestId: request.id, approverId })),
+        });
+      }
       return request;
     });
 
     // Best-effort, AFTER the rows have genuinely committed above — a
     // notification failure must never turn an already-successful submission
-    // into an error response. Only the SELECTED intermediate approvers are
-    // notified now; the final stage's own eligible approvers are
-    // deliberately notified later, only once intermediate approval is
-    // unanimously complete (see decideIntermediateApproval) — never at
-    // submission time, never a misleading "ready for final approval"
-    // notification before that.
-    await notifyIntermediateApprovers(created.id, created.title, intermediateResolution.approverIds);
+    // into an error response.
+    if (intermediateResolution.skipIntermediateStage) {
+      // No intermediate stage at all — the final stage's eligible
+      // approvers are actionable immediately, so notify them now (the SAME
+      // notification decideIntermediateApproval fires once intermediate
+      // approval completes unanimously for a request that DID have one).
+      await notifyEligibleApproversOfSubmission(departmentResolution.departmentId, created.id, created.title);
+    } else {
+      // Only the SELECTED intermediate approver(s) are notified now; the
+      // final stage's own eligible approvers are deliberately notified
+      // later, only once intermediate approval is unanimously complete
+      // (see decideIntermediateApproval) — never at submission time.
+      await notifyIntermediateApprovers(created.id, created.title, intermediateResolution.approverIds);
+    }
 
     return NextResponse.json({ id: created.id }, { status: 201 });
   } catch (error: any) {

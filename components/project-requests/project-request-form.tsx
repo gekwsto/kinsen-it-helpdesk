@@ -37,7 +37,15 @@ interface ProjectRequestFormProps {
   departments: DepartmentOption[];
   /** The active workspace's departmentId, ONLY when it's a real department (never the synthetic "All Workspaces" state) and already confirmed by the page to be in `departments` — a pre-selected default when there's more than one option, never an authorization decision; the server re-verifies whatever is actually submitted regardless. */
   defaultDepartmentId?: string;
-  /** Every real, currently-eligible intermediate approver, system-wide (never department-scoped) — the page already renders a clean empty state instead of this form when there are none (this stage is mandatory, never silently skipped). */
+  /**
+   * The requester's OWN verified SQLGeneral direct manager(s) — never
+   * Company/Department, never a permission-holder pool. Empty specifically
+   * means the page already verified this requester has NO manager at all
+   * (never that resolution failed — the page renders a blocking error
+   * state instead of this form in that case) — this form renders without
+   * any intermediate-approver section at all when empty, and submits
+   * straight to Final Approval.
+   */
   intermediateApproverOptions: IntermediateApproverOption[];
 }
 
@@ -53,6 +61,7 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
     setValue,
     watch,
     clearErrors,
+    setError,
     formState: { errors },
   } = useForm<CreateProjectRequestInput>({
     resolver: zodResolver(createProjectRequestSchema),
@@ -90,6 +99,15 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
   }, [intermediateApproverOptions, approverSearch]);
 
   const onSubmit = async (data: CreateProjectRequestInput) => {
+    // Client-side mirror of the server's own rule (never the authoritative
+    // check — resolveIntermediateApprovers re-verifies this fresh
+    // regardless): when a verified manager candidate exists, explicit
+    // selection is required — never auto-selected, never skippable just
+    // because there's only one option to pick.
+    if (intermediateApproverOptions.length > 0 && data.intermediateApproverIds.length === 0) {
+      setError("intermediateApproverIds", { type: "manual", message: "Select your manager as the intermediate approver." });
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await fetch("/api/project-requests", {
@@ -197,46 +215,52 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
             {errors.expectedBenefits && <p className="text-xs text-destructive">{errors.expectedBenefits.message}</p>}
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="intermediateApproverIds">
-              Intermediate Approvers <span className="text-destructive">*</span>
-            </Label>
-            <p id="intermediateApproverIds-helper" className="text-xs text-muted-foreground">
-              Select everyone who must approve this request before it goes to final approval — all of them must approve.
-            </p>
-            <Input
-              placeholder="Search approvers by name or email..."
-              value={approverSearch}
-              onChange={(e) => setApproverSearch(e.target.value)}
-              className="h-8 text-sm"
-            />
-            <div
-              id="intermediateApproverIds"
-              role="group"
-              aria-describedby={errors.intermediateApproverIds ? "intermediateApproverIds-helper intermediateApproverIds-error" : "intermediateApproverIds-helper"}
-              className="max-h-48 overflow-y-auto rounded-md border divide-y"
-            >
-              {approverSearchResults.map((u) => (
-                <label key={u.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-muted/50">
-                  <input
-                    type="checkbox"
-                    className="h-4 w-4 rounded border-input"
-                    checked={intermediateApproverIds.includes(u.id)}
-                    onChange={(e) => toggleIntermediateApprover(u.id, e.target.checked)}
-                  />
-                  <span>{u.name ?? u.email}</span>
-                </label>
-              ))}
-              {approverSearchResults.length === 0 && (
-                <p className="text-xs text-muted-foreground px-3 py-2">No approvers match &quot;{approverSearch}&quot;.</p>
+          {intermediateApproverOptions.length > 0 ? (
+            <div className="space-y-2">
+              <Label htmlFor="intermediateApproverIds">
+                Intermediate Approver <span className="text-destructive">*</span>
+              </Label>
+              <p id="intermediateApproverIds-helper" className="text-xs text-muted-foreground">
+                Select your manager to intermediate-approve this request before it goes to final approval.
+              </p>
+              <Input
+                placeholder="Search by name or email..."
+                value={approverSearch}
+                onChange={(e) => setApproverSearch(e.target.value)}
+                className="h-8 text-sm"
+              />
+              <div
+                id="intermediateApproverIds"
+                role="group"
+                aria-describedby={errors.intermediateApproverIds ? "intermediateApproverIds-helper intermediateApproverIds-error" : "intermediateApproverIds-helper"}
+                className="max-h-48 overflow-y-auto rounded-md border divide-y"
+              >
+                {approverSearchResults.map((u) => (
+                  <label key={u.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-muted/50">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded border-input"
+                      checked={intermediateApproverIds.includes(u.id)}
+                      onChange={(e) => toggleIntermediateApprover(u.id, e.target.checked)}
+                    />
+                    <span>{u.name ?? u.email}</span>
+                  </label>
+                ))}
+                {approverSearchResults.length === 0 && (
+                  <p className="text-xs text-muted-foreground px-3 py-2">No approvers match &quot;{approverSearch}&quot;.</p>
+                )}
+              </div>
+              {errors.intermediateApproverIds && (
+                <p id="intermediateApproverIds-error" className="text-xs text-destructive">
+                  {errors.intermediateApproverIds.message as string}
+                </p>
               )}
             </div>
-            {errors.intermediateApproverIds && (
-              <p id="intermediateApproverIds-error" className="text-xs text-destructive">
-                {errors.intermediateApproverIds.message as string}
-              </p>
-            )}
-          </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              You have no manager on record — this request will go straight to final approval.
+            </p>
+          )}
 
           <label className="flex items-center gap-2 text-sm">
             <input

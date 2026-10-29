@@ -5,14 +5,14 @@ import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, in
 import { decideIntermediateApproval } from "@/lib/services/project-request-service";
 
 // POST — the Approve/Reject action for the INTERMEDIATE stage (ahead of the
-// pre-existing final /approval route). Authorization requires BOTH:
-// (1) the caller genuinely holds projectRequest.intermediateApprove
-// globally right now, AND (2) the requester explicitly selected this exact
-// caller as one of THIS request's own intermediate approvers at submission
-// time — re-checked here server-side regardless of what the UI showed, via
-// decideIntermediateApproval's own atomic, race-safe guard (see its doc
-// comment). Never department-scoped, never derived from org-chart
-// management.
+// pre-existing final /approval route). Authorization: the requester must
+// have explicitly selected this exact caller as one of THIS request's own
+// intermediate approvers at submission time — re-checked here server-side
+// regardless of what the UI showed, via decideIntermediateApproval's own
+// atomic, race-safe guard (see its doc comment). Candidates (and therefore
+// who could ever hold such a row) are the requester's own verified
+// SQLGeneral direct manager — never Company/Department, never a global
+// permission grant.
 export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
     const session = await requireAuth();
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const parsed = projectRequestIntermediateApprovalDecisionSchema.safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);
 
-    const result = await decideIntermediateApproval(id, session.user.id, session.user.role, session.user.customRoleId, parsed.data.decision, parsed.data.businessAssessment);
+    const result = await decideIntermediateApproval(id, session.user.id, parsed.data.decision, parsed.data.businessAssessment);
     if (!result.ok) {
       switch (result.error.code) {
         case "not_found":

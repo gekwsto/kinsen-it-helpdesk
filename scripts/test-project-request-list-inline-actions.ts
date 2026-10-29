@@ -142,6 +142,14 @@ async function main() {
     return;
   }
 
+  // Intermediate-approver candidates are now the requester's own verified
+  // SQLGeneral direct manager (see resolveIntermediateApproverCandidates in
+  // lib/services/project-request-service.ts) — the requester fixture below
+  // is given a verified manager pointing at `intermediateApproverUser`.
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralBulkUsers: any[] = [];
+  mock.module("@/lib/sqlgeneral-api-client", { namedExports: { ...realSqlGeneralClient, listAllSqlGeneralUsers: async () => ({ ok: true, users: sqlGeneralBulkUsers }) } });
+
   const { NextRequest } = await import("next/server");
   const { Role, DepartmentRole, MembershipSource, AuthProvider } = await import("@prisma/client");
   const { createDepartment } = await import("@/lib/services/department-service");
@@ -163,6 +171,12 @@ async function main() {
   const jsonReq = (method: string, body?: unknown) =>
     new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
+  function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
+    sqlGeneralBulkUsers.push({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+  }
+  async function captureSqlGeneralUsername(userId: string, username: string) {
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId, sqlGeneralUsername: username, status: "SUCCEEDED" } });
+  }
   async function makeUser(email: string, customRoleId: string | null = null) {
     const u = await prisma.user.create({ data: { email, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, customRoleId } });
     userIds.push(u.id);
@@ -217,14 +231,16 @@ async function main() {
     const noPermUser = await makeUser(`pr-list-noperm-${RUN_ID}@kinsen.gr`);
     await addMembership(noPermUser.id, dept.id);
 
-    const intermediateApproverRole = await makeApproverRole("INTERMEDIATE", "GLOBAL", "projectRequest.intermediateApprove");
-    // The global-permission reverse lookup used at submission time reads the
-    // User's own top-level customRoleId DB column, never a
-    // DepartmentMembership's — must be set directly here.
-    const intermediateApproverUser = await makeUser(`pr-list-intermediate-${RUN_ID}@kinsen.gr`, intermediateApproverRole.id);
+    // Now a verified SQLGeneral manager rather than a permission grant.
+    const intermediateApproverUser = await makeUser(`pr-list-intermediate-${RUN_ID}@kinsen.gr`);
+    const INTERMEDIATE_MANAGER_USERNAME = `pr-list-mgr-${RUN_ID}`;
+    registerSqlGeneralUser(INTERMEDIATE_MANAGER_USERNAME, null);
+    await captureSqlGeneralUsername(intermediateApproverUser.id, INTERMEDIATE_MANAGER_USERNAME);
+    await captureSqlGeneralUsername(requester.id, `pr-list-req-${requester.id}`);
+    registerSqlGeneralUser(`pr-list-req-${requester.id}`, INTERMEDIATE_MANAGER_USERNAME);
     async function clearIntermediate(requestId: string) {
       const prior = currentSession;
-      currentSession = { user: { id: intermediateApproverUser.id, role: Role.USER, customRoleId: intermediateApproverRole.id } };
+      currentSession = { user: { id: intermediateApproverUser.id, role: Role.USER, customRoleId: null } };
       const res = await intermediateApprovalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "Cleared for fixture setup." }), { params: Promise.resolve({ id: requestId }) });
       if (res.status !== 200) throw new Error(`Failed to clear intermediate approval for ${requestId}: ${res.status}`);
       currentSession = prior;
@@ -424,6 +440,7 @@ async function main() {
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["sqlgeneral sync attempts", () => prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

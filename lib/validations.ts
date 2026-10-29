@@ -903,16 +903,19 @@ export const createProjectRequestSchema = z
     // instead. A value here that isn't one of the requester's OWN real,
     // active memberships is always rejected server-side.
     departmentId: z.string().optional(),
-    // The requester's OWN choice of who must unanimously clear the
-    // intermediate stage before this request can ever reach final approval
-    // — mandatory (fail closed, never silently skipped), at least one id.
-    // Each id is re-verified server-side against who ACTUALLY holds
-    // projectRequest.intermediateApprove at submission time (see
-    // resolveIntermediateApprovers in lib/services/project-request-service.ts)
-    // — a forged/stale id here is always rejected, never silently accepted.
+    // The requester's OWN explicit choice among their verified SQLGeneral
+    // direct manager(s) — NOT a free pick among permission-holders any
+    // more. Whether this must be non-empty depends on the requester's own
+    // verified manager status, which only the server can determine (see
+    // resolveIntermediateApproverCandidates/resolveIntermediateApprovers in
+    // lib/services/project-request-service.ts) — a requester with a
+    // verified manager must select them (enforced server-side, never here,
+    // since this schema has no requester context); a requester with a
+    // verified "no manager" must submit an empty array (also enforced
+    // server-side). A forged/stale id here is always rejected, never
+    // silently accepted.
     intermediateApproverIds: z
       .array(z.string().min(1))
-      .min(1, "Select at least one intermediate approver")
       .refine((ids) => new Set(ids).size === ids.length, "The same approver was selected more than once"),
   })
   .superRefine((data, ctx) => {

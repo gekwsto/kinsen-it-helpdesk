@@ -114,6 +114,18 @@ async function main() {
     return;
   }
 
+  // Intermediate-approver candidates (and the New Project Request page's own
+  // rendering branch) are now resolved from the requester's verified
+  // SQLGeneral direct manager (see resolveIntermediateApproverCandidates in
+  // lib/services/project-request-service.ts) — this file is about
+  // DEPARTMENT eligibility, so every user whose session actually renders
+  // the page or submits below is simply given a verified SQLGeneral
+  // identity (see registerSqlGeneralUser/captureSqlGeneralUsername),
+  // keeping this file's own department-only assertions meaningful.
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralBulkUsers: any[] = [];
+  mock.module("@/lib/sqlgeneral-api-client", { namedExports: { ...realSqlGeneralClient, listAllSqlGeneralUsers: async () => ({ ok: true, users: sqlGeneralBulkUsers }) } });
+
   const { NextRequest } = await import("next/server");
   const { Role, DepartmentRole, MembershipSource, AuthProvider } = await import("@prisma/client");
   const { createDepartment } = await import("@/lib/services/department-service");
@@ -130,6 +142,13 @@ async function main() {
   const customRoleKeys: string[] = [];
 
   const jsonReq = (body: unknown) => new NextRequest("http://localhost/x", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+  function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
+    sqlGeneralBulkUsers.push({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+  }
+  async function captureSqlGeneralUsername(userId: string, username: string) {
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId, sqlGeneralUsername: username, status: "SUCCEEDED" } });
+  }
 
   try {
     const deptA = await createDepartment({ name: `PR Elig Dept A ${RUN_ID}`, slug: `pr-elig-a-${RUN_ID}` });
@@ -150,6 +169,15 @@ async function main() {
     console.log("\n=== 1. System Administrator with ZERO direct DepartmentMembership rows gets the canonical active-department set ===\n");
     const admin = await prisma.user.create({ data: { email: `pr-elig-admin-${RUN_ID}@kinsen.gr`, role: Role.ADMIN, authProvider: AuthProvider.CREDENTIALS, isActive: true, managerId: manager.id } });
     userIds.push(admin.id);
+    // A verified SQLGeneral root (no SQLGeneral manager at all) — distinct
+    // from `manager` above, which is the UNRELATED local Graph-synced
+    // User.managerId org-chart concept this file's own subject (department
+    // eligibility) is about. Also doubles as the verified SQLGeneral
+    // manager for other fixtures below that need one to reach the New
+    // Project Request page's form branch / submit successfully.
+    const ADMIN_SQLGENERAL_USERNAME = `pr-elig-admin-sg-${RUN_ID}`;
+    registerSqlGeneralUser(ADMIN_SQLGENERAL_USERNAME, null);
+    await captureSqlGeneralUsername(admin.id, ADMIN_SQLGENERAL_USERNAME);
     check("Fixture: the admin genuinely has zero DepartmentMembership rows", (await prisma.departmentMembership.count({ where: { userId: admin.id } })) === 0);
 
     const adminAccessible = await listAccessibleWorkspaces(admin.id, Role.ADMIN, { take: 1000 });
@@ -178,6 +206,8 @@ async function main() {
     console.log("\n=== 5/6. Multi-department user: required dropdown; valid active workspace pre-selected ===\n");
     const multiUser = await prisma.user.create({ data: { email: `pr-elig-multi-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true, managerId: manager.id } });
     userIds.push(multiUser.id);
+    await captureSqlGeneralUsername(multiUser.id, `pr-elig-multi-sg-${RUN_ID}`);
+    registerSqlGeneralUser(`pr-elig-multi-sg-${RUN_ID}`, ADMIN_SQLGENERAL_USERNAME);
     await prisma.departmentMembership.create({ data: { userId: multiUser.id, departmentId: deptA.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: false, isActive: true } });
     await prisma.departmentMembership.create({ data: { userId: multiUser.id, departmentId: deptB.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: false, isActive: true } });
 
@@ -268,10 +298,17 @@ async function main() {
     const noDeptResolution = await resolveDepartmentForRequest(noDeptUser.id, Role.USER, undefined);
     check("...and resolveDepartmentForRequest itself reports no_department", !noDeptResolution.ok && noDeptResolution.reason === "no_department");
 
-    // ══════════════════════ 11. Department resolved correctly, no manager needed at all ══════════════════════
-    console.log("\n=== 11. User with a valid department but NO manager submits successfully — there is no manager stage at all ===\n");
-    const managerlessAdmin = await prisma.user.create({ data: { email: `pr-elig-managerless-admin-${RUN_ID}@kinsen.gr`, role: Role.ADMIN, authProvider: AuthProvider.CREDENTIALS, isActive: true } }); // no managerId
+    // ══════════════════════ 11. Department resolved correctly, independent of the LOCAL org-chart managerId ══════════════════════
+    console.log("\n=== 11. User with a valid department but NO local (Graph) managerId submits successfully — department resolution never depends on it ===\n");
+    const managerlessAdmin = await prisma.user.create({ data: { email: `pr-elig-managerless-admin-${RUN_ID}@kinsen.gr`, role: Role.ADMIN, authProvider: AuthProvider.CREDENTIALS, isActive: true } }); // no LOCAL managerId
     userIds.push(managerlessAdmin.id);
+    // A verified SQLGeneral manager pointing at `admin` (never themselves —
+    // a self-referential manager is fail-closed/unresolved under the new
+    // intermediate-stage rules) — this is a SEPARATE identity from the
+    // local managerId this section's title is about; the point here is that
+    // DEPARTMENT resolution itself has no dependency on either.
+    await captureSqlGeneralUsername(managerlessAdmin.id, `pr-elig-managerless-sg-${RUN_ID}`);
+    registerSqlGeneralUser(`pr-elig-managerless-sg-${RUN_ID}`, ADMIN_SQLGENERAL_USERNAME);
     currentSession = { user: { id: managerlessAdmin.id, role: Role.ADMIN, customRoleId: null } };
     const managerlessRes = await requestsPOST(
       jsonReq({
@@ -283,24 +320,23 @@ async function main() {
         expectedBenefits: "Benefits text long enough to pass validation.",
         replacesExisting: false,
         departmentId: deptA.id,
-        // Self-selected — managerlessAdmin is itself Role.ADMIN, which
-        // holds projectRequest.intermediateApprove by default (see
-        // prisma/seed.ts's NEW_PERMISSION_DEFAULT_GRANTS), so no extra
-        // fixture is needed just to clear this file's own intermediate
-        // stage (this file is about department resolution, not the
-        // intermediate stage itself).
-        intermediateApproverIds: [managerlessAdmin.id],
+        // admin is managerlessAdmin's verified SQLGeneral manager (see
+        // above) — this file is about department resolution, not the
+        // intermediate stage itself, so this is just real, valid fixture
+        // setup to clear it.
+        intermediateApproverIds: [admin.id],
       })
     );
-    check("Department resolves successfully (ADMIN, real active department) AND submission succeeds outright — no manager-related failure of any kind", managerlessRes.status === 201);
+    check("Department resolves successfully (ADMIN, real active department) AND submission succeeds outright — no LOCAL managerId dependency of any kind", managerlessRes.status === 201);
     const managerless = await managerlessRes.json();
     requestIds.push(managerless.id);
     const managerlessCreated = await prisma.projectRequest.findUniqueOrThrow({ where: { id: managerless.id } });
-    check("...status starts at PENDING_INTERMEDIATE_APPROVAL immediately (the mandatory intermediate stage, no manager dependency)", managerlessCreated.status === "PENDING_INTERMEDIATE_APPROVAL");
+    check("...status starts at PENDING_INTERMEDIATE_APPROVAL immediately", managerlessCreated.status === "PENDING_INTERMEDIATE_APPROVAL");
 
     const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
-    const clearManagerlessRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Self-cleared for fixture setup." }), { params: Promise.resolve({ id: managerless.id }) });
-    check("...managerlessAdmin (self-selected) clears the intermediate stage -> 200", clearManagerlessRes.status === 200);
+    currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    const clearManagerlessRes = await intermediateApprovalPOST(jsonReq({ decision: "approve", businessAssessment: "Cleared for fixture setup." }), { params: Promise.resolve({ id: managerless.id }) });
+    check("...admin (managerlessAdmin's verified SQLGeneral manager) clears the intermediate stage -> 200", clearManagerlessRes.status === 200);
     const managerlessAfterIntermediate = await prisma.projectRequest.findUniqueOrThrow({ where: { id: managerless.id } });
     check("...status now advances to PENDING_APPROVAL", managerlessAfterIntermediate.status === "PENDING_APPROVAL");
 
@@ -330,6 +366,7 @@ async function main() {
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["sqlgeneral sync attempts", () => prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],

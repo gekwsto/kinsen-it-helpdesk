@@ -75,6 +75,17 @@ async function main() {
     return;
   }
 
+  // Intermediate-approver candidates are now the requester's own verified
+  // SQLGeneral direct manager (see lib/services/project-request-service.ts's
+  // resolveIntermediateApproverCandidates) — this file is about the
+  // pre-existing FINAL stage, so every requester fixture below is simply
+  // given a verified manager pointing at `admin` (see registerSqlGeneralUser/
+  // captureSqlGeneralUsername below), preserving this file's own
+  // clearIntermediate helper exactly as before.
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralBulkUsers: any[] = [];
+  mock.module("@/lib/sqlgeneral-api-client", { namedExports: { ...realSqlGeneralClient, listAllSqlGeneralUsers: async () => ({ ok: true, users: sqlGeneralBulkUsers }) } });
+
   const { NextRequest } = await import("next/server");
   const { Role, RoleScope, DepartmentRole, MembershipSource, AuthProvider } = await import("@prisma/client");
   const { createDepartment } = await import("@/lib/services/department-service");
@@ -105,6 +116,12 @@ async function main() {
     userIds.push(u.id);
     return u;
   }
+  function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
+    sqlGeneralBulkUsers.push({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+  }
+  async function captureSqlGeneralUsername(userId: string, username: string) {
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId, sqlGeneralUsername: username, status: "SUCCEEDED" } });
+  }
   async function addMembership(userId: string, departmentId: string, customRoleId: string | null = null) {
     const m = await prisma.departmentMembership.create({
       data: { userId, departmentId, role: DepartmentRole.VIEWER, customRoleId, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
@@ -120,14 +137,14 @@ async function main() {
     return r;
   }
   /**
-   * Clears the mandatory intermediate stage (as whichever user holds
-   * projectRequest.intermediateApprove was selected for this request — this
-   * file always selects `admin`, who holds it by default, see
-   * prisma/seed.ts's NEW_PERMISSION_DEFAULT_GRANTS) so the request lands at
-   * PENDING_APPROVAL — the pre-existing starting point every test below was
-   * originally written against, before this stage existed. Restores
-   * `sessionAfter` once done; this file is about the FINAL stage, so the
-   * intermediate stage is only ever cleared here as fixture setup.
+   * Clears the mandatory intermediate stage (every requester fixture in
+   * this file is given a verified SQLGeneral manager pointing at `admin` —
+   * see makeRequesterUser — so `admin` is always the one real candidate)
+   * so the request lands at PENDING_APPROVAL — the pre-existing starting
+   * point every test below was originally written against, before this
+   * stage existed. Restores `sessionAfter` once done; this file is about
+   * the FINAL stage, so the intermediate stage is only ever cleared here
+   * as fixture setup.
    */
   async function clearIntermediate(
     requestId: string,
@@ -147,8 +164,18 @@ async function main() {
 
     const admin = await prisma.user.create({ data: { email: `pr-wf-admin-${RUN_ID}@kinsen.gr`, role: Role.ADMIN, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
     userIds.push(admin.id);
+    const ADMIN_MANAGER_USERNAME = `pr-wf-admin-mgr-${RUN_ID}`;
+    registerSqlGeneralUser(ADMIN_MANAGER_USERNAME, null);
+    await captureSqlGeneralUsername(admin.id, ADMIN_MANAGER_USERNAME);
+    async function makeRequesterUser(email: string) {
+      const u = await makeUser(email);
+      const username = `pr-wf-req-${u.id}`;
+      registerSqlGeneralUser(username, ADMIN_MANAGER_USERNAME);
+      await captureSqlGeneralUsername(u.id, username);
+      return u;
+    }
 
-    const requester = await makeUser(`pr-wf-requester-${RUN_ID}@kinsen.gr`);
+    const requester = await makeRequesterUser(`pr-wf-requester-${RUN_ID}@kinsen.gr`);
     await addMembership(requester.id, deptA.id);
 
     // Approvers, set up BEFORE any submission so the submission-notification
@@ -243,7 +270,7 @@ async function main() {
 
     // ══════════════ 3. Multi-department requester + forged department rejection ══════════════
     console.log("\n=== 3. Multi-department requester: explicit choice required; a forged departmentId is rejected ===\n");
-    const multiRequester = await makeUser(`pr-wf-multi-${RUN_ID}@kinsen.gr`);
+    const multiRequester = await makeRequesterUser(`pr-wf-multi-${RUN_ID}@kinsen.gr`);
     await addMembership(multiRequester.id, deptA.id);
     await addMembership(multiRequester.id, deptB.id);
     currentSession = { user: { id: multiRequester.id, role: Role.USER, customRoleId: null } };
@@ -310,7 +337,7 @@ async function main() {
 
     // ══════════════ 7. Rejection ══════════════
     console.log("\n=== 7. Rejection by a department-scoped approver ===\n");
-    const rejectRequester = await makeUser(`pr-wf-rejrequester-${RUN_ID}@kinsen.gr`);
+    const rejectRequester = await makeRequesterUser(`pr-wf-rejrequester-${RUN_ID}@kinsen.gr`);
     await addMembership(rejectRequester.id, deptA.id);
     currentSession = { user: { id: rejectRequester.id, role: Role.USER, customRoleId: null } };
     const rejectSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR To Reject ${RUN_ID}` }));
@@ -343,7 +370,7 @@ async function main() {
     console.log("\n=== 9. A user with NO projectRequest.approve gets 403 on the API ===\n");
     const noPermUser = await makeUser(`pr-wf-noperm-${RUN_ID}@kinsen.gr`);
     await addMembership(noPermUser.id, deptA.id);
-    const anotherRequester = await makeUser(`pr-wf-anotherrequester-${RUN_ID}@kinsen.gr`);
+    const anotherRequester = await makeRequesterUser(`pr-wf-anotherrequester-${RUN_ID}@kinsen.gr`);
     await addMembership(anotherRequester.id, deptA.id);
     currentSession = { user: { id: anotherRequester.id, role: Role.USER, customRoleId: null } };
     const anotherSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR No Perm Check ${RUN_ID}` }));
@@ -357,7 +384,7 @@ async function main() {
 
     // ══════════════ 10. Double-click / concurrent approval never creates a second transition ══════════════
     console.log("\n=== 10. Concurrent/double-click approval never produces a second transition ===\n");
-    const raceRequester = await makeUser(`pr-wf-racerequester-${RUN_ID}@kinsen.gr`);
+    const raceRequester = await makeRequesterUser(`pr-wf-racerequester-${RUN_ID}@kinsen.gr`);
     await addMembership(raceRequester.id, deptA.id);
     currentSession = { user: { id: raceRequester.id, role: Role.USER, customRoleId: null } };
     const raceSubmitRes = await requestsPOST(jsonReq("POST", { ...basePayload, title: `PR Race ${RUN_ID}` }));
@@ -471,6 +498,7 @@ async function main() {
       ["projects (auto-created from these requests)", () => prisma.project.deleteMany({ where: { projectRequestId: { in: requestIds } } })],
       ["project requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } })],
       ["project request types", () => prisma.taskType.deleteMany({ where: { id: { in: typeIds } } })],
+      ["sqlgeneral sync attempts", () => prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } })],
       ["department memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["role permissions", () => prisma.rolePermission.deleteMany({ where: { roleKey: { in: customRoleKeys } } })],
       ["custom roles", () => prisma.customRole.deleteMany({ where: { id: { in: customRoleIds } } })],
