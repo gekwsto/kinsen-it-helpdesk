@@ -11,7 +11,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { RefreshCw, Search, Maximize2, AlertTriangle, Inbox } from "lucide-react";
+import { RefreshCw, Search, Maximize2, AlertTriangle, Inbox, ArrowLeft } from "lucide-react";
 import { computeTreeLayout, toLayoutPositionMap, type LayoutTreeNode } from "@/lib/organization-chart-layout";
 import { DepartmentNode, type DepartmentNodeData } from "@/components/admin/organization-chart/department-node";
 import { PeopleNode, type PeopleNodeData } from "@/components/admin/organization-chart/people-node";
@@ -55,6 +55,32 @@ function flattenIds(nodes: RawTreeNode[]): string[] {
     ids.push(n.id, ...flattenIds(n.children));
   }
   return ids;
+}
+
+/** Every node in the forest, flattened — used by the SQLGeneral manager directory/employee search, which both filter client-side over the already-fetched data rather than a server round-trip. */
+function flattenAll(nodes: RawTreeNode[]): RawTreeNode[] {
+  const out: RawTreeNode[] = [];
+  for (const n of nodes) {
+    out.push(n, ...flattenAll(n.children));
+  }
+  return out;
+}
+
+/** Total descendant count (not just direct children) for every node in the forest — the manager directory's "team size". */
+function computeSubtreeSizes(nodes: RawTreeNode[]): Map<string, number> {
+  const sizes = new Map<string, number>();
+  function size(n: RawTreeNode): number {
+    let total = n.children.length;
+    for (const c of n.children) total += size(c);
+    sizes.set(n.id, total);
+    return total;
+  }
+  for (const root of nodes) size(root);
+  return sizes;
+}
+
+function sqlGeneralLabel(n: RawTreeNode): string {
+  return (n.name as string | null) ?? (n.sqlGeneralUsername as string);
 }
 
 /** Root -> target id path, or null if target isn't in this tree. */
@@ -269,12 +295,184 @@ function ChartCanvas({
       minZoom={0.1}
       maxZoom={2}
       proOptions={{ hideAttribution: true }}
-      aria-label={mode === "departments" ? "Department organization chart" : "People reporting-line chart"}
+      aria-label={mode === "departments" ? "Department organization chart" : mode === "people" ? "People reporting-line chart" : "SQLGeneral manager subtree chart"}
     >
       <Background />
       <Controls showInteractive={false} />
       {fullAccess && <MiniMap pannable zoomable className="!bg-card" />}
     </ReactFlow>
+  );
+}
+
+/**
+ * SQLGeneral mode's own navigation shell — fixes the root cause of the
+ * unreadable initial view: ReactFlow (and its `fitView`) was being handed
+ * the ENTIRE forest (every top-level root, including every standalone
+ * root created by an unresolved manager link) at once, so `fitView` had no
+ * choice but to zoom out until cards became microscopic. This component
+ * NEVER passes the whole forest into ChartCanvas — only ONE manager's
+ * subtree at a time (`focusRoot`), so ReactFlow (and fitView) only ever
+ * sees a bounded, readable slice. The full forest (`data`) is still kept
+ * entirely client-side for the directory/search below, which filter it
+ * in-memory — no extra network round-trip.
+ */
+function SqlGeneralManagerExplorer({
+  data,
+  fullAccess,
+  selectedId,
+  setSelectedId,
+  highlightedIds,
+}: {
+  data: RawTreeNode[];
+  fullAccess: boolean;
+  selectedId: string | null;
+  setSelectedId: (id: string | null) => void;
+  highlightedIds: Set<string>;
+}) {
+  const [focusRootId, setFocusRootId] = useState<string | null>(null);
+  const [directoryQuery, setDirectoryQuery] = useState("");
+  const [employeeQuery, setEmployeeQuery] = useState("");
+
+  const flat = useMemo(() => flattenAll(data), [data]);
+  const subtreeSizeById = useMemo(() => computeSubtreeSizes(data), [data]);
+
+  const directoryEntries = useMemo(() => {
+    return flat
+      .filter((n) => (subtreeSizeById.get(n.id) ?? 0) > 0)
+      .map((n) => ({ id: n.id, label: sqlGeneralLabel(n), size: subtreeSizeById.get(n.id) ?? 0 }))
+      .sort((a, b) => b.size - a.size || a.label.localeCompare(b.label));
+  }, [flat, subtreeSizeById]);
+
+  const filteredDirectory = useMemo(() => {
+    const q = directoryQuery.trim().toLowerCase();
+    if (!q) return directoryEntries;
+    return directoryEntries.filter((e) => e.label.toLowerCase().includes(q));
+  }, [directoryEntries, directoryQuery]);
+
+  const employeeResults = useMemo(() => {
+    const q = employeeQuery.trim().toLowerCase();
+    if (q.length < 2) return [];
+    return flat
+      .filter((n) => {
+        const label = sqlGeneralLabel(n).toLowerCase();
+        const email = ((n.email as string | null) ?? "").toLowerCase();
+        const username = (n.sqlGeneralUsername as string).toLowerCase();
+        return label.includes(q) || email.includes(q) || username.includes(q);
+      })
+      .slice(0, 25);
+  }, [flat, employeeQuery]);
+
+  const focusRoot = useMemo(() => {
+    if (!focusRootId) return null;
+    function find(nodes: RawTreeNode[]): RawTreeNode | null {
+      for (const n of nodes) {
+        if (n.id === focusRootId) return n;
+        const found = find(n.children);
+        if (found) return found;
+      }
+      return null;
+    }
+    return find(data);
+  }, [data, focusRootId]);
+
+  // Still a valid focus even if the employee is at the very top — findPath
+  // returns a root-to-target path, so path[0] is always that employee's
+  // ultimate top-level manager (REQUIRED #3: "locate the correct
+  // management tree"); setSelectedId reuses the SAME highlight/expand-path
+  // machinery ChartCanvas already has for the Departments/People modes.
+  function focusOnEmployee(employeeId: string) {
+    const path = findPath(data, employeeId);
+    if (!path || path.length === 0) return;
+    setFocusRootId(path[0]);
+    setSelectedId(employeeId);
+    setEmployeeQuery("");
+  }
+
+  const employeeSearchBox = (small: boolean) => (
+    <div className={small ? "relative w-64" : "relative"}>
+      <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        value={employeeQuery}
+        onChange={(e) => setEmployeeQuery(e.target.value)}
+        placeholder="Search by name, email or username..."
+        className="h-9 pl-7 text-sm"
+        aria-label="Search SQLGeneral employees"
+      />
+      {employeeResults.length > 0 && (
+        <Card className="absolute z-10 mt-1 max-h-56 w-full overflow-auto p-1">
+          {employeeResults.map((r) => (
+            <button key={r.id} type="button" className="flex w-full flex-col items-start rounded px-2 py-1.5 text-left text-sm hover:bg-accent" onClick={() => focusOnEmployee(r.id)}>
+              <span className="font-medium">{sqlGeneralLabel(r)}</span>
+              <span className="text-xs text-muted-foreground">
+                {r.sqlGeneralUsername as string}
+                {r.isLocal ? "" : " · no TicketApp account"}
+              </span>
+            </button>
+          ))}
+        </Card>
+      )}
+    </div>
+  );
+
+  if (!focusRoot) {
+    return (
+      <div className="flex h-full flex-col gap-4 overflow-auto p-4">
+        <div>
+          <p className="mb-1 text-sm font-medium">Find an employee</p>
+          {employeeSearchBox(false)}
+        </div>
+
+        <div className="flex min-h-0 flex-1 flex-col">
+          <p className="mb-1 text-sm font-medium">Browse by manager</p>
+          <Input value={directoryQuery} onChange={(e) => setDirectoryQuery(e.target.value)} placeholder="Filter managers..." className="mb-2 h-9 text-sm" aria-label="Filter manager directory" />
+          <div className="min-h-0 flex-1 overflow-auto rounded-md border">
+            {filteredDirectory.length === 0 && <p className="p-3 text-sm text-muted-foreground">No managers match.</p>}
+            {filteredDirectory.map((e) => (
+              <button
+                key={e.id}
+                type="button"
+                className="flex w-full items-center justify-between border-b px-3 py-2 text-left text-sm last:border-b-0 hover:bg-accent"
+                onClick={() => {
+                  setFocusRootId(e.id);
+                  setSelectedId(null);
+                }}
+              >
+                <span className="truncate font-medium">{e.label}</span>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {e.size} {e.size === 1 ? "report" : "reports"}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => {
+            setFocusRootId(null);
+            setSelectedId(null);
+          }}
+        >
+          <ArrowLeft className="h-3.5 w-3.5" />
+          Directory
+        </Button>
+        <span className="text-sm text-muted-foreground">/</span>
+        <span className="truncate text-sm font-medium">{sqlGeneralLabel(focusRoot)}</span>
+        <span className="ml-auto">{employeeSearchBox(true)}</span>
+      </div>
+      <div className="relative min-h-0 flex-1">
+        <ReactFlowProvider>
+          <ChartCanvas mode="sqlgeneral" data={[focusRoot]} fullAccess={fullAccess} selectedId={selectedId} setSelectedId={setSelectedId} highlightedIds={highlightedIds} />
+        </ReactFlowProvider>
+      </div>
+    </div>
   );
 }
 
@@ -423,37 +621,39 @@ export function OrganizationChartView() {
         </Tabs>
 
         <div className="flex flex-wrap items-center gap-3">
-          <div className="relative w-56">
-            <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search name, email, department..."
-              className="h-9 pl-7 text-sm"
-              aria-label="Search organization"
-            />
-            {searchResults.length > 0 && (
-              <Card className="absolute z-10 mt-1 max-h-64 w-full overflow-auto p-1">
-                {searchResults.map((r) => (
-                  <button
-                    key={`${r.type}-${r.id}`}
-                    type="button"
-                    className="flex w-full flex-col items-start rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
-                    onClick={() => {
-                      setSelectedId(r.id);
-                      setSearchQuery("");
-                      setSearchResults([]);
-                      if (r.type === "department") setMode("departments");
-                      else setMode("people");
-                    }}
-                  >
-                    <span className="font-medium">{r.label}</span>
-                    {r.sublabel && <span className="text-xs text-muted-foreground">{r.sublabel}</span>}
-                  </button>
-                ))}
-              </Card>
-            )}
-          </div>
+          {mode !== "sqlgeneral" && (
+            <div className="relative w-56">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search name, email, department..."
+                className="h-9 pl-7 text-sm"
+                aria-label="Search organization"
+              />
+              {searchResults.length > 0 && (
+                <Card className="absolute z-10 mt-1 max-h-64 w-full overflow-auto p-1">
+                  {searchResults.map((r) => (
+                    <button
+                      key={`${r.type}-${r.id}`}
+                      type="button"
+                      className="flex w-full flex-col items-start rounded px-2 py-1.5 text-left text-sm hover:bg-accent"
+                      onClick={() => {
+                        setSelectedId(r.id);
+                        setSearchQuery("");
+                        setSearchResults([]);
+                        if (r.type === "department") setMode("departments");
+                        else setMode("people");
+                      }}
+                    >
+                      <span className="font-medium">{r.label}</span>
+                      {r.sublabel && <span className="text-xs text-muted-foreground">{r.sublabel}</span>}
+                    </button>
+                  ))}
+                </Card>
+              )}
+            </div>
+          )}
 
           <label className="flex items-center gap-2 text-sm text-muted-foreground">
             <Switch checked={!activeOnly} onCheckedChange={(v) => setActiveOnly(!v)} aria-label="Include inactive" />
@@ -534,11 +734,17 @@ export function OrganizationChartView() {
         {!loading && !errorState && data && data.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center text-muted-foreground">
             <Inbox className="h-8 w-8" />
-            <p>No {mode === "departments" ? "departments" : "people"} to show{!activeOnly ? "" : " — try including inactive ones"}.</p>
+            <p>
+              No {mode === "departments" ? "departments" : mode === "people" ? "people" : "SQLGeneral identities"} to show{!activeOnly ? "" : mode === "sqlgeneral" ? "" : " — try including inactive ones"}.
+            </p>
           </div>
         )}
 
-        {!loading && !errorState && data && data.length > 0 && (
+        {!loading && !errorState && data && data.length > 0 && mode === "sqlgeneral" && (
+          <SqlGeneralManagerExplorer data={data} fullAccess={fullAccess} selectedId={selectedId} setSelectedId={setSelectedId} highlightedIds={highlightedIds} />
+        )}
+
+        {!loading && !errorState && data && data.length > 0 && mode !== "sqlgeneral" && (
           <ReactFlowProvider>
             <ChartCanvas mode={mode} data={data} fullAccess={fullAccess} selectedId={selectedId} setSelectedId={setSelectedId} highlightedIds={highlightedIds} />
           </ReactFlowProvider>
@@ -550,9 +756,15 @@ export function OrganizationChartView() {
           {selectedRawNode && (
             <>
               <DialogHeader>
-                <DialogTitle>{mode === "departments" ? (selectedRawNode.name as string) : (selectedRawNode.displayName as string | null) ?? "(no name)"}</DialogTitle>
+                <DialogTitle>
+                  {mode === "departments" ? (selectedRawNode.name as string) : mode === "people" ? (selectedRawNode.displayName as string | null) ?? "(no name)" : sqlGeneralLabel(selectedRawNode)}
+                </DialogTitle>
                 <DialogDescription>
-                  {mode === "departments" ? (selectedRawNode.isActive ? "Active department" : "Inactive department") : (selectedRawNode.jobTitle as string | null) ?? "No job title"}
+                  {mode === "departments"
+                    ? selectedRawNode.isActive
+                      ? "Active department"
+                      : "Inactive department"
+                    : (selectedRawNode.jobTitle as string | null) ?? (mode === "sqlgeneral" && !selectedRawNode.isLocal ? "No TicketApp account" : "No job title")}
                 </DialogDescription>
               </DialogHeader>
               {mode === "departments" ? (
@@ -564,12 +776,22 @@ export function OrganizationChartView() {
                     <p>Manager: {(selectedRawNode.manager as { displayName: string | null }).displayName}</p>
                   )}
                 </div>
-              ) : (
+              ) : mode === "people" ? (
                 <div className="space-y-1 text-sm">
                   <p>Email: {selectedRawNode.email as string}</p>
                   <p>Department: {(selectedRawNode.department as { name: string } | null)?.name ?? "None"}</p>
                   <p>Direct reports: {selectedRawNode.directReportsCount as number}</p>
                   <p>Status: {selectedRawNode.isActive ? "Active" : "Inactive"}</p>
+                </div>
+              ) : (
+                <div className="space-y-1 text-sm">
+                  <p>SQLGeneral username: {selectedRawNode.sqlGeneralUsername as string}</p>
+                  {(selectedRawNode.email as string | null) && <p>Email: {selectedRawNode.email as string}</p>}
+                  <p>Company: {(selectedRawNode.company as string | null) ?? "None"}</p>
+                  <p>Department: {(selectedRawNode.department as string | null) ?? "None"}</p>
+                  <p>Direct reports: {(selectedRawNode.children as RawTreeNode[]).length}</p>
+                  <p>Status: {selectedRawNode.isActive ? "Active" : "Inactive"}</p>
+                  <p>{selectedRawNode.isLocal ? "Linked to a TicketApp account" : "No TicketApp account — SQLGeneral identity only"}</p>
                 </div>
               )}
             </>
