@@ -26,17 +26,13 @@ interface RawTreeNode {
 
 type Mode = "departments" | "people" | "sqlgeneral";
 
-interface UnresolvedSqlGeneralDepartment {
-  sqlGeneralDepartmentId: string;
-  reason: "missing_parent" | "cycle";
-}
 interface UnresolvedSqlGeneralUser {
   userId: string;
-  reason: "not_found" | "ambiguous" | "no_hr_department" | "department_not_found" | "conflicting_attempt";
+  reason: "not_found" | "ambiguous" | "conflicting_attempt";
 }
-interface UnresolvedSqlGeneralCompanyIdentity {
-  sqlGeneralDepartmentId: string;
-  reason: "no_evidence" | "conflicting_evidence";
+interface UnresolvedSqlGeneralManagerLink {
+  sqlGeneralUsername: string;
+  reason: "self_reference" | "missing_manager" | "ambiguous_manager" | "cycle";
 }
 
 interface SearchResult {
@@ -206,60 +202,23 @@ function ChartCanvas({
           onSelect: setSelectedId,
         };
         rfNodes.push({ id: n.id, type: "person", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
-      } else if (n.kind === "sqlgeneral-company") {
-        // Top-level grouping layer added over SQLGeneral root Departments
-        // (never created for existing modes). Reuses DepartmentNode as-is;
-        // no manager/company sub-label is meaningful at this layer, so both
-        // are left null.
-        const data0: DepartmentNodeData = {
-          label: n.name as string,
-          isActive: true,
-          managerName: null,
-          managerJobTitle: null,
-          activeUserCount: 0,
-          childCount: originalChildCount,
-          hasHiddenChildren,
-          isCollapsed,
-          isHighlighted: highlightedIds.has(n.id),
-          isSelected: n.id === selectedId,
-          onToggleCollapse: toggleCollapse,
-          onSelect: setSelectedId,
-        };
-        rfNodes.push({ id: n.id, type: "department", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
-      } else if (n.kind === "sqlgeneral-department") {
-        // SQLGeneral mode mixes department AND user-leaf nodes in ONE tree
-        // (unlike the two existing modes, which are each uniformly one
-        // type) — so, unlike the two branches above, this one checks each
-        // node's OWN kind rather than the whole-tree mode alone. Reuses
-        // DepartmentNode as-is; the "(SQLGeneral)" suffix plus any
-        // localMapping annotation is the only provenance distinction
-        // needed, per REQUIRED #4.
-        const localMapping = n.localMapping as { departmentId: string; departmentName: string } | null;
-        const data0: DepartmentNodeData = {
-          label: `${n.name as string}${localMapping ? ` (mapped: ${localMapping.departmentName})` : ""}`,
-          isActive: (n.isActive as boolean | null) ?? true,
-          managerName: null,
-          managerJobTitle: (n.company as string | null) ?? null,
-          activeUserCount: n.children.filter((c) => c.kind === "sqlgeneral-user").length,
-          childCount: originalChildCount,
-          hasHiddenChildren,
-          isCollapsed,
-          isHighlighted: highlightedIds.has(n.id),
-          isSelected: n.id === selectedId,
-          onToggleCollapse: toggleCollapse,
-          onSelect: setSelectedId,
-        };
-        rfNodes.push({ id: n.id, type: "department", position: { x: pos.x, y: pos.y }, data: data0 as unknown as Record<string, unknown> });
       } else {
+        // mode === "sqlgeneral" — manager-first: ONE node kind only
+        // ("sqlgeneral-person"), reusing PeopleNode as-is. Company/
+        // Department are metadata shown on hover (REQUIRED #5), never a
+        // separate node kind or grouping layer.
+        const isLocal = n.isLocal as boolean;
         const data0: PeopleNodeData = {
-          label: (n.name as string | null) ?? "(no name)",
-          jobTitle: null,
-          departmentName: (n.sqlGeneralUsername as string | null) ?? null,
-          email: n.email as string,
-          isActive: true,
-          directReportsCount: 0,
-          hasHiddenChildren: false,
-          isCollapsed: false,
+          label: (n.name as string | null) ?? (n.sqlGeneralUsername as string),
+          jobTitle: n.jobTitle as string | null,
+          departmentName: (n.department as string | null) ?? null,
+          companyName: (n.company as string | null) ?? null,
+          email: (n.email as string | null) ?? "",
+          isActive: (n.isActive as boolean | null) ?? true,
+          isExternal: !isLocal,
+          directReportsCount: originalChildCount,
+          hasHiddenChildren,
+          isCollapsed,
           isHighlighted: highlightedIds.has(n.id),
           isSelected: n.id === selectedId,
           onToggleCollapse: toggleCollapse,
@@ -331,9 +290,8 @@ export function OrganizationChartView() {
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatusResponse | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [unresolvedDepartments, setUnresolvedDepartments] = useState<UnresolvedSqlGeneralDepartment[]>([]);
   const [unresolvedUsers, setUnresolvedUsers] = useState<UnresolvedSqlGeneralUser[]>([]);
-  const [unresolvedCompanyIdentity, setUnresolvedCompanyIdentity] = useState<UnresolvedSqlGeneralCompanyIdentity[]>([]);
+  const [unresolvedManagerLinks, setUnresolvedManagerLinks] = useState<UnresolvedSqlGeneralManagerLink[]>([]);
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchTree = useCallback(async () => {
@@ -360,9 +318,8 @@ export function OrganizationChartView() {
       const body = await res.json();
       setData(body.tree ?? []);
       setFullAccess(Boolean(body.fullAccess));
-      setUnresolvedDepartments(mode === "sqlgeneral" ? (body.unresolvedDepartments ?? []) : []);
       setUnresolvedUsers(mode === "sqlgeneral" ? (body.unresolvedUsers ?? []) : []);
-      setUnresolvedCompanyIdentity(mode === "sqlgeneral" ? (body.unresolvedCompanyIdentity ?? []) : []);
+      setUnresolvedManagerLinks(mode === "sqlgeneral" ? (body.unresolvedManagerLinks ?? []) : []);
     } catch {
       setErrorState("network");
       setData(null);
@@ -528,25 +485,19 @@ export function OrganizationChartView() {
         </p>
       )}
 
-      {mode === "sqlgeneral" && (unresolvedDepartments.length > 0 || unresolvedUsers.length > 0 || unresolvedCompanyIdentity.length > 0) && (
+      {mode === "sqlgeneral" && (unresolvedUsers.length > 0 || unresolvedManagerLinks.length > 0) && (
         <Card className="flex items-start gap-2 border-amber-300 bg-amber-50 p-3 text-xs text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <div>
-            {unresolvedDepartments.length > 0 && (
-              <p>
-                {unresolvedDepartments.length} department{unresolvedDepartments.length === 1 ? "" : "s"} not shown — unresolved parent/cycle (
-                {unresolvedDepartments.map((d) => `${d.sqlGeneralDepartmentId}: ${d.reason}`).join(", ")}).
-              </p>
-            )}
             {unresolvedUsers.length > 0 && (
               <p>
                 {unresolvedUsers.length} user{unresolvedUsers.length === 1 ? "" : "s"} not shown — unresolved SQLGeneral identity (see admin report for details).
               </p>
             )}
-            {unresolvedCompanyIdentity.length > 0 && (
+            {unresolvedManagerLinks.length > 0 && (
               <p>
-                {unresolvedCompanyIdentity.length} root department{unresolvedCompanyIdentity.length === 1 ? "" : "s"} shown without verified Company grouping — no or conflicting live
-                CompanyId evidence ({unresolvedCompanyIdentity.map((d) => `${d.sqlGeneralDepartmentId}: ${d.reason}`).join(", ")}).
+                {unresolvedManagerLinks.length} manager relationship{unresolvedManagerLinks.length === 1 ? "" : "s"} could not be verified — shown as a root instead (
+                {unresolvedManagerLinks.map((d) => `${d.sqlGeneralUsername}: ${d.reason}`).join(", ")}).
               </p>
             )}
           </div>

@@ -5,13 +5,14 @@ import { apiError, unauthorizedResponse, forbiddenResponse, internalErrorRespons
 
 // GET /api/admin/organization/sqlgeneral-tree — read-only, admin-only
 // (organization.sqlgeneralSync, same permission as every other SQLGeneral
-// admin surface). Returns the SQLGeneral-sourced tree built from
-// Departments.ParentDepartmentId with existing TicketApp users as leaves —
-// completely independent of the canonical local tree
+// admin surface). Returns the SQLGeneral-sourced, MANAGER-FIRST tree built
+// from UsersAndManagers.managerAMAccountName relationships — Company/
+// Department are employee metadata only, never a hierarchy boundary.
+// Completely independent of the canonical local tree
 // (/api/organization/department-tree, unchanged) and never dependent on
 // any approved SqlGeneralCompanyMapping/SqlGeneralDepartmentMapping to
-// render. unresolvedDepartments/unresolvedUsers/unresolvedCompanyIdentity
-// are always returned explicitly — never silently dropped.
+// render. unresolvedUsers/unresolvedManagerLinks are always returned
+// explicitly — never silently dropped.
 export async function GET() {
   try {
     const session = await requireAuth();
@@ -22,9 +23,8 @@ export async function GET() {
     if (!result.ok) return NextResponse.json(apiError("sqlgeneral_tree_unavailable", result.reason), { status: 502 });
     return NextResponse.json({
       tree: result.roots,
-      unresolvedDepartments: result.unresolvedDepartments,
       unresolvedUsers: result.unresolvedUsers,
-      unresolvedCompanyIdentity: result.unresolvedCompanyIdentity,
+      unresolvedManagerLinks: result.unresolvedManagerLinks,
     });
   } catch (error: any) {
     if (error.message === "Unauthorized") return unauthorizedResponse();

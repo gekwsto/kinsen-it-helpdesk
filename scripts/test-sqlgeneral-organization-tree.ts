@@ -1,16 +1,17 @@
 /**
- * SQLGeneral Organization Tree — recursive hierarchy, multi-company
- * isolation and Company-grouping identity (verified CompanyId evidence
- * only, never shortname/display-text equality), duplicate/conflicting
- * username attempts, missing parents, cycles (including cascading
- * failures at arbitrary depth), unmatched users, incomplete pagination,
- * the admin permission gate, and that the two EXISTING tree modes
+ * SQLGeneral Organization Tree — MANAGER-FIRST hierarchy (built purely from
+ * UsersAndManagers.managerAMAccountName, never Departments/Company),
+ * verifying the five named production identities (geokos manager of
+ * konkef/chapav/thoche/stekam), cross-company reporting, multi-level
+ * management, external (non-TicketApp) managers, ambiguous identities/
+ * managers, self-references, cycles (without cascading to a cycle
+ * member's own subordinates), local-user uniqueness/conflict handling, the
+ * admin permission gate, and that the two EXISTING tree modes
  * (Departments/People) are completely unaffected.
  *
  * Must run with --experimental-test-module-mocks (Node 24).
  * Usage: npx tsx --experimental-test-module-mocks scripts/test-sqlgeneral-organization-tree.ts
  */
-import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { AuthProvider, Role } from "@prisma/client";
 
@@ -32,21 +33,23 @@ function printSummaryAndExit() {
 
 const RUN_ID = Date.now();
 
-function fakeDept(id: string, description: string, parentDepartmentId: string | null, company: string, companyShortnameOverride?: string | null) {
+function fakeSqlUser(
+  username: string,
+  managerAMAccountName: string | null,
+  opts: Partial<{ mail: string | null; hrDepartmentId: string | number | null; department: string | null; companyId: string | number | null; company: string | null; active: boolean | null }> = {}
+) {
   return {
-    id,
-    description,
-    isActive: true,
-    parentDepartmentId,
-    country: null,
-    company,
-    companyShortname: companyShortnameOverride !== undefined ? companyShortnameOverride : company.slice(0, 4).toUpperCase(),
-    creationDate: null,
-    updateTimestamp: null,
+    username,
+    mail: opts.mail !== undefined ? opts.mail : `${username}@example.com`,
+    hrDepartmentId: opts.hrDepartmentId ?? null,
+    department: opts.department ?? null,
+    companyId: opts.companyId ?? null,
+    company: opts.company ?? null,
+    active: opts.active ?? true,
+    managerAMAccountName,
+    manager2AMAccountName: null,
+    manager3AMAccountName: null,
   };
-}
-function fakeSqlUser(username: string, hrDepartmentId: string | number | null, companyId: string | number | null = null, company: string | null = null) {
-  return { username, mail: null, hrDepartmentId, department: null, companyId, company, active: true, managerAMAccountName: null, manager2AMAccountName: null, manager3AMAccountName: null };
 }
 
 async function main() {
@@ -61,14 +64,11 @@ async function main() {
 
   const { mock } = await import("node:test");
   const realClient = await import("@/lib/sqlgeneral-api-client");
-  type ListDeptFn = typeof realClient.listAllSqlGeneralDepartments;
   type ListUsersFn = typeof realClient.listAllSqlGeneralUsers;
-  let mockListDeptImpl: ListDeptFn = async () => ({ ok: true, departments: [] });
   let mockListUsersImpl: ListUsersFn = async () => ({ ok: true, users: [] });
   mock.module("@/lib/sqlgeneral-api-client", {
     namedExports: {
       ...realClient,
-      listAllSqlGeneralDepartments: () => mockListDeptImpl(),
       listAllSqlGeneralUsers: () => mockListUsersImpl(),
     },
   });
@@ -106,277 +106,176 @@ async function main() {
     }
     return null;
   }
+  const personId = (username: string) => `sgperson:${username}`;
 
   try {
-    console.log("\nRecursive hierarchy (arbitrary depth) ===\n");
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("1", "Root", null, "Acme"), fakeDept("2", "Division", "1", "Acme"), fakeDept("3", "Department", "2", "Acme"), fakeDept("4", "Team", "3", "Acme")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [] });
-    const deepResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!deepResult.ok) {
-      check("1-4. deep hierarchy builds", false, deepResult.reason);
-    } else {
-      check(
-        "1. with zero live CompanyId evidence anywhere in its subtree, the root is rendered standalone (never wrapped in a guessed/synthetic company node) and reported unresolved",
-        deepResult.roots.length === 1 &&
-          deepResult.roots[0].kind === "sqlgeneral-department" &&
-          (deepResult.roots[0] as any).sqlGeneralDepartmentId === "1" &&
-          deepResult.unresolvedCompanyIdentity.length === 1 &&
-          deepResult.unresolvedCompanyIdentity[0].sqlGeneralDepartmentId === "1" &&
-          deepResult.unresolvedCompanyIdentity[0].reason === "no_evidence",
-        JSON.stringify({ roots: deepResult.roots, unresolvedCompanyIdentity: deepResult.unresolvedCompanyIdentity })
-      );
-      const division = findNode(deepResult.roots, "sgdept:2");
-      const department = findNode(deepResult.roots, "sgdept:3");
-      const team = findNode(deepResult.roots, "sgdept:4");
-      check("2. level 2 (Division) nested directly under the root", !!division);
-      check("3. level 3 (Department) nested under Division", !!department && findNode([division], "sgdept:3") !== null);
-      check("4. level 4 (Team) nested under Department — arbitrary depth, not just 1-2 levels", !!team && findNode([department], "sgdept:4") !== null);
-      check("4b. zero unresolved departments for a genuinely clean deep chain", deepResult.unresolvedDepartments.length === 0);
-    }
+    console.log("\nFive named production identities: geokos manager of konkef/chapav/thoche/stekam ===\n");
+    const uKonkef = await makeUser("konkef");
+    await enqueue(uKonkef, "konkef");
+    const uNikpap = await makeUser("nikpap");
+    await enqueue(uNikpap, "nikpap");
 
-    console.log("\nMulti-company isolation (verified CompanyId evidence) ===\n");
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("10", "Alpha Root", null, "Alpha Co"), fakeDept("11", "Alpha Child", "10", "Alpha Co"), fakeDept("20", "Beta Root", null, "Beta Co"), fakeDept("21", "Beta Child", "20", "Beta Co")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [fakeSqlUser("alpha.evidence", "10", "1", "Alpha Co"), fakeSqlUser("beta.evidence", "20", "2", "Beta Co")] });
-    const isolationResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!isolationResult.ok) {
-      check("5-6. multi-company isolation builds", false, isolationResult.reason);
-    } else {
-      check(
-        "5. two independent, VERIFIED CompanyIds produce two SEPARATE company nodes, never merged",
-        isolationResult.roots.length === 2 && isolationResult.roots.every((r) => r.kind === "sqlgeneral-company") && isolationResult.unresolvedCompanyIdentity.length === 0
-      );
-      const alphaCompany = isolationResult.roots.find((r) => (r as any).companyId === "1");
-      const betaCompany = isolationResult.roots.find((r) => (r as any).companyId === "2");
-      const alphaRoot = alphaCompany ? findNode([alphaCompany], "sgdept:10") : null;
-      const betaRoot = betaCompany ? findNode([betaCompany], "sgdept:20") : null;
-      check(
-        "6. each root's own children stay within its own verified company — no cross-company attachment",
-        !!alphaCompany && !!betaCompany && !!alphaRoot && !!betaRoot && findNode([alphaCompany], "sgdept:21") === null && findNode([betaCompany], "sgdept:11") === null,
-        JSON.stringify({ alpha: alphaCompany, beta: betaCompany })
-      );
-    }
-
-    console.log("\nCompany grouping identity edge cases ===\n");
-    // Two roots sharing identical Company/CompanyShortname DISPLAY TEXT but
-    // backed by DIFFERENT verified CompanyIds must stay SEPARATE — grouping
-    // never keys on the display text, only the live, verified CompanyId.
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("60", "Root One", null, "Acme Co", "ACME"), fakeDept("70", "Root Two", null, "Acme Co", "ACME")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [fakeSqlUser("u60", "60", "501", "Acme Co"), fakeSqlUser("u70", "70", "502", "Acme Co")] });
-    const distinctSharingTextResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!distinctSharingTextResult.ok) {
-      check("24. distinct-companies-sharing-text build", false, distinctSharingTextResult.reason);
-    } else {
-      check(
-        "24. distinct Companies sharing the SAME display text/shortname (ACME/Acme Co) but verified to DIFFERENT CompanyIds are never merged",
-        distinctSharingTextResult.roots.length === 2 &&
-          distinctSharingTextResult.roots.every((r) => r.kind === "sqlgeneral-company") &&
-          !!distinctSharingTextResult.roots.find((r) => (r as any).companyId === "501") &&
-          !!distinctSharingTextResult.roots.find((r) => (r as any).companyId === "502"),
-        JSON.stringify(distinctSharingTextResult.roots)
-      );
-    }
-
-    // The inverse: two roots with COMPLETELY DIFFERENT display text/shortname
-    // but the SAME verified CompanyId must be merged — proving grouping
-    // truly keys on the verified identity, not the text.
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("80", "Root One", null, "Acme Hellas", "AHEL"), fakeDept("81", "Root Two", null, "Acme International", "AINT")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [fakeSqlUser("u80", "80", "900", "Acme Hellas"), fakeSqlUser("u81", "81", "900", "Acme International")] });
-    const verifiedMergeResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!verifiedMergeResult.ok) {
-      check("25. verified-merge-despite-different-text build", false, verifiedMergeResult.reason);
-    } else {
-      check(
-        "25. two roots with totally different display text/shortname but the SAME verified CompanyId ARE grouped under one company node",
-        verifiedMergeResult.roots.length === 1 && verifiedMergeResult.roots[0].kind === "sqlgeneral-company" && (verifiedMergeResult.roots[0] as any).companyId === "900" && verifiedMergeResult.roots[0].children.length === 2,
-        JSON.stringify(verifiedMergeResult.roots)
-      );
-    }
-
-    // Two roots with ZERO CompanyId evidence must NEVER be merged into one
-    // shared "unknown company" bucket — each is reported unresolved and
-    // rendered standalone, independently.
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("90", "Orphan Root One", null, "Mystery Co"), fakeDept("91", "Orphan Root Two", null, "Other Co")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [] });
-    const noEvidenceResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!noEvidenceResult.ok) {
-      check("26. no-evidence build", false, noEvidenceResult.reason);
-    } else {
-      check(
-        "26. two roots with zero CompanyId evidence are NEVER merged into a shared synthetic/unknown company node — each rendered standalone",
-        noEvidenceResult.roots.length === 2 &&
-          noEvidenceResult.roots.every((r) => r.kind === "sqlgeneral-department") &&
-          noEvidenceResult.unresolvedCompanyIdentity.length === 2 &&
-          noEvidenceResult.unresolvedCompanyIdentity.every((u) => u.reason === "no_evidence"),
-        JSON.stringify({ roots: noEvidenceResult.roots, unresolvedCompanyIdentity: noEvidenceResult.unresolvedCompanyIdentity })
-      );
-    }
-
-    // Conflicting evidence WITHIN one root's own subtree (root itself has
-    // one CompanyId, a descendant has a different one) must never be
-    // silently resolved to either value — reported unresolved, rendered
-    // standalone, hierarchy underneath left completely intact.
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("100", "Conflicted Root", null, "Conflict Co"), fakeDept("101", "Conflicted Child", "100", "Conflict Co")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [fakeSqlUser("u100", "100", "11"), fakeSqlUser("u101", "101", "22")] });
-    const conflictResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!conflictResult.ok) {
-      check("27. conflicting-evidence build", false, conflictResult.reason);
-    } else {
-      const conflictedChild = findNode(conflictResult.roots, "sgdept:101");
-      check(
-        "27. conflicting CompanyId evidence within one root's own subtree (100 vs its child 101) is reported unresolved, never silently resolved to either value, and the root is rendered standalone",
-        conflictResult.roots.some((r) => r.kind === "sqlgeneral-department" && (r as any).sqlGeneralDepartmentId === "100") &&
-          conflictResult.unresolvedCompanyIdentity.length === 1 &&
-          conflictResult.unresolvedCompanyIdentity[0].sqlGeneralDepartmentId === "100" &&
-          conflictResult.unresolvedCompanyIdentity[0].reason === "conflicting_evidence" &&
-          !!conflictedChild,
-        JSON.stringify({ roots: conflictResult.roots, unresolvedCompanyIdentity: conflictResult.unresolvedCompanyIdentity })
-      );
-    }
-
-    // Evidence found on a DESCENDANT (not the root itself) still verifies
-    // the ROOT's identity — subtree-wide aggregation, not root-only — and
-    // the existing nesting below the root is completely unchanged by being
-    // wrapped in a company node.
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [fakeDept("110", "Root", null, "Descendant Co"), fakeDept("111", "Child", "110", "Descendant Co")],
-    });
-    mockListUsersImpl = async () => ({ ok: true, users: [fakeSqlUser("u111", "111", "77")] });
-    const descendantEvidenceResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!descendantEvidenceResult.ok) {
-      check("28. descendant-evidence build", false, descendantEvidenceResult.reason);
-    } else {
-      const companyNode = descendantEvidenceResult.roots.find((r) => (r as any).companyId === "77");
-      const nestedChild = companyNode ? findNode([companyNode], "sgdept:111") : null;
-      check(
-        "28. CompanyId evidence found on a DESCENDANT (not the root itself) still verifies the ROOT's identity, and arbitrary Department nesting below the root is completely unchanged once wrapped in the company node",
-        !!companyNode && companyNode.kind === "sqlgeneral-company" && !!findNode([companyNode], "sgdept:110") && !!nestedChild,
-        JSON.stringify(descendantEvidenceResult.roots)
-      );
-    }
-
-    console.log("\nMissing parent + cycle (including cascading failures at depth) ===\n");
-    mockListDeptImpl = async () => ({
-      ok: true,
-      departments: [
-        fakeDept("30", "Orphan", "999", "Gamma"), // 999 doesn't exist — missing_parent
-        fakeDept("31", "Cyclic A", "32", "Gamma"),
-        fakeDept("32", "Cyclic B", "31", "Gamma"), // 31 <-> 32 cycle
-        fakeDept("40", "Valid Root", null, "Gamma"),
-        fakeDept("41", "Valid Mid", "40", "Gamma"),
-        fakeDept("42", "Grandchild Of Orphan", "30", "Gamma"), // its parent (30) is missing_parent -> must cascade
-      ],
-    });
-    const brokenResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!brokenResult.ok) {
-      check("7-11. missing parent / cycle build", false, brokenResult.reason);
-    } else {
-      const unresolvedById = new Map(brokenResult.unresolvedDepartments.map((d) => [d.sqlGeneralDepartmentId, d.reason]));
-      check("7. a department whose parent id doesn't exist in the fetched set is reported missing_parent, never a false root", unresolvedById.get("30") === "missing_parent");
-      check("8. both members of a 2-cycle are reported as cycle", unresolvedById.get("31") === "cycle" && unresolvedById.get("32") === "cycle");
-      check(
-        "9. a cycle/missing-parent department is excluded from the tree entirely (searched recursively through the company wrapper layer)",
-        ["30", "31", "32"].every((id) => findNode(brokenResult.roots, `sgdept:${id}`) === null)
-      );
-      check(
-        "10. CASCADE at depth: a node whose parent is itself unresolved (30) is ALSO unresolved, even though its own ParentDepartmentId value is perfectly valid",
-        unresolvedById.get("42") === "missing_parent"
-      );
-      check("11. a genuinely unrelated, valid chain (40->41) is completely unaffected by the broken ones", findNode(brokenResult.roots, "sgdept:40") !== null && findNode(brokenResult.roots, "sgdept:41") !== null);
-    }
-
-    console.log("\nUnmatched / conflicting users ===\n");
-    const uNotFound = await makeUser("notfound");
-    await enqueue(uNotFound, "ghost.user");
-    const uAmbiguous = await makeUser("ambiguous");
-    await enqueue(uAmbiguous, "dupe.user");
-    const uNoHrDept = await makeUser("nohrdept");
-    await enqueue(uNoHrDept, "no.dept.user");
-    const uDeptNotFound = await makeUser("deptnotfound");
-    await enqueue(uDeptNotFound, "orphan.dept.user");
-    const uGood = await makeUser("good");
-    await enqueue(uGood, "good.user");
-    const uConflictA = await makeUser("conflicta");
-    await enqueue(uConflictA, "shared.identity");
-    const uConflictB = await makeUser("conflictb");
-    await enqueue(uConflictB, "shared.identity");
-
-    mockListDeptImpl = async () => ({ ok: true, departments: [fakeDept("50", "Home Department", null, "Delta")] });
     mockListUsersImpl = async () => ({
       ok: true,
       users: [
-        fakeSqlUser("dupe.user", "50"),
-        fakeSqlUser("dupe.user", "50"), // SQLGeneral's own ambiguity: two rows share this Username
-        fakeSqlUser("no.dept.user", null), // no HrDepartmentId at all
-        fakeSqlUser("orphan.dept.user", "999"), // HrDepartmentId doesn't match any fetched Department
-        fakeSqlUser("good.user", "50"),
-        // "ghost.user" and "shared.identity" deliberately absent from SQLGeneral's own data
+        fakeSqlUser("geokos", null, { company: "Acme HQ" }),
+        fakeSqlUser("konkef", "geokos", { company: "Acme HQ" }),
+        fakeSqlUser("chapav", "geokos", { company: "Beta Co" }), // cross-company: reports to geokos despite a DIFFERENT company
+        fakeSqlUser("thoche", "geokos", { company: "Gamma Co" }), // cross-company
+        fakeSqlUser("stekam", "geokos", { company: "Delta Co" }), // cross-company, and neither local NOR an ancestor of a local user
+        fakeSqlUser("nikpap", "thoche", { company: "Gamma Co" }), // multi-level: geokos -> thoche -> nikpap
       ],
     });
-    const userResult = await treeService.getSqlGeneralOrganizationTree();
-    if (!userResult.ok) {
-      check("12-17. unmatched/conflicting user resolution", false, userResult.reason);
+
+    const namedResult = await treeService.getSqlGeneralOrganizationTree();
+    if (!namedResult.ok) {
+      check("1-8. five-named-identity build", false, namedResult.reason);
     } else {
-      const unresolvedByUserId = new Map(userResult.unresolvedUsers.map((u) => [u.userId, u.reason]));
-      check("12. a username with zero SQLGeneral matches => not_found", unresolvedByUserId.get(uNotFound) === "not_found");
-      check("13. a username SQLGeneral itself reports more than once => ambiguous, never silently picks one", unresolvedByUserId.get(uAmbiguous) === "ambiguous");
-      check("14. a matched user with no HrDepartmentId at all => no_hr_department", unresolvedByUserId.get(uNoHrDept) === "no_hr_department");
-      check("15. a matched user whose HrDepartmentId doesn't resolve to any fetched Department => department_not_found", unresolvedByUserId.get(uDeptNotFound) === "department_not_found");
+      const geokos = findNode(namedResult.roots, personId("geokos"));
+      check("1. geokos has no manager and appears as a ROOT", !!geokos && namedResult.roots.includes(geokos), JSON.stringify(namedResult.roots.map((r) => r.sqlGeneralUsername)));
+      check("1b. geokos has no local TicketApp account — rendered as an external placeholder", !!geokos && geokos.isLocal === false && geokos.userId === null);
+      const directReports = geokos ? geokos.children.map((c: any) => c.sqlGeneralUsername).sort() : [];
       check(
-        "16. TWO DIFFERENT local users claiming the SAME SQLGeneral username (local-side conflict) => BOTH reported conflicting_attempt, NEITHER shown as a leaf",
-        unresolvedByUserId.get(uConflictA) === "conflicting_attempt" && unresolvedByUserId.get(uConflictB) === "conflicting_attempt"
+        "2. geokos is verified as the DIRECT manager of EXACTLY konkef, chapav, thoche and stekam",
+        JSON.stringify(directReports) === JSON.stringify(["chapav", "konkef", "stekam", "thoche"]),
+        JSON.stringify(directReports)
       );
-      const homeDept = findNode(userResult.roots, "sgdept:50");
+      check("3. konkef (a real TicketApp user) is isLocal with its own userId attached", findNode(namedResult.roots, personId("konkef"))?.isLocal === true && findNode(namedResult.roots, personId("konkef"))?.userId === uKonkef);
+      const chapavNode = findNode(namedResult.roots, personId("chapav"));
+      check("4. CROSS-COMPANY reporting: chapav (Beta Co) reports directly to geokos (Acme HQ) — Company never blocks or reshapes the edge", !!chapavNode && geokos.children.includes(chapavNode));
+      const stekamNode = findNode(namedResult.roots, personId("stekam"));
       check(
-        "17. a genuinely unique, resolvable user DOES appear as a leaf under their resolved department — never over-conservatively dropped",
-        !!homeDept && homeDept.children.some((c: any) => c.kind === "sqlgeneral-user" && c.userId === uGood),
-        JSON.stringify(homeDept)
+        "5. stekam renders under geokos even though stekam is NEITHER a TicketApp user NOR an ancestor of one — the tree is never scoped down to only TicketApp-relevant chains",
+        !!stekamNode && stekamNode.isLocal === false && geokos.children.includes(stekamNode)
       );
-      check("17b. no conflicting/ambiguous/unresolved user ever appears as a leaf anywhere", !findNode(userResult.roots, `sguser:${uConflictA}`) && !findNode(userResult.roots, `sguser:${uAmbiguous}`));
+      const thocheNode = findNode(namedResult.roots, personId("thoche"));
+      const nikpapNode = thocheNode ? findNode([thocheNode], personId("nikpap")) : null;
+      check("6. MULTI-LEVEL management: nikpap nests under thoche, which nests under geokos — arbitrary depth, not just one level", !!thocheNode && !!nikpapNode && geokos.children.includes(thocheNode));
+      check("7. nikpap (a real TicketApp user) is isLocal with its own userId attached, even nested 2 levels deep", nikpapNode?.isLocal === true && nikpapNode?.userId === uNikpap);
+      check("8. zero unresolvedManagerLinks for this entirely clean, well-formed set of relationships", namedResult.unresolvedManagerLinks.length === 0, JSON.stringify(namedResult.unresolvedManagerLinks));
+    }
+
+    console.log("\nAmbiguous identities and ambiguous managers ===\n");
+    mockListUsersImpl = async () => ({
+      ok: true,
+      users: [
+        fakeSqlUser("dupeuser", null), // row 1 of an ambiguous username
+        fakeSqlUser("dupeuser", null), // row 2 — SQLGeneral's own data reports this username twice
+        fakeSqlUser("ambmgr-emp", "dupeuser"), // claims the ambiguous username as manager
+      ],
+    });
+    const ambResult = await treeService.getSqlGeneralOrganizationTree();
+    if (!ambResult.ok) {
+      check("9-10. ambiguity build", false, ambResult.reason);
+    } else {
+      check("9. an identity SQLGeneral itself reports more than once NEVER becomes a node at all", findNode(ambResult.roots, personId("dupeuser")) === null);
+      const ambEmp = findNode(ambResult.roots, personId("ambmgr-emp"));
+      check(
+        "10. a employee claiming an AMBIGUOUS username as their manager is reported ambiguous_manager and rendered as a standalone root — never guesses which row is the real manager",
+        !!ambEmp && ambResult.roots.includes(ambEmp) && ambResult.unresolvedManagerLinks.some((u) => u.sqlGeneralUsername === "ambmgr-emp" && u.reason === "ambiguous_manager"),
+        JSON.stringify(ambResult.unresolvedManagerLinks)
+      );
+    }
+
+    console.log("\nMissing (dangling) managers and self-references ===\n");
+    mockListUsersImpl = async () => ({
+      ok: true,
+      users: [fakeSqlUser("orphan-emp", "ghost-manager-404"), fakeSqlUser("selfref-emp", "selfref-emp")],
+    });
+    const missingResult = await treeService.getSqlGeneralOrganizationTree();
+    if (!missingResult.ok) {
+      check("11-12. missing/self-reference build", false, missingResult.reason);
+    } else {
+      const orphan = findNode(missingResult.roots, personId("orphan-emp"));
+      check(
+        "11. a manager username that doesn't exist ANYWHERE in the live data is missing_manager — the employee still renders, as a standalone root",
+        !!orphan && missingResult.roots.includes(orphan) && missingResult.unresolvedManagerLinks.some((u) => u.sqlGeneralUsername === "orphan-emp" && u.reason === "missing_manager")
+      );
+      const selfRef = findNode(missingResult.roots, personId("selfref-emp"));
+      check(
+        "12. an employee claiming THEMSELVES as their own manager is self_reference, never a self-loop — rendered as a standalone root",
+        !!selfRef && missingResult.roots.includes(selfRef) && missingResult.unresolvedManagerLinks.some((u) => u.sqlGeneralUsername === "selfref-emp" && u.reason === "self_reference")
+      );
+    }
+
+    console.log("\nCycles — detected, reported, and NEVER cascaded onto a cycle member's own subordinates ===\n");
+    mockListUsersImpl = async () => ({
+      ok: true,
+      users: [fakeSqlUser("cycA", "cycB"), fakeSqlUser("cycB", "cycA"), fakeSqlUser("cycA-report", "cycA")],
+    });
+    const cycleResult = await treeService.getSqlGeneralOrganizationTree();
+    if (!cycleResult.ok) {
+      check("13-15. cycle build", false, cycleResult.reason);
+    } else {
+      check(
+        "13. both members of a 2-cycle (cycA <-> cycB) are reported \"cycle\", never a false root picked arbitrarily — EACH becomes its own standalone root",
+        cycleResult.unresolvedManagerLinks.some((u) => u.sqlGeneralUsername === "cycA" && u.reason === "cycle") &&
+          cycleResult.unresolvedManagerLinks.some((u) => u.sqlGeneralUsername === "cycB" && u.reason === "cycle"),
+        JSON.stringify(cycleResult.unresolvedManagerLinks)
+      );
+      const cycANode = findNode(cycleResult.roots, personId("cycA"));
+      const cycBNode = findNode(cycleResult.roots, personId("cycB"));
+      check("14. cycA and cycB both render as standalone roots (their own broken upward edge, not excluded from the tree entirely)", !!cycANode && !!cycBNode && cycleResult.roots.includes(cycANode) && cycleResult.roots.includes(cycBNode));
+      check(
+        "15. cycA's OWN subordinate (cycA-report) is completely unaffected by cycA's broken upward edge — never cascaded, chains are cut exactly where data stops supporting them, nothing more",
+        !!cycANode && cycANode.children.some((c: any) => c.sqlGeneralUsername === "cycA-report")
+      );
+    }
+
+    console.log("\nLocal-user uniqueness: not_found, SQLGeneral-side ambiguous, and conflicting local claims ===\n");
+    const uNotFound = await makeUser("notfound");
+    await enqueue(uNotFound, "no-such-sqlgeneral-user");
+    const uAmbiguousLocal = await makeUser("ambiguouslocal");
+    await enqueue(uAmbiguousLocal, "dupeuser2");
+    const uConflictA = await makeUser("conflicta");
+    await enqueue(uConflictA, "shared-identity");
+    const uConflictB = await makeUser("conflictb");
+    await enqueue(uConflictB, "shared-identity");
+
+    mockListUsersImpl = async () => ({
+      ok: true,
+      users: [
+        fakeSqlUser("dupeuser2", null),
+        fakeSqlUser("dupeuser2", null), // SQLGeneral's own ambiguity for a username a LOCAL user also claims
+        fakeSqlUser("shared-identity", "geokos2"), // two DIFFERENT local users claim this exact username
+        fakeSqlUser("geokos2", null),
+        // "no-such-sqlgeneral-user" deliberately absent from SQLGeneral's own data
+      ],
+    });
+    const uniquenessResult = await treeService.getSqlGeneralOrganizationTree();
+    if (!uniquenessResult.ok) {
+      check("16-19. uniqueness build", false, uniquenessResult.reason);
+    } else {
+      const unresolvedByUserId = new Map(uniquenessResult.unresolvedUsers.map((u) => [u.userId, u.reason]));
+      check("16. a username with zero SQLGeneral matches => not_found", unresolvedByUserId.get(uNotFound) === "not_found");
+      check("17. a LOCAL user claiming a username SQLGeneral itself reports more than once => ambiguous, never silently picks one", unresolvedByUserId.get(uAmbiguousLocal) === "ambiguous");
+      check(
+        "18. TWO DIFFERENT local users claiming the SAME SQLGeneral username => BOTH reported conflicting_attempt, and the SQLGeneral identity itself still renders in the tree but with NO local userId attached (neither claim is trusted)",
+        unresolvedByUserId.get(uConflictA) === "conflicting_attempt" &&
+          unresolvedByUserId.get(uConflictB) === "conflicting_attempt" &&
+          findNode(uniquenessResult.roots, personId("shared-identity"))?.isLocal === false,
+        JSON.stringify(uniquenessResult.unresolvedUsers)
+      );
+      check("19. each existing TicketApp user who DOES resolve uniquely still appears in the tree exactly once (no duplicate nodes)", uniquenessResult.roots.flatMap(flattenAll).filter((n: any) => n.sqlGeneralUsername === "shared-identity").length === 1);
     }
 
     console.log("\nIncomplete pagination (fail closed) ===\n");
-    mockListDeptImpl = async () => ({ ok: false, reason: "Pagination exceeded 200 pages without reaching the end — treating as incomplete rather than silently truncating." });
-    mockListUsersImpl = async () => ({ ok: true, users: [] });
-    const deptFailResult = await treeService.getSqlGeneralOrganizationTree();
-    check("18. a Departments pagination failure fails the WHOLE build closed — never a partial tree", deptFailResult.ok === false, deptFailResult.ok ? "unexpectedly ok" : "");
-
-    mockListDeptImpl = async () => ({ ok: true, departments: [] });
-    mockListUsersImpl = async () => ({ ok: false, reason: "Pagination exceeded 200 pages." });
-    const userFailResult = await treeService.getSqlGeneralOrganizationTree();
-    check("19. a UsersAndManagers pagination failure ALSO fails the whole build closed", userFailResult.ok === false);
+    mockListUsersImpl = async () => ({ ok: false, reason: "Pagination exceeded 200 pages without reaching the end — treating as incomplete rather than silently truncating." });
+    const failResult = await treeService.getSqlGeneralOrganizationTree();
+    check("20. a UsersAndManagers pagination failure fails the WHOLE build closed — never a partial tree", failResult.ok === false, failResult.ok ? "unexpectedly ok" : "");
 
     console.log("\nAdmin permission gate ===\n");
-    mockListDeptImpl = async () => ({ ok: true, departments: [] });
     mockListUsersImpl = async () => ({ ok: true, users: [] });
     const nonAdmin = await makeUser("nonadmin");
     currentSession = { user: { id: nonAdmin, role: Role.USER, customRoleId: null } };
     const forbiddenRes = await treeRoute.GET();
-    check("20. the SQLGeneral tree endpoint: a user without organization.sqlgeneralSync gets 403", forbiddenRes.status === 403);
+    check("21. the SQLGeneral tree endpoint: a user without organization.sqlgeneralSync gets 403", forbiddenRes.status === 403);
 
     const adminUser = await makeUser("admin", Role.ADMIN, null);
     currentSession = { user: { id: adminUser, role: Role.ADMIN, customRoleId: null } };
     const adminRes = await treeRoute.GET();
     const adminBody = await adminRes.json();
-    check("21. ADMIN bypasses the permission check and receives tree + unresolvedDepartments + unresolvedUsers", adminRes.status === 200 && Array.isArray(adminBody.tree) && Array.isArray(adminBody.unresolvedDepartments) && Array.isArray(adminBody.unresolvedUsers));
+    check("22. ADMIN bypasses the permission check and receives tree + unresolvedUsers + unresolvedManagerLinks", adminRes.status === 200 && Array.isArray(adminBody.tree) && Array.isArray(adminBody.unresolvedUsers) && Array.isArray(adminBody.unresolvedManagerLinks));
     currentSession = null;
 
     console.log("\nExisting Departments/People tree modes are completely unaffected ===\n");
@@ -392,8 +291,8 @@ async function main() {
     } catch {
       localPeopleTreeOk = false;
     }
-    check("22. the EXISTING local Department tree service (unmocked, untouched) still runs without error", localDeptTreeOk);
-    check("23. the EXISTING local People tree service (unmocked, untouched) still runs without error", localPeopleTreeOk);
+    check("23. the EXISTING local Department tree service (unmocked, untouched) still runs without error", localDeptTreeOk);
+    check("24. the EXISTING local People tree service (unmocked, untouched) still runs without error", localPeopleTreeOk);
   } finally {
     console.log("\nCleaning up test data...\n");
     const steps: Array<[string, () => Promise<unknown>]> = [
@@ -410,6 +309,10 @@ async function main() {
     await prisma.$disconnect();
   }
   printSummaryAndExit();
+}
+
+function flattenAll(node: any): any[] {
+  return [node, ...node.children.flatMap(flattenAll)];
 }
 
 main();

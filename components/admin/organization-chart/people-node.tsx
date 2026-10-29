@@ -10,6 +10,10 @@ export interface PeopleNodeData {
   label: string;
   jobTitle: string | null;
   departmentName: string | null;
+  /** Metadata only (SQLGeneral manager-first mode) — shown on hover via the card's native title tooltip, never as a visible grouping label. Null/undefined for the existing Graph-sourced People mode, which has no Company concept. */
+  companyName?: string | null;
+  /** True for a SQLGeneral-only placeholder (a real manager identity with no local TicketApp account) — never set for the existing People mode. */
+  isExternal?: boolean;
   email: string;
   isActive: boolean;
   directReportsCount: number;
@@ -28,11 +32,13 @@ function initials(name: string): string {
 
 export function PeopleNode({ id, data }: NodeProps) {
   const d = data as PeopleNodeData;
+  const hoverTitle = d.companyName !== undefined ? [d.companyName ? `Company: ${d.companyName}` : null, d.departmentName ? `Department: ${d.departmentName}` : null].filter(Boolean).join("\n") || undefined : undefined;
   return (
     <div
       role="treeitem"
       tabIndex={0}
-      aria-label={`${d.label}, ${d.jobTitle ?? "no job title"}, ${d.isActive ? "active" : "inactive"}, ${d.directReportsCount} direct reports`}
+      title={hoverTitle}
+      aria-label={`${d.label}, ${d.jobTitle ?? "no job title"}, ${d.isActive ? "active" : "inactive"}, ${d.directReportsCount} direct reports${d.isExternal ? ", no TicketApp account" : ""}`}
       aria-expanded={d.hasHiddenChildren ? !d.isCollapsed : undefined}
       aria-selected={d.isSelected}
       onClick={() => d.onSelect(id)}
@@ -46,6 +52,7 @@ export function PeopleNode({ id, data }: NodeProps) {
         "flex w-[240px] cursor-pointer items-center gap-2.5 rounded-lg border bg-card p-2.5 text-card-foreground shadow-sm transition-colors focus:outline-none focus:ring-2 focus:ring-ring",
         d.isSelected && "border-primary ring-2 ring-primary",
         d.isHighlighted && !d.isSelected && "border-primary/60 bg-primary/5",
+        d.isExternal && "border-dashed",
         !d.isActive && "opacity-60"
       )}
     >
@@ -58,8 +65,8 @@ export function PeopleNode({ id, data }: NodeProps) {
           <span className="truncate text-sm font-semibold">{d.label}</span>
           {!d.isActive && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-muted-foreground" aria-hidden />}
         </div>
-        <p className="truncate text-xs text-muted-foreground">{d.jobTitle ?? "—"}</p>
-        <p className="truncate text-[11px] text-muted-foreground">{d.departmentName ?? "No department"}</p>
+        <p className="truncate text-xs text-muted-foreground">{d.jobTitle ?? (d.isExternal ? "No TicketApp account" : "—")}</p>
+        {d.companyName === undefined && <p className="truncate text-[11px] text-muted-foreground">{d.departmentName ?? "No department"}</p>}
       </div>
       {d.directReportsCount > 0 && (
         <button
