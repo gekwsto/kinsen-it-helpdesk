@@ -18,7 +18,7 @@ import { DepartmentRole, GlobalRoleSource, MembershipSource, MicrosoftMappingSou
 import { syncMicrosoftUserDepartment, handleMicrosoftJwtSignIn } from "@/lib/services/microsoft-department-sync-service";
 import { syncMicrosoftDirectoryValues, normalizeJobTitleValue } from "@/lib/services/microsoft-directory-service";
 import { createMapping, updateMapping, MicrosoftMappingValidationError } from "@/lib/services/microsoft-mapping-service";
-import { normalizeDepartmentName } from "@/lib/services/organization-normalization";
+import { normalizeDepartmentName, UNASSIGNED_NODE_NAME } from "@/lib/services/organization-normalization";
 
 let passed = 0;
 let failed = 0;
@@ -40,8 +40,6 @@ const TEST_LOW_PRIORITY_DEPT_VALUE = `Test Systems Operations Low ${RUN_ID}`;
 const TEST_JOB_TITLE_MANAGER_VALUE = `Test Systems Operations Manager ${RUN_ID}`;
 const TEST_JOB_TITLE_ASSISTANT_VALUE = `Test IT Operations Assistant ${RUN_ID}`;
 const testUserIds: string[] = [];
-/** Raw Graph department-string values that resolveOrganizationPlacement will have created a real (companyId: null) Department for — tracked here so `finally` can clean them up too. */
-const resolvedDeptNames = new Set<string>();
 
 function mockGraphMeOnce(department: string | null, oid = `test-oid-${RUN_ID}`, jobTitle: string | null = null) {
   (global as unknown as { fetch: typeof fetch }).fetch = (async () =>
@@ -60,20 +58,25 @@ function mockGraphMeOnce(department: string | null, oid = `test-oid-${RUN_ID}`, 
 
 /**
  * FIND-003 (docs/roadmap-handoff-register.md): PRIMARY department placement
- * now comes from organization-company-department-resolver.ts's
- * name-based, company-scoped resolution (using the raw Graph `department`
- * string directly), never from a MicrosoftDepartmentMapping row — a Graph
+ * comes from organization-company-department-resolver.ts's name-based,
+ * company-scoped resolution (using the raw Graph `department` string
+ * directly), never from a MicrosoftDepartmentMapping row — a Graph
  * `department` value can still ALSO have a MicrosoftDepartmentMapping
  * pointing at a completely different, arbitrarily-named Department for
  * SECONDARY-membership/global-role purposes (that mechanism is unchanged).
- * This looks up the department the resolver would have created/found for a
- * given raw Graph department string, mirroring exactly what
- * resolveOrganizationPlacement does (no companyName in this file's mocks ->
- * companyId: null).
+ *
+ * UPDATED (duplicate-Department-prevention round): the resolver no longer
+ * auto-creates a Department named after an arbitrary unmatched raw value —
+ * see that file's own doc comments. Every brand-new/unmatched raw value in
+ * this file's mocks (no companyName -> companyId: null) now falls back to
+ * that same company's shared "Unassigned" Department instead, regardless of
+ * which specific raw string was used — so this always resolves THAT shared
+ * bucket now, ignoring the raw value entirely (kept as a parameter only so
+ * every existing call site below reads unchanged).
  */
-async function findResolvedPrimaryDepartment(rawDepartmentName: string) {
+async function findResolvedPrimaryDepartment(_rawDepartmentName: string) {
   return prisma.department.findFirst({
-    where: { companyId: null, normalizedName: normalizeDepartmentName(rawDepartmentName) },
+    where: { companyId: null, normalizedName: normalizeDepartmentName(UNASSIGNED_NODE_NAME) },
   });
 }
 
@@ -196,7 +199,6 @@ async function main() {
     // fixture is now purely a SECONDARY-membership/global-role target via
     // its MicrosoftDepartmentMapping row (see the checks below).
     const resolvedPrimaryDept = await findResolvedPrimaryDepartment(TEST_MAPPING_VALUE);
-    resolvedDeptNames.add(TEST_MAPPING_VALUE);
     const primaryMembership1 = resolvedPrimaryDept
       ? await prisma.departmentMembership.findUnique({ where: { userId_departmentId: { userId: user1.id, departmentId: resolvedPrimaryDept.id } } })
       : null;
@@ -310,7 +312,6 @@ async function main() {
     const afterUnmapped = await prisma.user.findUnique({ where: { id: unmappedUser.id } });
     const unmappedMembershipCount = await prisma.departmentMembership.count({ where: { userId: unmappedUser.id } });
     const unmappedResolvedDept = await findResolvedPrimaryDepartment(unmappedDeptValue);
-    resolvedDeptNames.add(unmappedDeptValue);
     check("no role promotion when no MicrosoftDepartmentMapping matches", afterUnmapped?.role === Role.USER);
     check("globalRoleSource stays SYSTEM (untouched) when no mapping matches", afterUnmapped?.globalRoleSource === GlobalRoleSource.SYSTEM);
     // PRIMARY placement is a SEPARATE mechanism from MicrosoftDepartmentMapping
@@ -646,14 +647,13 @@ async function main() {
     // the JobTitleValue table not existing yet, pre-migration) must not
     // mask the original test failure or skip $disconnect for the rest.
     //
-    // FIND-003: swept by RUN_ID-tagged name rather than the specific
-    // constants tracked in resolvedDeptNames (TEST_MAPPING_VALUE,
-    // unmappedDeptValue) — a broad, robust net that also catches
-    // TEST_LOW_PRIORITY_DEPT_VALUE/TEST_VERBATIM_VALUE (Cases 1-4, Scenario
-    // 9), which ALSO get resolver-created as PRIMARY-placement departments
-    // now that every eligible login resolves one, independent of which
-    // MicrosoftDepartmentMapping scenario each case is actually testing.
-    void resolvedDeptNames; // superseded by the broad sweep below; kept only for the inline resolvedDeptNames.add() call-site comments' context
+    // UPDATED (duplicate-Department-prevention round): every unmatched raw
+    // Graph `department` value in this file now resolves to the shared
+    // "Unassigned" bucket (see findResolvedPrimaryDepartment above) rather
+    // than its own RUN_ID-named row, so this RUN_ID-tagged sweep is now
+    // always a safe no-op (finds nothing — "Unassigned" never contains
+    // RUN_ID) — kept rather than removed in case a future scenario in this
+    // file ever resolves a REAL, exactly-matched, uniquely-named department.
     const resolvedDepts = await prisma.department.findMany({ where: { companyId: null, name: { contains: RUN_ID.toString() } }, select: { id: true } });
     const resolvedDeptIds = resolvedDepts.map((d) => d.id);
 

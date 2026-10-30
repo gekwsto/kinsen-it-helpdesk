@@ -501,7 +501,7 @@ export async function setPrimaryDepartmentMembership(
     const currentPrimary = allMemberships.find((m) => m.isPrimary && m.isActive) ?? null;
     const previousPrimaryDepartmentId = currentPrimary?.departmentId ?? null;
 
-    // Two independent protections against a non-MANUAL caller trying to
+    // Three independent protections against a non-MANUAL caller trying to
     // move a DIFFERENT department's worth of primary onto this user:
     //   1. An explicit admin lock (primaryLockedById) blocks ANY automatic
     //      caller — Microsoft or SQLGeneral alike (REQUIRED DO #4, prior
@@ -517,12 +517,27 @@ export async function setPrimaryDepartmentMembership(
     //      (a routine admin edit should not permanently block correct
     //      SQLGeneral placement) stays exactly as it was — only an
     //      explicit lock protects a MANUAL row from SQLGeneral.
+    //   3. Microsoft specifically also NEVER overrides an unlocked
+    //      SQLGENERAL_DEPARTMENT-sourced primary (REQUIRED, duplicate-
+    //      prevention round: "ensure Microsoft sync cannot override
+    //      SQLGeneral-authoritative primary placement"). The two existing
+    //      Microsoft sync callers (organization-directory-sync-service.ts,
+    //      microsoft-department-sync-service.ts) already independently
+    //      check isPrimaryCompanySqlGeneralAuthoritative before ever
+    //      calling this function with source: MICROSOFT_DEPARTMENT — this
+    //      makes that convention a STRUCTURAL guarantee enforced here too,
+    //      so a future or modified caller can never accidentally regress
+    //      it. SQLGeneral's own calls (source: SQLGENERAL_DEPARTMENT) are
+    //      completely unaffected — this condition only ever restricts a
+    //      MICROSOFT_DEPARTMENT caller, never SQLGeneral's own authority
+    //      over a Microsoft-sourced primary.
     if (
       currentPrimary &&
       source !== MembershipSource.MANUAL &&
       currentPrimary.departmentId !== departmentId &&
       (currentPrimary.primaryLockedById !== null ||
-        (currentPrimary.source === MembershipSource.MANUAL && source === MembershipSource.MICROSOFT_DEPARTMENT))
+        (currentPrimary.source === MembershipSource.MANUAL && source === MembershipSource.MICROSOFT_DEPARTMENT) ||
+        (currentPrimary.source === MembershipSource.SQLGENERAL_DEPARTMENT && source === MembershipSource.MICROSOFT_DEPARTMENT))
     ) {
       return {
         outcome: "blocked_primary_protected" as const,

@@ -233,7 +233,7 @@ export interface DirectoryBatchSyncCounts {
   skipped: number;
   errors: number;
   /** dbUserId + the raw Graph fields needed for department-membership resolution below — captured here (not re-queried afterward) since User has no persisted scalar column for Entra's raw `department` string (only the resolved Department relation). resolvedDepartmentId is the primary-organizational placement (organization-company-department-resolver.ts's result) used for the canonical setPrimaryDepartmentMembership call. `domain` (FIND-006) is this user's own already-validated eligible domain (validateDirectoryUser's result) — passed to resolveDepartmentMemberships/resolvePrimaryMicrosoftMapping below so a domain-scoped PROFILE_JOB_TITLE mapping resolves under the SAME domain eligibility already confirmed for this exact user, never a global assumption. */
-  syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; domain: string; name: string | null; department: string | null; jobTitle: string | null; resolvedDepartmentId: string | null }>;
+  syncedForMembership: Array<{ dbUserId: string; microsoftUserId: string; email: string; domain: string; name: string | null; department: string | null; jobTitle: string | null; resolvedDepartmentId: string | null; departmentFellBackToUnassigned: boolean; existingDepartmentId: string | null }>;
 }
 
 export type DirectoryUserSyncAction = "created" | "updated" | "linked" | "skipped";
@@ -247,6 +247,10 @@ interface DirectoryUserSyncResult {
   companyName: string | null;
   /** The resolved primary-organizational Department id (placement.departmentId) — null only when the upsert itself failed (skipped). Used by the membership-resolution loop below to set the PRIMARY DepartmentMembership via setPrimaryDepartmentMembership; never written to User.departmentId directly here anymore. */
   resolvedDepartmentId: string | null;
+  /** True when resolvedDepartmentId is the Unassigned fallback, not a genuine match — see OrganizationPlacement's own doc comment. The membership-resolution loop below must never let this move an EXISTING user's already-good primary. Meaningless (false) when resolvedDepartmentId is itself null. */
+  departmentFellBackToUnassigned: boolean;
+  /** This user's departmentId BEFORE this sync run touched anything — null for a brand-new user (nothing to protect), the existing mirror-of-primary value otherwise. Used by the membership-resolution loop to decide whether a fallback result is safe to apply. */
+  existingDepartmentId: string | null;
   skipReason?: string;
 }
 
@@ -318,11 +322,11 @@ async function upsertOneDirectoryUser(
   try {
     const placement = await resolveOrganizationPlacement(placementCache, user.companyName, user.department);
 
-    let existing = await prisma.user.findUnique({ where: { microsoftUserId: user.id }, select: { id: true, name: true, microsoftUserId: true } });
+    let existing = await prisma.user.findUnique({ where: { microsoftUserId: user.id }, select: { id: true, name: true, microsoftUserId: true, companyId: true, departmentId: true } });
     let action: DirectoryUserSyncAction = "updated";
 
     if (!existing) {
-      const byEmail = await prisma.user.findUnique({ where: { email }, select: { id: true, name: true, microsoftUserId: true } });
+      const byEmail = await prisma.user.findUnique({ where: { email }, select: { id: true, name: true, microsoftUserId: true, companyId: true, departmentId: true } });
       if (byEmail) {
         if (byEmail.microsoftUserId && byEmail.microsoftUserId !== user.id) {
           console.warn("[organization-directory-sync] user sync skipped", {
@@ -331,7 +335,7 @@ async function upsertOneDirectoryUser(
             action: "skipped",
             reason: "email_linked_to_different_microsoft_user",
           });
-          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: null, skipReason: "email_linked_to_different_microsoft_user" };
+          return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: null, departmentFellBackToUnassigned: false, existingDepartmentId: null, skipReason: "email_linked_to_different_microsoft_user" };
         }
         existing = byEmail;
         action = "linked";
@@ -343,16 +347,19 @@ async function upsertOneDirectoryUser(
     // setPrimaryDepartmentMembership (called from the membership-resolution
     // loop below, once dbUserId is known) — see the canonical-membership
     // architecture. companyId has no membership-table equivalent and stays
-    // a direct write, unrelated to that — EXCEPT once SQLGeneral has
-    // already become authoritative for THIS EXISTING user's Company
-    // (isPrimaryCompanySqlGeneralAuthoritative — their current active
-    // primary is SQLGENERAL_DEPARTMENT-sourced), in which case Microsoft
-    // must never overwrite it again, on this or any subsequent sync
-    // (REQUIRED: resolve the User.companyId dual-writer precedence).
-    // Checked unconditionally (not gated on isSqlGeneralPrimaryPlacementEnabled)
-    // so the precedence holds even across a rollout-flag rollback. Never
-    // applies to a brand-new user below (create path) — there is no prior
-    // primary to defer to yet.
+    // a direct write, unrelated to that — skipped for an EXISTING user for
+    // TWO independent reasons: (1) once SQLGeneral has already become
+    // authoritative for THIS user's Company (isPrimaryCompanySqlGeneralAuthoritative
+    // — their current active primary is SQLGENERAL_DEPARTMENT-sourced),
+    // Microsoft must never overwrite it again (REQUIRED: resolve the
+    // User.companyId dual-writer precedence); (2) REQUIRED (unresolved-
+    // Microsoft-directory-data safety round): placement.companyId === null
+    // from a non-blank, unmatched Company signal is degraded/untrusted
+    // information, never a reason to clobber an EXISTING real companyId
+    // down to null. Both checked unconditionally (not gated on
+    // isSqlGeneralPrimaryPlacementEnabled) so the precedence holds even
+    // across a rollout-flag rollback. Neither applies to a brand-new user
+    // below (create path) — there is no prior placement to protect yet.
     const commonFields = {
       name: user.displayName ?? undefined,
       givenName: user.givenName ?? undefined,
@@ -367,16 +374,17 @@ async function upsertOneDirectoryUser(
 
     if (existing) {
       const sqlGeneralIsAuthoritative = await isPrimaryCompanySqlGeneralAuthoritative(existing.id);
+      const unresolvedCompanyWouldClobber = placement.companyId === null && existing.companyId != null;
       // microsoftUserId is written unconditionally here (a no-op when action
       // is "updated" — it already matched; the actual backfill when action
       // is "linked").
       const updated = await prisma.user.update({
         where: { id: existing.id },
-        data: { ...commonFields, ...(sqlGeneralIsAuthoritative ? {} : { companyId: placement.companyId }), microsoftUserId: user.id },
+        data: { ...commonFields, ...(sqlGeneralIsAuthoritative || unresolvedCompanyWouldClobber ? {} : { companyId: placement.companyId }), microsoftUserId: user.id },
         select: { id: true, name: true },
       });
       console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action, company: placement.companyName, department: placement.departmentName });
-      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId };
+      return { action, dbUserId: updated.id, name: updated.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId, departmentFellBackToUnassigned: placement.departmentFellBackToUnassigned, existingDepartmentId: existing.departmentId };
     }
 
     // This flow has no MicrosoftDepartmentMapping-based global-role
@@ -409,7 +417,7 @@ async function upsertOneDirectoryUser(
       select: { id: true, name: true },
     });
     console.log("[organization-directory-sync] user synced", { microsoftUserId: user.id, email, action: "created", company: placement.companyName, department: placement.departmentName });
-    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId };
+    return { action: "created", dbUserId: created.id, name: created.name, department, jobTitle, companyName: placement.companyName, resolvedDepartmentId: placement.departmentId, departmentFellBackToUnassigned: placement.departmentFellBackToUnassigned, existingDepartmentId: null };
   } catch (err) {
     // Isolated to THIS user only (see the function header) — never runs
     // inside a transaction shared with any other user's writes, so this can
@@ -418,7 +426,7 @@ async function upsertOneDirectoryUser(
     // counted and logged, never silently dropped.
     const reason = err instanceof Error ? err.message : String(err);
     console.warn("[organization-directory-sync] user sync failed", { microsoftUserId: user.id, email, action: "skipped", reason });
-    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: null, resolvedDepartmentId: null, skipReason: reason };
+    return { action: "skipped", dbUserId: null, name: null, department, jobTitle, companyName: null, resolvedDepartmentId: null, departmentFellBackToUnassigned: false, existingDepartmentId: null, skipReason: reason };
   }
 }
 
@@ -452,6 +460,8 @@ async function upsertDirectoryUserBatch(
         department: result.department,
         jobTitle: result.jobTitle,
         resolvedDepartmentId: result.resolvedDepartmentId,
+        departmentFellBackToUnassigned: result.departmentFellBackToUnassigned,
+        existingDepartmentId: result.existingDepartmentId,
       });
     }
   }
@@ -592,7 +602,14 @@ export async function runOrganizationDirectorySync(): Promise<DirectorySyncOutco
     // blocks this batch sync from moving their primary DEPARTMENT too, not
     // only their companyId (upsertOneDirectoryUser's own, separate check).
     const sqlGeneralIsAuthoritative = !primaryPlacementRolledOut && (await isPrimaryCompanySqlGeneralAuthoritative(synced.dbUserId));
-    if (!primaryPlacementRolledOut && !sqlGeneralIsAuthoritative && synced.resolvedDepartmentId) {
+    // REQUIRED (unresolved-Microsoft-directory-data safety round): a
+    // Department that fell back to Unassigned is degraded/untrusted
+    // information — never a reason to move an EXISTING user off their
+    // already-good primary (existingDepartmentId != null). Safe to apply
+    // for a brand-new user (existingDepartmentId null — nothing to
+    // protect), same as the per-login path's own guard.
+    const unresolvedDepartmentWouldClobber = synced.departmentFellBackToUnassigned && synced.existingDepartmentId != null;
+    if (!primaryPlacementRolledOut && !sqlGeneralIsAuthoritative && !unresolvedDepartmentWouldClobber && synced.resolvedDepartmentId) {
       try {
         await setPrimaryDepartmentMembership(synced.dbUserId, synced.resolvedDepartmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
           role: departmentDefault!.role,

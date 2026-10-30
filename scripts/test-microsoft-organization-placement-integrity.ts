@@ -90,7 +90,7 @@ import { syncMicrosoftUserDepartment, handleMicrosoftJwtSignIn, type SyncEligibl
 import { createMapping } from "@/lib/services/microsoft-mapping-service";
 import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
 import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
-import { normalizeDepartmentName, normalizeCompanyName } from "@/lib/services/organization-normalization";
+import { normalizeDepartmentName, normalizeCompanyName, UNASSIGNED_NODE_NAME } from "@/lib/services/organization-normalization";
 import { runOrganizationDirectorySync } from "@/lib/services/organization-directory-sync-service";
 import { isSqlGeneralPrimaryPlacementEnabled } from "@/lib/sqlgeneral-api-client";
 
@@ -184,6 +184,52 @@ async function main() {
     });
     mappingIds.push(secondaryMapping.id);
 
+    // UPDATED (duplicate-Company/Department-prevention round):
+    // resolveCompanyForSync/resolveDepartmentForSync no longer auto-create
+    // anything from an unmatched raw Graph value (see
+    // organization-company-department-resolver.ts) — every Company/
+    // Department this file's scenarios expect Microsoft sync to RESOLVE
+    // (not fabricate) is now pre-created here, exactly mirroring the real
+    // production baseline after this round lands: an admin creates the
+    // real org once, and Microsoft sync correctly finds/reuses it forever
+    // after via exact match — it never fabricates a sibling. Scenario 2
+    // below is the one deliberately UNCHANGED exception: it now proves the
+    // NEW behavior (a genuinely first-ever-seen value never gets
+    // auto-created) instead of the old one.
+    const kinsenHellas = await prisma.company.create({ data: { name: `Kinsen Hellas ${RUN_ID}`, normalizedName: normalizeCompanyName(`Kinsen Hellas ${RUN_ID}`) } });
+    companyIds.push(kinsenHellas.id);
+    const financeDept = await prisma.department.create({ data: { name: FINANCE_VALUE, slug: `finance-${RUN_ID}`, normalizedName: normalizeDepartmentName(FINANCE_VALUE), companyId: kinsenHellas.id } });
+    departmentIds.push(financeDept.id);
+    // Scenario 9d's "obsolete AUTOMATED primary" starting point — a real,
+    // pre-existing Department (not an auto-created one), so that scenario
+    // tests a genuine A->B move between two EXISTING departments.
+    const OLD_VALUE = `Old Dept Before Move ${RUN_ID}`;
+    const oldDept = await prisma.department.create({ data: { name: OLD_VALUE, slug: `old-dept-${RUN_ID}`, normalizedName: normalizeDepartmentName(OLD_VALUE), companyId: kinsenHellas.id } });
+    departmentIds.push(oldDept.id);
+    // Scenario 13's rollout-gate toggle target — likewise pre-existing.
+    const AUTHORITY_VALUE = `Authority Dept ${RUN_ID}`;
+    const authorityDept = await prisma.department.create({ data: { name: AUTHORITY_VALUE, slug: `authority-dept-${RUN_ID}`, normalizedName: normalizeDepartmentName(AUTHORITY_VALUE), companyId: kinsenHellas.id } });
+    departmentIds.push(authorityDept.id);
+    // Scenario 6's two real, pre-existing companies, each with their OWN
+    // department that happens to share a name — proves multi-company
+    // Departments are fully preserved (DO #4), never merged.
+    const SHARED_DEPT_NAME = `Shared Finance Name ${RUN_ID}`;
+    const companyOne = await prisma.company.create({ data: { name: `Company One ${RUN_ID}`, normalizedName: normalizeCompanyName(`Company One ${RUN_ID}`) } });
+    const companyTwo = await prisma.company.create({ data: { name: `Company Two ${RUN_ID}`, normalizedName: normalizeCompanyName(`Company Two ${RUN_ID}`) } });
+    companyIds.push(companyOne.id, companyTwo.id);
+    const sharedDeptCo1 = await prisma.department.create({ data: { name: SHARED_DEPT_NAME, slug: `shared-dept-co1-${RUN_ID}`, normalizedName: normalizeDepartmentName(SHARED_DEPT_NAME), companyId: companyOne.id } });
+    const sharedDeptCo2 = await prisma.department.create({ data: { name: SHARED_DEPT_NAME, slug: `shared-dept-co2-${RUN_ID}`, normalizedName: normalizeDepartmentName(SHARED_DEPT_NAME), companyId: companyTwo.id } });
+    departmentIds.push(sharedDeptCo1.id, sharedDeptCo2.id);
+    // Scenario 12's pre-existing Company+Department — both sync entry
+    // points must independently discover and agree on the SAME existing
+    // record, never fork a duplicate between them.
+    const CONVERGE_DEPT = `Converge Finance ${RUN_ID}`;
+    const CONVERGE_COMPANY = `Converge Co ${RUN_ID}`;
+    const convergeCompany = await prisma.company.create({ data: { name: CONVERGE_COMPANY, normalizedName: normalizeCompanyName(CONVERGE_COMPANY) } });
+    companyIds.push(convergeCompany.id);
+    const convergeDept = await prisma.department.create({ data: { name: CONVERGE_DEPT, slug: `converge-dept-${RUN_ID}`, normalizedName: normalizeDepartmentName(CONVERGE_DEPT), companyId: convergeCompany.id } });
+    departmentIds.push(convergeDept.id);
+
     // ── 1. New user + existing Graph department -> primary Finance ────────
     console.log("\n1. New user + existing Graph department: Graph Finance -> primary Finance\n");
     {
@@ -201,10 +247,19 @@ async function main() {
       check("1. Active primary DepartmentMembership points at Finance", primary?.departmentId === after?.departmentId && primary?.isActive === true);
     }
 
-    // ── 2. New user + nonexistent Graph department -> created once -> primary ──
-    console.log("\n2. New user + nonexistent Graph department: Graph Legal -> Legal created once -> primary Legal\n");
+    // ── 2. New user + nonexistent Graph department -> UPDATED: never fabricated, falls back to Unassigned ──
+    // UPDATED (duplicate-Department-prevention round): a genuinely
+    // first-ever-seen raw Graph `department` value under an EXISTING
+    // Company (Kinsen Hellas, pre-created in Setup) no longer gets
+    // auto-created as its own new Department — it falls back to that
+    // Company's own "Unassigned" bucket instead (see
+    // organization-company-department-resolver.ts). This used to be the
+    // one case that proved auto-creation worked; it now proves the
+    // opposite is true by design, closing the exact production incident
+    // ("Mobility & Leasing" repeatedly recreated after a rename) this round
+    // fixes — a never-before-seen value can never spawn a new row again.
+    console.log("\n2. New user + nonexistent Graph department: Graph Legal -> NEVER auto-created -> falls back to the Company's Unassigned bucket\n");
     const LEGAL_VALUE = `Legal ${RUN_ID}`;
-    let legalDeptId: string | null = null;
     {
       const user = await createTestUser("t2-legal");
       userIds.push(user.id);
@@ -214,11 +269,11 @@ async function main() {
       await syncMicrosoftUserDepartment({ accessToken: "fake", userId: user.id, oid: `oid2-${RUN_ID}`, email: user.email, name: "T2" });
       const after = await prisma.user.findUnique({ where: { id: user.id }, include: { department: true, company: true } });
       if (after?.companyId) companyIds.push(after.companyId);
-      legalDeptId = after?.departmentId ?? null;
-      if (legalDeptId) departmentIds.push(legalDeptId);
-      check("2. Legal was created exactly once", (await prisma.department.count({ where: { normalizedName: normalizeDepartmentName(LEGAL_VALUE) } })) === 1);
-      check("2. User.departmentId points at the newly-created Legal", after?.department?.name === LEGAL_VALUE);
-      check("2. First session already used this department (no second login needed)", after?.departmentId === legalDeptId);
+      check("2. Company still resolves correctly (Kinsen Hellas, exact match, pre-existing)", after?.company?.id === kinsenHellas.id);
+      check("2. Legal is STILL never created, even after this login (no fabricated duplicate)", (await prisma.department.count({ where: { normalizedName: normalizeDepartmentName(LEGAL_VALUE) } })) === 0);
+      check("2. User.departmentId points at Kinsen Hellas's own Unassigned bucket instead, never a fabricated 'Legal'", after?.department?.name === UNASSIGNED_NODE_NAME && after?.department?.companyId === kinsenHellas.id);
+      const primary = await prisma.departmentMembership.findFirst({ where: { userId: user.id, isPrimary: true } });
+      check("2. First session already used this fallback (no second login needed)", primary?.departmentId === after?.departmentId && primary?.isActive === true);
     }
 
     // ── 3. Systems Operations must not influence a Finance user's placement ──
@@ -286,7 +341,6 @@ async function main() {
       const userCo1 = await createTestUser("t6-co1");
       const userCo2 = await createTestUser("t6-co2");
       userIds.push(userCo1.id, userCo2.id);
-      const SHARED_DEPT_NAME = `Shared Finance Name ${RUN_ID}`;
       mockGraphMe({ companyName: `Company One ${RUN_ID}`, department: SHARED_DEPT_NAME, oid: nextId("oid6a") });
       await syncMicrosoftUserDepartment({ accessToken: "fake", userId: userCo1.id, oid: `oid6a-${RUN_ID}`, email: userCo1.email, name: "T6a" });
       mockGraphMe({ companyName: `Company Two ${RUN_ID}`, department: SHARED_DEPT_NAME, oid: nextId("oid6b") });
@@ -410,7 +464,6 @@ async function main() {
     // ── 9d. An obsolete AUTOMATED primary is replaced by authoritative Graph placement ──
     console.log("\n9d. An obsolete AUTOMATED (non-MANUAL) primary from an earlier login is replaced once authoritative Graph placement succeeds\n");
     {
-      const OLD_VALUE = `Old Dept Before Move ${RUN_ID}`;
       const user = await createTestUser("t9d-moved");
       userIds.push(user.id);
       // First login: user's org placement is some other department, resolved and set automatically (source MICROSOFT_DEPARTMENT).
@@ -466,8 +519,6 @@ async function main() {
     // ── 12. Full Directory Sync and per-login sync converge ────────────────
     console.log("\n12. Full Directory Sync and per-login Microsoft sync converge on the SAME Company + primary Department for the same Graph profile\n");
     {
-      const CONVERGE_DEPT = `Converge Finance ${RUN_ID}`;
-      const CONVERGE_COMPANY = `Converge Co ${RUN_ID}`;
       const oid = `oid12-${RUN_ID}`;
       const email = `t12-converge-${RUN_ID}@kinsen.gr`;
 
@@ -528,7 +579,6 @@ async function main() {
     console.log("\n13. Rollout gate: flipping SQLGENERAL_PRIMARY_PLACEMENT_ENABLED suppresses Microsoft placement, and flipping it back restores it\n");
     {
       check("13. Sanity: the gate is unset/false for every other scenario in this file", !isSqlGeneralPrimaryPlacementEnabled());
-      const AUTHORITY_VALUE = `Authority Dept ${RUN_ID}`;
 
       // Gate ON (in-process only, never written to .env): Microsoft must
       // stop placing entirely, same invariant as every scenario in

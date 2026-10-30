@@ -246,23 +246,38 @@ export async function syncMicrosoftUserDepartment(
       try {
         const placementCache = createOrganizationResolutionCache();
         const placement = await resolveOrganizationPlacement(placementCache, claims.companyName, claims.department);
+        // REQUIRED (unresolved-Microsoft-directory-data safety round): an
+        // unresolved Company (placement.companyId === null from a
+        // non-blank, unmatched signal) or a Department that fell back to
+        // the Unassigned bucket is degraded/untrusted information — it
+        // must never downgrade an EXISTING user's already-good placement.
+        // Read once, reused for both guards below; User.companyId/
+        // departmentId are the canonical mirrors of the user's current
+        // placement, so a non-null value here reliably means "there is
+        // something real to protect." Safe to apply unconditionally for a
+        // brand-new user (nothing to protect yet) — same as before.
+        const existingPlacement = await prisma.user.findUnique({ where: { id: userId }, select: { companyId: true, departmentId: true } });
+        const unresolvedCompanyWouldClobber = placement.companyId === null && existingPlacement?.companyId != null;
         await prisma.user.update({
           where: { id: userId },
           data: {
-            companyId: placement.companyId,
+            ...(unresolvedCompanyWouldClobber ? {} : { companyId: placement.companyId }),
             givenName: result.profile.givenName ?? undefined,
             surname: result.profile.surname ?? undefined,
             jobTitle: claims.jobTitle ?? undefined,
             organizationSyncedAt: new Date(),
           },
         });
-        const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
-        await setPrimaryDepartmentMembership(userId, placement.departmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
-          role: departmentDefault.role,
-          customRoleId: departmentDefault.customRoleId,
-          deactivateObsoleteAutomaticPrimary: true,
-        });
-        primaryDepartmentSynced = true;
+        const unresolvedDepartmentWouldClobber = placement.departmentFellBackToUnassigned && existingPlacement?.departmentId != null;
+        if (!unresolvedDepartmentWouldClobber) {
+          const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
+          await setPrimaryDepartmentMembership(userId, placement.departmentId, MembershipSource.MICROSOFT_DEPARTMENT, {
+            role: departmentDefault.role,
+            customRoleId: departmentDefault.customRoleId,
+            deactivateObsoleteAutomaticPrimary: true,
+          });
+          primaryDepartmentSynced = true;
+        }
       } catch (err) {
         console.warn("[microsoft-department-sync] Failed to resolve/set organization placement", {
           userId,

@@ -204,6 +204,19 @@ async function main() {
     });
     mappingIds.push(mapping.id);
 
+    // UPDATED (duplicate-Company/Department-prevention round):
+    // resolveCompanyForSync/resolveDepartmentForSync no longer auto-create
+    // anything from an unmatched raw Graph value — "Guard Company"/its real
+    // departments (used by B3/B5 below) are pre-created here, mirroring an
+    // admin having already created them, so this file keeps testing the
+    // TRUST-BOUNDARY mechanics (its actual purpose) rather than
+    // auto-creation (a separate concern now covered elsewhere).
+    const guardCompany = await prisma.company.create({ data: { name: `Guard Company ${RUN_ID}`, normalizedName: normalizeCompanyName(`Guard Company ${RUN_ID}`) } });
+    companyIds.push(guardCompany.id);
+    const guardRealDept = await prisma.department.create({ data: { name: `Guard Real Dept ${RUN_ID}`, slug: `guard-real-dept-${RUN_ID}`, normalizedName: normalizeDepartmentName(`Guard Real Dept ${RUN_ID}`), companyId: guardCompany.id } });
+    const guardBlankMailDept = await prisma.department.create({ data: { name: `Guard Blank Mail Dept ${RUN_ID}`, slug: `guard-blankmail-dept-${RUN_ID}`, normalizedName: normalizeDepartmentName(`Guard Blank Mail Dept ${RUN_ID}`), companyId: guardCompany.id } });
+    departmentIds.push(guardRealDept.id, guardBlankMailDept.id);
+
     // B1 — secondary mappings never auto-promote to PRIMARY.
     console.log("\nB1. A secondary Microsoft mapping never auto-promotes itself to PRIMARY\n");
     {

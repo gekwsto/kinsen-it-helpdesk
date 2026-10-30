@@ -22,6 +22,7 @@
 import { prisma } from "@/lib/prisma";
 import { createDepartment } from "@/lib/services/department-service";
 import { resolveOrganizationPlacement, createOrganizationResolutionCache } from "@/lib/services/organization-company-department-resolver";
+import { normalizeCompanyName } from "@/lib/services/organization-normalization";
 import { STARTER_STATUSES, STARTER_PRIORITIES } from "@/lib/services/config-starter-data";
 import { checkDepartmentConfigHealth } from "@/lib/services/config-health";
 
@@ -49,12 +50,24 @@ async function main() {
     check("   config-health reports no issues for a freshly-created department", plainHealth.healthy === true);
 
     // ── Path 2: Microsoft-sync placement (companyId path, the one that surfaced this live) ──
+    // UPDATED (duplicate-Department-prevention round): resolveDepartmentForSync
+    // no longer auto-creates a Department named after an arbitrary unmatched
+    // raw value — an unmatched raw department name now falls back to that
+    // Company's own "Unassigned" Department instead (see
+    // organization-company-department-resolver.ts). The Company itself is
+    // pre-created here (mirroring an admin's own explicit, already-approved
+    // creation — resolveCompanyForSync also no longer auto-creates) so this
+    // still exercises createDepartment()'s starter-config completeness via a
+    // real companyId-scoped department, just the "Unassigned" one rather
+    // than one freshly minted from the raw department string.
+    const company = await prisma.company.create({ data: { name: `Starter Config Co ${RUN_ID}`, normalizedName: normalizeCompanyName(`Starter Config Co ${RUN_ID}`) } });
+    companyIds.push(company.id);
     const cache = createOrganizationResolutionCache();
     const placement = await resolveOrganizationPlacement(cache, `Starter Config Co ${RUN_ID}`, `Starter Config Dept ${RUN_ID}`);
-    if (placement.companyId) companyIds.push(placement.companyId);
+    check("   ...resolves to the pre-created Company (exact normalizedName match, not a duplicate)", placement.companyId === company.id);
     departmentIds.push(placement.departmentId);
     const syncStatuses = await prisma.ticketStatus.findMany({ where: { departmentId: placement.departmentId } });
-    check("2. A Microsoft-sync-created (companyId-placed) department ALSO gets all STARTER_STATUSES", syncStatuses.length === STARTER_STATUSES.length);
+    check("2. The resolved (Unassigned, companyId-placed) department ALSO gets all STARTER_STATUSES", syncStatuses.length === STARTER_STATUSES.length);
 
     // ── Idempotency: calling ensureStarterStatusesForDepartment-equivalent path twice never duplicates ──
     const secondPlacement = await resolveOrganizationPlacement(cache, `Starter Config Co ${RUN_ID}`, `Starter Config Dept ${RUN_ID}`);

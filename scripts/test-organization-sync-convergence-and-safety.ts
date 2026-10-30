@@ -111,6 +111,18 @@ async function main() {
     // ══ A. CONVERGENCE: full sync vs first login for equivalent profiles ══
     console.log("\n=== A. Full sync vs first-login convergence ===\n");
 
+    // UPDATED (duplicate-Company/Department-prevention round):
+    // resolveCompanyForSync/resolveDepartmentForSync no longer auto-create
+    // anything from an unmatched raw Graph value — pre-created here,
+    // mirroring an admin having already created the real Company/Department
+    // once, so both sync entry points below independently discover and
+    // converge on the SAME existing record (the actual property under
+    // test), rather than each needing to auto-create one.
+    const convergenceCompany = await prisma.company.create({ data: { name: companyName, normalizedName: normalizeCompanyName(companyName) } });
+    companyIds.push(convergenceCompany.id);
+    const convergenceDept = await prisma.department.create({ data: { name: deptName, slug: `convergence-dept-${RUN_ID}`, normalizedName: normalizeDepartmentName(deptName), companyId: convergenceCompany.id } });
+    departmentIds.push(convergenceDept.id);
+
     // -- Full sync creates userA via the real pipeline --
     const userAOid = `conv-a-${RUN_ID}`;
     const userAEmail = `conv-a-${RUN_ID}@kinsen.gr`;
