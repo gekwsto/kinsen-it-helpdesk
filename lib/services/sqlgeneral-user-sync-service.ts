@@ -30,12 +30,10 @@ import {
   isSqlGeneralPrimaryPlacementEnabled,
   findSqlGeneralUserByUsername,
   listAllSqlGeneralDepartments,
-  listAllSqlGeneralUsers,
   resolveSqlGeneralDepartmentPlacement,
   verifySqlGeneralCompanyIdExists,
   verifySqlGeneralDepartmentIdExists,
   type SqlGeneralDepartmentRecord,
-  type SqlGeneralUserRecord,
   type ResolvedDepartmentPlacement,
 } from "@/lib/sqlgeneral-api-client";
 import { normalizeCompanyName, normalizeDepartmentName } from "@/lib/services/organization-normalization";
@@ -256,48 +254,37 @@ async function resolveSqlGeneralPlacementTarget(
   let department = null as Awaited<ReturnType<typeof tx.department.findUnique>>;
   if (approvedDeptMapping) {
     // Re-validate at write time — an approved mapping is never trusted
-    // blindly. Two checks, both against VERIFIED source data, never
-    // against any ancestor's own local mapping (the local schema cannot
-    // represent SQLGeneral's recursive Department ancestry, so ancestors
-    // are never required to be separately mapped at all, here or at
-    // approval time):
-    //   1. The SOURCE chain must still be structurally sound right now
-    //      (no missing parent, no cycle) — a fresh resolution, not the
-    //      one from whenever this mapping was approved.
-    //   2. If this specific matched SQLGeneral user carries their own
-    //      verified CompanyId, IT must have its OWN approved
-    //      SqlGeneralCompanyMapping, and that mapping must point at the
-    //      SAME local Company this Department mapping's target belongs
-    //      to — never written on a genuinely conflicting identity. This
-    //      is deliberately a MEMBERSHIP check (does the user's own
-    //      companyId resolve, via ITS OWN mapping row, to this same local
-    //      Company), not an equality check against one arbitrarily-picked
-    //      mapping row — REQUIRED: "the SQLGeneral Company must NOT
-    //      determine the target TicketApp Department," so MULTIPLE
-    //      different, unrelated SQLGeneral Companies may each have their
-    //      own approved SqlGeneralCompanyMapping pointing at this SAME
-    //      local Company (e.g. two companies that both feed the same
-    //      unified "Call Center & Customer Service" department) — a user
-    //      from EITHER one must pass this check, not just whichever
-    //      mapping row happens to be picked first.
+    // blindly, but ONLY against structural source data, never against any
+    // ancestor's own local mapping (the local schema cannot represent
+    // SQLGeneral's recursive Department ancestry, so ancestors are never
+    // required to be separately mapped at all, here or at approval time):
+    // the SOURCE chain must still be structurally sound right now (no
+    // missing parent, no cycle) — a fresh resolution, not the one from
+    // whenever this mapping was approved.
+    //
+    // REQUIRED (this round): Company identity and Primary Department
+    // placement are DELIBERATELY independent — an explicitly approved
+    // Department mapping is authoritative on its own merits and is NEVER
+    // required to also agree with whatever local Company the acting
+    // user's own SQLGeneral CompanyId happens to be separately approved
+    // under (there used to be exactly such a check here; removed — see
+    // git history for the prior "conflicting identity" mechanism this
+    // replaces). `company` above (this user's own resolved Company,
+    // eventually written to User.companyId by the caller) is computed
+    // completely independently of `department` here and is never forced
+    // to match the approved Department mapping's own Company — a user can
+    // be verified under one real-world SQLGeneral Company while their
+    // explicitly-approved Primary Department legitimately belongs to a
+    // different local Company (e.g. a shared-services department staffed
+    // across group companies). The explicit admin approval
+    // (SqlGeneralDepartmentMapping) IS the authorization; no implicit
+    // Company-equality guess is layered on top of it.
     if (!approvedDeptMapping.department.companyId) {
       return { ok: false, reason: `Approved Department mapping's target no longer has a Company — refusing to write.` };
     }
     const structure = classifySqlGeneralChainStructure(placement.parentChain, placement.missingParent, placement.cycle);
     if (structure.status === "unresolved") {
       return { ok: false, reason: `Approved Department mapping failed re-validation at write time: ${structure.reason}` };
-    }
-    if (sqlGeneralCompanyId !== null) {
-      const companyMapping = await tx.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { companyId: true } });
-      if (!companyMapping) {
-        return { ok: false, reason: `This user's own verified SQLGeneral CompanyId ("${sqlGeneralCompanyId}") has no approved SqlGeneralCompanyMapping of its own — refusing to write.` };
-      }
-      if (companyMapping.companyId !== approvedDeptMapping.department.companyId) {
-        return {
-          ok: false,
-          reason: `This user's own verified SQLGeneral CompanyId ("${sqlGeneralCompanyId}") is approved under a DIFFERENT local Company than this Department mapping's target Company — refusing to write on a conflicting identity.`,
-        };
-      }
     }
     department = approvedDeptMapping.department;
   }
@@ -1003,11 +990,7 @@ export interface DepartmentMappingCandidate {
   hierarchyValidation: DepartmentHierarchyValidation;
 }
 
-export type DepartmentHierarchyValidation =
-  | { status: "root" }
-  | { status: "verified" }
-  | { status: "unresolved"; reason: string }
-  | { status: "conflicting_identity"; conflictingEvidence: Array<{ sqlGeneralDepartmentId: string; sqlGeneralCompanyId: string }> };
+export type DepartmentHierarchyValidation = { status: "root" } | { status: "verified" } | { status: "unresolved"; reason: string };
 
 /**
  * TicketApp's Department has NO self-referential parent — it nests under
@@ -1023,26 +1006,23 @@ export type DepartmentHierarchyValidation =
  * approveSqlGeneralDepartmentMapping.
  *
  * What IS still validated, against VERIFIED source data only (never an
- * ancestor's own local mapping):
- *   1. The complete chain (target + every ancestor up to the root) must be
- *      structurally sound within SQLGeneral's own Departments data — no
- *      missing parent, no cycle. An unsound chain can never be verified,
- *      full stop.
- *   2. For every department in that chain, any LIVE CompanyId evidence
- *      (a real UsersAndManagers row whose HrDepartmentId resolves to it)
- *      must be ONE OF `validSqlGeneralCompanyIds` — every SQLGeneral
- *      CompanyId that the target Department's own Company is ALREADY
- *      approved under (REQUIRED: "the SQLGeneral Company must NOT
- *      determine the target TicketApp Department" — a SET, deliberately,
- *      not one scalar value, since multiple different SQLGeneral
- *      Companies may each have their own approved SqlGeneralCompanyMapping
- *      pointing at this SAME local Company; evidence from ANY of them is
- *      consistent, never a conflict just because it isn't the specific
- *      mapping an earlier, now-superseded single-value check happened to
- *      pick). Absence of evidence is never treated as a conflict (most
- *      departments have none at all — see this session's Company-grouping
- *      round); only evidence for a CompanyId outside the whole approved
- *      set is an actual, live contradiction.
+ * ancestor's own local mapping): the complete chain (target + every
+ * ancestor up to the root) must be structurally sound within SQLGeneral's
+ * own Departments data — no missing parent, no cycle. An unsound chain can
+ * never be verified, full stop.
+ *
+ * REQUIRED (this round): this is now PURELY a structural check. It
+ * deliberately does NOT inspect any live UsersAndManagers CompanyId
+ * evidence any more — a prior version of this function additionally
+ * required every employee anywhere in the chain to carry a SQLGeneral
+ * CompanyId that was itself approved onto the target's own local Company,
+ * which conflated two genuinely independent concepts: "is this
+ * Department's SQLGeneral ancestry honestly resolvable" (still checked
+ * here) and "does this Department's Company agree with whichever
+ * Company its staff happen to be verified under" (an explicitly approved
+ * Department mapping is its own authorization — see this function's
+ * caller for the full reasoning, and resolveSqlGeneralPlacementTarget's
+ * own doc comment for the write-time side of the same decoupling).
  */
 function classifySqlGeneralChainStructure(parentChain: SqlGeneralDepartmentRecord[], missingParent: boolean, cycle: boolean): { status: "unresolved"; reason: string } | { status: "root" } | { status: "has_ancestors" } {
   if (missingParent) {
@@ -1054,31 +1034,13 @@ function classifySqlGeneralChainStructure(parentChain: SqlGeneralDepartmentRecor
   return parentChain.length === 0 ? { status: "root" } : { status: "has_ancestors" };
 }
 
-/** CompanyId evidence per Department id, scoped to only the ids passed in — never the whole dataset — from real, live UsersAndManagers rows. */
-function collectCompanyIdEvidenceByDeptId(deptIds: string[], sqlGeneralUsers: SqlGeneralUserRecord[]): Map<string, Set<string>> {
-  const deptIdSet = new Set(deptIds);
-  const byDept = new Map<string, Set<string>>();
-  for (const u of sqlGeneralUsers) {
-    if (u.hrDepartmentId === null || u.companyId === null) continue;
-    const deptId = String(u.hrDepartmentId);
-    if (!deptIdSet.has(deptId)) continue;
-    if (!byDept.has(deptId)) byDept.set(deptId, new Set());
-    byDept.get(deptId)!.add(String(u.companyId));
-  }
-  return byDept;
-}
-
 /**
  * Full chain validation used by Preview and approval — see
  * DepartmentHierarchyValidation's own doc comment for exactly what is and
- * isn't required. Never requires an ancestor's own SqlGeneralDepartmentMapping.
+ * isn't required. Never requires an ancestor's own SqlGeneralDepartmentMapping,
+ * and (this round) never requires CompanyId agreement either.
  */
-async function validateSqlGeneralDepartmentSourceHierarchy(
-  sqlGeneralDepartmentId: string,
-  departments: SqlGeneralDepartmentRecord[],
-  sqlGeneralUsers: SqlGeneralUserRecord[],
-  validSqlGeneralCompanyIds: ReadonlySet<string>
-): Promise<DepartmentHierarchyValidation> {
+async function validateSqlGeneralDepartmentSourceHierarchy(sqlGeneralDepartmentId: string, departments: SqlGeneralDepartmentRecord[]): Promise<DepartmentHierarchyValidation> {
   const placementResult = resolveSqlGeneralDepartmentPlacement(sqlGeneralDepartmentId, departments);
   if (placementResult.outcome === "department_not_found") {
     return { status: "unresolved", reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" was not found in the fetched Departments set.` };
@@ -1086,24 +1048,12 @@ async function validateSqlGeneralDepartmentSourceHierarchy(
   const { parentChain, missingParent, cycle } = placementResult.placement;
   const structure = classifySqlGeneralChainStructure(parentChain, missingParent, cycle);
   if (structure.status === "unresolved") return structure;
-
-  const chainIds = [sqlGeneralDepartmentId, ...parentChain.map((a) => String(a.id))];
-  const evidenceByDept = collectCompanyIdEvidenceByDeptId(chainIds, sqlGeneralUsers);
-  const conflictingEvidence: Array<{ sqlGeneralDepartmentId: string; sqlGeneralCompanyId: string }> = [];
-  for (const [deptId, companyIds] of evidenceByDept) {
-    for (const companyId of companyIds) {
-      if (!validSqlGeneralCompanyIds.has(companyId)) conflictingEvidence.push({ sqlGeneralDepartmentId: deptId, sqlGeneralCompanyId: companyId });
-    }
-  }
-  if (conflictingEvidence.length > 0) return { status: "conflicting_identity", conflictingEvidence };
-
   return structure.status === "root" ? { status: "root" } : { status: "verified" };
 }
 
 function describeHierarchyValidationFailure(v: DepartmentHierarchyValidation): string | null {
   if (v.status === "root" || v.status === "verified") return null;
-  if (v.status === "unresolved") return v.reason;
-  return `Live SQLGeneral CompanyId evidence conflicts with the Company this mapping is being approved under: ${v.conflictingEvidence.map((e) => `sgdept "${e.sqlGeneralDepartmentId}" -> CompanyId "${e.sqlGeneralCompanyId}"`).join(", ")} — never approving on an ambiguous or conflicting identity.`;
+  return v.reason;
 }
 
 /**
@@ -1113,18 +1063,22 @@ function describeHierarchyValidationFailure(v: DepartmentHierarchyValidation): s
  * writes anything.
  */
 export async function previewSqlGeneralDepartmentMappingCandidate(sqlGeneralDepartmentId: string, targetDepartmentId: string): Promise<DepartmentMappingCandidate> {
-  const [existing, targetDepartment, otherMappings, sourceCheck, deptResult, usersResult] = await Promise.all([
+  const [existing, targetDepartment, otherMappings, sourceCheck, deptResult] = await Promise.all([
     prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { departmentId: true, approvedById: true, approvedAt: true, department: { select: { name: true } } } }),
     prisma.department.findUnique({ where: { id: targetDepartmentId }, select: { id: true, name: true, companyId: true, importSource: true } }),
     prisma.sqlGeneralDepartmentMapping.findMany({ where: { departmentId: targetDepartmentId, sqlGeneralDepartmentId: { not: sqlGeneralDepartmentId } }, select: { sqlGeneralDepartmentId: true } }),
     verifySqlGeneralDepartmentIdExists(sqlGeneralDepartmentId),
     listAllSqlGeneralDepartments(),
-    listAllSqlGeneralUsers(),
   ]);
 
   // ALL approved mappings for the target's Company — never just one; see
   // DepartmentMappingCandidate.companyMappingsForTargetDepartment's own
-  // doc comment.
+  // doc comment. Existence-only precondition ("this Company is a real,
+  // SQLGeneral-recognized parent") — NEVER checked against this specific
+  // Department's own staff CompanyId evidence any more (REQUIRED this
+  // round: Company identity and Primary Department placement are
+  // independent — see validateSqlGeneralDepartmentSourceHierarchy's own
+  // doc comment).
   const companyMappings = targetDepartment?.companyId
     ? await prisma.sqlGeneralCompanyMapping.findMany({ where: { companyId: targetDepartment.companyId }, select: { sqlGeneralCompanyId: true } })
     : [];
@@ -1135,10 +1089,8 @@ export async function previewSqlGeneralDepartmentMappingCandidate(sqlGeneralDepa
   } else if (targetDepartment?.companyId && companyMappings.length > 0) {
     if (!deptResult.ok) {
       hierarchyValidation = { status: "unresolved", reason: deptResult.reason };
-    } else if (!usersResult.ok) {
-      hierarchyValidation = { status: "unresolved", reason: usersResult.reason };
     } else {
-      hierarchyValidation = await validateSqlGeneralDepartmentSourceHierarchy(sqlGeneralDepartmentId, deptResult.departments, usersResult.users, new Set(companyMappings.map((m) => m.sqlGeneralCompanyId)));
+      hierarchyValidation = await validateSqlGeneralDepartmentSourceHierarchy(sqlGeneralDepartmentId, deptResult.departments);
     }
   }
 
@@ -1159,24 +1111,36 @@ export type ApproveDepartmentMappingResult =
   | { ok: false; reason: string };
 
 /**
- * The ONLY way a SqlGeneralDepartmentMapping row is ever created — mirrors
- * approveSqlGeneralCompanyMapping's revalidation order exactly, plus two
- * Department-specific preconditions: the target Department's own Company
- * must ALREADY have an approved SqlGeneralCompanyMapping, and the SOURCE
- * department's own ancestor chain must validate as "root" or "verified"
- * per validateSqlGeneralDepartmentSourceHierarchy above —
- * "unresolved"/"conflicting_identity" are both refused. This is the ONLY
+ * The ONLY way a SqlGeneralDepartmentMapping row is ever created OR
+ * replaced — mirrors approveSqlGeneralCompanyMapping's revalidation order,
+ * plus two Department-specific preconditions: the target Department's own
+ * Company must ALREADY have an approved SqlGeneralCompanyMapping (from
+ * ANY SQLGeneral Company — existence only, never required to match this
+ * specific HR Department's own staff), and the SOURCE department's own
+ * ancestor chain must validate as "root" or "verified" per
+ * validateSqlGeneralDepartmentSourceHierarchy above — purely structural,
+ * never a CompanyId-identity check (REQUIRED this round: Company identity
+ * and Primary Department placement are independent). This is the ONLY
  * Department ever mapped by this call — no ancestor is required to have
  * (or ever gets) its own mapping created here, even implicitly. Never
  * writes to the target Department's own fields (name/normalizedName/
  * importSource/businessUnitId/companyId) or reparents it, and never
  * touches any User row.
+ *
+ * `confirmReplaceExisting` (REQUIRED this round): the ONLY way an already-
+ * approved mapping's target may change. Omitted/false, a call that would
+ * re-point an existing mapping is refused exactly as before — never an
+ * implicit mutation. Passed true, the existing row's departmentId AND its
+ * audit fields (approvedById/approvedAt) are updated in place to reflect
+ * WHO authorized the replacement and WHEN — the full prior approval is
+ * simply superseded, never silently merged or duplicated.
  */
 export async function approveSqlGeneralDepartmentMapping(
   sqlGeneralDepartmentId: string,
   targetDepartmentId: string,
   approvedById: string,
-  confirmMultipleMapping = false
+  confirmMultipleMapping = false,
+  confirmReplaceExisting = false
 ): Promise<ApproveDepartmentMappingResult> {
   const sourceCheck = await verifySqlGeneralDepartmentIdExists(sqlGeneralDepartmentId);
   if (!sourceCheck.ok) return { ok: false, reason: `Could not verify SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" against live SQLGeneral data (${sourceCheck.reason}) — never approving an unverifiable identifier.` };
@@ -1188,30 +1152,35 @@ export async function approveSqlGeneralDepartmentMapping(
   if (!targetDepartment.companyId) {
     return { ok: false, reason: `Department "${targetDepartmentId}" has no Company at all — an unsafe parent relationship; approve a Company mapping for its intended Company first.` };
   }
-  // ALL approved SqlGeneralCompanyMapping rows pointing at this target's
-  // Company — never just one, picked arbitrarily. REQUIRED: "the
-  // SQLGeneral Company must NOT determine the target TicketApp
-  // Department," so this local Company may legitimately already be fed
-  // by several DIFFERENT, unrelated SQLGeneral Companies (e.g. the Call
-  // Center & Customer Service department unifying two separate HR
-  // companies) — evidence from ANY of them is valid, not just whichever
-  // row a single-value lookup happened to return first.
-  const companyMappings = await prisma.sqlGeneralCompanyMapping.findMany({ where: { companyId: targetDepartment.companyId }, select: { sqlGeneralCompanyId: true } });
-  if (companyMappings.length === 0) {
+  // Existence-only precondition: the target's own Company must be a real,
+  // SQLGeneral-recognized parent (ANY approved SqlGeneralCompanyMapping,
+  // from any SQLGeneral Company) — never required to match or even relate
+  // to this specific HR Department's own staff CompanyId. See this
+  // function's own doc comment.
+  const companyMappingCount = await prisma.sqlGeneralCompanyMapping.count({ where: { companyId: targetDepartment.companyId } });
+  if (companyMappingCount === 0) {
     return { ok: false, reason: `Department "${targetDepartmentId}"'s Company ("${targetDepartment.companyId}") has no approved SqlGeneralCompanyMapping yet — an unsafe parent relationship; a Department mapping can only be approved on top of an already-approved Company mapping.` };
   }
-  const validSqlGeneralCompanyIds = new Set(companyMappings.map((m) => m.sqlGeneralCompanyId));
 
-  const [deptResult, usersResult] = await Promise.all([listAllSqlGeneralDepartments(), listAllSqlGeneralUsers()]);
+  const deptResult = await listAllSqlGeneralDepartments();
   if (!deptResult.ok) return { ok: false, reason: `Could not fetch SQLGeneral Departments to verify ancestor-hierarchy compatibility (${deptResult.reason}) — never approving an unverifiable hierarchy.` };
-  if (!usersResult.ok) return { ok: false, reason: `Could not fetch SQLGeneral UsersAndManagers to verify CompanyId consistency (${usersResult.reason}) — never approving an unverifiable identity.` };
-  const hierarchyValidation = await validateSqlGeneralDepartmentSourceHierarchy(sqlGeneralDepartmentId, deptResult.departments, usersResult.users, validSqlGeneralCompanyIds);
+  const hierarchyValidation = await validateSqlGeneralDepartmentSourceHierarchy(sqlGeneralDepartmentId, deptResult.departments);
   const hierarchyFailure = describeHierarchyValidationFailure(hierarchyValidation);
   if (hierarchyFailure) return { ok: false, reason: `Ancestor-hierarchy validation failed: ${hierarchyFailure}` };
 
   const existing = await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId } });
   if (existing && existing.departmentId !== targetDepartmentId) {
-    return { ok: false, reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" is already mapped to a different Department (id="${existing.departmentId}") — remove that mapping first if it should change.` };
+    if (!confirmReplaceExisting) {
+      return {
+        ok: false,
+        reason: `SQLGeneral Departments.Id "${sqlGeneralDepartmentId}" is already mapped to a different Department (id="${existing.departmentId}") — pass confirmReplaceExisting: true to explicitly replace it; never changed implicitly.`,
+      };
+    }
+    const replaced = await prisma.sqlGeneralDepartmentMapping.update({
+      where: { sqlGeneralDepartmentId },
+      data: { departmentId: targetDepartmentId, approvedById, approvedAt: new Date() },
+    });
+    return { ok: true, mapping: { sqlGeneralDepartmentId: replaced.sqlGeneralDepartmentId, departmentId: replaced.departmentId, approvedById: replaced.approvedById, approvedAt: replaced.approvedAt } };
   }
   if (existing) {
     // Idempotent re-approval of the exact same pair — safe no-op, not an error.

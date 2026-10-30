@@ -578,13 +578,15 @@ async function main() {
     check("87c. approve() blocks a department whose ancestor chain contains a cycle", cycleApprove.ok === false, cycleApprove.ok ? "unexpectedly ok" : cycleApprove.reason);
     check("87d. ...no mapping row was created for the cyclic department", !(await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: "cycA" } })));
 
-    // CompanyId CONFLICT (ancestor-level / "wrong-company target"): a new
-    // SQLGeneral department ("11") claims "Root" (id "1") as its parent.
-    // Root carries NO local mapping (never required — see above), but LIVE
-    // UsersAndManagers evidence DOES exist for it: a real matched user puts
-    // Root's own verified CompanyId at Acme's (CONFLICT_SQLGENERAL_COMPANY_ID)
-    // — while "11" is being proposed for a Department under a totally
-    // different, independently-approved Company (Gamma).
+    // REQUIRED (this round): Company identity and Primary Department
+    // placement are DELIBERATELY independent. A new SQLGeneral department
+    // ("11") claims "Root" (id "1") as its parent. Root carries NO local
+    // mapping (never required), and LIVE UsersAndManagers evidence exists
+    // for it: a real matched user puts Root's own verified CompanyId at
+    // Acme's (CONFLICT_SQLGENERAL_COMPANY_ID) — while "11" is being
+    // proposed for a Department under a totally different, independently-
+    // approved Company (Gamma). This must NO LONGER block anything — the
+    // hierarchy check is purely structural now.
     mockListDeptImpl = async () => ({
       ok: true,
       departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES, { id: "11", description: "Engineering Satellite", isActive: true, parentDepartmentId: "1", country: null, company: "Gamma Co", companyShortname: "GAMMA", creationDate: null, updateTimestamp: null }],
@@ -593,28 +595,34 @@ async function main() {
 
     const mismatchCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate("11", gammaDept.id);
     check(
-      "88. candidate preview reports a CompanyId CONFLICT: live evidence shows ancestor \"Root\" verified to a DIFFERENT CompanyId than the one proposed for its descendant",
-      mismatchCandidate.hierarchyValidation.status === "conflicting_identity" &&
-        (mismatchCandidate.hierarchyValidation as { conflictingEvidence: Array<{ sqlGeneralDepartmentId: string; sqlGeneralCompanyId: string }> }).conflictingEvidence.some((e) => e.sqlGeneralDepartmentId === "1" && e.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID),
+      "88. candidate preview is NOT blocked by an ancestor's conflicting live CompanyId evidence any more — purely structural (verified)",
+      mismatchCandidate.hierarchyValidation.status === "verified",
       JSON.stringify(mismatchCandidate.hierarchyValidation)
     );
     const mismatchApprove = await svc.approveSqlGeneralDepartmentMapping("11", gammaDept.id, bfMapAdmin);
-    check("89. approve() blocks a mismatched Company identity — Gamma Co has its own approval, but live evidence contradicts it for this chain", mismatchApprove.ok === false, mismatchApprove.ok ? "unexpectedly ok" : mismatchApprove.reason);
-    check("89b. ...no mapping row was created for the conflicted department", !(await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: "11" } })));
-    check("89c. ...and gammaDept's own fields remain untouched", (await prisma.department.findUniqueOrThrow({ where: { id: gammaDept.id } })).importSource === null);
+    check("89. approve() SUCCEEDS despite a mismatched ancestor Company identity — Company identity and Department placement are independent", mismatchApprove.ok === true, mismatchApprove.ok ? undefined : (mismatchApprove as { reason: string }).reason);
+    check("89b. ...a real mapping row WAS created for the formerly-conflicted department", !!(await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId: "11" } })));
+    check("89c. ...and gammaDept's own fields remain untouched regardless", (await prisma.department.findUniqueOrThrow({ where: { id: gammaDept.id } })).importSource === null);
 
-    // CompanyId CONFLICT (target-level): the SAME department ("11") this
-    // time carries conflicting evidence DIRECTLY on itself (not just its
-    // ancestor) — its own ancestor ("Root") has NO evidence at all here,
-    // proving the conflict check covers the whole chain, not only ancestors.
-    mockListUsersImpl = async () => ({ ok: true, users: [fakeUser("direct-evidence-user", "11", CONFLICT_SQLGENERAL_COMPANY_ID)] });
-    const targetConflictCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate("11", gammaDept.id);
+    // SAME independence, this time with the conflicting evidence sitting
+    // DIRECTLY on the target department itself (not just an ancestor) —
+    // proving the removed check used to cover the whole chain, and its
+    // removal does too: a genuinely different, brand-new SQLGeneral
+    // department ("12") is used here so this is a fresh approval, not a
+    // re-approval of "11" above.
+    mockListDeptImpl = async () => ({
+      ok: true,
+      departments: [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES, { id: "12", description: "Engineering Satellite 2", isActive: true, parentDepartmentId: null, country: null, company: "Gamma Co", companyShortname: "GAMMA", creationDate: null, updateTimestamp: null }],
+    });
+    mockListUsersImpl = async () => ({ ok: true, users: [fakeUser("direct-evidence-user", "12", CONFLICT_SQLGENERAL_COMPANY_ID)] });
+    const targetConflictCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate("12", gammaDept.id);
     check(
-      "89d. candidate preview reports a CompanyId CONFLICT when the evidence sits on the TARGET department itself, not only on an ancestor",
-      targetConflictCandidate.hierarchyValidation.status === "conflicting_identity" &&
-        (targetConflictCandidate.hierarchyValidation as { conflictingEvidence: Array<{ sqlGeneralDepartmentId: string; sqlGeneralCompanyId: string }> }).conflictingEvidence.some((e) => e.sqlGeneralDepartmentId === "11" && e.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID),
+      "89d. candidate preview is NOT blocked even when the conflicting evidence sits on the TARGET department itself",
+      targetConflictCandidate.hierarchyValidation.status === "root",
       JSON.stringify(targetConflictCandidate.hierarchyValidation)
     );
+    const targetConflictApprove = await svc.approveSqlGeneralDepartmentMapping("12", gammaDept.id, bfMapAdmin, true);
+    check("89e. approve() SUCCEEDS for the direct-evidence conflict too", targetConflictApprove.ok === true, targetConflictApprove.ok ? undefined : (targetConflictApprove as { reason: string }).reason);
 
     console.log("\nApproved-target membership: the actual write path ===\n");
 
@@ -627,10 +635,12 @@ async function main() {
     const membershipWriteToken = "membership-write-token";
     await prisma.sqlGeneralUserSyncAttempt.update({ where: { userId: uMembershipWrite }, data: { status: "PROCESSING", claimedAt: new Date(), claimToken: membershipWriteToken } });
 
-    // CONFLICT AT WRITE TIME: a second user matches a SQLGeneral row with
-    // the SAME HrDepartmentId (Engineering) but a CompanyId belonging to a
-    // totally different approved Company (Gamma) — the write must refuse,
-    // never silently placing them under Engineering/Acme anyway.
+    // FORMERLY A CONFLICT AT WRITE TIME, now explicitly allowed (REQUIRED
+    // this round): a second user matches a SQLGeneral row with the SAME
+    // HrDepartmentId (Engineering) but a CompanyId belonging to a totally
+    // different approved Company (Gamma) — the write must now SUCCEED,
+    // placing them under the explicitly-approved Engineering mapping
+    // regardless of their own Company identity.
     const uMembershipConflict = await makeUser("membership-conflict");
     await svc.enqueueOrRecoverSqlGeneralUserSync(uMembershipConflict, "membership-write-conflict");
     const membershipConflictToken = "membership-conflict-token";
@@ -662,10 +672,12 @@ async function main() {
       new Date(),
       [FAKE_ROOT, FAKE_ENGINEERING, FAKE_ORPHAN, FAKE_SALES]
     );
-    check("90c. processClaimedSqlGeneralUserSync REFUSES to write when this specific user's own verified CompanyId conflicts with the approved mapping's Company — write-time revalidation preserved", conflictOutcome === "retrying", `outcome=${conflictOutcome}`);
+    check("90c. processClaimedSqlGeneralUserSync now SUCCEEDS even when this user's own verified CompanyId differs from the approved mapping's Company — Company identity and Department placement are independent", conflictOutcome === "succeeded", `outcome=${conflictOutcome}`);
+    const conflictMembership = await prisma.departmentMembership.findUnique({ where: { userId_departmentId: { userId: uMembershipConflict, departmentId: engineeringDept.id } } });
     check(
-      "90d. ...and no DepartmentMembership row was created for the conflicted user",
-      !(await prisma.departmentMembership.findUnique({ where: { userId_departmentId: { userId: uMembershipConflict, departmentId: engineeringDept.id } } }))
+      "90d. ...and a real DepartmentMembership row WAS created for this user, sourced SQLGENERAL_DEPARTMENT",
+      !!conflictMembership && conflictMembership.source === "SQLGENERAL_DEPARTMENT" && conflictMembership.isActive === true,
+      JSON.stringify(conflictMembership)
     );
 
     // Restore the department/users/find-user mocks for the remainder of the suite.

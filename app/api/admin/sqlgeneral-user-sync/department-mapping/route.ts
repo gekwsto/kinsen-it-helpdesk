@@ -4,12 +4,16 @@ import { previewSqlGeneralDepartmentMappingCandidate, approveSqlGeneralDepartmen
 import { apiError, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 
 // GET  /api/admin/sqlgeneral-user-sync/department-mapping?sqlGeneralDepartmentId=&targetDepartmentId= — read-only candidate preview.
-// POST /api/admin/sqlgeneral-user-sync/department-mapping { sqlGeneralDepartmentId, targetDepartmentId, confirmMultipleMapping? } — explicit admin approval.
+// POST /api/admin/sqlgeneral-user-sync/department-mapping { sqlGeneralDepartmentId, targetDepartmentId, confirmMultipleMapping?, confirmReplaceExisting? } — explicit admin approval (or replacement).
 // Mirrors the Company-mapping endpoints exactly. Never infers a mapping
 // from a name match; approval requires the target Department's own
-// Company to already have an approved Company mapping, and never writes
-// to the target Department's own fields, ownership, or hierarchy. Same
-// organization.sqlgeneralSync permission as every other SQLGeneral admin action.
+// Company to already have an approved Company mapping (existence only —
+// Company identity and Primary Department placement are independent),
+// and never writes to the target Department's own fields, ownership, or
+// hierarchy. confirmReplaceExisting re-points an already-approved
+// mapping — omitted/false, that call is refused exactly as before; never
+// an implicit mutation. Same organization.sqlgeneralSync permission as
+// every other SQLGeneral admin action.
 export async function GET(req: NextRequest) {
   try {
     const session = await requireAuth();
@@ -44,8 +48,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(apiError("invalid_request", "Provide both sqlGeneralDepartmentId and targetDepartmentId."), { status: 400 });
     }
     const confirmMultipleMapping = body?.confirmMultipleMapping === true;
+    const confirmReplaceExisting = body?.confirmReplaceExisting === true;
 
-    const result = await approveSqlGeneralDepartmentMapping(sqlGeneralDepartmentId, targetDepartmentId, session.user.id, confirmMultipleMapping);
+    const result = await approveSqlGeneralDepartmentMapping(sqlGeneralDepartmentId, targetDepartmentId, session.user.id, confirmMultipleMapping, confirmReplaceExisting);
     if (!result.ok) return NextResponse.json(apiError("mapping_rejected", result.reason), { status: 409 });
     return NextResponse.json(result.mapping);
   } catch (error: any) {
