@@ -22,7 +22,7 @@
  */
 import { randomUUID } from "crypto";
 import type { Prisma } from "@prisma/client";
-import { MembershipSource, OrganizationNodeSource, SqlGeneralUserSyncStatus } from "@prisma/client";
+import { MembershipSource, OrganizationNodeSource, SqlGeneralUserSyncStatus, DepartmentRole } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { acquireOrganizationSyncLock, releaseOrganizationSyncLock } from "@/lib/services/organization-sync-orchestrator";
 import {
@@ -46,6 +46,17 @@ export const MAX_ATTEMPTS = 5;
 export const STALE_CLAIM_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_BATCH_SIZE = 25;
 export const MAX_BATCHES_PER_RUN = 10;
+/**
+ * A SUCCEEDED attempt whose lastSyncCompletedAt is this old (or still
+ * null — a pre-existing row from before that column existed) becomes
+ * re-claimable by the SAME worker/claimBatch this file already runs every
+ * few minutes (REQUIRED: "reuse existing queue, locking, retry and claim
+ * mechanisms" — no second scheduler). No calendar-day alignment is
+ * attempted — this is a rolling 24h window per user, which is simpler,
+ * needs no extra state, and is exactly as "once a day" as the business
+ * requirement needs.
+ */
+export const DAILY_REVALIDATION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 // ─── Enqueue / recovery (called from the Microsoft login hot path) ─────────
 
@@ -393,17 +404,38 @@ async function applySqlGeneralPrimaryPlacement(userId: string, placement: Resolv
 
 // ─── Worker ───────────────────────────────────────────────────────────────────
 
-async function claimBatch(now: Date, batchSize: number, staleAfterMs: number): Promise<{ id: string; token: string }[]> {
+/**
+ * Three, independent claim conditions, all handled by the SAME atomic
+ * `UPDATE ... RETURNING` + `FOR UPDATE SKIP LOCKED` this worker already
+ * used before this round — no new locking/claim mechanism:
+ *   1. PENDING — a fresh or retrying attempt (unchanged).
+ *   2. Stale PROCESSING — a crashed worker's abandoned claim (unchanged).
+ *   3. SUCCEEDED, due for daily revalidation — REQUIRED this round. A row
+ *      claimed this way also gets its own `attemptCount` reset to 0 in the
+ *      SAME statement: the revalidation cycle gets its own fresh
+ *      MAX_ATTEMPTS budget, never inherited from however many attempts
+ *      the user's ORIGINAL first-time sync happened to take (see
+ *      processOne/recordFailureAndMaybeFinalize's own doc comments for
+ *      why that budget matters — a revalidation that exhausts it defers
+ *      to tomorrow, it never reaches FAILED_PERMANENT).
+ */
+async function claimBatch(now: Date, batchSize: number, staleAfterMs: number, revalidationIntervalMs: number): Promise<{ id: string; token: string }[]> {
   const token = randomUUID();
   const nowUtc = now.toISOString();
   const staleBeforeUtc = new Date(now.getTime() - staleAfterMs).toISOString();
+  const revalidationBeforeUtc = new Date(now.getTime() - revalidationIntervalMs).toISOString();
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     UPDATE "SqlGeneralUserSyncAttempt"
-    SET status = 'PROCESSING', "claimedAt" = (${nowUtc}::timestamptz AT TIME ZONE 'UTC'), "claimToken" = ${token}, "updatedAt" = (${nowUtc}::timestamptz AT TIME ZONE 'UTC')
+    SET status = 'PROCESSING',
+        "claimedAt" = (${nowUtc}::timestamptz AT TIME ZONE 'UTC'),
+        "claimToken" = ${token},
+        "updatedAt" = (${nowUtc}::timestamptz AT TIME ZONE 'UTC'),
+        "attemptCount" = CASE WHEN status = 'SUCCEEDED' THEN 0 ELSE "attemptCount" END
     WHERE id IN (
       SELECT id FROM "SqlGeneralUserSyncAttempt"
       WHERE status = 'PENDING'
          OR (status = 'PROCESSING' AND "claimedAt" < (${staleBeforeUtc}::timestamptz AT TIME ZONE 'UTC'))
+         OR (status = 'SUCCEEDED' AND ("lastSyncCompletedAt" IS NULL OR "lastSyncCompletedAt" < (${revalidationBeforeUtc}::timestamptz AT TIME ZONE 'UTC')))
       ORDER BY "createdAt" ASC
       LIMIT ${batchSize}
       FOR UPDATE SKIP LOCKED
@@ -417,16 +449,32 @@ async function finalize(id: string, token: string, data: Prisma.SqlGeneralUserSy
   return r.count === 1;
 }
 
-export type Outcome = "succeeded" | "skipped_no_username" | "retrying" | "failed_permanent" | "lost_claim";
+export type Outcome = "succeeded" | "skipped_no_username" | "retrying" | "failed_permanent" | "lost_claim" | "revalidation_deferred";
 
 /** Exported so tests can drive claim/process ordering deterministically — same seam as mention-reminder-service.ts's processClaimedMentionReminder. `departments` is the SAME batch-fetched snapshot every row in one worker run shares (see processDueSqlGeneralUserSyncs) — never re-fetched per row. */
 export async function processClaimedSqlGeneralUserSync(id: string, token: string, now: Date, departments: SqlGeneralDepartmentRecord[]): Promise<Outcome> {
   return processOne(id, token, now, departments);
 }
 
-async function recordFailureAndMaybeFinalize(id: string, token: string, previousAttemptCount: number, reason: string, now: Date): Promise<Outcome> {
+/**
+ * `isRevalidation` distinguishes a row that already has a real prior
+ * success (daily revalidation cycle) from a genuinely first-ever sync. A
+ * revalidation that exhausts MAX_ATTEMPTS must NEVER reach FAILED_PERMANENT
+ * — that would silently strip a working user's existing membership on a
+ * transient SQLGeneral outage, which REQUIRED DO #2 explicitly forbids
+ * ("Failed revalidations must preserve existing memberships and retry
+ * safely"). Instead it defers back to SUCCEEDED (existing placement
+ * untouched), `lastError` kept for diagnostics, and `lastSyncCompletedAt`
+ * pushed to `now` so the next automatic attempt is ~24h out rather than on
+ * the very next 5-minute cron tick (no retry-storm during a prolonged
+ * outage).
+ */
+async function recordFailureAndMaybeFinalize(id: string, token: string, previousAttemptCount: number, reason: string, now: Date, isRevalidation: boolean): Promise<Outcome> {
   const attemptCount = previousAttemptCount + 1;
   if (attemptCount >= MAX_ATTEMPTS) {
+    if (isRevalidation) {
+      return (await finalize(id, token, { status: "SUCCEEDED", attemptCount: 0, lastError: reason.slice(0, 1000), lastSyncCompletedAt: now }, now)) ? "revalidation_deferred" : "lost_claim";
+    }
     return (await finalize(id, token, { status: "FAILED_PERMANENT", attemptCount, lastError: reason.slice(0, 1000) }, now)) ? "failed_permanent" : "lost_claim";
   }
   // Deliberately back to PENDING, not a distinct "FAILED" resting state —
@@ -439,6 +487,12 @@ async function processOne(id: string, token: string, now: Date, departments: Sql
   const attempt = await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { id } });
   if (!attempt || attempt.status !== "PROCESSING" || attempt.claimToken !== token) return "lost_claim";
 
+  // A prior real success (lastSyncCompletedAt already set) means this claim
+  // came from claimBatch's third, daily-revalidation condition, not a
+  // first-ever sync — drives recordFailureAndMaybeFinalize's defer-not-fail
+  // branching above.
+  const isRevalidation = attempt.lastSyncCompletedAt !== null;
+
   if (!attempt.sqlGeneralUsername) {
     // Defensive only: reachable if an admin refresh re-armed a row that
     // still has no captured username (e.g. SKIPPED_NO_USERNAME reset by
@@ -450,20 +504,20 @@ async function processOne(id: string, token: string, now: Date, departments: Sql
   try {
     const matchResult = await findSqlGeneralUserByUsername(attempt.sqlGeneralUsername);
     if (matchResult.outcome === "not_found") {
-      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `No SQLGeneral user found for username "${attempt.sqlGeneralUsername}".`, now);
+      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `No SQLGeneral user found for username "${attempt.sqlGeneralUsername}".`, now, isRevalidation);
     }
     if (matchResult.outcome === "ambiguous") {
-      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `Username "${attempt.sqlGeneralUsername}" matched ${matchResult.count} SQLGeneral users — requires exactly one match.`, now);
+      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `Username "${attempt.sqlGeneralUsername}" matched ${matchResult.count} SQLGeneral users — requires exactly one match.`, now, isRevalidation);
     }
 
     const { user } = matchResult;
     if (user.hrDepartmentId === null) {
-      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `SQLGeneral user "${attempt.sqlGeneralUsername}" has no HrDepartmentId.`, now);
+      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `SQLGeneral user "${attempt.sqlGeneralUsername}" has no HrDepartmentId.`, now, isRevalidation);
     }
 
     const placementResult = resolveSqlGeneralDepartmentPlacement(user.hrDepartmentId, departments);
     if (placementResult.outcome === "department_not_found") {
-      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `HrDepartmentId "${user.hrDepartmentId}" does not match any fetched SQLGeneral Department.`, now);
+      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `HrDepartmentId "${user.hrDepartmentId}" does not match any fetched SQLGeneral Department.`, now, isRevalidation);
     }
 
     const sqlGeneralCompanyId = user.companyId !== null ? String(user.companyId) : null;
@@ -481,23 +535,23 @@ async function processOne(id: string, token: string, now: Date, departments: Sql
       // bounded-retry mechanism as every other failure reason here
       // (REQUIRED DO #8: no new state machine).
       if (user.active !== true) {
-        return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `SQLGeneral user "${attempt.sqlGeneralUsername}" is not Active — primary placement requires an active HR record.`, now);
+        return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, `SQLGeneral user "${attempt.sqlGeneralUsername}" is not Active — primary placement requires an active HR record.`, now, isRevalidation);
       }
       const appliedPrimary = await applySqlGeneralPrimaryPlacement(attempt.userId, placementResult.placement, sqlGeneralCompanyId);
       if (!appliedPrimary.ok) {
-        return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, appliedPrimary.reason, now);
+        return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, appliedPrimary.reason, now, isRevalidation);
       }
-      return (await finalize(id, token, { status: "SUCCEEDED", attemptCount: attempt.attemptCount + 1, lastError: null }, now)) ? "succeeded" : "lost_claim";
+      return (await finalize(id, token, { status: "SUCCEEDED", attemptCount: attempt.attemptCount + 1, lastError: null, lastSyncCompletedAt: now }, now)) ? "succeeded" : "lost_claim";
     }
 
     const applied = await applySqlGeneralDepartmentMembership(attempt.userId, placementResult.placement, sqlGeneralCompanyId);
     if (!applied.ok) {
-      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, applied.reason, now);
+      return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, applied.reason, now, isRevalidation);
     }
-    return (await finalize(id, token, { status: "SUCCEEDED", attemptCount: attempt.attemptCount + 1, lastError: null }, now)) ? "succeeded" : "lost_claim";
+    return (await finalize(id, token, { status: "SUCCEEDED", attemptCount: attempt.attemptCount + 1, lastError: null, lastSyncCompletedAt: now }, now)) ? "succeeded" : "lost_claim";
   } catch (err) {
     const reason = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, reason, now);
+    return recordFailureAndMaybeFinalize(id, token, attempt.attemptCount, reason, now, isRevalidation);
   }
 }
 
@@ -508,6 +562,7 @@ export interface ProcessResult {
   failedPermanent: number;
   skippedNoUsername: number;
   errored: number;
+  revalidationDeferred: number;
 }
 
 /**
@@ -520,8 +575,8 @@ export interface ProcessResult {
  * ALSO claims nothing — a shared infrastructure failure must never be
  * split into N separately-consumed per-row attempts.
  */
-export async function processDueSqlGeneralUserSyncs(options: { now?: Date; batchSize?: number; maxBatches?: number; staleAfterMs?: number } = {}): Promise<ProcessResult> {
-  const result: ProcessResult = { claimed: 0, succeeded: 0, retrying: 0, failedPermanent: 0, skippedNoUsername: 0, errored: 0 };
+export async function processDueSqlGeneralUserSyncs(options: { now?: Date; batchSize?: number; maxBatches?: number; staleAfterMs?: number; revalidationIntervalMs?: number } = {}): Promise<ProcessResult> {
+  const result: ProcessResult = { claimed: 0, succeeded: 0, retrying: 0, failedPermanent: 0, skippedNoUsername: 0, errored: 0, revalidationDeferred: 0 };
   if (!isSqlGeneralSyncEnabled()) {
     console.info("[sqlgeneral-user-sync] SQLGENERAL_SYNC_ENABLED is not \"true\" — skipping run, no rows claimed");
     return result;
@@ -538,9 +593,10 @@ export async function processDueSqlGeneralUserSyncs(options: { now?: Date; batch
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const maxBatches = options.maxBatches ?? MAX_BATCHES_PER_RUN;
   const staleAfterMs = options.staleAfterMs ?? STALE_CLAIM_TIMEOUT_MS;
+  const revalidationIntervalMs = options.revalidationIntervalMs ?? DAILY_REVALIDATION_INTERVAL_MS;
 
   for (let i = 0; i < maxBatches; i++) {
-    const batch = await claimBatch(now, batchSize, staleAfterMs);
+    const batch = await claimBatch(now, batchSize, staleAfterMs, revalidationIntervalMs);
     result.claimed += batch.length;
     for (const { id, token } of batch) {
       try {
@@ -549,6 +605,7 @@ export async function processDueSqlGeneralUserSyncs(options: { now?: Date; batch
         else if (outcome === "retrying") result.retrying++;
         else if (outcome === "failed_permanent") result.failedPermanent++;
         else if (outcome === "skipped_no_username") result.skippedNoUsername++;
+        else if (outcome === "revalidation_deferred") result.revalidationDeferred++;
       } catch (err) {
         // Left PROCESSING: recoverable after STALE_CLAIM_TIMEOUT_MS.
         result.errored++;
@@ -558,7 +615,7 @@ export async function processDueSqlGeneralUserSyncs(options: { now?: Date; batch
     if (batch.length < batchSize) break;
   }
   console.info(
-    `[sqlgeneral-user-sync] run at ${now.toISOString()}: claimed=${result.claimed} succeeded=${result.succeeded} retrying=${result.retrying} failedPermanent=${result.failedPermanent} skippedNoUsername=${result.skippedNoUsername} errored=${result.errored}`
+    `[sqlgeneral-user-sync] run at ${now.toISOString()}: claimed=${result.claimed} succeeded=${result.succeeded} retrying=${result.retrying} failedPermanent=${result.failedPermanent} skippedNoUsername=${result.skippedNoUsername} errored=${result.errored} revalidationDeferred=${result.revalidationDeferred}`
   );
   return result;
 }
@@ -610,26 +667,86 @@ export interface SqlGeneralPreviewRow {
   proposedDepartmentId: string | null;
   proposedDepartmentName: string | null;
   /**
-   * What applySqlGeneralPrimaryPlacement would actually do for this user
-   * right now: "would_place" (a real, resolvable change — new placement or
-   * a genuine A->B move), "already_aligned" (current primary already
-   * matches the resolved department, source SQLGENERAL_DEPARTMENT — a
-   * no-op), or one of the blocked_* reasons, each corresponding exactly to
-   * a real failure/skip condition in processOne/applySqlGeneralPrimaryPlacement
-   * — never a guess. "n/a" only when usernameMatch/departmentResolution
-   * never got far enough to have an opinion (covered by the more specific
-   * blocked_* reasons otherwise).
+   * What applySqlGeneralPrimaryPlacement/setPrimaryDepartmentMembership
+   * would actually do for this user right now:
+   *   - "would_place": a genuine Department move (resolved target differs
+   *     from the current primary's departmentId) — a real A->B placement.
+   *   - "already_aligned": resolved target department is UNCHANGED and
+   *     setPrimaryDepartmentMembership's own role-protection check
+   *     (protectManualRole || protectCustomRole || roleAlreadyMatches)
+   *     would leave the row completely untouched — zero write — AND the
+   *     row's source is already SQLGENERAL_DEPARTMENT, so there is
+   *     nothing left for the admin to review at all.
+   *   - "would_realign_source_only": same zero-write condition as
+   *     already_aligned (dept unchanged, role protected/already matches),
+   *     but the row's source is NOT SQLGENERAL_DEPARTMENT (e.g. a
+   *     protected MANUAL or MICROSOFT_DEPARTMENT row, or one whose role
+   *     happens to already match the configured default) — worth
+   *     surfacing distinctly since the provenance tag will never actually
+   *     be promoted by this call, exactly mirroring REQUIRED DO #4
+   *     ("never silently reset an existing role merely because the
+   *     membership source changes").
+   *   - "would_change_role": dept unchanged, but NONE of
+   *     setPrimaryDepartmentMembership's protections apply — a real write
+   *     occurs (role/source/customRoleId all updated in place).
+   *   - one of the blocked_* reasons, each corresponding exactly to a real
+   *     failure/skip condition in processOne/applySqlGeneralPrimaryPlacement
+   *     — never a guess.
+   *   - "n/a" only when usernameMatch/departmentResolution never got far
+   *     enough to have an opinion (covered by the more specific blocked_*
+   *     reasons otherwise).
    */
-  primaryChangeOutcome: "would_place" | "already_aligned" | "blocked_locked" | "blocked_inactive_hr" | "blocked_unmapped_department" | "blocked_identity_unresolved" | "blocked_local_conflict" | "n/a";
+  primaryChangeOutcome:
+    | "would_place"
+    | "already_aligned"
+    | "would_realign_source_only"
+    | "would_change_role"
+    | "blocked_locked"
+    | "blocked_inactive_hr"
+    | "blocked_unmapped_department"
+    | "blocked_identity_unresolved"
+    | "blocked_local_conflict"
+    | "n/a";
 }
 
-/** Shared by every early-exit branch of previewSqlGeneralUserSync — one lookup per user, reused for the primary-placement dimension regardless of how far SECONDARY resolution got. */
-async function currentPrimaryPreviewFields(userId: string): Promise<Pick<SqlGeneralPreviewRow, "currentPrimaryDepartmentId" | "currentPrimarySource" | "currentPrimaryLocked">> {
-  const current = await prisma.departmentMembership.findFirst({ where: { userId, isPrimary: true, isActive: true }, select: { departmentId: true, source: true, primaryLockedById: true } });
+/**
+ * Shared by every early-exit branch of previewSqlGeneralUserSync — one
+ * lookup per user, reused for the primary-placement dimension regardless
+ * of how far SECONDARY resolution got. Carries role/customRoleId too (not
+ * just the narrower departmentId/source/locked triple exposed on
+ * SqlGeneralPreviewRow) — needed internally to replicate
+ * setPrimaryDepartmentMembership's own protectManualRole/protectCustomRole/
+ * roleAlreadyMatches checks for the would_realign_source_only/
+ * would_change_role classification below, without duplicating a second
+ * copy of those checks on the actual write path.
+ */
+interface CurrentPrimaryInfo {
+  departmentId: string | null;
+  source: MembershipSource | null;
+  locked: boolean;
+  role: DepartmentRole | null;
+  customRoleId: string | null;
+}
+
+async function currentPrimaryInfo(userId: string): Promise<CurrentPrimaryInfo> {
+  const current = await prisma.departmentMembership.findFirst({
+    where: { userId, isPrimary: true, isActive: true },
+    select: { departmentId: true, source: true, primaryLockedById: true, role: true, customRoleId: true },
+  });
   return {
-    currentPrimaryDepartmentId: current?.departmentId ?? null,
-    currentPrimarySource: current?.source ?? null,
-    currentPrimaryLocked: current ? current.primaryLockedById !== null : false,
+    departmentId: current?.departmentId ?? null,
+    source: current?.source ?? null,
+    locked: current ? current.primaryLockedById !== null : false,
+    role: current?.role ?? null,
+    customRoleId: current?.customRoleId ?? null,
+  };
+}
+
+function toPreviewCurrentFields(info: CurrentPrimaryInfo): Pick<SqlGeneralPreviewRow, "currentPrimaryDepartmentId" | "currentPrimarySource" | "currentPrimaryLocked"> {
+  return {
+    currentPrimaryDepartmentId: info.departmentId,
+    currentPrimarySource: info.source,
+    currentPrimaryLocked: info.locked,
   };
 }
 
@@ -695,9 +812,15 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
   const attempts = await prisma.sqlGeneralUserSyncAttempt.findMany({ where: { userId: { in: targetUserIds } } });
   const attemptByUserId = new Map(attempts.map((a) => [a.userId, a]));
 
+  // Computed ONCE per preview call, reused for every row's role comparison
+  // below — matches applySqlGeneralPrimaryPlacement's own single call per
+  // write, never re-resolved per user.
+  const departmentDefault = await resolveDefaultDepartmentRoleAssignment();
+
   const rows: SqlGeneralPreviewRow[] = [];
   for (const userId of targetUserIds) {
-    const current = await currentPrimaryPreviewFields(userId);
+    const currentInfo = await currentPrimaryInfo(userId);
+    const current = toPreviewCurrentFields(currentInfo);
     const attemptRow = attemptByUserId.get(userId);
     if (!attemptRow?.sqlGeneralUsername) {
       rows.push(emptyPreviewRow(userId, attemptRow?.sqlGeneralUsername ?? null, "no_username_captured", current));
@@ -800,18 +923,30 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       }
     }
 
-    // REQUIRED DO #7 — mirrors processOne/applySqlGeneralPrimaryPlacement's
-    // own checks exactly, so this preview is never more optimistic than
-    // what a real run would actually do:
+    // REQUIRED DO #7/#5 — mirrors processOne/applySqlGeneralPrimaryPlacement/
+    // setPrimaryDepartmentMembership's own checks exactly, so this preview
+    // is never more optimistic than what a real run would actually do:
     //   - a local conflict (company OR department) always blocks, same as
     //     applySqlGeneralPlacementTarget's own fail-closed resolution.
     //   - an inactive HR record blocks (processOne's own gate), reported
     //     distinctly from a resolution problem.
-    //   - an explicit admin lock on the CURRENT primary blocks ANY
-    //     automatic change, even one that would otherwise resolve cleanly.
-    //   - otherwise: already aligned (no-op) if the current primary is
-    //     already SQLGENERAL_DEPARTMENT-sourced and points at the exact
-    //     same department; a real, applicable change otherwise.
+    //   - setPrimaryDepartmentMembership's explicit-lock protection is only
+    //     ever CHECKED when the resolved target department actually DIFFERS
+    //     from the current primary's — a lock never blocks a same-department
+    //     role-only write (the lock guards against being moved OUT of a
+    //     department, not against in-place role bookkeeping), so the lock
+    //     check is nested under the "would be a real move" branch below,
+    //     never evaluated first.
+    //   - when the department is UNCHANGED, the real write path's own
+    //     protectManualRole/protectCustomRole/roleAlreadyMatches conditions
+    //     decide whether anything is actually written at all: if any one of
+    //     them holds, the row is left 100% untouched (including its source
+    //     tag) — "already_aligned" when that source is already
+    //     SQLGENERAL_DEPARTMENT (nothing left to even note), or
+    //     "would_realign_source_only" when it isn't (a zero-write no-op,
+    //     but the stale provenance tag is worth surfacing). Otherwise a
+    //     real write occurs (role/source/customRoleId all updated) —
+    //     "would_change_role".
     let primaryChangeOutcome: SqlGeneralPreviewRow["primaryChangeOutcome"];
     if (localMatch === "conflict_other_owner") {
       primaryChangeOutcome = "blocked_local_conflict";
@@ -823,12 +958,17 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
       primaryChangeOutcome = "blocked_unmapped_department";
     } else if (user.active !== true) {
       primaryChangeOutcome = "blocked_inactive_hr";
-    } else if (current.currentPrimaryLocked) {
-      primaryChangeOutcome = "blocked_locked";
-    } else if (current.currentPrimaryDepartmentId === proposedDepartmentId && current.currentPrimarySource === MembershipSource.SQLGENERAL_DEPARTMENT) {
-      primaryChangeOutcome = "already_aligned";
+    } else if (currentInfo.departmentId !== proposedDepartmentId) {
+      primaryChangeOutcome = currentInfo.locked ? "blocked_locked" : "would_place";
     } else {
-      primaryChangeOutcome = "would_place";
+      const protectManualRole = currentInfo.source === MembershipSource.MANUAL;
+      const protectCustomRole = currentInfo.customRoleId !== null;
+      const roleAlreadyMatches = currentInfo.role === departmentDefault.role;
+      if (protectManualRole || protectCustomRole || roleAlreadyMatches) {
+        primaryChangeOutcome = currentInfo.source === MembershipSource.SQLGENERAL_DEPARTMENT ? "already_aligned" : "would_realign_source_only";
+      } else {
+        primaryChangeOutcome = "would_change_role";
+      }
     }
 
     rows.push({

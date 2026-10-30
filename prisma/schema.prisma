@@ -722,6 +722,27 @@ model SqlGeneralUserSyncAttempt {
   lastError          String?                  @db.Text
   claimedAt          DateTime?
   claimToken         String?
+  // Set whenever a sync CYCLE for this user concludes while a real prior
+  // success already exists — either a genuine fresh success (status
+  // SUCCEEDED, lastError cleared) or a daily revalidation that exhausted
+  // its own retry budget without reconfirming (status SUCCEEDED, lastError
+  // preserved for diagnostics) — see processOne's own doc comment. Still
+  // null for a row that has NEVER yet succeeded, even across many PENDING
+  // retries of its first sync. Two jobs, both intentional:
+  //   1. Drives claimBatch's own daily-revalidation re-claim condition
+  //      (status = SUCCEEDED AND this NULL-or-older-than-~24h) — distinct
+  //      from updatedAt, which churns on every transient claim/retry and
+  //      so can never answer "when did this row last genuinely conclude".
+  //      NULL (a pre-existing SUCCEEDED row from before this column
+  //      existed) is treated as infinitely stale — immediately eligible,
+  //      never stuck waiting forever on a value it never had.
+  //   2. Lets processOne tell "this is a revalidation cycle" (field
+  //      already set) apart from "this is this user's first-ever sync
+  //      cycle" (field still null) — a revalidation's retry exhaustion
+  //      defers to the next daily window instead of ever reaching
+  //      FAILED_PERMANENT, since the user already has a real, working
+  //      placement from whenever this was last set.
+  lastSyncCompletedAt DateTime?
   createdAt          DateTime                 @default(now())
   updatedAt          DateTime                 @updatedAt
 
