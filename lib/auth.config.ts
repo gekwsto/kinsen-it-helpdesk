@@ -8,9 +8,22 @@ const PUBLIC_PATHS = [
   "/unauthorized",
   "/api/auth",
   "/api/email/inbound",
-  // Mention Reminder worker: skips the browser-session redirect only; the
-  // route itself requires the CRON_SECRET bearer token (fails closed in production).
+  // Internal cron worker routes (Vercel Cron / docker-compose sidecar,
+  // see vercel.json): every one of these is called server-to-server with
+  // no browser session at all, so without this bypass the `authorized`
+  // callback's "not logged in" branch returns `false` for them, and
+  // NextAuth's own default behavior for that is a 307 redirect to
+  // `pages.signIn` (/login) — never a JSON 401/403, and the request never
+  // reaches the route at all. This bypass skips ONLY that browser-session
+  // redirect; each route still independently requires and strictly
+  // verifies its own CRON_SECRET bearer token via timingSafeEqual, and
+  // fails closed (401, never 200) in production when CRON_SECRET is
+  // unset — see each route's own isAuthorized(). A missing/invalid secret
+  // still gets that route's real 401 response, never a /login redirect.
   "/api/internal/mention-reminders/process",
+  "/api/internal/project-request-setup-reminders/process",
+  "/api/internal/sqlgeneral-user-sync/process",
+  "/api/internal/sqlgeneral-tree-snapshot/process",
   // Canonical suite-to-Helpdesk SSO entry point (app/auth/sso-entry/route.ts)
   // — must be reachable with NO session at all (that's exactly the "absent"
   // case it has to classify and act on itself); it independently performs
