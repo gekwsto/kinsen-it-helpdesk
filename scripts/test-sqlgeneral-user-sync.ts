@@ -498,7 +498,7 @@ async function main() {
     const deptCandidate = await svc.previewSqlGeneralDepartmentMappingCandidate(ENGINEERING_SQLGENERAL_DEPARTMENT_ID, engineeringDept.id);
     check(
       "75. Department mapping candidate preview correctly reports the target's own Company HAS an approved Company mapping (safe to proceed)",
-      deptCandidate.companyMappingForTargetDepartment?.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID && deptCandidate.sourceVerified === true,
+      deptCandidate.companyMappingsForTargetDepartment.some((m) => m.sqlGeneralCompanyId === CONFLICT_SQLGENERAL_COMPANY_ID) && deptCandidate.sourceVerified === true,
       JSON.stringify(deptCandidate)
     );
     check(
