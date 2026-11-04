@@ -30,6 +30,7 @@ import {
   shouldEnableAfterSubscribeResponse,
   shouldTreatLocalSubscriptionAsEnabled,
 } from "@/lib/notifications/push-client-decisions";
+import { NAV_LOADER_IGNORE_ATTR } from "@/lib/navigation-loader";
 
 function urlBase64ToUint8Array(base64: string): ArrayBuffer {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
@@ -486,8 +487,20 @@ export function NotificationDropdown() {
                   {/* Per-row dismiss — visible on hover (and always, for
                       keyboard/touch users who can't hover) via opacity, never
                       disabled behind a hover-only affordance that a keyboard
-                      user couldn't reach at all. */}
+                      user couldn't reach at all.
+                      NAV_LOADER_IGNORE_ATTR: for a notification with a link
+                      (n.link), this button sits nested inside that row's own
+                      <Link> (see below). The global navigation loader's
+                      capture-phase listener would otherwise arm its full-page
+                      overlay for that Link BEFORE this button's own
+                      preventDefault()/stopPropagation() ever runs — the
+                      actual navigation is correctly suppressed, so the
+                      overlay then hangs for the full ~15s safety timeout
+                      instead of clearing on a route change that was never
+                      going to happen. Same fix as
+                      components/activities/activity-complete-checkbox.tsx. */}
                   <button
+                    {...{ [NAV_LOADER_IGNORE_ATTR]: true }}
                     type="button"
                     onClick={(e) => deleteNotification(e, n.id)}
                     className="flex-shrink-0 p-1 rounded opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:bg-muted text-muted-foreground transition-opacity"

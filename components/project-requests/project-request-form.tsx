@@ -138,6 +138,15 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
       }
       const created = await res.json();
       toast.success("Project Request submitted");
+      // The list page (app/(main)/project-requests/page.tsx) is a Server
+      // Component — this POST went through a plain fetch()/Route Handler,
+      // so Next's Router Cache still holds whatever RSC payload for
+      // /project-requests was cached from the last time it was visited.
+      // Without this, navigating back to that list shows a stale view
+      // missing the just-created request until a hard reload. Same
+      // convention already used elsewhere (e.g. approval-actions.tsx,
+      // project-request-table.tsx).
+      router.refresh();
       router.push(`/project-requests/${created.id}`);
     } catch (error: any) {
       toast.error(error.message ?? "Failed to submit Project Request");
