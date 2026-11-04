@@ -286,8 +286,16 @@ export async function POST(req: NextRequest) {
     // too, not just for a later PATCH.
     const createdAsCompleted = rest.status === ActivityStatus.COMPLETED;
     const completionDate = createdAsCompleted ? new Date() : null;
+    // Expected Start (the request-origin planning baseline) wins when
+    // present — preserves existing request-origin behavior byte-for-byte.
+    // Falls back to Actual Start (startDate) only when Expected Start is
+    // absent — true for every manual-Project Activity by design — so
+    // creating one directly as COMPLETED is no longer silently left with
+    // actualDays: null merely because it was never a request-origin
+    // Activity. Same fallback PATCH /api/activities/[id] now uses.
+    const actualDaysStartReference = expectedStartDate ? new Date(expectedStartDate) : startDate ? new Date(startDate) : null;
     const actualDays =
-      createdAsCompleted && expectedStartDate ? actualDaysFromCompletion(new Date(expectedStartDate), completionDate!) : null;
+      createdAsCompleted && actualDaysStartReference ? actualDaysFromCompletion(actualDaysStartReference, completionDate!) : null;
 
     // Sequence (request-origin Projects only) — the server-derived APPEND
     // position, never client-authoritative (createActivitySchema doesn't

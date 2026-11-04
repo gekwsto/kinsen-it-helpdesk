@@ -202,17 +202,34 @@ async function main() {
       check("2. User.companyId is the SAME unified Company", after?.companyId === unifiedCompany.id);
     }
 
-    // ── 3. An unapproved third Company/Department still fails closed ──
-    console.log("\n3. An UNAPPROVED third SQLGeneral Company/Department (C) still fails closed — never guessed, never silently placed\n");
+    // ── 3. An unapproved third Company/Department is a genuinely NEW identity — auto-created, never guessed onto an existing one ──
+    // REQUIRED (SQLGeneral missing-Department auto-creation round): this
+    // scenario previously failed closed because Department auto-creation
+    // did not exist yet (Company C, having no approved mapping and no
+    // existing name match, was ALREADY auto-created even before that
+    // round — this file's own prior assertions only ever exercised the
+    // Department-level gap). Company/Department auto-creation for a
+    // genuinely new, structurally-valid, active HR identity with no
+    // approved mapping and no existing local match is now the CONFIRMED,
+    // intended behavior (the exact fix this round implements) — what
+    // still must never happen, and is what this section now actually
+    // verifies, is this new identity being silently folded into the
+    // UNRELATED, already-unified callCenterDept/decoyDept/unifiedCompany
+    // from sections 1-2 above.
+    console.log("\n3. An UNAPPROVED third SQLGeneral Company/Department (C) is a genuinely new identity — auto-created as its OWN Company/Department, never guessed onto the unrelated unified Company/Department from sections 1-2\n");
     {
       const user = await makeUser("user-unapproved");
       mockFindUserImpl = async () => ({ outcome: "unique" as const, user: fakeHrUser("sgdu-user-unapproved", DEPT_UNAPPROVED, COMPANY_C_ID, `Company C ${RUN_ID}`) });
       const { outcome, row } = await driveSync(user, "sgdu-user-unapproved", [FAKE_DEPT_359, FAKE_DEPT_129, FAKE_DEPT_UNAPPROVED]);
-      check("3. Placement is retried (blocked), never silently succeeds", outcome === "retrying");
-      check("3. ...reason names the missing Company mapping, not a fabricated placement", (row.lastError ?? "").length > 0);
+      check("3. Placement succeeds — a new Company/Department pair is auto-created for this genuinely new identity", outcome === "succeeded", row.lastError ?? undefined);
       const after = await prisma.user.findUnique({ where: { id: user } });
-      check("3. User.departmentId stays null — never guessed", after?.departmentId === null);
-      check("3. User.companyId stays null too", after?.companyId === null);
+      check("3. User.companyId is a NEW Company, never the unrelated unified Company from sections 1-2", after?.companyId !== null && after?.companyId !== unifiedCompany.id);
+      check("3. User.departmentId is a NEW Department, never the unified callCenterDept", after?.departmentId !== null && after?.departmentId !== callCenterDept.id);
+      check("3. ...and never the decoy 'Call Center KINSEN' Department either", after?.departmentId !== decoyDept.id);
+      if (after?.companyId) companyIds.push(after.companyId);
+      if (after?.departmentId) departmentIds.push(after.departmentId);
+      const newDept = after?.departmentId ? await prisma.department.findUnique({ where: { id: after.departmentId } }) : null;
+      check("3. ...owned by SQLGeneral (importSource), same provenance as any other auto-created Department", newDept?.importSource === OrganizationNodeSource.SQLGENERAL);
     }
 
     // ── 4. Preview/worker parity for the cross-company case ──

@@ -34,10 +34,18 @@ export interface SequencedActivityRow {
   id: string;
   title: string;
   dueDate: string | null;
-  /** Used only to derive the same-day-start warning (see
-   * lib/activities/activity-conflict.ts) — never displayed directly in
-   * this row. */
+  /** Also used to derive the same-day-start warning (see
+   * lib/activities/activity-conflict.ts) — and now displayed directly in
+   * this row too. */
   expectedStartDate: string | null;
+  expectedFinishDate: string | null;
+  /** The legacy, editable "real" start date (ProjectActivity.startDate) — distinct from expectedStartDate above (the request-origin planning baseline). */
+  startDate: string | null;
+  /** Stamped server-side exactly at the authoritative COMPLETED transition — null until the Activity is actually completed, never a stand-in for expectedFinishDate. */
+  completedAt: string | null;
+  /** Whole calendar days, both already computed/stored server-side — never recalculated client-side. */
+  expectedDays: number | null;
+  actualDays: number | null;
   isCompleted: boolean;
   statusLabel: string;
   statusColor: string;
@@ -100,7 +108,13 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
 
   const handleToggled = (activityId: string) => (result: ActivityToggleResult) => {
     const myToken = tokenGuardRef.current.bump();
-    setActivities((prev) => prev.map((a) => (a.id === activityId ? { ...a, isCompleted: result.isCompleted, statusLabel: result.statusLabel, statusColor: result.statusColor } : a)));
+    setActivities((prev) =>
+      prev.map((a) =>
+        a.id === activityId
+          ? { ...a, isCompleted: result.isCompleted, statusLabel: result.statusLabel, statusColor: result.statusColor, completedAt: result.completedAt, actualDays: result.actualDays }
+          : a
+      )
+    );
     const rollup = result.projectRollups.find((r) => r.id === projectId);
     if (rollup && tokenGuardRef.current.isCurrent(myToken)) {
       setProgress(rollup.progress);
@@ -166,7 +180,10 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
         ) : canReorder ? (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <SortableContext items={activities.map((a) => a.id)} strategy={verticalListSortingStrategy}>
-              <div className="space-y-2" aria-disabled={saving}>
+              {/* max-h + overflow-y-auto only on the row list itself — the
+                  header (title/count/progress) above and the progress bar
+                  stay outside, so they're never scrolled out of view. */}
+              <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1" aria-disabled={saving}>
                 {activities.map((activity, index) => (
                   <SequencedActivityRowItem
                     key={activity.id}
@@ -181,7 +198,7 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
             </SortableContext>
           </DndContext>
         ) : (
-          <div className="space-y-2">
+          <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
             {activities.map((activity, index) => (
               <SequencedActivityRowItem
                 key={activity.id}
@@ -258,6 +275,12 @@ function SequencedActivityRowItem({
               )}
               {activity.owner && <span className="text-xs text-muted-foreground truncate">Owner: {activity.owner.name ?? "—"}</span>}
               {activity.dueDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Due: {formatDate(activity.dueDate)}</span>}
+              {activity.expectedStartDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Start: {formatDate(activity.expectedStartDate)}</span>}
+              {activity.expectedFinishDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Finish: {formatDate(activity.expectedFinishDate)}</span>}
+              {typeof activity.expectedDays === "number" && <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Duration: {activity.expectedDays} day(s)</span>}
+              {activity.startDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Start: {formatDate(activity.startDate)}</span>}
+              {activity.completedAt && <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Finish: {formatDate(activity.completedAt)}</span>}
+              {typeof activity.actualDays === "number" && <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Duration: {activity.actualDays} day(s)</span>}
             </div>
           </div>
         </div>

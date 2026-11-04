@@ -21,7 +21,7 @@
  * before ever enabling it.
  */
 import { randomUUID } from "crypto";
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { MembershipSource, OrganizationNodeSource, SqlGeneralUserSyncStatus, DepartmentRole } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { acquireOrganizationSyncLock, releaseOrganizationSyncLock } from "@/lib/services/organization-sync-orchestrator";
@@ -40,6 +40,9 @@ import { normalizeCompanyName, normalizeDepartmentName } from "@/lib/services/or
 import { resolveDefaultDepartmentRoleAssignment } from "@/lib/services/default-role-service";
 import { setPrimaryDepartmentMembership } from "@/lib/services/department-membership-service";
 import { fetchAllGraphUserIdentities, type GraphUserIdentity } from "@/lib/services/microsoft-directory-service";
+import { slugify } from "@/lib/services/department-service";
+import { ensureStatusAndPriorityConfigForDepartment, ensureActivityProgressConfigForDepartment, ensureStarterPrioritiesForDepartment, ensureStarterStatusesForDepartment } from "@/lib/services/config-starter-data";
+import { logDepartmentConfigHealth } from "@/lib/services/config-health";
 
 export const MAX_ATTEMPTS = 5;
 /** A PROCESSING claim older than this is considered abandoned by a crashed worker and becomes re-claimable — same idiom and default as mention-reminder-service.ts's STALE_CLAIM_TIMEOUT_MS. */
@@ -198,9 +201,46 @@ export type ApplyOutcome = { ok: true } | { ok: false; reason: string };
  * approved mapping, behavior is completely unchanged from before this
  * feature: name-based find-or-create, conflict on any non-SQLGeneral owner.
  */
+/**
+ * Stable, machine-readable classification of a resolution failure —
+ * REQUIRED ("Preview must accurately predict... without duplicating
+ * business rules"): previewSqlGeneralUserSync's own dry-run wrapper
+ * (resolveSqlGeneralPlacementTargetDryRun below) needs to map each failure
+ * onto its existing localMatch/conflictLevel vocabulary WITHOUT re-deriving
+ * which failures are "conflicts" vs "unresolved source data" itself — that
+ * decision is made exactly once, here, by this function.
+ */
+type PlacementFailureCode =
+  | "missing_source_company_name"
+  | "missing_source_department_name"
+  | "company_conflict_other_owner"
+  | "approved_department_mapping_company_missing"
+  | "approved_department_mapping_chain_unresolved"
+  | "department_chain_unresolved"
+  | "department_inactive_source"
+  | "department_ancestor_inconsistent"
+  | "department_conflict_other_owner";
+
 type ResolvedPlacementTarget =
-  | { ok: true; company: { id: string; name: string }; department: { id: string; importSource: OrganizationNodeSource | null } }
-  | { ok: false; reason: string };
+  | {
+      ok: true;
+      company: { id: string; name: string };
+      department: { id: string; name: string; importSource: OrganizationNodeSource | null };
+      /**
+       * True when THIS call created the Company/Department row, as opposed
+       * to reusing an existing match or an approved-mapping target. The
+       * real write callers below never read these — they only care about
+       * the final ids — but previewSqlGeneralUserSync's dry-run wrapper
+       * uses them to report "would be auto-created" without duplicating
+       * this function's own creation decision.
+       */
+      companyCreated: boolean;
+      departmentCreated: boolean;
+      /** Same rationale as companyCreated/departmentCreated above, for the OTHER pre-existing distinction Preview already surfaced: resolved via an admin-approved SqlGeneralCompanyMapping/SqlGeneralDepartmentMapping rather than a plain name/ownership match. */
+      companyMappingUsed: boolean;
+      departmentMappingUsed: boolean;
+    }
+  | { ok: false; reason: string; reasonCode: PlacementFailureCode };
 
 /**
  * The shared Company/Department resolution core — mapping-first
@@ -225,8 +265,8 @@ async function resolveSqlGeneralPlacementTarget(
 ): Promise<ResolvedPlacementTarget> {
   const companyName = placement.department.company;
   const departmentName = placement.department.description;
-  if (!companyName) return { ok: false, reason: `Department ${placement.department.id} has no Company value — cannot safely place this user.` };
-  if (!departmentName) return { ok: false, reason: `Department ${placement.department.id} has no Description value — cannot safely match/create a local Department without a name.` };
+  if (!companyName) return { ok: false, reasonCode: "missing_source_company_name", reason: `Department ${placement.department.id} has no Company value — cannot safely place this user.` };
+  if (!departmentName) return { ok: false, reasonCode: "missing_source_department_name", reason: `Department ${placement.department.id} has no Description value — cannot safely match/create a local Department without a name.` };
 
   const normalizedCompanyName = normalizeCompanyName(companyName);
   const normalizedDepartmentName = normalizeDepartmentName(departmentName);
@@ -235,6 +275,7 @@ async function resolveSqlGeneralPlacementTarget(
     ? await tx.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } })
     : null;
 
+  let companyCreated = false;
   let company = approvedMapping?.company ?? null;
   if (!company) {
     company = await tx.company.findUnique({ where: { normalizedName: normalizedCompanyName } });
@@ -249,6 +290,7 @@ async function resolveSqlGeneralPlacementTarget(
         importRunId: lockRunId,
       },
     });
+    companyCreated = true;
   } else if (!approvedMapping && company.importSource !== OrganizationNodeSource.SQLGENERAL) {
     // A name collision against a Company this sync does not own (manual,
     // Microsoft-sourced, or no provenance at all) is always a conflict,
@@ -256,7 +298,7 @@ async function resolveSqlGeneralPlacementTarget(
     // An approved mapping is the one explicit, admin-reviewed exception —
     // it bypasses this check entirely, but never touches the Company's
     // own ownership/fields either way.
-    return { ok: false, reason: `Company "${companyName}" already exists and is not owned by SQLGeneral sync.` };
+    return { ok: false, reasonCode: "company_conflict_other_owner", reason: `Company "${companyName}" already exists and is not owned by SQLGeneral sync.` };
   }
 
   const sqlGeneralDepartmentId = String(placement.department.id);
@@ -291,30 +333,178 @@ async function resolveSqlGeneralPlacementTarget(
     // (SqlGeneralDepartmentMapping) IS the authorization; no implicit
     // Company-equality guess is layered on top of it.
     if (!approvedDeptMapping.department.companyId) {
-      return { ok: false, reason: `Approved Department mapping's target no longer has a Company — refusing to write.` };
+      return { ok: false, reasonCode: "approved_department_mapping_company_missing", reason: `Approved Department mapping's target no longer has a Company — refusing to write.` };
     }
     const structure = classifySqlGeneralChainStructure(placement.parentChain, placement.missingParent, placement.cycle);
     if (structure.status === "unresolved") {
-      return { ok: false, reason: `Approved Department mapping failed re-validation at write time: ${structure.reason}` };
+      return { ok: false, reasonCode: "approved_department_mapping_chain_unresolved", reason: `Approved Department mapping failed re-validation at write time: ${structure.reason}` };
     }
     department = approvedDeptMapping.department;
   }
+  const departmentMappingUsed = !!approvedDeptMapping;
+  let departmentCreated = false;
   if (!department) {
     department = await tx.department.findUnique({
       where: { companyId_normalizedName: { companyId: company.id, normalizedName: normalizedDepartmentName } },
     });
   }
   if (!department) {
-    return { ok: false, reason: `No existing Department "${departmentName}" under Company "${companyName}" — SQLGeneral Department auto-creation is not yet implemented.` };
+    // Department auto-creation (REQUIRED, this round) — mirrors the Company
+    // auto-creation above exactly: find-or-create, importSource: SQLGENERAL,
+    // never claims a non-SQLGeneral-owned name collision (the ownership
+    // check just below already covers that for this new row too, same as
+    // any pre-existing one).
+    //
+    // Design note: the local Department model has no self-referencing
+    // field (no `parentDepartmentId`) — this app's organizational
+    // hierarchy is the flat Company -> BusinessUnit -> Department ->
+    // SubDepartment structure, not a recursive Department -> Department
+    // chain. `placement.parentChain` (SQLGeneral's own recursive HR
+    // ancestry) is therefore used PURELY to validate that the source data
+    // is structurally sound before trusting it enough to create anything
+    // from it — never to materialize ancestor nodes as local rows. Only
+    // the resolved leaf Department itself is created, directly under the
+    // already-resolved Company — the exact same flat shape the Company
+    // auto-creation above already has.
+    const structure = classifySqlGeneralChainStructure(placement.parentChain, placement.missingParent, placement.cycle);
+    if (structure.status === "unresolved") {
+      return { ok: false, reasonCode: "department_chain_unresolved", reason: `Cannot auto-create Department "${departmentName}" — ${structure.reason}` };
+    }
+    if (placement.department.isActive === false) {
+      return { ok: false, reasonCode: "department_inactive_source", reason: `Department ${placement.department.id} ("${departmentName}") is marked inactive in SQLGeneral — refusing to auto-create a local Department from untrusted/stale source data.` };
+    }
+    // Every ancestor in the chain must itself be active and belong to the
+    // SAME Company as the leaf we're about to create — an inactive or
+    // cross-Company ancestor makes the chain ambiguous/inconsistent, and
+    // "fail closed" (never guess which one is right) applies the same way
+    // it already does for missingParent/cycle above.
+    const inconsistentAncestor = placement.parentChain.find(
+      (ancestor) => ancestor.isActive === false || (ancestor.company != null && normalizeCompanyName(ancestor.company) !== normalizedCompanyName)
+    );
+    if (inconsistentAncestor) {
+      const label = inconsistentAncestor.description ?? String(inconsistentAncestor.id);
+      return {
+        ok: false,
+        reasonCode: "department_ancestor_inconsistent",
+        reason:
+          inconsistentAncestor.isActive === false
+            ? `Cannot auto-create Department "${departmentName}" — its SQLGeneral ancestor chain includes an inactive Department ("${label}").`
+            : `Cannot auto-create Department "${departmentName}" — its SQLGeneral ancestor chain includes "${label}", which belongs to a different Company ("${inconsistentAncestor.company}") than the resolved Company ("${companyName}") — ambiguous/conflicting hierarchy.`,
+      };
+    }
+
+    const createResult = await createSqlGeneralDepartment(tx, company.id, departmentName, normalizedDepartmentName, lockRunId);
+    department = createResult.department;
+    departmentCreated = createResult.created;
   }
   if (!approvedDeptMapping && department.importSource !== OrganizationNodeSource.SQLGENERAL) {
     // Same explicit-mapping exception as the Company check above — an
     // approved Department mapping bypasses this, but never touches the
     // Department's own ownership/fields/hierarchy either way.
-    return { ok: false, reason: `Department "${departmentName}" already exists and is not owned by SQLGeneral sync.` };
+    return { ok: false, reasonCode: "department_conflict_other_owner", reason: `Department "${departmentName}" already exists and is not owned by SQLGeneral sync.` };
   }
 
-  return { ok: true, company, department };
+  return { ok: true, company, department, companyCreated, departmentCreated, companyMappingUsed: !!approvedMapping, departmentMappingUsed };
+}
+
+/**
+ * Creates the one local Department row SQLGeneral auto-creation ever
+ * produces (REQUIRED, this round) — same starter-config row set a manually
+ * admin-created Department gets (lib/services/department-service.ts's own
+ * createDepartment does the identical ensure-config/health-log sequence), run
+ * inside the CALLER's own transaction/lock instead of opening a second one
+ * (createDepartment itself can't be reused directly — it opens its own
+ * top-level prisma.$transaction, which would escape this function's `tx`).
+ *
+ * Race-safety: acquireOrganizationSyncLock is a single global mutex (see
+ * organization-sync-orchestrator.ts's SINGLETON_LOCK_ID) already held by
+ * every caller of resolveSqlGeneralPlacementTarget, so two of these can
+ * never actually run concurrently — the P2002-catch-and-refetch below is
+ * the same defense-in-depth backstop resolveDepartmentForSync already
+ * relies on for Microsoft sync's own Department creation, never a
+ * substitute for the lock.
+ */
+async function createSqlGeneralDepartment(
+  tx: Prisma.TransactionClient,
+  companyId: string,
+  name: string,
+  normalizedName: string,
+  lockRunId: string
+) {
+  const base = slugify(name) || "department";
+  let slug = base;
+  let suffix = 2;
+  // Bounded by the number of existing collisions — not a realistic infinite loop (see department-service.ts's own generateUniqueSlug, mirrored here against `tx` instead of the top-level prisma client).
+  while (await tx.department.findFirst({ where: { slug }, select: { id: true } })) {
+    slug = `${base}-${suffix}`;
+    suffix += 1;
+  }
+
+  try {
+    const department = await tx.department.create({
+      data: {
+        name,
+        normalizedName,
+        slug,
+        companyId,
+        businessUnitId: null,
+        importSource: OrganizationNodeSource.SQLGENERAL,
+        importedAt: new Date(),
+        importRunId: lockRunId,
+      },
+    });
+    await ensureStatusAndPriorityConfigForDepartment(tx, department.id);
+    await ensureActivityProgressConfigForDepartment(tx, department.id);
+    await ensureStarterPrioritiesForDepartment(tx, department.id);
+    await ensureStarterStatusesForDepartment(tx, department.id);
+    await logDepartmentConfigHealth(tx, department.id, "SQLGeneral Department auto-creation");
+    return { department, created: true };
+  } catch (err) {
+    if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== "P2002") throw err;
+    const existing = await tx.department.findUnique({ where: { companyId_normalizedName: { companyId, normalizedName } } });
+    if (!existing) throw err;
+    return { department: existing, created: false };
+  }
+}
+
+const SQLGENERAL_PREVIEW_DRY_RUN_ABORT = Symbol("sqlgeneral-preview-dry-run-abort");
+
+/**
+ * The ONE place previewSqlGeneralUserSync touches Company/Department
+ * resolution — REQUIRED ("reuse the canonical SQLGeneral placement
+ * resolution and validation rules without performing any writes... avoid
+ * duplicating business rules or introducing another resolver"). Calls the
+ * EXACT SAME resolveSqlGeneralPlacementTarget the real worker uses, inside
+ * a transaction that is UNCONDITIONALLY rolled back — every eligibility/
+ * trust/ambiguity/ownership/hierarchy/inactive-source rule lives
+ * exclusively in that one function; this wrapper adds no decision logic of
+ * its own, only the rollback boundary. The sentinel throw forces Prisma to
+ * discard every statement the call made (a would-be Company/Department
+ * create included) — nothing from this ever reaches the committed
+ * database, regardless of what the resolver decided to do internally.
+ *
+ * Deliberately does NOT acquire acquireOrganizationSyncLock: nothing here
+ * is ever persisted, so there is nothing to serialize against, and
+ * skipping it keeps Preview non-blocking against a real in-flight sync run.
+ * A transient unique-constraint collision against a concurrently-running
+ * REAL sync is already handled by the same P2002-catch-and-refetch
+ * createSqlGeneralDepartment/resolveCompanyForSync use for a real run —
+ * this call simply observes whichever row wins, then rolls back either way.
+ */
+async function resolveSqlGeneralPlacementTargetDryRun(
+  placement: ResolvedDepartmentPlacement,
+  sqlGeneralCompanyId: string | null
+): Promise<ResolvedPlacementTarget> {
+  let captured: ResolvedPlacementTarget | null = null;
+  try {
+    await prisma.$transaction(async (tx) => {
+      captured = await resolveSqlGeneralPlacementTarget(tx, placement, sqlGeneralCompanyId, `preview-dry-run:${randomUUID()}`);
+      throw SQLGENERAL_PREVIEW_DRY_RUN_ABORT;
+    });
+  } catch (err) {
+    if (err !== SQLGENERAL_PREVIEW_DRY_RUN_ABORT) throw err;
+  }
+  return captured!;
 }
 
 async function applySqlGeneralDepartmentMembership(userId: string, placement: ResolvedDepartmentPlacement, sqlGeneralCompanyId: string | null): Promise<ApplyOutcome> {
@@ -636,8 +826,23 @@ export interface SqlGeneralPreviewRow {
   /** Root-to-immediate-parent department descriptions (or raw id if a link has no description) — built purely from ParentDepartmentId, never from names or manager chains. */
   parentChain: string[];
   missingParent: boolean;
-  /** "approved_external_mapping": resolved via an admin-approved SqlGeneralCompanyMapping — the target Company is NOT SQLGeneral-owned and never will be by this alone; distinct from "existing_sqlgeneral_owned" (which really is owned by this sync) so the two are never conflated. */
-  localMatch: "none" | "existing_sqlgeneral_owned" | "conflict_other_owner" | "approved_external_mapping";
+  /**
+   * "approved_external_mapping": resolved via an admin-approved
+   * SqlGeneralCompanyMapping/SqlGeneralDepartmentMapping — the target is
+   * NOT necessarily SQLGeneral-owned and never will be by this alone;
+   * distinct from "existing_sqlgeneral_owned" (which really is owned by
+   * this sync) so the two are never conflated.
+   * "would_auto_create" (REQUIRED, Preview/Worker parity round): the
+   * Company and/or Department does not exist locally yet, but the real
+   * worker's resolveSqlGeneralPlacementTarget would successfully create
+   * it (structurally sound chain, active source, no ownership conflict) —
+   * a VALID proposed creation, distinct from every blocked_* outcome,
+   * which this field never reports. proposedDepartmentId is deliberately
+   * null in this case — a brand-new id generated inside Preview's own
+   * rolled-back dry-run transaction was never actually persisted, so it is
+   * never surfaced as if it already existed.
+   */
+  localMatch: "none" | "existing_sqlgeneral_owned" | "conflict_other_owner" | "approved_external_mapping" | "would_auto_create";
   conflictDetail: string | null;
   /** Which node level the conflict is actually at — null whenever localMatch isn't conflict_other_owner. Distinct from conflictDetail's free text so a caller can branch on it structurally. */
   conflictLevel: "company" | "department" | null;
@@ -855,72 +1060,60 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     const { department, parentChain, missingParent } = placementResult.placement;
     const companyName = department.company ?? user.company;
     const departmentName = department.description;
-    const sqlGeneralDepartmentId = String(department.id);
+
+    // REQUIRED (Preview/Worker parity round): the ENTIRE Company/Department
+    // resolution decision — approved-mapping lookup, name-match, ownership
+    // conflict, hierarchy/inactive-source validation, and now auto-creation
+    // eligibility — lives EXCLUSIVELY in resolveSqlGeneralPlacementTarget
+    // (the same function applySqlGeneralPrimaryPlacement/
+    // applySqlGeneralDepartmentMembership call for a real run). This no
+    // longer re-implements any of those rules — it only calls the canonical
+    // resolver inside a transaction that is ALWAYS rolled back
+    // (resolveSqlGeneralPlacementTargetDryRun), then maps that ONE shared
+    // result onto this preview row's existing display vocabulary.
+    let dryRunResult: ResolvedPlacementTarget;
+    try {
+      dryRunResult = await resolveSqlGeneralPlacementTargetDryRun(placementResult.placement, sqlGeneralCompanyId);
+    } catch (err) {
+      return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+    }
 
     let localMatch: SqlGeneralPreviewRow["localMatch"] = "none";
     let conflictDetail: string | null = null;
     let conflictLevel: SqlGeneralPreviewRow["conflictLevel"] = null;
     let resolvedCompany: { id: string; name: string } | null = null;
-
-    const approvedCompanyMapping = sqlGeneralCompanyId ? await prisma.sqlGeneralCompanyMapping.findUnique({ where: { sqlGeneralCompanyId }, select: { company: true } }) : null;
-    if (approvedCompanyMapping) {
-      // An admin has explicitly reviewed and approved this exact SQLGeneral
-      // CompanyId against this exact local Company — bypass the name-based
-      // check entirely, but this is NOT the same as SQLGeneral owning it
-      // (see localMatch's own doc comment).
-      resolvedCompany = approvedCompanyMapping.company;
-      localMatch = "approved_external_mapping";
-    } else if (companyName) {
-      const existingCompany = await prisma.company.findUnique({ where: { normalizedName: normalizeCompanyName(companyName) } });
-      if (existingCompany) {
-        if (existingCompany.importSource !== OrganizationNodeSource.SQLGENERAL) {
-          localMatch = "conflict_other_owner";
-          conflictLevel = "company";
-          conflictDetail = `Company "${companyName}" already exists and is not owned by SQLGeneral sync.`;
-          // Blocked at the Company level — the Department-level check below
-          // never runs; resolvedCompany stays null on purpose.
-        } else {
-          resolvedCompany = existingCompany;
-          localMatch = "existing_sqlgeneral_owned";
-        }
-      }
-      // No existingCompany at all: resolvedCompany stays null, localMatch
-      // stays "none" — a brand-new Company (and therefore Department) would
-      // be created fresh; the Department-level check below doesn't apply.
-    }
-
-    // One shared Department-level check, reached whenever a Company was
-    // actually resolved above (approved-mapped, or SQLGeneral-owned) —
-    // consolidated from what used to be two near-identical copies so the
-    // NEW SqlGeneralDepartmentMapping check only has to be written once and
-    // applies identically to both paths (REQUIRED #6: "sync and preview
-    // both resolve approved mappings consistently").
     let proposedDepartmentId: string | null = null;
     let proposedDepartmentName: string | null = null;
-    if (resolvedCompany && departmentName) {
-      const approvedDeptMapping = await prisma.sqlGeneralDepartmentMapping.findUnique({ where: { sqlGeneralDepartmentId }, select: { department: true } });
-      if (approvedDeptMapping) {
-        // An admin has explicitly approved THIS exact Department bridge —
-        // authoritative regardless of the existing Department's own
-        // ownership, which is never touched by this.
-        localMatch = "approved_external_mapping";
-        proposedDepartmentId = approvedDeptMapping.department.id;
-        proposedDepartmentName = approvedDeptMapping.department.name;
-      } else {
-        const existingDept = await prisma.department.findUnique({
-          where: { companyId_normalizedName: { companyId: resolvedCompany.id, normalizedName: normalizeDepartmentName(departmentName) } },
-        });
-        if (existingDept && existingDept.importSource !== OrganizationNodeSource.SQLGENERAL) {
-          localMatch = "conflict_other_owner";
-          conflictLevel = "department";
-          conflictDetail = `Department "${departmentName}" already exists under Company "${resolvedCompany.name}" and is not owned by SQLGeneral sync.`;
-        } else if (!existingDept) {
-          conflictDetail = `No existing Department "${departmentName}" under Company "${resolvedCompany.name}" — would require SQLGeneral Department auto-creation, not yet implemented.`;
-        } else {
-          proposedDepartmentId = existingDept.id;
-          proposedDepartmentName = existingDept.name;
-        }
+
+    if (dryRunResult.ok) {
+      resolvedCompany = dryRunResult.company;
+      proposedDepartmentName = dryRunResult.department.name;
+      // Never surfaced when the row was only created inside the rolled-back
+      // dry-run transaction — that id was never actually persisted, so
+      // handing it back as if it already existed would be actively
+      // misleading to a caller that might reuse it in a later real request.
+      proposedDepartmentId = dryRunResult.departmentCreated ? null : dryRunResult.department.id;
+      localMatch = dryRunResult.companyMappingUsed || dryRunResult.departmentMappingUsed
+        ? "approved_external_mapping"
+        : dryRunResult.companyCreated || dryRunResult.departmentCreated
+          ? "would_auto_create"
+          : "existing_sqlgeneral_owned";
+    } else {
+      conflictDetail = dryRunResult.reason;
+      if (dryRunResult.reasonCode === "company_conflict_other_owner") {
+        localMatch = "conflict_other_owner";
+        conflictLevel = "company";
+      } else if (dryRunResult.reasonCode === "department_conflict_other_owner") {
+        localMatch = "conflict_other_owner";
+        conflictLevel = "department";
       }
+      // Every other reasonCode (missing source value, an approved mapping's
+      // own target/chain gone bad, or the auto-creation gates — unresolved
+      // chain, inactive source, inconsistent ancestor) is a genuine blocker
+      // with no local-ownership conflict at either level — localMatch stays
+      // "none", conflictDetail alone (the resolver's own human-readable
+      // reason) carries the specifics, same as the pre-existing
+      // "not yet implemented" case used to.
     }
 
     // REQUIRED DO #7/#5 — mirrors processOne/applySqlGeneralPrimaryPlacement/
@@ -947,18 +1140,30 @@ export async function previewSqlGeneralUserSync(target: { userIds: string[] } | 
     //     but the stale provenance tag is worth surfacing). Otherwise a
     //     real write occurs (role/source/customRoleId all updated) —
     //     "would_change_role".
+    // Used ONLY for the "would this actually move the user" comparison
+    // below — deliberately NOT the same value as the public
+    // proposedDepartmentId field above, which stays null for a
+    // not-yet-created Department precisely so a never-persisted id is
+    // never handed back as if it already existed. The comparison still
+    // needs the real resolved id (persisted or not) to correctly tell
+    // "would_place" apart from "unchanged" for a user with no current
+    // primary moving into a brand-new auto-created Department.
+    const resolvedDepartmentIdForComparison = dryRunResult.ok ? dryRunResult.department.id : null;
+
     let primaryChangeOutcome: SqlGeneralPreviewRow["primaryChangeOutcome"];
     if (localMatch === "conflict_other_owner") {
       primaryChangeOutcome = "blocked_local_conflict";
-    } else if (proposedDepartmentId === null) {
-      // localMatch stays "none" for this case — a Company may still have
-      // been auto-creatable, but Department auto-creation is not
-      // implemented (same fail-closed reason resolveSqlGeneralPlacementTarget
-      // itself returns) — distinct from a genuine ownership conflict.
+    } else if (!dryRunResult.ok) {
+      // Every other resolver failure (missing source value, a broken
+      // approved mapping, or one of the auto-creation gates — unresolved
+      // chain, inactive source, inconsistent ancestor) has no resolvable
+      // target at all — the same bucket the pre-existing "Department
+      // doesn't exist, auto-creation not implemented" case used to report,
+      // now reused for every other non-conflict resolver failure too.
       primaryChangeOutcome = "blocked_unmapped_department";
     } else if (user.active !== true) {
       primaryChangeOutcome = "blocked_inactive_hr";
-    } else if (currentInfo.departmentId !== proposedDepartmentId) {
+    } else if (currentInfo.departmentId !== resolvedDepartmentIdForComparison) {
       primaryChangeOutcome = currentInfo.locked ? "blocked_locked" : "would_place";
     } else {
       const protectManualRole = currentInfo.source === MembershipSource.MANUAL;

@@ -14,6 +14,16 @@ export interface ProjectActivityRow {
   title: string;
   /** ISO string — formatted client-side with the same formatDate() the previous server render used. */
   dueDate: string | null;
+  /** ISO strings — same Expected Start/Finish fields ProjectActivity already carries (set only for a request-origin Project's Activities; null for a manual one). */
+  expectedStartDate: string | null;
+  expectedFinishDate: string | null;
+  /** The legacy, editable "real" start date (ProjectActivity.startDate) — distinct from expectedStartDate above (the request-origin planning baseline). Set on any Activity, manual or request-origin. */
+  startDate: string | null;
+  /** Stamped server-side exactly at the authoritative COMPLETED transition (see app/api/activities/[id]/route.ts) — null until the Activity is actually completed, never a stand-in for expectedFinishDate. */
+  completedAt: string | null;
+  /** Whole calendar days, both already computed/stored server-side — never recalculated client-side. */
+  expectedDays: number | null;
+  actualDays: number | null;
   isCompleted: boolean;
   /** Pre-resolved server-side (see lib/services/activity-status-config.ts) — never re-derived client-side. */
   statusLabel: string;
@@ -60,7 +70,13 @@ export function ProjectActivitiesCard({ projectId, initialActivities, initialPro
     // always applies — the checkbox itself structurally prevents a second
     // concurrent toggle of the SAME row (it unmounts into a spinner for the
     // duration of its own request), so there is no same-row race to guard.
-    setActivities((prev) => prev.map((a) => (a.id === activityId ? { ...a, isCompleted: result.isCompleted, statusLabel: result.statusLabel, statusColor: result.statusColor } : a)));
+    setActivities((prev) =>
+      prev.map((a) =>
+        a.id === activityId
+          ? { ...a, isCompleted: result.isCompleted, statusLabel: result.statusLabel, statusColor: result.statusColor, completedAt: result.completedAt, actualDays: result.actualDays }
+          : a
+      )
+    );
 
     const rollup = result.projectRollups.find((r) => r.id === projectId);
     if (rollup && tokenGuardRef.current.isCurrent(myToken)) {
@@ -92,7 +108,10 @@ export function ProjectActivitiesCard({ projectId, initialActivities, initialPro
         {activities.length === 0 ? (
           <p className="text-center text-muted-foreground py-8 text-sm">No activities yet.</p>
         ) : (
-          <div className="space-y-2">
+          // max-h + overflow-y-auto only on the row list itself — the header
+          // (title/count/progress) above and the progress bar stay outside
+          // this div, so they're never scrolled out of view.
+          <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
             {activities.map((activity) => (
               <Link
                 key={activity.id}
@@ -109,9 +128,29 @@ export function ProjectActivitiesCard({ projectId, initialActivities, initialPro
                     <p className={`text-sm font-medium ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
                       {activity.title}
                     </p>
-                    {activity.dueDate && (
-                      <p className="text-xs text-muted-foreground">Due: {formatDate(activity.dueDate)}</p>
-                    )}
+                    <div className="flex items-center gap-2 flex-wrap mt-0.5">
+                      {activity.dueDate && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Due: {formatDate(activity.dueDate)}</span>
+                      )}
+                      {activity.expectedStartDate && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Start: {formatDate(activity.expectedStartDate)}</span>
+                      )}
+                      {activity.expectedFinishDate && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Finish: {formatDate(activity.expectedFinishDate)}</span>
+                      )}
+                      {typeof activity.expectedDays === "number" && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Duration: {activity.expectedDays} day(s)</span>
+                      )}
+                      {activity.startDate && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Start: {formatDate(activity.startDate)}</span>
+                      )}
+                      {activity.completedAt && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Finish: {formatDate(activity.completedAt)}</span>
+                      )}
+                      {typeof activity.actualDays === "number" && (
+                        <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Duration: {activity.actualDays} day(s)</span>
+                      )}
+                    </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 flex-shrink-0">

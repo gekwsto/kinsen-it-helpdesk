@@ -434,9 +434,14 @@ export async function PATCH(
     // status whenever a caller, like the Activity edit form, sent `status`
     // without also sending `isCompleted`). actualDays is computed ONLY at
     // the moment of a genuine TODO/IN_PROGRESS/etc. -> COMPLETED transition
-    // (never retroactively just because expectedStartDate is edited while
-    // already completed), using Expected Start (never Expected Finish) and
-    // the server's own clock (never a client-submitted date). Reopening
+    // (never retroactively just because expectedStartDate/startDate is
+    // edited while already completed), using Expected Start when present —
+    // never Expected Finish — falling back to Actual Start (startDate) only
+    // when Expected Start is absent (see actualDaysStartReference below;
+    // true for every manual-Project Activity by design, so completing one
+    // is no longer silently left with actualDays: null merely because it
+    // was never a request-origin Activity) — and the server's own clock
+    // (never a client-submitted date). Reopening
     // (COMPLETED -> anything else) clears it; completing again later
     // recomputes it fresh from the NEW completion date — this repository's
     // Activity domain does allow COMPLETED -> another status (no DB/service
@@ -447,7 +452,15 @@ export async function PATCH(
     const justCompleted = existing.status !== ActivityStatus.COMPLETED && effectiveStatus === ActivityStatus.COMPLETED;
     const justReopened = existing.status === ActivityStatus.COMPLETED && effectiveStatus !== ActivityStatus.COMPLETED;
     const completionDate = justCompleted ? new Date() : null;
-    const newActualDays = justCompleted && effectiveExpectedStart ? actualDaysFromCompletion(effectiveExpectedStart, completionDate!) : null;
+    // Expected Start (the request-origin planning baseline) wins when
+    // present — preserves existing request-origin behavior byte-for-byte.
+    // Falls back to the (already-resolved, see effectiveStart above) Actual
+    // Start only when Expected Start is absent — true for every manual-
+    // Project Activity by design — so completing one no longer silently
+    // persists actualDays: null merely because it was never a request-
+    // origin Activity in the first place.
+    const actualDaysStartReference = effectiveExpectedStart ?? effectiveStart;
+    const newActualDays = justCompleted && actualDaysStartReference ? actualDaysFromCompletion(actualDaysStartReference, completionDate!) : null;
 
     // Sequence — ONLY touched when the PROJECT itself is changing (a plain
     // field edit, status change, etc. never alters it; reordering within a

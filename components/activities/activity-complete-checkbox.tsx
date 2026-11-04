@@ -14,6 +14,9 @@ export interface ActivityToggleResult {
   statusLabel: string;
   statusColor: string;
   projectRollups: ProjectRollupResult[];
+  /** Server-derived on this SAME transition (see toggleActivityComplete's own doc comment) — null on reopen, a fresh value on (re)completion. */
+  completedAt: string | null;
+  actualDays: number | null;
 }
 
 interface ActivityCompleteCheckboxProps {
