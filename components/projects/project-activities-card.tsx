@@ -1,13 +1,17 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials, formatDate } from "@/lib/utils";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { createTokenGuard } from "@/lib/navigation-loader";
+import { LinkExistingActivityDialog } from "@/components/projects/link-existing-activity-dialog";
+import { Link2 } from "lucide-react";
 
 export interface ProjectActivityRow {
   id: string;
@@ -33,9 +37,15 @@ export interface ProjectActivityRow {
 
 interface ProjectActivitiesCardProps {
   projectId: string;
+  /** This Project's own title — passed through to LinkExistingActivityDialog as the reassignment destination's display name. */
+  projectTitle: string;
   initialActivities: ProjectActivityRow[];
   initialProgress: number;
   progressIsCalculated: boolean;
+  /** This Project's own departmentId — null hides the Link Activity button entirely (nothing to scope a candidate search to). */
+  departmentId: string | null;
+  /** activity.edit for this Project's own department — the SAME permission PATCH /api/activities/[id] itself requires to move an Activity's projectId; this only gates whether the button renders. */
+  canLinkActivities: boolean;
 }
 
 /**
@@ -49,9 +59,27 @@ interface ProjectActivitiesCardProps {
  * component's local state — no refresh, no re-fetch, same markup/behavior
  * otherwise.
  */
-export function ProjectActivitiesCard({ projectId, initialActivities, initialProgress, progressIsCalculated }: ProjectActivitiesCardProps) {
+export function ProjectActivitiesCard({ projectId, projectTitle, initialActivities, initialProgress, progressIsCalculated, departmentId, canLinkActivities }: ProjectActivitiesCardProps) {
+  const router = useRouter();
   const [activities, setActivities] = useState(initialActivities);
   const [progress, setProgress] = useState(initialProgress);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+
+  // initialActivities/initialProgress only change identity on a genuine
+  // server re-render (router.refresh() or a navigation) — never as a side
+  // effect of this component's OWN local state updates (the completion
+  // toggle below never calls router.refresh(), it applies its PATCH
+  // response directly to local state instead) — so re-syncing here can
+  // never clobber an in-flight optimistic toggle. Needed because useState's
+  // initial value is only consumed on first mount; without this, the newly
+  // Linked Activity (see LinkExistingActivityDialog's onLinked ->
+  // router.refresh()) would never actually appear until a hard reload.
+  useEffect(() => {
+    setActivities(initialActivities);
+  }, [initialActivities]);
+  useEffect(() => {
+    setProgress(initialProgress);
+  }, [initialProgress]);
 
   // Guards the SHARED project-level aggregate (progress) against a stale
   // response clobbering a newer one: two different rows' toggles can
@@ -88,15 +116,23 @@ export function ProjectActivitiesCard({ projectId, initialActivities, initialPro
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-3">
         <CardTitle className="text-base">Activities ({totalActivities})</CardTitle>
-        {totalActivities > 0 && (
-          <div className="text-right">
-            <span className="text-sm text-muted-foreground">{progress}%</span>
-            <p className="text-[10px] text-muted-foreground">
-              {completedActivities} of {totalActivities} complete
-              {progressIsCalculated ? " · Calculated from linked tickets" : " · Manual progress"}
-            </p>
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          {totalActivities > 0 && (
+            <div className="text-right">
+              <span className="text-sm text-muted-foreground">{progress}%</span>
+              <p className="text-[10px] text-muted-foreground">
+                {completedActivities} of {totalActivities} complete
+                {progressIsCalculated ? " · Calculated from linked tickets" : " · Manual progress"}
+              </p>
+            </div>
+          )}
+          {canLinkActivities && departmentId && (
+            <Button size="sm" className="gap-1.5" onClick={() => setLinkDialogOpen(true)}>
+              <Link2 className="h-3.5 w-3.5" />
+              Link Activity
+            </Button>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         {totalActivities > 0 && (
@@ -167,6 +203,16 @@ export function ProjectActivitiesCard({ projectId, initialActivities, initialPro
           </div>
         )}
       </CardContent>
+      {canLinkActivities && departmentId && (
+        <LinkExistingActivityDialog
+          open={linkDialogOpen}
+          onOpenChange={setLinkDialogOpen}
+          projectId={projectId}
+          projectTitle={projectTitle}
+          departmentId={departmentId}
+          onLinked={() => router.refresh()}
+        />
+      )}
     </Card>
   );
 }

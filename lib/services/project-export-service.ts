@@ -60,6 +60,33 @@ function decimalToNumber(value: Prisma.Decimal | number): number {
   return typeof value === "number" ? value : Number(value);
 }
 
+/**
+ * Writes a TOTAL-row cell as a real Excel SUM formula over that column's
+ * own data rows (`result` is supplied too, so the total still displays
+ * correctly in a viewer that doesn't recalculate on open). This does NOT
+ * weaken the formula-injection defense-in-depth above: a `<f>` formula
+ * element is written here ONLY for this app-authored total, over a range
+ * of numeric duration cells — never for a value built from user-controlled
+ * input (every other cell in these sheets keeps going through
+ * sanitizeRow/sanitizeCellValue exactly as before, completely unaffected
+ * by this helper). Falls back to a plain number when there are no data
+ * rows to sum (`SUM(D2:D1)` is an invalid/empty range) — an empty export
+ * still shows a correct 0 total, not a formula error.
+ */
+function setSumTotalCell(
+  sheet: ExcelJS.Worksheet,
+  totalsRowNumber: number,
+  columnKey: string,
+  firstDataRow: number,
+  lastDataRow: number,
+  sumValue: number
+) {
+  const column = sheet.getColumn(columnKey);
+  const cell = sheet.getCell(totalsRowNumber, column.number);
+  cell.value =
+    lastDataRow >= firstDataRow ? { formula: `SUM(${column.letter}${firstDataRow}:${column.letter}${lastDataRow})`, result: sumValue } : sumValue;
+}
+
 // ─── Formula-injection defense-in-depth (CWE-1236) ──────────────────────────
 // Every exported .xlsx cell is written as a plain OOXML shared-string value
 // (`t="s"`, never a `<f>` formula element — verified directly against the
@@ -265,12 +292,21 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   ];
   let totalEstimated = 0;
   let totalActual = 0;
+  // Summed from the SAME data.activities array both sheets below iterate —
+  // one Activity contributes to this total exactly once, never re-queried
+  // or re-derived per sheet, so Financials and Activities can never
+  // disagree or double-count. A null expectedDays/actualDays contributes 0
+  // here; the Activity's own row cell stays null/blank, never coerced.
+  let totalExpectedDays = 0;
+  let totalActualDays = 0;
   for (const a of data.activities) {
     const { estimatedCost, actualCost } = computeActivityFinancials({ taskSubTypeCost: a.taskSubTypeCost, expectedDays: a.expectedDays, actualDays: a.actualDays });
     const estimatedNum = decimalToNumber(estimatedCost);
     const actualNum = decimalToNumber(actualCost);
     totalEstimated += estimatedNum;
     totalActual += actualNum;
+    totalExpectedDays += a.expectedDays ?? 0;
+    totalActualDays += a.actualDays ?? 0;
     financialsSheet.addRow(
       sanitizeRow({
         title: a.title,
@@ -283,8 +319,11 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
       })
     );
   }
+  const financialsLastDataRow = 1 + data.activities.length;
   const totalsRow = financialsSheet.addRow({ title: "TOTAL", estimatedCost: totalEstimated, actualCost: totalActual });
   totalsRow.font = { bold: true };
+  setSumTotalCell(financialsSheet, totalsRow.number, "expectedDays", 2, financialsLastDataRow, totalExpectedDays);
+  setSumTotalCell(financialsSheet, totalsRow.number, "actualDays", 2, financialsLastDataRow, totalActualDays);
   for (const key of ["costPerDay", "estimatedCost", "actualCost"]) {
     financialsSheet.getColumn(key).numFmt = '"€"#,##0.00';
   }
@@ -327,6 +366,18 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
       })
     );
   }
+  // Same totalExpectedDays/totalActualDays already summed once above while
+  // building the Financials sheet — this is the identical data.activities
+  // array, so reusing the figure (rather than summing a second time) is
+  // both simpler and a guarantee the two sheets' totals can never drift
+  // apart. The SUM formula itself still references THIS sheet's own
+  // expectedDays/actualDays columns, not Financials' — each sheet's total
+  // is independently verifiable from its own visible rows.
+  const activitiesLastDataRow = 1 + data.activities.length;
+  const activitiesTotalsRow = activitiesSheet.addRow({ title: "TOTAL" });
+  activitiesTotalsRow.font = { bold: true };
+  setSumTotalCell(activitiesSheet, activitiesTotalsRow.number, "expectedDays", 2, activitiesLastDataRow, totalExpectedDays);
+  setSumTotalCell(activitiesSheet, activitiesTotalsRow.number, "actualDays", 2, activitiesLastDataRow, totalActualDays);
   applyDateFormat(activitiesSheet, ["expectedStartDate", "expectedFinishDate", "createdAt"]);
   styleHeaderRow(activitiesSheet);
   if (data.activities.length > 0) applyAutoFilter(activitiesSheet);

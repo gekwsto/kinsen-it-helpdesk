@@ -177,6 +177,25 @@ async function main() {
     });
     activityIds.push(a1.id, a2.id);
 
+    // Dedicated fixture for the Expected/Actual Days TOTAL row: a mix of
+    // null expectedDays, null actualDays, and fully-populated rows — null
+    // durations must count as 0 in the total WITHOUT the original cell
+    // itself ever being coerced away from null.
+    const p5 = await prisma.project.create({
+      data: { title: `Export Days Totals Project ${RUN_ID}`, status: ProjectStatus.PLANNING, priority: 2, ownerId: adminUser.id, departmentId: deptA.id },
+    });
+    projectIds.push(p5.id);
+    const b1 = await prisma.projectActivity.create({
+      data: { title: `Export Days b1 (null actual) ${RUN_ID}`, projectId: p5.id, departmentId: deptA.id, expectedDays: 10, actualDays: null },
+    });
+    const b2 = await prisma.projectActivity.create({
+      data: { title: `Export Days b2 (null expected) ${RUN_ID}`, projectId: p5.id, departmentId: deptA.id, expectedDays: null, actualDays: 4 },
+    });
+    const b3 = await prisma.projectActivity.create({
+      data: { title: `Export Days b3 (both set) ${RUN_ID}`, projectId: p5.id, departmentId: deptA.id, expectedDays: 3, actualDays: 3 },
+    });
+    activityIds.push(b1.id, b2.id, b3.id);
+
     // 25 manual projects (> DEFAULT_PAGE_SIZE of 20) sharing a unique search
     // term, to prove the export never truncates to one pagination page.
     const pagTag = `ExportPagTest-${RUN_ID}`;
@@ -282,10 +301,14 @@ async function main() {
     const financialsSheet = workbook.getWorksheet("Financials")!;
     let totalEstimated: unknown;
     let totalActual: unknown;
+    let financialsTotalExpectedDays: ExcelJS.CellValue;
+    let financialsTotalActualDays: ExcelJS.CellValue;
     let financialsDataRows = 0;
     financialsSheet.eachRow((row, rowNumber) => {
       if (rowNumber === 1) return;
       if (row.getCell(1).value === "TOTAL") {
+        financialsTotalExpectedDays = row.getCell(4).value;
+        financialsTotalActualDays = row.getCell(5).value;
         totalEstimated = row.getCell(6).value;
         totalActual = row.getCell(7).value;
       } else {
@@ -296,11 +319,118 @@ async function main() {
     check("Financials sheet has one data row per Activity (2)", financialsDataRows === 2);
     check(`Financials TOTAL estimated cost is correct (500+500=1000, got ${totalEstimated})`, totalEstimated === 1000);
     check(`Financials TOTAL actual cost is correct (300+500=800, got ${totalActual})`, totalActual === 800);
+    check(
+      `Financials TOTAL Expected Days is a SUM formula over its own column, result 7 (5+2) (got ${JSON.stringify(financialsTotalExpectedDays)})`,
+      typeof financialsTotalExpectedDays === "object" &&
+        financialsTotalExpectedDays !== null &&
+        "formula" in financialsTotalExpectedDays &&
+        (financialsTotalExpectedDays as any).formula === "SUM(D2:D3)" &&
+        (financialsTotalExpectedDays as any).result === 7
+    );
+    check(
+      `Financials TOTAL Actual Days is a SUM formula over its own column, result 5 (3+2) (got ${JSON.stringify(financialsTotalActualDays)})`,
+      typeof financialsTotalActualDays === "object" &&
+        financialsTotalActualDays !== null &&
+        "formula" in financialsTotalActualDays &&
+        (financialsTotalActualDays as any).formula === "SUM(E2:E3)" &&
+        (financialsTotalActualDays as any).result === 5
+    );
 
     const activitiesSheet = workbook.getWorksheet("Activities")!;
     const activityTitles = await readSheetTitles(detailBuf, "Activities");
     check("Activities sheet lists both fixture Activities", activityTitles.includes(a1.title) && activityTitles.includes(a2.title));
-    void activitiesSheet;
+    let activitiesTotalExpectedDays: ExcelJS.CellValue;
+    let activitiesTotalActualDays: ExcelJS.CellValue;
+    activitiesSheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      if (row.getCell(1).value === "TOTAL") {
+        activitiesTotalExpectedDays = row.getCell(10).value;
+        activitiesTotalActualDays = row.getCell(11).value;
+      }
+    });
+    check(
+      `Activities sheet TOTAL row has its own Expected Days SUM formula, result 7 (got ${JSON.stringify(activitiesTotalExpectedDays)})`,
+      typeof activitiesTotalExpectedDays === "object" &&
+        activitiesTotalExpectedDays !== null &&
+        "formula" in activitiesTotalExpectedDays &&
+        (activitiesTotalExpectedDays as any).formula === "SUM(J2:J3)" &&
+        (activitiesTotalExpectedDays as any).result === 7
+    );
+    check(
+      `Activities sheet TOTAL row has its own Actual Days SUM formula, result 5 (got ${JSON.stringify(activitiesTotalActualDays)})`,
+      typeof activitiesTotalActualDays === "object" &&
+        activitiesTotalActualDays !== null &&
+        "formula" in activitiesTotalActualDays &&
+        (activitiesTotalActualDays as any).formula === "SUM(K2:K3)" &&
+        (activitiesTotalActualDays as any).result === 5
+    );
+
+    console.log("\n6b. Null durations count as 0 in the total WITHOUT the original cell being coerced...\n");
+    res = await callDetailExport(p5.id);
+    const p5Buf = Buffer.from(await res.arrayBuffer());
+    const p5Workbook = new ExcelJS.Workbook();
+    await p5Workbook.xlsx.load(p5Buf as any);
+    const p5Activities = p5Workbook.getWorksheet("Activities")!;
+    let b1ExpectedCell: ExcelJS.CellValue, b1ActualCell: ExcelJS.CellValue, b2ExpectedCell: ExcelJS.CellValue, b2ActualCell: ExcelJS.CellValue;
+    let p5TotalExpected: ExcelJS.CellValue, p5TotalActual: ExcelJS.CellValue;
+    p5Activities.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      const title = row.getCell(1).value;
+      if (title === b1.title) {
+        b1ExpectedCell = row.getCell(10).value;
+        b1ActualCell = row.getCell(11).value;
+      } else if (title === b2.title) {
+        b2ExpectedCell = row.getCell(10).value;
+        b2ActualCell = row.getCell(11).value;
+      } else if (title === "TOTAL") {
+        p5TotalExpected = row.getCell(10).value;
+        p5TotalActual = row.getCell(11).value;
+      }
+    });
+    check(`b1's own Actual Days cell stays blank/null, never coerced to 0 (got ${JSON.stringify(b1ActualCell)})`, b1ActualCell == null);
+    check(`b2's own Expected Days cell stays blank/null, never coerced to 0 (got ${JSON.stringify(b2ExpectedCell)})`, b2ExpectedCell == null);
+    check(`b1's Expected Days cell is untouched at 10 (got ${JSON.stringify(b1ExpectedCell)})`, b1ExpectedCell === 10);
+    check(`b2's Actual Days cell is untouched at 4 (got ${JSON.stringify(b2ActualCell)})`, b2ActualCell === 4);
+    check(
+      `TOTAL Expected Days treats b2's null as 0: 10+0+3=13 (got ${JSON.stringify(p5TotalExpected)})`,
+      typeof p5TotalExpected === "object" && p5TotalExpected !== null && (p5TotalExpected as any).result === 13
+    );
+    check(
+      `TOTAL Actual Days treats b1's null as 0: 0+4+3=7 (got ${JSON.stringify(p5TotalActual)})`,
+      typeof p5TotalActual === "object" && p5TotalActual !== null && (p5TotalActual as any).result === 7
+    );
+
+    console.log("\n6c. Empty dataset (Project with zero Activities) — totals are 0, no formula-range crash...\n");
+    res = await callDetailExport(p3.id);
+    check("Empty-activities detail export still responds 200", res.status === 200);
+    const p3Buf = Buffer.from(await res.arrayBuffer());
+    const p3Workbook = new ExcelJS.Workbook();
+    await p3Workbook.xlsx.load(p3Buf as any);
+    const p3Financials = p3Workbook.getWorksheet("Financials")!;
+    const p3ActivitiesSheet = p3Workbook.getWorksheet("Activities")!;
+    let p3FinTotalExpected: ExcelJS.CellValue, p3FinTotalActual: ExcelJS.CellValue;
+    p3Financials.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      if (row.getCell(1).value === "TOTAL") {
+        p3FinTotalExpected = row.getCell(4).value;
+        p3FinTotalActual = row.getCell(5).value;
+      }
+    });
+    let p3ActTotalExpected: ExcelJS.CellValue, p3ActTotalActual: ExcelJS.CellValue, p3ActRowCount = 0;
+    p3ActivitiesSheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+      if (row.getCell(1).value === "TOTAL") {
+        p3ActTotalExpected = row.getCell(10).value;
+        p3ActTotalActual = row.getCell(11).value;
+      } else {
+        p3ActRowCount++;
+      }
+    });
+    check("Empty-activities Project has zero data rows in the Activities sheet", p3ActRowCount === 0);
+    check(`Empty Financials TOTAL Expected Days is a plain 0, not a broken formula (got ${JSON.stringify(p3FinTotalExpected)})`, p3FinTotalExpected === 0);
+    check(`Empty Financials TOTAL Actual Days is a plain 0 (got ${JSON.stringify(p3FinTotalActual)})`, p3FinTotalActual === 0);
+    check(`Empty Activities TOTAL Expected Days is a plain 0 (got ${JSON.stringify(p3ActTotalExpected)})`, p3ActTotalExpected === 0);
+    check(`Empty Activities TOTAL Actual Days is a plain 0 (got ${JSON.stringify(p3ActTotalActual)})`, p3ActTotalActual === 0);
 
     console.log("\n7. Unknown Project id -> 404, not a crash or empty file...\n");
     res = await callDetailExport("nonexistent-id-12345");

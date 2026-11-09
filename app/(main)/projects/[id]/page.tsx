@@ -6,15 +6,13 @@ import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
-import { ChevronRight, Calendar, Users, Target, Ticket, Pencil } from "lucide-react";
+import { ChevronRight, Calendar, Users, Target } from "lucide-react";
 import { GoalStatus } from "@prisma/client";
-import { formatTicketNumber } from "@/lib/utils";
 import { ProjectActivitiesCard } from "@/components/projects/project-activities-card";
 import { ProjectActivitySequenceCard } from "@/components/projects/project-activity-sequence-card";
+import { ProjectRelatedTicketsCard } from "@/components/projects/project-related-tickets-card";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
 import { EntityNotes } from "@/components/notes/entity-notes";
 import { EntityAttachments } from "@/components/attachments/entity-attachments";
@@ -92,6 +90,13 @@ export default async function ProjectDetailPage({
   // render; PATCH /api/projects/[id]/activities/order independently
   // re-checks this exact permission and is the real authority.
   const canEditActivities = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "activity.edit");
+  // ticket.linkProjectActivity for this Project's own department — the
+  // SAME permission PATCH /api/tickets/[id] itself requires to set a
+  // Ticket's projectId (see components/tickets/ticket-actions.tsx's own
+  // "Link Project / Activity" dialog, which already gates on this).
+  // Gates ONLY whether the new "Link Ticket" button renders here; the
+  // route is the real authority regardless.
+  const canLinkTickets = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "ticket.linkProjectActivity");
   const notes = await prisma.projectNote.findMany({
     where: { projectId: id },
     include: {
@@ -197,6 +202,23 @@ export default async function ProjectDetailPage({
   // normally occurring at all. Computed here (sorting the SAME
   // project.activities already loaded above, no extra query) only when
   // actually needed.
+  // Owner(s) to render in the unified "People" section — `project.owners`
+  // is the authoritative full set and, per its own schema doc comment,
+  // ALWAYS contains `project.owner` (ownerId) for every Project, manual or
+  // request-origin alike. Rendering owners[] alone (instead of the single
+  // `owner` AND the separate `owners[]` list the two old cards each showed)
+  // is what eliminates the duplicate-Owner display — nothing is lost,
+  // since owners[] is a superset by invariant. The `project.owner` fallback
+  // only guards against owners[] somehow coming back empty (it never
+  // should, per the invariant) so a People section is never left ownerless.
+  const ownersToShow = project.owners.length > 0 ? project.owners : [project.owner];
+
+  const hasGeneralInfo = !!project.department || !!project.projectRequest;
+  const hasTimeline =
+    !!project.startDate ||
+    !!project.endDate ||
+    !!(project.projectRequest && (project.expectedStartDate || project.expectedFinishDate));
+
   const activitySequenceRows = project.projectRequest
     ? [...project.activities]
         .sort((a, b) => {
@@ -259,138 +281,71 @@ export default async function ProjectDetailPage({
         canDeleteProject={canDeleteProject}
       />
 
-      {/* Project Details sits beside Project Request Setup as peer cards —
-          `sm:grid-cols-2` only applies when both exist (project.projectRequest
-          is set); a manual Project has no second card and no grid at all, so
-          Project Details keeps occupying the row naturally instead of
-          leaving an empty column beside it. */}
-      <div className={project.projectRequest ? "grid gap-6 sm:grid-cols-2" : undefined}>
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Project Details</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 text-sm">
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Owner</p>
-              <div className="flex items-center gap-2">
-                <Avatar className="h-6 w-6">
-                  <AvatarImage src={project.owner.image ?? undefined} />
-                  <AvatarFallback className="text-[9px]">
-                    {getInitials(project.owner.name)}
-                  </AvatarFallback>
-                </Avatar>
-                <span className="font-medium">{project.owner.name}</span>
+      {/* Project Overview — a single full-width card replacing the old
+          "Project Details" + "Project Request Setup" side-by-side pair.
+          Four labeled sections (General Information / People / Timeline /
+          Financial Information) instead of two cards, each section's own
+          responsive grid (1 col on mobile, up to 3 on desktop) rather than
+          the page choosing between two fixed-width cards. Request-origin-
+          only fields (Project Request link, Expense Type, Audience,
+          Expected Timeline, Financial Information) still only ever render
+          when project.projectRequest is set — identical gating to the two
+          old cards, just inside one container instead of a second Card.
+          No separate Edit control here: the page's own top-level Edit
+          button (ProjectDetailHeader, above) already links to this exact
+          same /projects/[id]/edit route, so the old card-local pencil
+          button was a second entry point to the identical flow — dropping
+          it here is the "eliminate unnecessary visual duplication" this
+          refactor asked for, not a loss of edit functionality. */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Project Overview</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-5 text-sm">
+          {hasGeneralInfo && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">General Information</p>
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {project.department && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Department</p>
+                    <p className="font-medium">{project.department.name}</p>
+                  </div>
+                )}
+                {project.projectRequest && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">From Project Request</p>
+                    <Link href={`/project-requests/${project.projectRequest.id}`} className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline">
+                      <FolderKanban className="h-3.5 w-3.5" />
+                      {project.projectRequest.title}
+                    </Link>
+                  </div>
+                )}
+                {project.projectRequest && project.expenseType && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Expense Type</p>
+                    <p className="font-medium">
+                      {project.expenseType.name}
+                      {!project.expenseType.isActive && <span className="text-muted-foreground font-normal"> (inactive)</span>}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
+          )}
 
-            {(project.startDate || project.endDate) && (
-              <>
-                <Separator />
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1 flex items-center gap-1">
-                    <Calendar className="h-3 w-3" /> Timeline
-                  </p>
-                  <div className="text-sm">
-                    {project.startDate && (
-                      <p>Start: {formatDate(project.startDate)}</p>
-                    )}
-                    {project.endDate && (
-                      <p>End: {formatDate(project.endDate)}</p>
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-
-            {project.department && (
-              <>
-                <Separator />
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Department</p>
-                  <p className="font-medium">{project.department.name}</p>
-                </div>
-              </>
-            )}
-
-            {project.members.length > 0 && (
-              <>
-                <Separator />
-                <div>
-                  <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-                    <Users className="h-3 w-3" /> Members
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {project.members.map((m) => (
-                      <div key={m.id} className="flex items-center gap-1.5 text-xs">
-                        <Avatar className="h-5 w-5">
-                          <AvatarImage src={m.image ?? undefined} />
-                          <AvatarFallback className="text-[9px]">
-                            {getInitials(m.name)}
-                          </AvatarFallback>
-                        </Avatar>
-                        {m.name}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Request-origin-only metadata — only ever rendered for a
-            Project created through the request-origin setup flow
-            (projectRequest is non-null exactly then). A manually-created
-            Project never shows this section at all, never an empty
-            version of it. */}
-        {project.projectRequest && (
-          <Card>
-            {/* Same title-left/action-right CardHeader pattern already used
-                by ProjectActivitiesCard — title wraps/truncates naturally
-                and the button can wrap onto its own line via flex-wrap, so
-                a narrow card never overflows horizontally. */}
-            <CardHeader className="pb-3 flex flex-row flex-wrap items-center justify-between gap-2">
-              <CardTitle className="text-sm flex items-center gap-2">
-                <Wallet className="h-4 w-4" />
-                Project Request Setup
-              </CardTitle>
-              {/* Same small ghost pencil-icon pattern already used for
-                  inline editing elsewhere on this page (see
-                  components/related-links/entity-related-links.tsx) —
-                  gated on the SAME canEditProject (project.edit) the rest
-                  of this page already computed; no new permission.
-                  Navigates to the existing Project edit page — there is no
-                  second edit flow. */}
-              {canEditProject && (
-                <Button asChild size="sm" variant="ghost" className="h-7 px-2 text-muted-foreground" aria-label="Edit Project Request Setup">
-                  <Link href={`/projects/${project.id}/edit`}>
-                    <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                    Edit
-                  </Link>
-                </Button>
-              )}
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <div>
-                <p className="text-xs text-muted-foreground mb-1">From Project Request</p>
-                <Link href={`/project-requests/${project.projectRequest.id}`} className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline">
-                  <FolderKanban className="h-3.5 w-3.5" />
-                  {project.projectRequest.title}
-                </Link>
-              </div>
-
-              {/* Owner(s) — the authoritative full set (project.owners),
-                  never just the single canonical project.owner — a
-                  request-origin Project's real owner set may have more
-                  than one explicitly-selected user. Distinct from Members
-                  below: an Owner is never implicitly a Member. */}
-              <Separator />
+          {/* People — always at least an Owner (every Project has one; see
+              ownersToShow's own doc comment above), Members/Audience only
+              when non-empty. */}
+          <div className="space-y-3">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">People</p>
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
               <div>
                 <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-                  <Users className="h-3 w-3" /> Owner{project.owners.length === 1 ? "" : "(s)"}
+                  <Users className="h-3 w-3" /> Owner{ownersToShow.length === 1 ? "" : "(s)"}
                 </p>
                 <div className="flex flex-wrap gap-2">
-                  {project.owners.map((o) => (
+                  {ownersToShow.map((o) => (
                     <div key={o.id} className="flex items-center gap-1.5 text-xs">
                       <Avatar className="h-5 w-5">
                         <AvatarImage src={o.image ?? undefined} />
@@ -402,35 +357,64 @@ export default async function ProjectDetailPage({
                 </div>
               </div>
 
-              {/* Audience — optional, zero or more; distinct from both
-                  Owner(s) above and Members below. Only ever rendered when
-                  non-empty, same "no empty placeholder" convention Members
-                  already uses. */}
-              {project.audience.length > 0 && (
-                <>
-                  <Separator />
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
-                      <Users className="h-3 w-3" /> Audience
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {project.audience.map((a) => (
-                        <div key={a.id} className="flex items-center gap-1.5 text-xs">
-                          <Avatar className="h-5 w-5">
-                            <AvatarImage src={a.image ?? undefined} />
-                            <AvatarFallback className="text-[9px]">{getInitials(a.name)}</AvatarFallback>
-                          </Avatar>
-                          {a.name}
-                        </div>
-                      ))}
-                    </div>
+              {project.members.length > 0 && (
+                <div>
+                  <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                    <Users className="h-3 w-3" /> Members
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {project.members.map((m) => (
+                      <div key={m.id} className="flex items-center gap-1.5 text-xs">
+                        <Avatar className="h-5 w-5">
+                          <AvatarImage src={m.image ?? undefined} />
+                          <AvatarFallback className="text-[9px]">{getInitials(m.name)}</AvatarFallback>
+                        </Avatar>
+                        {m.name}
+                      </div>
+                    ))}
                   </div>
-                </>
+                </div>
               )}
 
-              {(project.expectedStartDate || project.expectedFinishDate) && (
-                <>
-                  <Separator />
+              {/* Audience — request-origin only, zero or more; distinct
+                  from both Owner(s) and Members. Only rendered when
+                  non-empty, same "no empty placeholder" convention as
+                  Members. */}
+              {project.projectRequest && project.audience.length > 0 && (
+                <div>
+                  <p className="text-xs text-muted-foreground mb-2 flex items-center gap-1">
+                    <Users className="h-3 w-3" /> Audience
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {project.audience.map((a) => (
+                      <div key={a.id} className="flex items-center gap-1.5 text-xs">
+                        <Avatar className="h-5 w-5">
+                          <AvatarImage src={a.image ?? undefined} />
+                          <AvatarFallback className="text-[9px]">{getInitials(a.name)}</AvatarFallback>
+                        </Avatar>
+                        {a.name}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {hasTimeline && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                <Calendar className="h-3 w-3" /> Timeline
+              </p>
+              <div className="grid gap-4 sm:grid-cols-2">
+                {(project.startDate || project.endDate) && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Actual Timeline</p>
+                    {project.startDate && <p>Start: {formatDate(project.startDate)}</p>}
+                    {project.endDate && <p>End: {formatDate(project.endDate)}</p>}
+                  </div>
+                )}
+                {project.projectRequest && (project.expectedStartDate || project.expectedFinishDate) && (
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Expected Timeline</p>
                     {project.expectedStartDate && <p>Start: {formatDate(project.expectedStartDate)}</p>}
@@ -439,28 +423,23 @@ export default async function ProjectDetailPage({
                       <p className="text-xs text-muted-foreground mt-0.5">Initial baseline: {project.expectedTotalInitialDays} day(s)</p>
                     )}
                   </div>
-                </>
-              )}
+                )}
+              </div>
+            </div>
+          )}
 
-              {project.expenseType && (
-                <>
-                  <Separator />
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Expense Type</p>
-                    <p className="font-medium">
-                      {project.expenseType.name}
-                      {!project.expenseType.isActive && <span className="text-muted-foreground font-normal"> (inactive)</span>}
-                    </p>
-                  </div>
-                </>
-              )}
-
-              <Separator />
-              <div className="grid grid-cols-2 gap-3">
-                {/* Derived from this Project's own Activities (taskSubTypeCost
-                    × expectedDays/actualDays, summed) — never a stored,
-                    manually-entered value. Budget was removed entirely (no
-                    replacement). */}
+          {/* Financial Information — request-origin only, identical gating
+              to the old "Project Request Setup" card's own cost grid.
+              projectEstimatedCost/projectActualCost are derived from this
+              Project's own Activities (see computeProjectFinancials above)
+              regardless of origin, but only ever rendered here, exactly as
+              before. */}
+          {project.projectRequest && (
+            <div className="space-y-3">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                <Wallet className="h-3 w-3" /> Financial Information
+              </p>
+              <div className="grid gap-4 sm:grid-cols-3">
                 <div>
                   <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
                   <p className="font-medium">{formatEUR(Number(projectEstimatedCost))}</p>
@@ -474,10 +453,10 @@ export default async function ProjectDetailPage({
                   <p className="font-medium">{project.external ? "Yes" : "No"}</p>
                 </div>
               </div>
-            </CardContent>
-          </Card>
-        )}
-      </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Project Feedback — the FULL evaluation form no longer lives on
           this page at all; it's a dedicated standalone route
@@ -512,63 +491,35 @@ export default async function ProjectDetailPage({
           {activitySequenceRows ? (
             <ProjectActivitySequenceCard
               projectId={project.id}
+              projectTitle={project.title}
               initialActivities={activitySequenceRows}
               initialProgress={project.progress}
               progressIsCalculated={progressIsCalculated}
               canReorder={canEditActivities}
+              departmentId={project.departmentId}
+              canLinkActivities={canEditActivities}
             />
           ) : (
             <ProjectActivitiesCard
               projectId={project.id}
+              projectTitle={project.title}
               initialActivities={activityRows}
               initialProgress={project.progress}
               progressIsCalculated={progressIsCalculated}
+              departmentId={project.departmentId}
+              canLinkActivities={canEditActivities}
             />
           )}
         </div>
 
         <div className="space-y-4">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-base flex items-center gap-2">
-                <Ticket className="h-4 w-4" />
-                Related Tickets ({relatedTickets.length})
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              {relatedTickets.length === 0 ? (
-                <p className="text-center text-muted-foreground py-4 text-sm">
-                  No tickets linked to this project.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {relatedTickets.map((t) => (
-                    <Link
-                      key={t.id}
-                      href={`/tickets/${t.id}`}
-                      className="flex items-center justify-between p-2.5 rounded-lg border hover:bg-muted/50 transition-colors"
-                    >
-                      <div className="flex items-center gap-2 min-w-0">
-                        <span className="font-mono text-xs text-muted-foreground shrink-0">
-                          {formatTicketNumber(t.ticketNumber)}
-                        </span>
-                        <span className="text-sm font-medium truncate">{t.title}</span>
-                      </div>
-                      <span
-                        className="text-xs font-medium px-2 py-0.5 rounded-full shrink-0 ml-2"
-                        style={{
-                          backgroundColor: t.status.color + "22",
-                          color: t.status.color,
-                        }}
-                      >
-                        {t.status.name}
-                      </span>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <ProjectRelatedTicketsCard
+            projectId={project.id}
+            projectTitle={project.title}
+            initialTickets={relatedTickets.map((t) => ({ id: t.id, ticketNumber: t.ticketNumber, title: t.title, status: { name: t.status.name, color: t.status.color } }))}
+            departmentId={project.departmentId}
+            canLinkTickets={canLinkTickets}
+          />
 
           {project.successTarget && (
             <Card>

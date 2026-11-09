@@ -137,6 +137,7 @@ export async function GET(req: NextRequest) {
           priority: { select: { id: true, name: true, color: true, level: true } },
           category: { select: { id: true, name: true, color: true } },
           department: { select: { id: true, name: true } },
+          project: { select: { id: true, title: true } },
           _count: { select: { messages: true, attachments: true } },
         },
       }),

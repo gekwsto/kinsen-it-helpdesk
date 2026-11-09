@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { toast } from "sonner";
 import {
@@ -21,6 +22,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials, formatDate } from "@/lib/utils";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
@@ -28,7 +30,8 @@ import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { SameDayStartWarningBadge } from "@/components/shared/same-day-start-warning-badge";
 import { computeSameDayStartWarnings, type SameDayStartWarning } from "@/lib/activities/activity-conflict";
 import { createTokenGuard } from "@/lib/navigation-loader";
-import { GripVertical } from "lucide-react";
+import { LinkExistingActivityDialog } from "@/components/projects/link-existing-activity-dialog";
+import { GripVertical, Link2 } from "lucide-react";
 
 export interface SequencedActivityRow {
   id: string;
@@ -55,6 +58,8 @@ export interface SequencedActivityRow {
 
 interface ProjectActivitySequenceCardProps {
   projectId: string;
+  /** This Project's own title — passed through to LinkExistingActivityDialog as the reassignment destination's display name. */
+  projectTitle: string;
   initialActivities: SequencedActivityRow[];
   initialProgress: number;
   progressIsCalculated: boolean;
@@ -67,6 +72,10 @@ interface ProjectActivitySequenceCardProps {
    * just with no drag affordance at all.
    */
   canReorder: boolean;
+  /** This Project's own departmentId — null hides the Link Activity button entirely (nothing to scope a candidate search to). */
+  departmentId: string | null;
+  /** activity.edit for this Project's own department — the SAME permission PATCH /api/activities/[id] itself requires to move an Activity's projectId; this only gates whether the button renders. */
+  canLinkActivities: boolean;
 }
 
 /**
@@ -82,10 +91,27 @@ interface ProjectActivitySequenceCardProps {
  * blocks, requires, or implies anything about completion order; dragging
  * Activity #2 above #1 has no effect on either one's status/dates/cost.
  */
-export function ProjectActivitySequenceCard({ projectId, initialActivities, initialProgress, progressIsCalculated, canReorder }: ProjectActivitySequenceCardProps) {
+export function ProjectActivitySequenceCard({ projectId, projectTitle, initialActivities, initialProgress, progressIsCalculated, canReorder, departmentId, canLinkActivities }: ProjectActivitySequenceCardProps) {
+  const router = useRouter();
   const [activities, setActivities] = useState(initialActivities);
   const [progress, setProgress] = useState(initialProgress);
   const [saving, setSaving] = useState(false);
+  const [linkDialogOpen, setLinkDialogOpen] = useState(false);
+
+  // Same reasoning as ProjectActivitiesCard's own identical effects: only
+  // a genuine server re-render (router.refresh(), e.g. after
+  // LinkExistingActivityDialog's onLinked) changes initialActivities'/
+  // initialProgress' identity — never this component's own drag-reorder or
+  // completion-toggle state updates, which apply their own response data
+  // directly and never call router.refresh(). Without this, useState's
+  // one-time initial value would leave a newly-linked Activity invisible
+  // until a hard reload.
+  useEffect(() => {
+    setActivities(initialActivities);
+  }, [initialActivities]);
+  useEffect(() => {
+    setProgress(initialProgress);
+  }, [initialProgress]);
 
   // Same stale-response guard ProjectActivitiesCard already uses for the
   // shared project-level progress aggregate.
@@ -158,15 +184,23 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-3">
         <CardTitle className="text-base">Activities ({totalActivities})</CardTitle>
-        {totalActivities > 0 && (
-          <div className="text-right">
-            <span className="text-sm text-muted-foreground">{progress}%</span>
-            <p className="text-[10px] text-muted-foreground">
-              {completedActivities} of {totalActivities} complete
-              {progressIsCalculated ? " · Calculated from linked tickets" : " · Manual progress"}
-            </p>
-          </div>
-        )}
+        <div className="flex items-center gap-3">
+          {totalActivities > 0 && (
+            <div className="text-right">
+              <span className="text-sm text-muted-foreground">{progress}%</span>
+              <p className="text-[10px] text-muted-foreground">
+                {completedActivities} of {totalActivities} complete
+                {progressIsCalculated ? " · Calculated from linked tickets" : " · Manual progress"}
+              </p>
+            </div>
+          )}
+          {canLinkActivities && departmentId && (
+            <Button size="sm" className="gap-1.5" onClick={() => setLinkDialogOpen(true)}>
+              <Link2 className="h-3.5 w-3.5" />
+              Link Activity
+            </Button>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         {totalActivities > 0 && (
@@ -212,6 +246,16 @@ export function ProjectActivitySequenceCard({ projectId, initialActivities, init
           </div>
         )}
       </CardContent>
+      {canLinkActivities && departmentId && (
+        <LinkExistingActivityDialog
+          open={linkDialogOpen}
+          onOpenChange={setLinkDialogOpen}
+          projectId={projectId}
+          projectTitle={projectTitle}
+          departmentId={departmentId}
+          onLinked={() => router.refresh()}
+        />
+      )}
     </Card>
   );
 }
