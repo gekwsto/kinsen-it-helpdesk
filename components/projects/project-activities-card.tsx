@@ -6,11 +6,12 @@ import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getInitials, formatDate } from "@/lib/utils";
+import { getInitials } from "@/lib/utils";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { createTokenGuard } from "@/lib/navigation-loader";
 import { LinkExistingActivityDialog } from "@/components/projects/link-existing-activity-dialog";
+import { ActivityDetailsGrid } from "@/components/projects/activity-details-grid";
 import { Link2 } from "lucide-react";
 
 export interface ProjectActivityRow {
@@ -32,6 +33,8 @@ export interface ProjectActivityRow {
   /** Pre-resolved server-side (see lib/services/activity-status-config.ts) — never re-derived client-side. */
   statusLabel: string;
   statusColor: string;
+  /** Already fetched server-side alongside assignedUsers (same `activities` include in app/(main)/projects/[id]/page.tsx) — just not previously threaded through to this row. */
+  owner: { id: string; name: string | null; image: string | null } | null;
   assignedUsers: { id: string; name: string | null; image: string | null }[];
 }
 
@@ -152,52 +155,42 @@ export function ProjectActivitiesCard({ projectId, projectTitle, initialActiviti
               <Link
                 key={activity.id}
                 href={`/activities/${activity.id}`}
-                className="flex items-center justify-between p-3 rounded-lg border hover:bg-muted/50 transition-colors"
+                className="flex flex-col gap-0.5 p-3 rounded-lg border hover:bg-muted/50 transition-colors"
               >
-                <div className="flex items-center gap-3 min-w-0">
-                  <ActivityCompleteCheckbox
-                    activityId={activity.id}
-                    initialIsCompleted={activity.isCompleted}
-                    onToggled={handleToggled(activity.id)}
-                  />
-                  <div className="min-w-0">
-                    <p className={`text-sm font-medium ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
+                {/* Header: checkbox, title, status, avatars — the Details
+                    grid below carries every date/duration/owner field, so
+                    this row never needs a second line of its own. */}
+                <div className="flex items-center justify-between gap-3 min-w-0">
+                  <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <ActivityCompleteCheckbox
+                      activityId={activity.id}
+                      initialIsCompleted={activity.isCompleted}
+                      onToggled={handleToggled(activity.id)}
+                    />
+                    <p className={`text-sm font-medium truncate ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
                       {activity.title}
                     </p>
-                    <div className="flex items-center gap-2 flex-wrap mt-0.5">
-                      {activity.dueDate && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Due: {formatDate(activity.dueDate)}</span>
-                      )}
-                      {activity.expectedStartDate && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Start: {formatDate(activity.expectedStartDate)}</span>
-                      )}
-                      {activity.expectedFinishDate && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Finish: {formatDate(activity.expectedFinishDate)}</span>
-                      )}
-                      {typeof activity.expectedDays === "number" && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Duration: {activity.expectedDays} day(s)</span>
-                      )}
-                      {activity.startDate && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Start: {formatDate(activity.startDate)}</span>
-                      )}
-                      {activity.completedAt && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Finish: {formatDate(activity.completedAt)}</span>
-                      )}
-                      {typeof activity.actualDays === "number" && (
-                        <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Duration: {activity.actualDays} day(s)</span>
-                      )}
-                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {activity.assignedUsers.slice(0, 2).map((u) => (
+                      <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
+                        <AvatarImage src={u.image ?? undefined} />
+                        <AvatarFallback className="text-[9px]">{getInitials(u.name)}</AvatarFallback>
+                      </Avatar>
+                    ))}
+                    <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
                   </div>
                 </div>
-                <div className="flex items-center gap-2 flex-shrink-0">
-                  {activity.assignedUsers.slice(0, 2).map((u) => (
-                    <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-                      <AvatarImage src={u.image ?? undefined} />
-                      <AvatarFallback className="text-[9px]">{getInitials(u.name)}</AvatarFallback>
-                    </Avatar>
-                  ))}
-                  <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
-                </div>
+                <ActivityDetailsGrid
+                  owner={activity.owner}
+                  dueDate={activity.dueDate}
+                  expectedStartDate={activity.expectedStartDate}
+                  expectedFinishDate={activity.expectedFinishDate}
+                  expectedDays={activity.expectedDays}
+                  startDate={activity.startDate}
+                  completedAt={activity.completedAt}
+                  actualDays={activity.actualDays}
+                />
               </Link>
             ))}
           </div>

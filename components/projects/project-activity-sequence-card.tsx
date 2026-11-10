@@ -24,13 +24,14 @@ import { CSS } from "@dnd-kit/utilities";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getInitials, formatDate } from "@/lib/utils";
+import { getInitials } from "@/lib/utils";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { SameDayStartWarningBadge } from "@/components/shared/same-day-start-warning-badge";
 import { computeSameDayStartWarnings, type SameDayStartWarning } from "@/lib/activities/activity-conflict";
 import { createTokenGuard } from "@/lib/navigation-loader";
 import { LinkExistingActivityDialog } from "@/components/projects/link-existing-activity-dialog";
+import { ActivityDetailsGrid } from "@/components/projects/activity-details-grid";
 import { GripVertical, Link2 } from "lucide-react";
 
 export interface SequencedActivityRow {
@@ -303,39 +304,45 @@ function SequencedActivityRowItem({
       )}
       <Link
         href={`/activities/${activity.id}`}
-        className="flex-1 min-w-0 flex items-center justify-between gap-3 p-3 pl-0"
+        className="flex-1 min-w-0 flex flex-col gap-0.5 p-3 pl-0"
       >
-        <div className="flex items-center gap-3 min-w-0">
-          <span className="flex-shrink-0 w-5 text-sm font-semibold text-muted-foreground text-right tabular-nums">{position}.</span>
-          <ActivityCompleteCheckbox activityId={activity.id} initialIsCompleted={activity.isCompleted} onToggled={onToggled} />
-          <div className="min-w-0">
-            <p className={`text-sm font-medium truncate ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
+        {/* Header: position, checkbox, title, status, warning badge,
+            avatars — the Details grid below carries Owner and every
+            date/duration field, so this row never needs a second line of
+            its own. */}
+        <div className="flex items-center justify-between gap-3 min-w-0">
+          <div className="flex items-center gap-3 min-w-0 flex-1">
+            <span className="flex-shrink-0 w-5 text-sm font-semibold text-muted-foreground text-right tabular-nums">{position}.</span>
+            <ActivityCompleteCheckbox activityId={activity.id} initialIsCompleted={activity.isCompleted} onToggled={onToggled} />
+            <p className={`text-sm font-medium truncate min-w-0 flex-1 ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
               {activity.title}
             </p>
-            <div className="flex items-center gap-2 flex-wrap mt-0.5">
+            <div className="flex items-center gap-2 flex-shrink-0">
               <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
               {!activity.isCompleted && sameDayStartWarning?.hasSameDayStartWarning && (
                 <SameDayStartWarningBadge sameDayStartActiveCount={sameDayStartWarning.sameDayStartActiveCount} />
               )}
-              {activity.owner && <span className="text-xs text-muted-foreground truncate">Owner: {activity.owner.name ?? "—"}</span>}
-              {activity.dueDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Due: {formatDate(activity.dueDate)}</span>}
-              {activity.expectedStartDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Start: {formatDate(activity.expectedStartDate)}</span>}
-              {activity.expectedFinishDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Finish: {formatDate(activity.expectedFinishDate)}</span>}
-              {typeof activity.expectedDays === "number" && <span className="text-xs text-muted-foreground whitespace-nowrap">Expected Duration: {activity.expectedDays} day(s)</span>}
-              {activity.startDate && <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Start: {formatDate(activity.startDate)}</span>}
-              {activity.completedAt && <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Finish: {formatDate(activity.completedAt)}</span>}
-              {typeof activity.actualDays === "number" && <span className="text-xs text-muted-foreground whitespace-nowrap">Actual Duration: {activity.actualDays} day(s)</span>}
             </div>
           </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {activity.assignedUsers.slice(0, 2).map((u) => (
+              <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
+                <AvatarImage src={u.image ?? undefined} />
+                <AvatarFallback className="text-[10px]">{getInitials(u.name)}</AvatarFallback>
+              </Avatar>
+            ))}
+          </div>
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          {activity.assignedUsers.slice(0, 2).map((u) => (
-            <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-              <AvatarImage src={u.image ?? undefined} />
-              <AvatarFallback className="text-[10px]">{getInitials(u.name)}</AvatarFallback>
-            </Avatar>
-          ))}
-        </div>
+        <ActivityDetailsGrid
+          owner={activity.owner}
+          dueDate={activity.dueDate}
+          expectedStartDate={activity.expectedStartDate}
+          expectedFinishDate={activity.expectedFinishDate}
+          expectedDays={activity.expectedDays}
+          startDate={activity.startDate}
+          completedAt={activity.completedAt}
+          actualDays={activity.actualDays}
+        />
       </Link>
     </div>
   );

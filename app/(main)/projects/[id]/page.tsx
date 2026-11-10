@@ -190,6 +190,7 @@ export default async function ProjectDetailPage({
       isCompleted: activity.isCompleted,
       statusLabel: statusDisplay.label,
       statusColor: statusDisplay.color,
+      owner: activity.owner,
       assignedUsers: activity.assignedUsers,
     };
   });
