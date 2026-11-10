@@ -23,12 +23,13 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getInitials } from "@/lib/utils";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { UserAvatarTooltip } from "@/components/shared/user-avatar-tooltip";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { SameDayStartWarningBadge } from "@/components/shared/same-day-start-warning-badge";
 import { computeSameDayStartWarnings, type SameDayStartWarning } from "@/lib/activities/activity-conflict";
+import { resolveActivityUserRoles } from "@/lib/activities/activity-user-roles";
 import { createTokenGuard } from "@/lib/navigation-loader";
 import { LinkExistingActivityDialog } from "@/components/projects/link-existing-activity-dialog";
 import { ActivityDetailsGrid } from "@/components/projects/activity-details-grid";
@@ -212,39 +213,44 @@ export function ProjectActivitySequenceCard({ projectId, projectTitle, initialAc
 
         {activities.length === 0 ? (
           <p className="text-center text-muted-foreground py-8 text-sm">No activities yet.</p>
-        ) : canReorder ? (
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-            <SortableContext items={activities.map((a) => a.id)} strategy={verticalListSortingStrategy}>
-              {/* max-h + overflow-y-auto only on the row list itself — the
-                  header (title/count/progress) above and the progress bar
-                  stay outside, so they're never scrolled out of view. */}
-              <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1" aria-disabled={saving}>
+        ) : (
+          <TooltipProvider delayDuration={200}>
+            {canReorder ? (
+              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                <SortableContext items={activities.map((a) => a.id)} strategy={verticalListSortingStrategy}>
+                  {/* max-h + overflow-y-auto only on the row list itself —
+                      the header (title/count/progress) above and the
+                      progress bar stay outside, so they're never scrolled
+                      out of view. */}
+                  <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1" aria-disabled={saving}>
+                    {activities.map((activity, index) => (
+                      <SequencedActivityRowItem
+                        key={activity.id}
+                        activity={activity}
+                        position={index + 1}
+                        draggable
+                        onToggled={handleToggled(activity.id)}
+                        sameDayStartWarning={sameDayStartWarnings.get(activity.id)}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
+            ) : (
+              <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
                 {activities.map((activity, index) => (
                   <SequencedActivityRowItem
                     key={activity.id}
                     activity={activity}
                     position={index + 1}
-                    draggable
+                    draggable={false}
                     onToggled={handleToggled(activity.id)}
                     sameDayStartWarning={sameDayStartWarnings.get(activity.id)}
                   />
                 ))}
               </div>
-            </SortableContext>
-          </DndContext>
-        ) : (
-          <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
-            {activities.map((activity, index) => (
-              <SequencedActivityRowItem
-                key={activity.id}
-                activity={activity}
-                position={index + 1}
-                draggable={false}
-                onToggled={handleToggled(activity.id)}
-                sameDayStartWarning={sameDayStartWarnings.get(activity.id)}
-              />
-            ))}
-          </div>
+            )}
+          </TooltipProvider>
         )}
       </CardContent>
       {canLinkActivities && departmentId && (
@@ -326,10 +332,13 @@ function SequencedActivityRowItem({
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
             {activity.assignedUsers.slice(0, 2).map((u) => (
-              <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-                <AvatarImage src={u.image ?? undefined} />
-                <AvatarFallback className="text-[10px]">{getInitials(u.name)}</AvatarFallback>
-              </Avatar>
+              <UserAvatarTooltip
+                key={u.id}
+                user={u}
+                roles={resolveActivityUserRoles(activity, u.id)}
+                avatarClassName="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0"
+                fallbackClassName="text-[10px]"
+              />
             ))}
           </div>
         </div>

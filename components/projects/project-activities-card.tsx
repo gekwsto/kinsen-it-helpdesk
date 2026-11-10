@@ -5,13 +5,14 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { getInitials } from "@/lib/utils";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { UserAvatarTooltip } from "@/components/shared/user-avatar-tooltip";
 import { ActivityCompleteCheckbox, type ActivityToggleResult } from "@/components/activities/activity-complete-checkbox";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
 import { createTokenGuard } from "@/lib/navigation-loader";
 import { LinkExistingActivityDialog } from "@/components/projects/link-existing-activity-dialog";
 import { ActivityDetailsGrid } from "@/components/projects/activity-details-grid";
+import { resolveActivityUserRoles } from "@/lib/activities/activity-user-roles";
 import { Link2 } from "lucide-react";
 
 export interface ProjectActivityRow {
@@ -150,50 +151,55 @@ export function ProjectActivitiesCard({ projectId, projectTitle, initialActiviti
           // max-h + overflow-y-auto only on the row list itself — the header
           // (title/count/progress) above and the progress bar stay outside
           // this div, so they're never scrolled out of view.
-          <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
-            {activities.map((activity) => (
-              <Link
-                key={activity.id}
-                href={`/activities/${activity.id}`}
-                className="flex flex-col gap-0.5 p-3 rounded-lg border hover:bg-muted/50 transition-colors"
-              >
-                {/* Header: checkbox, title, status, avatars — the Details
-                    grid below carries every date/duration/owner field, so
-                    this row never needs a second line of its own. */}
-                <div className="flex items-center justify-between gap-3 min-w-0">
-                  <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <ActivityCompleteCheckbox
-                      activityId={activity.id}
-                      initialIsCompleted={activity.isCompleted}
-                      onToggled={handleToggled(activity.id)}
-                    />
-                    <p className={`text-sm font-medium truncate ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
-                      {activity.title}
-                    </p>
+          <TooltipProvider delayDuration={200}>
+            <div className="max-h-[520px] overflow-y-auto space-y-2 pr-1">
+              {activities.map((activity) => (
+                <Link
+                  key={activity.id}
+                  href={`/activities/${activity.id}`}
+                  className="flex flex-col gap-0.5 p-3 rounded-lg border hover:bg-muted/50 transition-colors"
+                >
+                  {/* Header: checkbox, title, status, avatars — the Details
+                      grid below carries every date/duration/owner field, so
+                      this row never needs a second line of its own. */}
+                  <div className="flex items-center justify-between gap-3 min-w-0">
+                    <div className="flex items-center gap-3 min-w-0 flex-1">
+                      <ActivityCompleteCheckbox
+                        activityId={activity.id}
+                        initialIsCompleted={activity.isCompleted}
+                        onToggled={handleToggled(activity.id)}
+                      />
+                      <p className={`text-sm font-medium truncate ${activity.isCompleted ? "line-through text-muted-foreground" : ""}`}>
+                        {activity.title}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {activity.assignedUsers.slice(0, 2).map((u) => (
+                        <UserAvatarTooltip
+                          key={u.id}
+                          user={u}
+                          roles={resolveActivityUserRoles(activity, u.id)}
+                          avatarClassName="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0"
+                          fallbackClassName="text-[9px]"
+                        />
+                      ))}
+                      <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-shrink-0">
-                    {activity.assignedUsers.slice(0, 2).map((u) => (
-                      <Avatar key={u.id} className="h-6 w-6 ring-2 ring-background -ml-1 first:ml-0">
-                        <AvatarImage src={u.image ?? undefined} />
-                        <AvatarFallback className="text-[9px]">{getInitials(u.name)}</AvatarFallback>
-                      </Avatar>
-                    ))}
-                    <StatusBadge label={activity.statusLabel} color={activity.statusColor} />
-                  </div>
-                </div>
-                <ActivityDetailsGrid
-                  owner={activity.owner}
-                  dueDate={activity.dueDate}
-                  expectedStartDate={activity.expectedStartDate}
-                  expectedFinishDate={activity.expectedFinishDate}
-                  expectedDays={activity.expectedDays}
-                  startDate={activity.startDate}
-                  completedAt={activity.completedAt}
-                  actualDays={activity.actualDays}
-                />
-              </Link>
-            ))}
-          </div>
+                  <ActivityDetailsGrid
+                    owner={activity.owner}
+                    dueDate={activity.dueDate}
+                    expectedStartDate={activity.expectedStartDate}
+                    expectedFinishDate={activity.expectedFinishDate}
+                    expectedDays={activity.expectedDays}
+                    startDate={activity.startDate}
+                    completedAt={activity.completedAt}
+                    actualDays={activity.actualDays}
+                  />
+                </Link>
+              ))}
+            </div>
+          </TooltipProvider>
         )}
       </CardContent>
       {canLinkActivities && departmentId && (

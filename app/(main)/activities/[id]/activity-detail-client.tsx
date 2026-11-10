@@ -7,7 +7,8 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { UserAvatarTooltip } from "@/components/shared/user-avatar-tooltip";
 import {
   Select,
   SelectContent,
@@ -15,15 +16,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { formatDate, getInitials } from "@/lib/utils";
-import { ChevronRight, Loader2, CheckCircle2, Circle, Pencil, Ticket, GitMerge, Trash2, Plus } from "lucide-react";
+import { formatDate } from "@/lib/utils";
+import { ChevronRight, Loader2, CheckCircle2, Circle, Pencil, Ticket, GitMerge, Trash2, Plus, Users, Calendar, Wallet } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { formatTicketNumber } from "@/lib/utils";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
+import { InlineActivityDateField } from "@/components/activities/inline-activity-date-field";
 import { toggleActivityComplete } from "@/components/activities/toggle-activity-complete";
 import { ActivityQuickStatus, type ActivityStatusUpdate } from "@/components/activities/activity-quick-status";
 import type { QuickStatusOption } from "@/components/status/quick-status-select";
 import { StatusBadge } from "@/components/shared/activity-status-badge";
+import { resolveActivityUserRoles } from "@/lib/activities/activity-user-roles";
 import { EntityNotes } from "@/components/notes/entity-notes";
 import { EntityRelatedLinks } from "@/components/related-links/entity-related-links";
 import type { Note } from "@/components/notes/types";
@@ -162,6 +165,13 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
   const [statusOptionsState, setStatusOptionsState] = useState<"loading" | "ready" | "error">("loading");
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState(false);
+
+  // Which of the 4 inline Timeline date fields (startDate/dueDate/
+  // expectedStartDate/expectedFinishDate) currently has a save in flight —
+  // shared across all 4 so a second field can never be edited (let alone
+  // saved) while another one's PATCH is still in flight, which would
+  // otherwise let two concurrent responses race to overwrite `activity`.
+  const [savingDateField, setSavingDateField] = useState<string | null>(null);
 
   // Dependencies
   const [dependencies, setDependencies] = useState<Dependency[]>([]);
@@ -324,6 +334,64 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
     }
   };
 
+  // THE one place every inline Timeline date edit calls through — PATCH
+  // /api/activities/[id] with ONLY the single field that changed, the exact
+  // same endpoint/permission/validation the Edit Activity form's own
+  // Start/Due/Expected Start/Expected Finish fields already go through, no
+  // parallel update path. The response is the FULL updated Activity (same
+  // shape GET returns), so applying its date/expectedDays/actualDays/cost
+  // fields back onto local state picks up every server-side side effect
+  // (expectedDays recalculation, etc.) without a second fetch or
+  // router.refresh(). Never sends `status`/`isCompleted`, so the
+  // COMPLETED-transition boundary in the route never fires from a plain
+  // date edit — isCompleted/completedAt/actualDays are only ever touched
+  // there by a genuine status transition, exactly preserving "a date edit
+  // on an already-completed Activity never retroactively changes actualDays".
+  const updateActivityDate = async (
+    field: "startDate" | "dueDate" | "expectedStartDate" | "expectedFinishDate",
+    value: string | null
+  ): Promise<boolean> => {
+    setSavingDateField(field);
+    try {
+      const res = await fetch(`/api/activities/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [field]: value }),
+      });
+      const resData = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // Surfaces the route's OWN validation message verbatim (e.g.
+        // "Start date cannot be after due date.", "Expected Finish cannot
+        // be before Expected Start.") — never a client-side re-derivation
+        // of the same business rule.
+        toast.error(typeof resData.error === "string" ? resData.error : "Failed to update date");
+        return false;
+      }
+      setActivity((prev) =>
+        prev
+          ? {
+              ...prev,
+              startDate: resData.startDate ?? null,
+              dueDate: resData.dueDate ?? null,
+              expectedStartDate: resData.expectedStartDate ?? null,
+              expectedFinishDate: resData.expectedFinishDate ?? null,
+              expectedDays: resData.expectedDays ?? null,
+              actualDays: resData.actualDays ?? null,
+              estimatedCost: resData.estimatedCost,
+              actualCost: resData.actualCost,
+            }
+          : prev
+      );
+      toast.success("Date updated");
+      return true;
+    } catch {
+      toast.error("Failed to update date");
+      return false;
+    } finally {
+      setSavingDateField(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -465,128 +533,205 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
                 )}
               </div>
               <Separator />
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Project</p>
-                  {activity.project ? (
-                    <Link
-                      href={`/projects/${activity.project.id}`}
-                      className="font-medium text-primary hover:underline"
-                    >
-                      {activity.project.title}
-                    </Link>
-                  ) : (
-                    <span className="text-muted-foreground italic">Standalone</span>
+
+              {/* General Information */}
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">General Information</p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-sm">
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Project</p>
+                    {activity.project ? (
+                      <Link
+                        href={`/projects/${activity.project.id}`}
+                        className="font-medium text-primary hover:underline"
+                      >
+                        {activity.project.title}
+                      </Link>
+                    ) : (
+                      <span className="text-muted-foreground italic">Standalone</span>
+                    )}
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Task Type</p>
+                    {/* "Not set" only ever appears for a legacy Activity created
+                        before this classification existed — never fabricated. */}
+                    <p className="font-medium">{activity.taskType?.name ?? "Not set"}</p>
+                  </div>
+                  {activity.department && (
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Department</p>
+                      <p className="font-medium">{activity.department.name}</p>
+                    </div>
                   )}
                 </div>
-                <div>
-                  <p className="text-xs text-muted-foreground mb-1">Task Type</p>
-                  {/* "Not set" only ever appears for a legacy Activity created
-                      before this classification existed — never fabricated. */}
-                  <p className="font-medium">{activity.taskType?.name ?? "Not set"}</p>
-                </div>
-                {activity.assignedUsers.length > 0 && (
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Assigned To</p>
-                    <div className="flex flex-wrap gap-2">
-                      {activity.assignedUsers.map((u) => (
-                        <div key={u.id} className="flex items-center gap-1.5">
-                          <Avatar className="h-5 w-5">
-                            <AvatarImage src={u.image ?? undefined} />
-                            <AvatarFallback className="text-[9px]">
-                              {getInitials(u.name)}
-                            </AvatarFallback>
-                          </Avatar>
-                          <span className="font-medium text-sm">{u.name ?? u.email}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {activity.startDate && (
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Start Date</p>
-                    <p className="font-medium">{formatDate(activity.startDate)}</p>
-                  </div>
-                )}
-                {activity.dueDate && (
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Due Date</p>
-                    <p className="font-medium">{formatDate(activity.dueDate)}</p>
-                  </div>
-                )}
-                {activity.department && (
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Department</p>
-                    <p className="font-medium">{activity.department.name}</p>
-                  </div>
-                )}
               </div>
-            </CardContent>
-          </Card>
-          {/* Request-origin-only metadata — only ever rendered for an Activity
-              whose parent Project originates from a Project Request
-              (project.projectRequestId non-null). A manual Project's Activity
-              never shows this section at all, never an empty version of it. */}
-          {activity.project?.projectRequestId && (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-sm">Project Request Setup</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-2 gap-4 text-sm">
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Expected Start</p>
-                    <p className="font-medium">{activity.expectedStartDate ? formatDate(activity.expectedStartDate) : "Not set"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Expected Finish</p>
-                    <p className="font-medium">{activity.expectedFinishDate ? formatDate(activity.expectedFinishDate) : "Not set"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Expected Days</p>
-                    <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} day(s)` : "Not set"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Actual Days</p>
-                    <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Task Sub Type</p>
-                    <p className="font-medium">
-                      {activity.taskSubType?.name ?? "Not set"}
-                      {/* `null` (no configured cost) is simply never shown — never displayed as 0.00. */}
-                      {activity.taskSubTypeCost !== null && activity.taskSubTypeCost !== undefined && (
-                        <span className="text-muted-foreground font-normal"> — {Number(activity.taskSubTypeCost).toFixed(2)} EUR</span>
+
+              {/* People / Related Users — the exact two user relations
+                  canonically loaded for an Activity (see GET
+                  /api/activities/[id]'s own `include`): assignedUsers
+                  (every Activity) and owner (request-origin only). No third
+                  relation invented — Owner still only renders when this
+                  Activity's parent Project actually originates from a
+                  Project Request, same gating the old "Project Request
+                  Setup" card used for this exact field. */}
+              {(activity.assignedUsers.length > 0 || activity.project?.projectRequestId) && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                    <Users className="h-3 w-3" /> People
+                  </p>
+                  <TooltipProvider delayDuration={200}>
+                    <div className="grid gap-3 sm:grid-cols-2 text-sm">
+                      {activity.assignedUsers.length > 0 && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1.5">Assigned To</p>
+                          <div className="flex flex-wrap gap-2">
+                            {activity.assignedUsers.map((u) => (
+                              <div key={u.id} className="flex items-center gap-1.5">
+                                <UserAvatarTooltip
+                                  user={u}
+                                  roles={resolveActivityUserRoles(activity, u.id)}
+                                  avatarClassName="h-5 w-5"
+                                  fallbackClassName="text-[9px]"
+                                />
+                                <span className="font-medium text-sm">{u.name ?? u.email}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       )}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
-                    <p className="font-medium">{activity.estimatedCost !== null && activity.estimatedCost !== undefined ? `${Number(activity.estimatedCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
-                    <p className="font-medium">{activity.actualCost !== null && activity.actualCost !== undefined ? `${Number(activity.actualCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Owner</p>
-                    {activity.owner ? (
-                      <div className="flex items-center gap-1.5">
-                        <Avatar className="h-5 w-5">
-                          <AvatarImage src={activity.owner.image ?? undefined} />
-                          <AvatarFallback className="text-[9px]">{getInitials(activity.owner.name)}</AvatarFallback>
-                        </Avatar>
-                        <span className="font-medium">{activity.owner.name ?? activity.owner.email}</span>
+                      {activity.project?.projectRequestId && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1.5">Owner</p>
+                          {activity.owner ? (
+                            <div className="flex items-center gap-1.5">
+                              <UserAvatarTooltip
+                                user={activity.owner}
+                                roles={resolveActivityUserRoles(activity, activity.owner.id)}
+                                avatarClassName="h-5 w-5"
+                                fallbackClassName="text-[9px]"
+                              />
+                              <span className="font-medium">{activity.owner.name ?? activity.owner.email}</span>
+                            </div>
+                          ) : (
+                            <p className="font-medium">Not set</p>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  </TooltipProvider>
+                </div>
+              )}
+
+              {/* Timeline — Start/Due Date exist on any Activity; Expected
+                  Start/Finish/Days + Actual Days are request-origin-only,
+                  same gating as before. All 4 dates (Expected Days/Actual
+                  Days are server-derived, never directly editable) are
+                  inline-editable for a user with activity.edit — see
+                  InlineActivityDateField and updateActivityDate above.
+                  A date-less field (Start/Due Date) still only appears to a
+                  READ-ONLY viewer when it's actually set, exactly as
+                  before; an EDITOR also sees it when unset, as "Not set",
+                  so there's a way to set one in the first place — same
+                  reasoning extends to the whole section itself staying
+                  visible for an editor even on a bare Activity with no
+                  dates/project request yet. */}
+              {(activity.startDate || activity.dueDate || activity.project?.projectRequestId || activity.canEditActivity) && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                    <Calendar className="h-3 w-3" /> Timeline
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-sm">
+                    {(activity.startDate || activity.canEditActivity) && (
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Start Date</p>
+                        <InlineActivityDateField
+                          value={activity.startDate ?? null}
+                          canEdit={activity.canEditActivity ?? false}
+                          disabled={savingDateField !== null && savingDateField !== "startDate"}
+                          isSaving={savingDateField === "startDate"}
+                          onSave={(value) => updateActivityDate("startDate", value)}
+                        />
                       </div>
-                    ) : (
-                      <p className="font-medium">Not set</p>
+                    )}
+                    {(activity.dueDate || activity.canEditActivity) && (
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Due Date</p>
+                        <InlineActivityDateField
+                          value={activity.dueDate ?? null}
+                          canEdit={activity.canEditActivity ?? false}
+                          disabled={savingDateField !== null && savingDateField !== "dueDate"}
+                          isSaving={savingDateField === "dueDate"}
+                          onSave={(value) => updateActivityDate("dueDate", value)}
+                        />
+                      </div>
+                    )}
+                    {activity.project?.projectRequestId && (
+                      <>
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Expected Start</p>
+                          <InlineActivityDateField
+                            value={activity.expectedStartDate ?? null}
+                            canEdit={activity.canEditActivity ?? false}
+                            disabled={savingDateField !== null && savingDateField !== "expectedStartDate"}
+                            isSaving={savingDateField === "expectedStartDate"}
+                            onSave={(value) => updateActivityDate("expectedStartDate", value)}
+                          />
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Expected Finish</p>
+                          <InlineActivityDateField
+                            value={activity.expectedFinishDate ?? null}
+                            canEdit={activity.canEditActivity ?? false}
+                            disabled={savingDateField !== null && savingDateField !== "expectedFinishDate"}
+                            isSaving={savingDateField === "expectedFinishDate"}
+                            onSave={(value) => updateActivityDate("expectedFinishDate", value)}
+                          />
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Expected Days</p>
+                          <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} day(s)` : "Not set"}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Actual Days</p>
+                          <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
+                        </div>
+                      </>
                     )}
                   </div>
                 </div>
-              </CardContent>
-            </Card>
-          )}
+              )}
+
+              {/* Financial / Setup — request-origin-only, same gating as
+                  the old "Project Request Setup" card. */}
+              {activity.project?.projectRequestId && (
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                    <Wallet className="h-3 w-3" /> Financial Information
+                  </p>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-sm">
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Task Sub Type</p>
+                      <p className="font-medium">
+                        {activity.taskSubType?.name ?? "Not set"}
+                        {/* `null` (no configured cost) is simply never shown — never displayed as 0.00. */}
+                        {activity.taskSubTypeCost !== null && activity.taskSubTypeCost !== undefined && (
+                          <span className="text-muted-foreground font-normal"> — {Number(activity.taskSubTypeCost).toFixed(2)} EUR</span>
+                        )}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
+                      <p className="font-medium">{activity.estimatedCost !== null && activity.estimatedCost !== undefined ? `${Number(activity.estimatedCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
+                      <p className="font-medium">{activity.actualCost !== null && activity.actualCost !== undefined ? `${Number(activity.actualCost).toFixed(2)} EUR` : "0.00 EUR"}</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
 
         <div className="space-y-6">

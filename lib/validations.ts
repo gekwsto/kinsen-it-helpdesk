@@ -376,8 +376,19 @@ export const createActivitySchema = z.object({
   departmentId: z.string().optional(),
   subDepartmentId: z.string().nullable().optional(),
   businessUnitId: z.string().optional(),
-  startDate: z.string().optional(),
-  dueDate: z.string().optional(),
+  // Nullable (not just optional) so an update can explicitly clear either
+  // back to unset — same `undefined` = "leave unchanged" / `null` = "clear"
+  // convention projectId/subDepartmentId/expectedStartDate/
+  // expectedFinishDate already use on this same schema. Both are already
+  // nullable at the DB level (ProjectActivity.startDate/dueDate); PATCH
+  // /api/activities/[id] already branches on a literal `null` for both
+  // (`startDate === null ? null : undefined`) — this was simply never
+  // reachable before now, since no caller could get a `null` past this
+  // schema. Harmless at creation too: POST /api/activities already treats
+  // a falsy startDate/dueDate (so `null` included) as "don't set it",
+  // identical to omitting the field.
+  startDate: z.string().nullable().optional(),
+  dueDate: z.string().nullable().optional(),
   isCompleted: z.boolean().default(false),
   // progress is deliberately NOT accepted here — it's fully derived from
   // status (per-department configurable, see
