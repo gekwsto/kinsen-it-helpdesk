@@ -3,6 +3,7 @@ import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
 import { getAccessibleDepartmentSummaries, getNavVisibilityFlags, hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
+import { getFacilitiesServicesDepartmentId } from "@/lib/services/project-facilities-service";
 import { Button } from "@/components/ui/button";
 import { ProjectForm } from "@/components/projects/project-form";
 import { ChevronLeft } from "lucide-react";
@@ -63,6 +64,8 @@ export default async function NewProjectPage({
       redirect(`/projects/${request.project.id}`);
     }
 
+    const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+
     return (
       // No max-width cap (previously max-w-2xl, then max-w-4xl) — a fixed
       // Tailwind cap always clamps at SOME fixed px value regardless of how
@@ -92,6 +95,7 @@ export default async function NewProjectPage({
           fixedDepartmentId={request.department.id}
           fixedDepartmentName={request.department.name}
           fromRequestPrefill={{ title: request.title, description: request.description, priority: request.importance }}
+          facilitiesServicesDepartmentId={facilitiesServicesDepartmentId}
         />
       </div>
     );
@@ -114,9 +118,10 @@ export default async function NewProjectPage({
   // set resolveDepartmentForCreate (lib/services/department-scope-service.ts)
   // validates against on submit, so the dropdown never offers a choice the
   // API would reject.
-  const [departments, activeWorkspace] = await Promise.all([
+  const [departments, activeWorkspace, facilitiesServicesDepartmentId] = await Promise.all([
     getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create"),
     getActiveWorkspace(session.user.id, session.user.role),
+    getFacilitiesServicesDepartmentId(),
   ]);
 
   // project.create never implies project.edit — they're independently
@@ -169,7 +174,12 @@ export default async function NewProjectPage({
         </div>
       </div>
 
-      <ProjectForm departments={departments} editableDepartmentIds={editableDepartmentIds} defaultDepartmentId={defaultDepartmentId} />
+      <ProjectForm
+        departments={departments}
+        editableDepartmentIds={editableDepartmentIds}
+        defaultDepartmentId={defaultDepartmentId}
+        facilitiesServicesDepartmentId={facilitiesServicesDepartmentId}
+      />
     </div>
   );
 }

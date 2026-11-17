@@ -106,6 +106,12 @@ export async function GET(request: NextRequest) {
       startDate: p.startDate,
       endDate: p.endDate,
       createdAt: p.createdAt,
+      facilitiesCompany: p.facilitiesCompany,
+      facilitiesLocation: p.facilitiesLocation,
+      facilitiesStartQuarter: p.facilitiesStartQuarter,
+      facilitiesStartYear: p.facilitiesStartYear,
+      facilitiesEndQuarter: p.facilitiesEndQuarter,
+      facilitiesEndYear: p.facilitiesEndYear,
     };
   });
 

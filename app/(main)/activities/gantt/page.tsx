@@ -10,6 +10,7 @@ import { ArrowLeft, GanttChartSquare, ShieldOff } from "lucide-react";
 import { GanttChart, GanttGroup, GanttDependency } from "@/components/gantt/gantt-chart";
 import { getProgressConfigsForDepartments, resolveProgressPercentOrNull } from "@/lib/activities/activity-progress";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
+import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 
 interface SearchParams {
   status?: string;
@@ -110,7 +111,22 @@ export default async function ActivityGanttPage({
     where,
     orderBy: { startDate: "asc" },
     include: {
-      project: { select: { id: true, title: true, status: true, startDate: true, endDate: true, progress: true, owner: { select: { id: true, name: true, image: true } } } },
+      project: {
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          departmentId: true,
+          startDate: true,
+          endDate: true,
+          progress: true,
+          owner: { select: { id: true, name: true, image: true } },
+          facilitiesStartQuarter: true,
+          facilitiesStartYear: true,
+          facilitiesEndQuarter: true,
+          facilitiesEndYear: true,
+        },
+      },
       assignedUsers: { select: { id: true, name: true, image: true } },
     },
   });
@@ -135,6 +151,9 @@ export default async function ActivityGanttPage({
   const activityDepartmentIds = activities.map((a) => a.departmentId).filter((id): id is string => !!id);
   const progressConfigs = await getProgressConfigsForDepartments(activityDepartmentIds);
   const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments(activityDepartmentIds);
+  // Facilities Services-only — id comparison, never a display-name match;
+  // same rule as app/(main)/projects/gantt/page.tsx's own identical check.
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
 
   for (const a of activities) {
     const child = {
@@ -159,6 +178,7 @@ export default async function ActivityGanttPage({
       standaloneGroup.children.push(child);
     } else {
       if (!projectMap.has(a.project.id)) {
+        const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && a.project.departmentId === facilitiesServicesDepartmentId;
         projectMap.set(a.project.id, {
           id: a.project.id,
           title: a.project.title,
@@ -166,6 +186,8 @@ export default async function ActivityGanttPage({
           status: a.project.status,
           startDate: a.project.startDate?.toISOString() ?? null,
           endDate: a.project.endDate?.toISOString() ?? null,
+          facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(a.project.facilitiesStartQuarter, a.project.facilitiesStartYear) : null,
+          facilitiesEndLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(a.project.facilitiesEndQuarter, a.project.facilitiesEndYear) : null,
           progress: a.project.progress,
           ownerName: a.project.owner.name,
           ownerImage: a.project.owner.image,

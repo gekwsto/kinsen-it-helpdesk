@@ -6,11 +6,18 @@ import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
-import { updateProjectSchema, updateProjectRequestOriginFieldsSchema } from "@/lib/validations";
+import { updateProjectSchema, updateProjectRequestOriginFieldsSchema, facilitiesProjectFieldsSchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
 import { notifyOwnerOfProjectCompletion } from "@/lib/services/project-feedback-service";
+import {
+  getFacilitiesServicesDepartmentId,
+  hasFacilitiesFieldsPresent,
+  resolveFacilitiesWrite,
+  facilitiesResolutionErrorMessage,
+  type ResolvedFacilitiesWrite,
+} from "@/lib/services/project-facilities-service";
 import { Role } from "@prisma/client";
 
 // Every field the Project List (table) or Grid (card) view actually
@@ -89,7 +96,18 @@ export async function GET(
       return NextResponse.json({ error: "Forbidden" }, { status: 403 });
     }
 
-    return NextResponse.json(withProjectFinancials(project));
+    // Lets the client decide whether to show/edit the Facilities
+    // Information section without re-deriving the Department identity
+    // check itself (never display-name matching) — a UI hint only, the
+    // real enforcement is in PATCH below. The raw facilitiesCompany/
+    // Location/precision/quarter/year fields are still returned even when
+    // this is false (e.g. a Project that USED to be Facilities Services —
+    // see PATCH's own doc comment on why that history is never cleared);
+    // the client is what hides them outside the workspace.
+    const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+    const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId;
+
+    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -105,7 +123,23 @@ export async function PATCH(
 
     const existing = await prisma.project.findUnique({
       where: { id },
-      select: { departmentId: true, status: true, title: true, expectedStartDate: true, expectedFinishDate: true, expenseTypeId: true, projectRequestId: true },
+      select: {
+        departmentId: true,
+        status: true,
+        title: true,
+        expectedStartDate: true,
+        expectedFinishDate: true,
+        expenseTypeId: true,
+        projectRequestId: true,
+        startDate: true,
+        endDate: true,
+        facilitiesStartPrecision: true,
+        facilitiesStartQuarter: true,
+        facilitiesStartYear: true,
+        facilitiesEndPrecision: true,
+        facilitiesEndQuarter: true,
+        facilitiesEndYear: true,
+      },
     });
     if (!existing) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
@@ -125,8 +159,11 @@ export async function PATCH(
     // app/(main)/projects/[id]/edit/page.tsx), but there's no extra
     // security boundary being bypassed by also allowing it here: editing
     // these fields still requires the SAME project.edit this route already
-    // re-checks above, on a real, already-existing Project.
-    const data = updateProjectSchema.merge(updateProjectRequestOriginFieldsSchema).parse(body);
+    // re-checks above, on a real, already-existing Project. Facilities
+    // Services fields are merged in the SAME way, but DO have an extra
+    // boundary — see the isFacilitiesWorkspace check below, right after
+    // effectiveDepartmentId is resolved.
+    const data = updateProjectSchema.merge(updateProjectRequestOriginFieldsSchema).merge(facilitiesProjectFieldsSchema).parse(body);
 
     // expectedStartDate/expectedFinishDate are now `string | null | undefined`
     // (see updateProjectRequestOriginFieldsSchema's doc comment): `undefined`
@@ -180,8 +217,83 @@ export async function PATCH(
       }
     }
 
-    const { memberIds, startDate, endDate, expectedStartDate, expectedFinishDate, ...rest } = data;
+    const {
+      memberIds,
+      startDate,
+      endDate,
+      expectedStartDate,
+      expectedFinishDate,
+      facilitiesCompany,
+      facilitiesLocation,
+      facilitiesStartPrecision,
+      facilitiesStartQuarter,
+      facilitiesStartYear,
+      facilitiesEndPrecision,
+      facilitiesEndQuarter,
+      facilitiesEndYear,
+      ...rest
+    } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
+
+    // Facilities Services-only metadata — rejected outright (requirement:
+    // "prevent unauthorized changes") for a Project whose EFFECTIVE
+    // department (after this same request's own possible departmentId
+    // change) isn't Facilities Services. This is also what keeps a
+    // Project's HISTORICAL Facilities metadata safe once it's been moved
+    // out: nothing in this route ever clears those columns on a
+    // department change away (see the data object built below — the
+    // facilities keys are simply never touched when !isFacilitiesWorkspace,
+    // left exactly as they were), and this same check stops anyone from
+    // writing new values into them from that point on. Checked against the
+    // RAW body, same reasoning as POST /api/projects.
+    const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+    const isFacilitiesWorkspace = !!facilitiesServicesDepartmentId && effectiveDepartmentId === facilitiesServicesDepartmentId;
+    if (!isFacilitiesWorkspace && hasFacilitiesFieldsPresent(body)) {
+      return NextResponse.json(
+        { error: "Facilities-specific fields can only be set for a Project in the Facilities Services workspace.", code: "facilities_fields_not_allowed" },
+        { status: 400 }
+      );
+    }
+    // Only recomputed when THIS request actually touches a date or a
+    // facilities-only field — editing, say, just the title must never
+    // silently re-persist (and re-derive) an unrelated Start/End.
+    const facilitiesRelevantFieldsTouched =
+      startDate !== undefined ||
+      endDate !== undefined ||
+      facilitiesStartPrecision !== undefined ||
+      facilitiesStartQuarter !== undefined ||
+      facilitiesStartYear !== undefined ||
+      facilitiesEndPrecision !== undefined ||
+      facilitiesEndQuarter !== undefined ||
+      facilitiesEndYear !== undefined;
+    let facilitiesWrite: ResolvedFacilitiesWrite | null = null;
+    if (isFacilitiesWorkspace && facilitiesRelevantFieldsTouched) {
+      const effectiveStartPrecision = facilitiesStartPrecision !== undefined ? facilitiesStartPrecision : existing.facilitiesStartPrecision;
+      const effectiveEndPrecision = facilitiesEndPrecision !== undefined ? facilitiesEndPrecision : existing.facilitiesEndPrecision;
+      const startSwitchedAwayFromQuarter = existing.facilitiesStartPrecision === "QUARTER" && effectiveStartPrecision !== "QUARTER" && startDate === undefined;
+      const endSwitchedAwayFromQuarter = existing.facilitiesEndPrecision === "QUARTER" && effectiveEndPrecision !== "QUARTER" && endDate === undefined;
+      const resolution = resolveFacilitiesWrite({
+        startPrecision: effectiveStartPrecision,
+        startQuarter: facilitiesStartQuarter !== undefined ? facilitiesStartQuarter : existing.facilitiesStartQuarter,
+        startYear: facilitiesStartYear !== undefined ? facilitiesStartYear : existing.facilitiesStartYear,
+        // Never fall back to the EXISTING startDate when this request is
+        // switching Start away from QUARTER — that existing value IS the
+        // old quarter-derived boundary, and falling back to it here would
+        // silently re-persist it as if it had just been typed in as an
+        // exact date (exactly what switchedAwayFromQuarter below exists
+        // to reject instead).
+        startExact: startDate !== undefined ? startDate : startSwitchedAwayFromQuarter ? null : existing.startDate ? existing.startDate.toISOString() : null,
+        endPrecision: effectiveEndPrecision,
+        endQuarter: facilitiesEndQuarter !== undefined ? facilitiesEndQuarter : existing.facilitiesEndQuarter,
+        endYear: facilitiesEndYear !== undefined ? facilitiesEndYear : existing.facilitiesEndYear,
+        endExact: endDate !== undefined ? endDate : endSwitchedAwayFromQuarter ? null : existing.endDate ? existing.endDate.toISOString() : null,
+        switchedAwayFromQuarter: { start: startSwitchedAwayFromQuarter, end: endSwitchedAwayFromQuarter },
+      });
+      if (!resolution.ok) {
+        return NextResponse.json({ error: facilitiesResolutionErrorMessage(resolution.error), code: resolution.error.code }, { status: 400 });
+      }
+      facilitiesWrite = resolution.value;
+    }
 
     if (memberIds && memberIds.length > 0) {
       for (const userId of memberIds) {
@@ -215,8 +327,25 @@ export async function PATCH(
       data: {
         ...rest,
         subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
-        startDate: startDate ? new Date(startDate) : undefined,
-        endDate: endDate ? new Date(endDate) : undefined,
+        // Facilities Services, and this request actually touched a
+        // relevant field: the resolved write wins (already derived
+        // startDate/endDate from whichever of Quarter/Exact applies).
+        // Everything else (including a Facilities Project whose date
+        // fields this particular request doesn't touch at all): the
+        // exact, unmodified pre-existing behavior — `rest` never includes
+        // the 8 facilities keys (destructured out above), so they're
+        // simply left untouched here, which is also what preserves a
+        // Project's HISTORICAL Facilities metadata once it's moved to a
+        // different department (nothing in this branch ever clears it).
+        ...(facilitiesWrite
+          ? { ...facilitiesWrite, facilitiesCompany: facilitiesCompany !== undefined ? facilitiesCompany : undefined, facilitiesLocation: facilitiesLocation !== undefined ? facilitiesLocation : undefined }
+          : {
+              startDate: startDate ? new Date(startDate) : undefined,
+              endDate: endDate ? new Date(endDate) : undefined,
+              ...(isFacilitiesWorkspace
+                ? { facilitiesCompany: facilitiesCompany !== undefined ? facilitiesCompany : undefined, facilitiesLocation: facilitiesLocation !== undefined ? facilitiesLocation : undefined }
+                : {}),
+            }),
         // undefined (key omitted) -> leave untouched; null/"" (explicitly
         // cleared) -> persist NULL; a real value -> the parsed Date. Reuses
         // the exact same effective values already computed above for the
@@ -273,7 +402,7 @@ export async function PATCH(
       await notifyOwnerOfProjectCompletion({ id: project.id, title: project.title, projectRequestId: existing.projectRequestId, owner: project.owner });
     }
 
-    return NextResponse.json(withProjectFinancials(project));
+    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace: isFacilitiesWorkspace });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

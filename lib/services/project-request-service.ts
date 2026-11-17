@@ -11,6 +11,12 @@ import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/servic
 import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
 import { findSqlGeneralUserByUsername, type SqlGeneralUserRecord } from "@/lib/sqlgeneral-api-client";
 import { wholeCalendarDaysBetween } from "@/lib/date-only";
+import {
+  getFacilitiesServicesDepartmentId,
+  hasFacilitiesFieldsPresent,
+  resolveFacilitiesWrite,
+  type ResolvedFacilitiesWrite,
+} from "@/lib/services/project-facilities-service";
 import { Role, type ProjectRequestStatus, type IntermediateApprovalSkipReason, type Prisma } from "@prisma/client";
 
 // ─── Department resolution ──────────────────────────────────────────────────
@@ -541,7 +547,10 @@ export type CreateProjectFromRequestError =
   | { code: "invalid_audience" }
   | { code: "invalid_expense_type" }
   | { code: "invalid_sub_department" }
-  | { code: "invalid_member" };
+  | { code: "invalid_member" }
+  | { code: "facilities_fields_not_allowed" }
+  | { code: "facilities_quarter_fields_incomplete"; field: "start" | "end" }
+  | { code: "facilities_invalid_date_range" };
 
 /**
  * Validates a set of user ids for Owner(s)/Audience — deliberately NEVER
@@ -611,7 +620,7 @@ export async function createProjectFromApprovedRequest(
   userId: string,
   role: Role,
   customRoleId: string | null | undefined,
-  data: import("@/lib/validations").CreateProjectFromRequestInput
+  data: import("@/lib/validations").CreateProjectFromRequestInput & Partial<import("@/lib/validations").FacilitiesProjectFieldsInput>
 ): Promise<CreateProjectFromRequestResult> {
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
@@ -624,6 +633,40 @@ export async function createProjectFromApprovedRequest(
 
   if (existing.project) {
     return { ok: true, projectId: existing.project.id, alreadyExisted: true };
+  }
+
+  // Facilities Services-only metadata — the department here is ALWAYS the
+  // Project Request's own, server-resolved, never client-chosen (see this
+  // route's own doc comment) — still re-checked against the real
+  // department identity (never display-name matching), same as every
+  // other creation path.
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+  const isFacilitiesWorkspace = !!facilitiesServicesDepartmentId && existing.departmentId === facilitiesServicesDepartmentId;
+  if (!isFacilitiesWorkspace && hasFacilitiesFieldsPresent(data as Record<string, unknown>)) {
+    return { ok: false, error: { code: "facilities_fields_not_allowed" } };
+  }
+  let facilitiesWrite: ResolvedFacilitiesWrite | null = null;
+  if (isFacilitiesWorkspace) {
+    const resolution = resolveFacilitiesWrite({
+      startPrecision: data.facilitiesStartPrecision ?? null,
+      startQuarter: data.facilitiesStartQuarter ?? null,
+      startYear: data.facilitiesStartYear ?? null,
+      startExact: data.startDate ?? null,
+      endPrecision: data.facilitiesEndPrecision ?? null,
+      endQuarter: data.facilitiesEndQuarter ?? null,
+      endYear: data.facilitiesEndYear ?? null,
+      endExact: data.endDate ?? null,
+    });
+    if (!resolution.ok) {
+      return {
+        ok: false,
+        error:
+          resolution.error.code === "quarter_fields_incomplete"
+            ? { code: "facilities_quarter_fields_incomplete", field: resolution.error.field }
+            : { code: "facilities_invalid_date_range" },
+      };
+    }
+    facilitiesWrite = resolution.value;
   }
 
   // System-wide, NEVER Department-scoped — see resolveSystemWideActiveUserIds'
@@ -701,8 +744,15 @@ export async function createProjectFromApprovedRequest(
         // hasProjectViewAccess, lib/services/project-access-service.ts,
         // for the ONLY effect Audience membership has).
         audience: audienceIds.length ? { connect: audienceIds.map((id) => ({ id })) } : undefined,
-        startDate: data.startDate ? new Date(data.startDate) : undefined,
-        endDate: data.endDate ? new Date(data.endDate) : undefined,
+        // Facilities Services: the resolved write wins (derived from
+        // either Quarter or Exact). Every other workspace: the exact,
+        // unmodified pre-existing behavior.
+        ...(facilitiesWrite
+          ? { ...facilitiesWrite, facilitiesCompany: data.facilitiesCompany ?? undefined, facilitiesLocation: data.facilitiesLocation ?? undefined }
+          : {
+              startDate: data.startDate ? new Date(data.startDate) : undefined,
+              endDate: data.endDate ? new Date(data.endDate) : undefined,
+            }),
         successTarget: data.successTarget,
         isGoal: data.isGoal,
         members: data.memberIds.length ? { connect: data.memberIds.map((id) => ({ id })) } : undefined,

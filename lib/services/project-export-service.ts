@@ -26,7 +26,8 @@
 import ExcelJS from "exceljs";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { computeActivityFinancials } from "@/lib/services/project-financials-service";
-import type { Prisma } from "@prisma/client";
+import { formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
+import type { Prisma, ProjectQuarter } from "@prisma/client";
 
 const DATE_FORMAT = "dd mmm yyyy";
 const HEADER_FILL: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE5E7EB" } };
@@ -133,6 +134,17 @@ export interface ProjectExportRow {
   startDate: Date | null;
   endDate: Date | null;
   createdAt: Date;
+  // Facilities Services only — null for every other workspace's Project
+  // (and for a Facilities Project that simply never set them). Start
+  // Date/Due Date above still carry the derived boundary date regardless
+  // (unchanged, still sortable/filterable); these add the human Quarter
+  // label alongside, and the free-text Company/Location.
+  facilitiesCompany: string | null;
+  facilitiesLocation: string | null;
+  facilitiesStartQuarter: ProjectQuarter | null;
+  facilitiesStartYear: number | null;
+  facilitiesEndQuarter: ProjectQuarter | null;
+  facilitiesEndYear: number | null;
 }
 
 export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promise<ExcelJS.Buffer> {
@@ -156,6 +168,10 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
     { header: "Expected Finish", key: "expectedFinishDate", width: 16 },
     { header: "Start Date", key: "startDate", width: 14 },
     { header: "Due Date", key: "endDate", width: 14 },
+    { header: "Company", key: "facilitiesCompany", width: 24 },
+    { header: "Location", key: "facilitiesLocation", width: 24 },
+    { header: "Start (Quarter)", key: "facilitiesStartQuarterLabel", width: 16 },
+    { header: "End (Quarter)", key: "facilitiesEndQuarterLabel", width: 16 },
     { header: "Created", key: "createdAt", width: 16 },
     { header: "Description", key: "description", width: 40 },
   ];
@@ -177,6 +193,10 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
         expectedFinishDate: r.expectedFinishDate,
         startDate: r.startDate,
         endDate: r.endDate,
+        facilitiesCompany: r.facilitiesCompany ?? "",
+        facilitiesLocation: r.facilitiesLocation ?? "",
+        facilitiesStartQuarterLabel: formatFacilitiesQuarterLabel(r.facilitiesStartQuarter, r.facilitiesStartYear) ?? "",
+        facilitiesEndQuarterLabel: formatFacilitiesQuarterLabel(r.facilitiesEndQuarter, r.facilitiesEndYear) ?? "",
         createdAt: r.createdAt,
         description: r.description ?? "",
       })
@@ -211,6 +231,13 @@ export interface ProjectDetailExportData {
   endDate: Date | null;
   progress: number;
   createdAt: Date;
+  // Facilities Services only — see ProjectExportRow's own doc comment.
+  facilitiesCompany: string | null;
+  facilitiesLocation: string | null;
+  facilitiesStartQuarter: ProjectQuarter | null;
+  facilitiesStartYear: number | null;
+  facilitiesEndQuarter: ProjectQuarter | null;
+  facilitiesEndYear: number | null;
   activities: {
     title: string;
     status: string;
@@ -264,6 +291,16 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   if (data.expectedTotalInitialDays !== null) addKeyValueRow(detailsSheet, "Expected Total Days", data.expectedTotalInitialDays);
   addKeyValueRow(detailsSheet, "Start Date", data.startDate);
   addKeyValueRow(detailsSheet, "Due Date", data.endDate);
+  // Facilities Services only — Start Date/Due Date above already carry the
+  // derived boundary date either way; these add the explicit Quarter
+  // label (never shown as if it were a user-entered exact date) and the
+  // free-text Company/Location, only when actually set.
+  if (data.facilitiesCompany) addKeyValueRow(detailsSheet, "Company", data.facilitiesCompany);
+  if (data.facilitiesLocation) addKeyValueRow(detailsSheet, "Location", data.facilitiesLocation);
+  const facilitiesStartQuarterLabel = formatFacilitiesQuarterLabel(data.facilitiesStartQuarter, data.facilitiesStartYear);
+  if (facilitiesStartQuarterLabel) addKeyValueRow(detailsSheet, "Start (Quarter)", facilitiesStartQuarterLabel);
+  const facilitiesEndQuarterLabel = formatFacilitiesQuarterLabel(data.facilitiesEndQuarter, data.facilitiesEndYear);
+  if (facilitiesEndQuarterLabel) addKeyValueRow(detailsSheet, "End (Quarter)", facilitiesEndQuarterLabel);
   addKeyValueRow(detailsSheet, "Progress (%)", data.progress);
   addKeyValueRow(detailsSheet, "Created", data.createdAt);
   addKeyValueRow(detailsSheet, "Description", data.description);

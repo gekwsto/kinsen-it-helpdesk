@@ -111,6 +111,18 @@ export interface GanttGroup {
   children: GanttItem[];
   /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
   overdue?: boolean;
+  /**
+   * Facilities Services Project with Quarter precision only — e.g. "Q2
+   * 2027", pre-formatted server-side (formatFacilitiesQuarterLabel). When
+   * present, the tooltip shows this INSTEAD of the formatted exact
+   * startDate/endDate for that one boundary — startDate/endDate
+   * themselves are still the real derived dates (unchanged, still what
+   * positions/sizes the bar), this only controls what the tooltip's own
+   * label text says, so a Quarter-derived boundary is never presented as
+   * if a user had typed in that exact day.
+   */
+  facilitiesStartLabel?: string | null;
+  facilitiesEndLabel?: string | null;
 }
 
 export interface GanttDependency {
@@ -617,6 +629,8 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
       assigneeName?: string | null; assigneeImage?: string | null;
       ownerName?: string | null; ownerImage?: string | null;
       overdue?: boolean;
+      /** Facilities Services Quarter precision only — see GanttGroup's own doc comment. */
+      facilitiesStartLabel?: string | null; facilitiesEndLabel?: string | null;
     };
     barH: number;
     isGroup: boolean;
@@ -726,8 +740,14 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             )}
           </div>
           <div className="text-xs space-y-0.5">
-            {item.startDate && <p><span className="text-muted-foreground">Start:</span>{" "}{format(new Date(item.startDate), "MMM d, yyyy")}</p>}
-            {item.endDate   && <p><span className="text-muted-foreground">End:</span>{" "}{format(new Date(item.endDate),   "MMM d, yyyy")}</p>}
+            {/* Facilities Services with Quarter precision: show the
+                explicit "Q2 2027" label instead of the formatted derived
+                boundary date — never present a Quarter boundary as if it
+                were a user-entered exact date. startDate/endDate
+                themselves are untouched either way; they're what
+                positioned/sized this bar in the first place. */}
+            {item.startDate && <p><span className="text-muted-foreground">Start:</span>{" "}{item.facilitiesStartLabel ?? format(new Date(item.startDate), "MMM d, yyyy")}</p>}
+            {item.endDate   && <p><span className="text-muted-foreground">End:</span>{" "}{item.facilitiesEndLabel ?? format(new Date(item.endDate),   "MMM d, yyyy")}</p>}
           </div>
           {item.progress != null && item.progress > 0 && (
             <div className="space-y-1">
@@ -1008,7 +1028,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                 <div className="absolute inset-y-0 w-0.5 bg-red-500/70 pointer-events-none z-10" style={{ left: todayPx }} />
                               )}
                               <Bar
-                                item={{ id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue }}
+                                item={{ id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue, facilitiesStartLabel: group.facilitiesStartLabel, facilitiesEndLabel: group.facilitiesEndLabel }}
                                 barH={24}
                                 isGroup
                               />

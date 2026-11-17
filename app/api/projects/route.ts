@@ -11,8 +11,15 @@ import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { resolveActiveDepartmentMemberIds } from "@/lib/services/department-membership-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
-import { createProjectSchema, createProjectMemberEligibilitySchema } from "@/lib/validations";
+import { createProjectSchema, createProjectMemberEligibilitySchema, facilitiesProjectFieldsSchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
+import {
+  getFacilitiesServicesDepartmentId,
+  hasFacilitiesFieldsPresent,
+  resolveFacilitiesWrite,
+  facilitiesResolutionErrorMessage,
+  type ResolvedFacilitiesWrite,
+} from "@/lib/services/project-facilities-service";
 
 export async function GET(req: NextRequest) {
   try {
@@ -80,7 +87,7 @@ export async function POST(req: NextRequest) {
     const session = await requireAuth();
 
     const body = await req.json();
-    const data = createProjectSchema.parse(body);
+    const data = createProjectSchema.merge(facilitiesProjectFieldsSchema).parse(body);
     const { memberEligibilitySource } = createProjectMemberEligibilitySchema.parse(body);
 
     // No explicit departmentId in the body — fall back to the caller's
@@ -105,7 +112,53 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { memberIds, startDate, endDate, departmentId: _ignoredDepartmentId, ...rest } = data;
+    const {
+      memberIds,
+      startDate,
+      endDate,
+      departmentId: _ignoredDepartmentId,
+      facilitiesCompany,
+      facilitiesLocation,
+      facilitiesStartPrecision,
+      facilitiesStartQuarter,
+      facilitiesStartYear,
+      facilitiesEndPrecision,
+      facilitiesEndQuarter,
+      facilitiesEndYear,
+      ...rest
+    } = data;
+
+    // Facilities Services-only metadata — rejected outright for any other
+    // workspace (requirement: "prevent cross-workspace writes"), resolved
+    // (Quarter -> boundary date, or the plain exact date) only when this
+    // Project's own department actually IS Facilities Services. Checked
+    // against the RAW body (not `data`) so an attempt is caught even if
+    // Zod would otherwise have rejected/stripped the value.
+    const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+    const isFacilitiesWorkspace = !!facilitiesServicesDepartmentId && deptResolution.departmentId === facilitiesServicesDepartmentId;
+    if (!isFacilitiesWorkspace && hasFacilitiesFieldsPresent(body)) {
+      return NextResponse.json(
+        { error: "Facilities-specific fields can only be set for a Project in the Facilities Services workspace.", code: "facilities_fields_not_allowed" },
+        { status: 400 }
+      );
+    }
+    let facilitiesWrite: ResolvedFacilitiesWrite | null = null;
+    if (isFacilitiesWorkspace) {
+      const resolution = resolveFacilitiesWrite({
+        startPrecision: facilitiesStartPrecision ?? null,
+        startQuarter: facilitiesStartQuarter ?? null,
+        startYear: facilitiesStartYear ?? null,
+        startExact: startDate ?? null,
+        endPrecision: facilitiesEndPrecision ?? null,
+        endQuarter: facilitiesEndQuarter ?? null,
+        endYear: facilitiesEndYear ?? null,
+        endExact: endDate ?? null,
+      });
+      if (!resolution.ok) {
+        return NextResponse.json({ error: facilitiesResolutionErrorMessage(resolution.error), code: resolution.error.code }, { status: 400 });
+      }
+      facilitiesWrite = resolution.value;
+    }
 
     if (rest.subDepartmentId) {
       const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, deptResolution.departmentId);
@@ -162,8 +215,14 @@ export async function POST(req: NextRequest) {
         // behavior changes — no UI, no permission check, reads this
         // relation differently for a manual Project.
         owners: { connect: [{ id: session.user.id }] },
-        startDate: startDate ? new Date(startDate) : undefined,
-        endDate: endDate ? new Date(endDate) : undefined,
+        // Facilities Services: the resolved write wins outright (it
+        // already derived startDate/endDate from either the exact date or
+        // the Quarter boundary, plus the precision/quarter/year metadata).
+        // Every other workspace: the exact, unmodified pre-existing
+        // behavior — a plain exact date or nothing.
+        ...(isFacilitiesWorkspace && facilitiesWrite
+          ? { ...facilitiesWrite, facilitiesCompany: facilitiesCompany ?? undefined, facilitiesLocation: facilitiesLocation ?? undefined }
+          : { startDate: startDate ? new Date(startDate) : undefined, endDate: endDate ? new Date(endDate) : undefined }),
         members: memberIds.length
           ? { connect: memberIds.map((id) => ({ id })) }
           : undefined,

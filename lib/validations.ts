@@ -9,6 +9,8 @@ import {
   DependencyType,
   DepartmentRole,
   MicrosoftMappingSourceType,
+  ProjectDatePrecision,
+  ProjectQuarter,
 } from "@prisma/client";
 
 // ─── Ticket Schemas ────────────────────────────────────────────────────────────
@@ -162,8 +164,14 @@ export const createProjectSchema = z.object({
   departmentId: z.string().optional(),
   subDepartmentId: z.string().nullable().optional(),
   businessUnitId: z.string().optional(),
-  startDate: z.string().optional(),
-  endDate: z.string().optional(),
+  // Nullable (not just optional) so an edit can explicitly clear either —
+  // needed for a Facilities Services Project switching away from an exact
+  // date (see lib/services/project-facilities-service.ts); every other
+  // workspace simply never sends `null` here today, so this is a pure
+  // widening, not a behavior change. `undefined` still means "leave
+  // unchanged" wherever that distinction matters (PATCH).
+  startDate: z.string().nullable().optional(),
+  endDate: z.string().nullable().optional(),
   successTarget: z.string().optional(),
   memberIds: z.array(z.string()).default([]),
   isGoal: z.boolean().default(false),
@@ -287,6 +295,28 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
   // sending any of these three keys now has them silently stripped by Zod
   // (unknown keys), never persisted.
   external: z.boolean().optional(),
+});
+
+// Facilities Services-only Project metadata — a SEPARATE schema, merged in
+// at each of the 3 creation paths and at PATCH /api/projects/[id], same
+// "never baked into createProjectSchema itself" convention as
+// updateProjectRequestOriginFieldsSchema above. Every field optional AND
+// nullable — `undefined` means "untouched" (PATCH only; a create request
+// simply never sends the key at all), `null` means "explicitly cleared".
+// Whether any of these 8 keys is even ALLOWED on a given Project (it
+// belonging to the Facilities Services Department) is a server-side
+// business rule, not a Zod concern — see hasFacilitiesFieldsPresent/
+// resolveFacilitiesWrite in lib/services/project-facilities-service.ts,
+// the actual enforcement point in every route.
+export const facilitiesProjectFieldsSchema = z.object({
+  facilitiesCompany: z.string().trim().min(1).nullable().optional(),
+  facilitiesLocation: z.string().trim().min(1).nullable().optional(),
+  facilitiesStartPrecision: z.nativeEnum(ProjectDatePrecision).nullable().optional(),
+  facilitiesStartQuarter: z.nativeEnum(ProjectQuarter).nullable().optional(),
+  facilitiesStartYear: z.number().int().min(1900).max(2999).nullable().optional(),
+  facilitiesEndPrecision: z.nativeEnum(ProjectDatePrecision).nullable().optional(),
+  facilitiesEndQuarter: z.nativeEnum(ProjectQuarter).nullable().optional(),
+  facilitiesEndYear: z.number().int().min(1900).max(2999).nullable().optional(),
 });
 
 export const projectExpenseTypeSchema = z.object({
@@ -991,6 +1021,7 @@ export type UpdateTicketInput = z.infer<typeof updateTicketSchema>;
 export type ReplyTicketInput = z.infer<typeof replyTicketSchema>;
 export type CreateProjectInput = z.infer<typeof createProjectSchema>;
 export type UpdateProjectInput = z.infer<typeof updateProjectSchema>;
+export type FacilitiesProjectFieldsInput = z.infer<typeof facilitiesProjectFieldsSchema>;
 export type CreateActivityInput = z.infer<typeof createActivitySchema>;
 export type UpdateActivityInput = z.infer<typeof updateActivitySchema>;
 export type CreateGoalInput = z.infer<typeof createGoalSchema>;

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAuth } from "@/lib/permissions";
-import { createProjectFromRequestSchema } from "@/lib/validations";
+import { createProjectFromRequestSchema, facilitiesProjectFieldsSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, forbiddenResponse, internalErrorResponse } from "@/lib/api-errors";
 import { createProjectFromApprovedRequest } from "@/lib/services/project-request-service";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
@@ -20,7 +20,10 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
     const { id } = await params;
 
     const body = await req.json();
-    const parsed = createProjectFromRequestSchema.safeParse(body);
+    // createProjectFromRequestSchema is a ZodEffects (its own trailing
+    // .superRefine), which has no .merge() — .and() (ZodIntersection) works
+    // on any ZodType and merges both objects' parsed results the same way.
+    const parsed = createProjectFromRequestSchema.and(facilitiesProjectFieldsSchema).safeParse(body);
     if (!parsed.success) return zodErrorResponse(parsed.error);
 
     const result = await createProjectFromApprovedRequest(id, session.user.id, session.user.role, session.user.customRoleId, parsed.data);
@@ -60,6 +63,18 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             apiError("invalid_member", "One or more selected members cannot be assigned to projects in this department.", { field: "memberIds" }),
             { status: 400 }
           );
+        case "facilities_fields_not_allowed":
+          return NextResponse.json(
+            apiError("facilities_fields_not_allowed", "Facilities-specific fields can only be set for a Project in the Facilities Services workspace."),
+            { status: 400 }
+          );
+        case "facilities_quarter_fields_incomplete":
+          return NextResponse.json(
+            apiError("facilities_quarter_fields_incomplete", `Select both a Quarter and a Year for ${result.error.field === "start" ? "Start" : "End"}.`),
+            { status: 400 }
+          );
+        case "facilities_invalid_date_range":
+          return NextResponse.json(apiError("facilities_invalid_date_range", "Start must not be later than End."), { status: 400 });
         default:
           return internalErrorResponse();
       }

@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/select";
 import { ChevronRight, Loader2 } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
+import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
 
 interface AssignableUser {
   id: string;
@@ -77,6 +78,23 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [external, setExternal] = useState(false);
   const [expenseTypes, setExpenseTypes] = useState<ExpenseTypeOption[]>([]);
 
+  // Facilities Services-only — server-resolved by GET /api/projects/[id]
+  // itself (isFacilitiesServicesWorkspace: id comparison only, never a
+  // display-name match), never re-derived here. Starts at the stored
+  // precision/quarter/year/exact values exactly as persisted — switching
+  // precision below clears the OTHER representation's own local state, so
+  // a stale value from before the switch can never be sent alongside the
+  // new one.
+  const [isFacilitiesServicesWorkspace, setIsFacilitiesServicesWorkspace] = useState(false);
+  const [facilitiesCompany, setFacilitiesCompany] = useState("");
+  const [facilitiesLocation, setFacilitiesLocation] = useState("");
+  const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
+  const [facStartQuarter, setFacStartQuarter] = useState("");
+  const [facStartYear, setFacStartYear] = useState("");
+  const [facEndPrecision, setFacEndPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
+  const [facEndQuarter, setFacEndQuarter] = useState("");
+  const [facEndYear, setFacEndYear] = useState("");
+
   useEffect(() => {
     fetch(`/api/projects/${id}`)
       .then((r) => r.json())
@@ -89,6 +107,15 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setPriority(String(Math.min(p.priority ?? 2, 3)));
           setStartDate(p.startDate ? p.startDate.split("T")[0] : "");
           setEndDate(p.endDate ? p.endDate.split("T")[0] : "");
+          setIsFacilitiesServicesWorkspace(p.isFacilitiesServicesWorkspace ?? false);
+          setFacilitiesCompany(p.facilitiesCompany ?? "");
+          setFacilitiesLocation(p.facilitiesLocation ?? "");
+          setFacStartPrecision(p.facilitiesStartPrecision === "QUARTER" ? "QUARTER" : "EXACT");
+          setFacStartQuarter(p.facilitiesStartQuarter ?? "");
+          setFacStartYear(p.facilitiesStartYear ? String(p.facilitiesStartYear) : "");
+          setFacEndPrecision(p.facilitiesEndPrecision === "QUARTER" ? "QUARTER" : "EXACT");
+          setFacEndQuarter(p.facilitiesEndQuarter ?? "");
+          setFacEndYear(p.facilitiesEndYear ? String(p.facilitiesEndYear) : "");
           setSuccessTarget(p.successTarget ?? "");
           setIsGoal(p.isGoal ?? false);
           setSubDepartmentId(p.subDepartmentId ?? "");
@@ -164,6 +191,18 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
       toast.error("Expected Finish Date cannot be before Expected Start Date.");
       return;
     }
+    // Facilities Services-only — a UX convenience only; the server
+    // (resolveFacilitiesWrite) re-validates all of this regardless.
+    if (isFacilitiesServicesWorkspace) {
+      if (facStartPrecision === "QUARTER" && (!facStartQuarter || !facStartYear)) {
+        toast.error("Select both a Quarter and a Year for Start.");
+        return;
+      }
+      if (facEndPrecision === "QUARTER" && (!facEndQuarter || !facEndYear)) {
+        toast.error("Select both a Quarter and a Year for End.");
+        return;
+      }
+    }
     setSaving(true);
     try {
       const res = await fetch(`/api/projects/${id}`, {
@@ -174,8 +213,27 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           description: description || undefined,
           status,
           priority: parseInt(priority),
-          startDate: startDate || undefined,
-          endDate: endDate || undefined,
+          // Facilities Services: Start/End are driven by the precision
+          // toggle below (an exact date still flows through this SAME
+          // startDate/endDate field; Quarter mode sends quarter+year
+          // instead and intentionally omits startDate/endDate so the
+          // server's own resolveFacilitiesWrite derives the boundary,
+          // never a stale value from before a precision switch). Every
+          // other workspace: the exact, unmodified pre-existing behavior.
+          ...(isFacilitiesServicesWorkspace
+            ? {
+                facilitiesCompany: facilitiesCompany.trim() || null,
+                facilitiesLocation: facilitiesLocation.trim() || null,
+                facilitiesStartPrecision: facStartPrecision,
+                facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
+                facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
+                startDate: facStartPrecision === "EXACT" ? startDate || null : undefined,
+                facilitiesEndPrecision: facEndPrecision,
+                facilitiesEndQuarter: facEndPrecision === "QUARTER" ? facEndQuarter : null,
+                facilitiesEndYear: facEndPrecision === "QUARTER" ? (facEndYear ? parseInt(facEndYear) : null) : null,
+                endDate: facEndPrecision === "EXACT" ? endDate || null : undefined,
+              }
+            : { startDate: startDate || undefined, endDate: endDate || undefined }),
           successTarget: successTarget || undefined,
           memberIds: Array.from(selectedMemberIds),
           isGoal,
@@ -328,26 +386,86 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="startDate">Start Date</Label>
-                <Input
-                  id="startDate"
-                  type="date"
-                  value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
+            {isFacilitiesServicesWorkspace ? (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <FacilitiesDateField
+                  label="Start"
+                  precision={facStartPrecision}
+                  onPrecisionChange={(p) => {
+                    setFacStartPrecision(p);
+                    setStartDate("");
+                    setFacStartQuarter("");
+                    setFacStartYear("");
+                  }}
+                  exactValue={startDate}
+                  onExactChange={setStartDate}
+                  quarter={facStartQuarter}
+                  onQuarterChange={setFacStartQuarter}
+                  year={facStartYear}
+                  onYearChange={setFacStartYear}
+                />
+                <FacilitiesDateField
+                  label="End"
+                  precision={facEndPrecision}
+                  onPrecisionChange={(p) => {
+                    setFacEndPrecision(p);
+                    setEndDate("");
+                    setFacEndQuarter("");
+                    setFacEndYear("");
+                  }}
+                  exactValue={endDate}
+                  onExactChange={setEndDate}
+                  quarter={facEndQuarter}
+                  onQuarterChange={setFacEndQuarter}
+                  year={facEndYear}
+                  onYearChange={setFacEndYear}
                 />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="endDate">End Date</Label>
-                <Input
-                  id="endDate"
-                  type="date"
-                  value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
-                />
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="startDate">Start Date</Label>
+                  <Input
+                    id="startDate"
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => setStartDate(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="endDate">End Date</Label>
+                  <Input
+                    id="endDate"
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => setEndDate(e.target.value)}
+                  />
+                </div>
               </div>
-            </div>
+            )}
+
+            {isFacilitiesServicesWorkspace && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="facilitiesCompany">Company</Label>
+                  <Input
+                    id="facilitiesCompany"
+                    placeholder="One or more company names…"
+                    value={facilitiesCompany}
+                    onChange={(e) => setFacilitiesCompany(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="facilitiesLocation">Location</Label>
+                  <Input
+                    id="facilitiesLocation"
+                    placeholder="Where this project takes place…"
+                    value={facilitiesLocation}
+                    onChange={(e) => setFacilitiesLocation(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
 
             {/* Request-origin-only fields — only ever shown for a Project
                 created through the request-origin setup flow. A

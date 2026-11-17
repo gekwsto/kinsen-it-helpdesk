@@ -167,6 +167,22 @@ enum ProjectStatus {
   CANCELLED
 }
 
+// Facilities Services-only — see Project.facilitiesStartPrecision/
+// facilitiesEndPrecision's own doc comment.
+enum ProjectDatePrecision {
+  EXACT
+  QUARTER
+}
+
+// Facilities Services-only — see Project.facilitiesStartQuarter/
+// facilitiesEndQuarter's own doc comment.
+enum ProjectQuarter {
+  Q1
+  Q2
+  Q3
+  Q4
+}
+
 enum ActivityStatus {
   TODO
   IN_PROGRESS
@@ -1604,6 +1620,43 @@ model Project {
   // Activities that actually make it up. Budget has no replacement — the
   // business rule simply no longer tracks it for request-origin Projects.
   external                 Boolean             @default(false)
+
+  // ─── Facilities Services-only metadata ──────────────────────────────────
+  // Nullable at the DB level for every Project — same "nullable at schema,
+  // enforced at the application boundary" pattern as every other
+  // origin-specific block on this model (e.g. expectedStartDate above).
+  // Writable ONLY when this Project's own departmentId resolves to the
+  // Facilities Services department (see getFacilitiesServicesDepartmentId
+  // in lib/services/project-facilities-service.ts) — enforced in every
+  // write path (POST /api/projects, PATCH /api/projects/[id],
+  // createProjectFromApprovedRequest), never by a DB constraint. If a
+  // Project is later moved to a different department, these columns are
+  // deliberately left exactly as they were (never cleared) — historical
+  // Facilities metadata is preserved, just no longer shown or editable
+  // outside the Facilities Services workspace.
+  //
+  // Free text, NOT a relation to the existing Company model (that's an
+  // org-structure concept — a Department's own parent Company — completely
+  // unrelated to this field, which names one or more EXTERNAL companies
+  // involved in the facilities work itself).
+  facilitiesCompany        String?             @db.Text
+  facilitiesLocation       String?             @db.Text
+  // Precision is the SOURCE OF TRUTH for how Start/End were entered —
+  // startDate/endDate above remain the single DERIVED boundary value
+  // every existing Gantt/filter/sort/overdue/export consumer already
+  // reads unchanged (first/last calendar day of the quarter when
+  // precision=QUARTER, UTC midnight — see quarterStartDate/quarterEndDate
+  // in lib/services/project-facilities-service.ts). Never left stale: the
+  // write path clears quarter/year back to null whenever precision isn't
+  // QUARTER, so a quarter boundary is never mistakable for a real
+  // user-entered exact date, and an exact date never carries leftover
+  // quarter metadata from a previous selection.
+  facilitiesStartPrecision ProjectDatePrecision?
+  facilitiesStartQuarter   ProjectQuarter?
+  facilitiesStartYear      Int?
+  facilitiesEndPrecision   ProjectDatePrecision?
+  facilitiesEndQuarter     ProjectQuarter?
+  facilitiesEndYear        Int?
 
   members      User[]              @relation("ProjectMembers")
   // The AUTHORITATIVE full Owner set — always contains `ownerId` (the

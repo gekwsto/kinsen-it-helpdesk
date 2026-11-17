@@ -23,7 +23,8 @@ import { formatEUR } from "@/lib/currency";
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
 import { getProjectFeedbackEligibility } from "@/lib/services/project-feedback-service";
 import { ProjectFeedbackCtaCard } from "@/components/projects/project-feedback-cta-card";
-import { FolderKanban, Wallet } from "lucide-react";
+import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
+import { FolderKanban, Wallet, Building2 } from "lucide-react";
 
 export default async function ProjectDetailPage({
   params,
@@ -220,6 +221,19 @@ export default async function ProjectDetailPage({
     !!project.endDate ||
     !!(project.projectRequest && (project.expectedStartDate || project.expectedFinishDate));
 
+  // Facilities Services-only — id comparison only, never a display-name
+  // match. Governs the "Facilities Information" section AND whether
+  // "Actual Timeline" shows "Q2 2027" instead of a formatted exact date.
+  // Deliberately NOT gated on "any facilities field being non-null" —
+  // once a Project leaves this workspace, its historical Facilities
+  // metadata stays in the DB (never cleared, see PATCH /api/projects/[id]'s
+  // own doc comment) but is no longer shown here, satisfying "hide it
+  // outside the workspace."
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+  const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId;
+  const facilitiesStartLabel = isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(project.facilitiesStartQuarter, project.facilitiesStartYear) : null;
+  const facilitiesEndLabel = isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(project.facilitiesEndQuarter, project.facilitiesEndYear) : null;
+
   const activitySequenceRows = project.projectRequest
     ? [...project.activities]
         .sort((a, b) => {
@@ -343,6 +357,32 @@ export default async function ProjectDetailPage({
               </div>
             )}
 
+            {/* Facilities Information — Facilities Services-only, placed
+                immediately after General Information. Company/Location are
+                both optional, so each is only ever rendered when actually
+                set (never an empty "—" placeholder cell). */}
+            {isFacilitiesServicesWorkspace && (project.facilitiesCompany || project.facilitiesLocation) && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                  <Building2 className="h-3 w-3" /> Facilities Information
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {project.facilitiesCompany && (
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Company</p>
+                      <p className="font-medium">{project.facilitiesCompany}</p>
+                    </div>
+                  )}
+                  {project.facilitiesLocation && (
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Location</p>
+                      <p className="font-medium">{project.facilitiesLocation}</p>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* People — always at least an Owner (every Project has one; see
                 ownersToShow's own doc comment above), Members/Audience only
                 when non-empty. */}
@@ -419,8 +459,14 @@ export default async function ProjectDetailPage({
                   {(project.startDate || project.endDate) && (
                     <div>
                       <p className="text-xs text-muted-foreground mb-1">Actual Timeline</p>
-                      {project.startDate && <p>Start: {formatDate(project.startDate)}</p>}
-                      {project.endDate && <p>End: {formatDate(project.endDate)}</p>}
+                      {/* Facilities Services with Quarter precision: show
+                          "Q2 2027" — the explicit precision metadata — never
+                          the derived boundary date formatted as if it were a
+                          real user-entered exact date (see this Project's
+                          own isFacilitiesServicesWorkspace/
+                          facilitiesStartLabel computation above). */}
+                      {project.startDate && <p>Start: {facilitiesStartLabel ?? formatDate(project.startDate)}</p>}
+                      {project.endDate && <p>End: {facilitiesEndLabel ?? formatDate(project.endDate)}</p>}
                     </div>
                   )}
                   {project.projectRequest && (project.expectedStartDate || project.expectedFinishDate) && (

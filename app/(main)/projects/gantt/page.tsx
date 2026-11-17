@@ -14,6 +14,7 @@ import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDis
 import { isProjectOverdue, isActivityOverdue } from "@/lib/overdue";
 import { projectPriorityKey } from "@/lib/project-priority";
 import { getActivityPriorityConfigsForDepartments, buildPriorityFilterOptions } from "@/lib/priority-config";
+import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 
 interface SearchParams {
   status?: string;
@@ -184,38 +185,52 @@ export default async function ProjectGanttPage({
   // rejected per-row by the backend if they drag one they don't hold it in.
   const canEditProjects = await hasEffectiveModulePermission(session.user.id, session.user.role, session.user.customRoleId, "project.edit");
 
-  const groups: GanttGroup[] = projects.map((p) => ({
-    id: p.id,
-    title: p.title,
-    href: `/projects/${p.id}`,
-    status: p.status,
-    priority: projectPriorityKey(p.priority),
-    startDate: p.startDate?.toISOString() ?? null,
-    endDate: p.endDate?.toISOString() ?? null,
-    progress: p.progress,
-    ownerName: p.owner.name,
-    ownerImage: p.owner.image,
-    type: "project",
-    overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(projectTerminalConfigs, p.departmentId, p.status), now),
-    children: p.activities.map((a) => ({
-      id: a.id,
-      title: a.title,
-      status: a.status,
-      statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
-      statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
-      startDate: a.isMilestone
-        ? (a.dueDate?.toISOString() ?? null)
-        : (a.startDate?.toISOString() ?? null),
-      endDate: a.dueDate?.toISOString() ?? null,
-      progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
-      href: `/activities/${a.id}`,
-      priority: a.priority,
-      assigneeName: a.assignedUsers[0]?.name ?? null,
-      assigneeImage: a.assignedUsers[0]?.image ?? null,
-      type: (a.isMilestone ? "milestone" : "activity") as "milestone" | "activity",
-      overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(activityTerminalConfigs, a.departmentId, a.status), now),
-    })),
-  }));
+  // Facilities Services-only — id comparison, never a display-name match.
+  // Gates whether a Project's Gantt tooltip shows "Q2 2027" instead of the
+  // formatted derived boundary date, exactly mirroring the Project Overview
+  // page's own isFacilitiesServicesWorkspace check: a Project that USED to
+  // be Facilities Services keeps its historical facilitiesStartQuarter/Year
+  // in the DB (never cleared), but this stays hidden once its department no
+  // longer matches.
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+
+  const groups: GanttGroup[] = projects.map((p) => {
+    const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && p.departmentId === facilitiesServicesDepartmentId;
+    return {
+      id: p.id,
+      title: p.title,
+      href: `/projects/${p.id}`,
+      status: p.status,
+      priority: projectPriorityKey(p.priority),
+      startDate: p.startDate?.toISOString() ?? null,
+      facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesStartQuarter, p.facilitiesStartYear) : null,
+      facilitiesEndLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesEndQuarter, p.facilitiesEndYear) : null,
+      endDate: p.endDate?.toISOString() ?? null,
+      progress: p.progress,
+      ownerName: p.owner.name,
+      ownerImage: p.owner.image,
+      type: "project" as const,
+      overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(projectTerminalConfigs, p.departmentId, p.status), now),
+      children: p.activities.map((a) => ({
+        id: a.id,
+        title: a.title,
+        status: a.status,
+        statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
+        statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
+        startDate: a.isMilestone
+          ? (a.dueDate?.toISOString() ?? null)
+          : (a.startDate?.toISOString() ?? null),
+        endDate: a.dueDate?.toISOString() ?? null,
+        progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
+        href: `/activities/${a.id}`,
+        priority: a.priority,
+        assigneeName: a.assignedUsers[0]?.name ?? null,
+        assigneeImage: a.assignedUsers[0]?.image ?? null,
+        type: (a.isMilestone ? "milestone" : "activity") as "milestone" | "activity",
+        overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(activityTerminalConfigs, a.departmentId, a.status), now),
+      })),
+    };
+  });
 
   return (
     <div className="space-y-6">

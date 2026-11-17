@@ -74,6 +74,12 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     endDate: project.endDate,
     progress: project.progress,
     createdAt: project.createdAt,
+    facilitiesCompany: project.facilitiesCompany,
+    facilitiesLocation: project.facilitiesLocation,
+    facilitiesStartQuarter: project.facilitiesStartQuarter,
+    facilitiesStartYear: project.facilitiesStartYear,
+    facilitiesEndQuarter: project.facilitiesEndQuarter,
+    facilitiesEndYear: project.facilitiesEndYear,
     activities: project.activities.map((a) => ({
       title: a.title,
       status: a.status,

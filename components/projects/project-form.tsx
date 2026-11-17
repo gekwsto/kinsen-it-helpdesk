@@ -25,6 +25,7 @@ import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
 import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
+import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
 
 interface AssignableUser {
   id: string;
@@ -131,9 +132,22 @@ interface ProjectFormProps {
   onLockChange?: (locked: boolean) => void;
   onCreated?: (project: CreatedProject) => void;
   onCancel?: () => void;
+  /**
+   * The Facilities Services Department's own canonical id — resolved
+   * server-side (by slug, never by display name; see
+   * getFacilitiesServicesDepartmentId in
+   * lib/services/project-facilities-service.ts) and passed down so this
+   * form only ever compares ids, never names. Undefined/null simply means
+   * "never show the Facilities-only fields" (e.g. the resolver found no
+   * such department, or the caller didn't bother resolving it — inline
+   * mode's chain, for one, may not always have it available). The actual
+   * write-time enforcement lives server-side regardless; this only ever
+   * decides what the form OFFERS.
+   */
+  facilitiesServicesDepartmentId?: string | null;
 }
 
-export function ProjectForm({ departments, editableDepartmentIds, defaultDepartmentId, mode = "standalone", fixedDepartmentId, fixedDepartmentName, inlineCanUploadAttachments = false, fromRequestId, fromRequestPrefill, onLockChange, onCreated, onCancel }: ProjectFormProps) {
+export function ProjectForm({ departments, editableDepartmentIds, defaultDepartmentId, mode = "standalone", fixedDepartmentId, fixedDepartmentName, inlineCanUploadAttachments = false, fromRequestId, fromRequestPrefill, onLockChange, onCreated, onCancel, facilitiesServicesDepartmentId }: ProjectFormProps) {
   const router = useRouter();
   const inline = mode === "inline";
   const fromRequest = mode === "fromRequest";
@@ -251,6 +265,43 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   const departmentId = inline || fromRequest ? fixedDepartmentId : watch("departmentId");
   const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
 
+  // Inline mode's own caller chain (the ticket-linking create dialog) is
+  // client components with no server-resolved id handy, unlike standalone/
+  // fromRequest (whose server page always passes the prop) — this fetches
+  // it ONCE, only when actually needed, rather than threading the id
+  // through several more component layers. A caller that DOES pass the
+  // prop explicitly (even in inline mode) is trusted as-is, no fetch.
+  const [fetchedFacilitiesId, setFetchedFacilitiesId] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (facilitiesServicesDepartmentId !== undefined || !inline) return;
+    fetch("/api/projects/facilities-department")
+      .then((r) => (r.ok ? r.json() : { id: null }))
+      .then((d) => setFetchedFacilitiesId(d.id ?? null))
+      .catch(() => setFetchedFacilitiesId(null));
+  }, [facilitiesServicesDepartmentId, inline]);
+  const effectiveFacilitiesServicesDepartmentId = facilitiesServicesDepartmentId !== undefined ? facilitiesServicesDepartmentId : fetchedFacilitiesId;
+
+  // Facilities Services-only fields — id comparison only, never a
+  // display-name match (see this prop's own doc comment). Plain useState,
+  // same established pattern as the fromRequest-only extras above: the
+  // shared createProjectSchema resolver covers every field common to every
+  // mode, so these extras (which apply across ALL three modes, unlike the
+  // fromRequest-only block) are kept separate rather than fighting that
+  // resolver. The native date input (EXACT mode) still goes through
+  // register("startDate")/("endDate") when NOT a Facilities workspace —
+  // these only override/replace that grid when it IS one.
+  const isFacilitiesWorkspace = !!departmentId && !!effectiveFacilitiesServicesDepartmentId && departmentId === effectiveFacilitiesServicesDepartmentId;
+  const [facilitiesCompany, setFacilitiesCompany] = useState("");
+  const [facilitiesLocation, setFacilitiesLocation] = useState("");
+  const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
+  const [facStartDate, setFacStartDate] = useState("");
+  const [facStartQuarter, setFacStartQuarter] = useState("");
+  const [facStartYear, setFacStartYear] = useState("");
+  const [facEndPrecision, setFacEndPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
+  const [facEndDate, setFacEndDate] = useState("");
+  const [facEndQuarter, setFacEndQuarter] = useState("");
+  const [facEndYear, setFacEndYear] = useState("");
+
   // Recomputed purely from the already-server-resolved `editableDepartmentIds`
   // set whenever the Workspace Select changes — never a fresh permission
   // decision made client-side, just a membership check against server
@@ -367,9 +418,54 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
       if (!expenseTypeId) return toast.error("Select an Expense Type.");
     }
 
+    // Facilities Services-only fields — a UX convenience only; the server
+    // (resolveFacilitiesWrite in lib/services/project-facilities-service.ts)
+    // re-validates all of this regardless, and is the real authority.
+    if (isFacilitiesWorkspace) {
+      if (facStartPrecision === "QUARTER" && (!facStartQuarter || !facStartYear)) return toast.error("Select both a Quarter and a Year for Start.");
+      if (facEndPrecision === "QUARTER" && (!facEndQuarter || !facEndYear)) return toast.error("Select both a Quarter and a Year for End.");
+      const startPreview =
+        facStartPrecision === "QUARTER"
+          ? facStartQuarter && facStartYear
+            ? new Date(Date.UTC(parseInt(facStartYear), ["Q1", "Q2", "Q3", "Q4"].indexOf(facStartQuarter) * 3, 1))
+            : null
+          : facStartDate
+          ? new Date(facStartDate)
+          : null;
+      const endPreview =
+        facEndPrecision === "QUARTER"
+          ? facEndQuarter && facEndYear
+            ? new Date(Date.UTC(parseInt(facEndYear), ["Q1", "Q2", "Q3", "Q4"].indexOf(facEndQuarter) * 3 + 3, 0))
+            : null
+          : facEndDate
+          ? new Date(facEndDate)
+          : null;
+      if (startPreview && endPreview && startPreview > endPreview) return toast.error("Start must not be later than End.");
+    }
+
     setIsSubmitting(true);
     try {
-      const { departmentId: _ignoredDepartmentId, ...restData } = data;
+      const { departmentId: _ignoredDepartmentId, startDate: _ignoredStartDate, endDate: _ignoredEndDate, ...restData } = data;
+      // Facilities Services only — overrides the plain startDate/endDate
+      // the generic grid would otherwise submit (hidden/unused for this
+      // workspace, see the render below) with whichever of Exact/Quarter
+      // is actually selected PER field. Every other workspace sends
+      // neither of these keys at all, preserving the exact pre-existing
+      // body shape.
+      const facilitiesFields = isFacilitiesWorkspace
+        ? {
+            facilitiesCompany: facilitiesCompany.trim() || null,
+            facilitiesLocation: facilitiesLocation.trim() || null,
+            facilitiesStartPrecision: facStartPrecision,
+            facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
+            facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
+            startDate: facStartPrecision === "EXACT" ? facStartDate || null : undefined,
+            facilitiesEndPrecision: facEndPrecision,
+            facilitiesEndQuarter: facEndPrecision === "QUARTER" ? facEndQuarter : null,
+            facilitiesEndYear: facEndPrecision === "QUARTER" ? (facEndYear ? parseInt(facEndYear) : null) : null,
+            endDate: facEndPrecision === "EXACT" ? facEndDate || null : undefined,
+          }
+        : {};
       // Two-step architecture: create the Project first (unchanged request/
       // route), THEN — only once it has a real, server-issued id — upload
       // any selected attachments through the existing protected
@@ -380,6 +476,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
         const body = fromRequest
           ? {
               ...restData,
+              ...facilitiesFields,
               memberIds: Array.from(selectedMemberIds),
               ownerIds: Array.from(selectedOwnerIds),
               audienceIds: Array.from(selectedAudienceIds),
@@ -390,6 +487,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             }
           : {
               ...restData,
+              ...facilitiesFields,
               departmentId: effectiveDepartmentId,
               memberIds: Array.from(selectedMemberIds),
               // Tells POST /api/projects which Member-eligibility rule to
@@ -609,16 +707,79 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label>Start Date</Label>
-              <Input type="date" {...register("startDate")} />
+          {isFacilitiesWorkspace ? (
+            // Facilities Services only — replaces the plain date grid with
+            // an Exact/Quarter toggle per field; the resulting startDate/
+            // endDate are computed and sent in onSubmit's facilitiesFields,
+            // never through register("startDate")/("endDate") (left
+            // unused here on purpose for this workspace).
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <FacilitiesDateField
+                label="Start"
+                precision={facStartPrecision}
+                onPrecisionChange={(p) => {
+                  setFacStartPrecision(p);
+                  setFacStartDate("");
+                  setFacStartQuarter("");
+                  setFacStartYear("");
+                }}
+                exactValue={facStartDate}
+                onExactChange={setFacStartDate}
+                quarter={facStartQuarter}
+                onQuarterChange={setFacStartQuarter}
+                year={facStartYear}
+                onYearChange={setFacStartYear}
+              />
+              <FacilitiesDateField
+                label="End"
+                precision={facEndPrecision}
+                onPrecisionChange={(p) => {
+                  setFacEndPrecision(p);
+                  setFacEndDate("");
+                  setFacEndQuarter("");
+                  setFacEndYear("");
+                }}
+                exactValue={facEndDate}
+                onExactChange={setFacEndDate}
+                quarter={facEndQuarter}
+                onQuarterChange={setFacEndQuarter}
+                year={facEndYear}
+                onYearChange={setFacEndYear}
+              />
             </div>
-            <div className="space-y-2">
-              <Label>End Date</Label>
-              <Input type="date" {...register("endDate")} />
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Start Date</Label>
+                <Input type="date" {...register("startDate")} />
+              </div>
+              <div className="space-y-2">
+                <Label>End Date</Label>
+                <Input type="date" {...register("endDate")} />
+              </div>
             </div>
-          </div>
+          )}
+
+          {isFacilitiesWorkspace && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Company</Label>
+                <Input
+                  placeholder="One or more company names…"
+                  value={facilitiesCompany}
+                  onChange={(e) => setFacilitiesCompany(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Location</Label>
+                <Input
+                  placeholder="Where this project takes place…"
+                  value={facilitiesLocation}
+                  onChange={(e) => setFacilitiesLocation(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
 
           {fromRequest && (
             <div className="space-y-4 rounded-lg border p-4 bg-muted/20">

@@ -30,6 +30,8 @@ interface ProjectCreateDialogProps {
    */
   canUploadAttachments?: boolean;
   onCreated: (project: CreatedProject) => void;
+  /** Server-resolved — see ProjectForm's own doc comment on this prop. Passed through unchanged. */
+  facilitiesServicesDepartmentId?: string | null;
 }
 
 /**
@@ -57,7 +59,7 @@ interface ProjectCreateDialogProps {
  * button (which calls `onOpenChange` directly, bypassing this guard — see
  * `handleCreated` below).
  */
-export function ProjectCreateDialog({ open, onOpenChange, departmentId, departmentName, canUploadAttachments = false, onCreated }: ProjectCreateDialogProps) {
+export function ProjectCreateDialog({ open, onOpenChange, departmentId, departmentName, canUploadAttachments = false, onCreated, facilitiesServicesDepartmentId }: ProjectCreateDialogProps) {
   const [locked, setLocked] = useState(false);
 
   const guardedOnOpenChange = (next: boolean) => {
@@ -88,6 +90,7 @@ export function ProjectCreateDialog({ open, onOpenChange, departmentId, departme
           onLockChange={setLocked}
           onCreated={handleCreated}
           onCancel={() => onOpenChange(false)}
+          facilitiesServicesDepartmentId={facilitiesServicesDepartmentId}
         />
       </DialogContent>
     </Dialog>
