@@ -22,6 +22,7 @@ import {
 } from "@/lib/services/project-query-service";
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 import { ExportProjectsButton } from "@/components/projects/export-projects-button";
+import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 
 // Pagination/view-only params — every FILTER/sort param (search, status,
 // origin, date ranges, etc.) comes from ProjectListFilterParams, the SAME
@@ -175,15 +176,30 @@ export default async function ProjectsPage({
     projects.map((p) => p.departmentId).filter((id): id is string => !!id)
   );
   const now = new Date();
+  // Facilities Services-only — id comparison, never a display-name match;
+  // same rule as the Project Overview page and Gantt. Resolved ONCE, not
+  // per row.
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
   // Project.budget/estimatedCost/actualCost no longer exist as DB columns
   // at all (removed — see
   // prisma/migrations/20261005090000_remove_project_budget_and_cost_columns);
   // the Decimal-crossing-the-RSC-boundary conversion this spread used to
   // need for them is gone along with the columns themselves.
-  const projectsWithOverdue = projects.map((p) => ({
-    ...p,
-    overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(terminalConfigs, p.departmentId, p.status), now),
-  }));
+  const projectsWithOverdue = projects.map((p) => {
+    const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && p.departmentId === facilitiesServicesDepartmentId;
+    return {
+      ...p,
+      overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(terminalConfigs, p.departmentId, p.status), now),
+      // startDate/endDate (already spread from `p` above) stay exactly the
+      // derived boundary dates every sort/filter/overdue calculation
+      // already reads — completely unchanged. These two are ADDITIONAL,
+      // display-only labels ProjectList shows INSTEAD of the formatted
+      // exact date, only for a Project currently in Facilities Services
+      // with Quarter precision — never affecting what's sorted/filtered.
+      facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesStartQuarter, p.facilitiesStartYear) : null,
+      facilitiesEndLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesEndQuarter, p.facilitiesEndYear) : null,
+    };
+  });
 
   return (
     <div className="space-y-6">

@@ -70,6 +70,19 @@ export interface ProjectListItem {
   projectRequest: { id: string; title: string } | null;
   /** Canonical creation timestamp — Project.createdAt, never a derived/approximated date. */
   createdAt: Date;
+  /**
+   * Facilities Services Project with Quarter precision only — e.g.
+   * "Q2 2027", pre-formatted server-side (formatFacilitiesQuarterLabel in
+   * lib/services/project-facilities-service.ts — the SAME helper the
+   * Project Overview page and Gantt already use, never a second
+   * date-formatting rule). Shown INSTEAD of the formatted exact
+   * startDate/endDate for that one boundary when present; startDate/endDate
+   * themselves are untouched either way — this never affects sorting,
+   * filtering, or overdue, all of which keep reading the real derived
+   * dates exactly as before.
+   */
+  facilitiesStartLabel?: string | null;
+  facilitiesEndLabel?: string | null;
 }
 
 interface ProjectListProps {
@@ -142,9 +155,9 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                   {project.startDate || project.endDate ? (
                     <span className="flex items-center gap-1.5">
                       <Calendar className="h-3.5 w-3.5" />
-                      {project.startDate && formatDate(project.startDate)}
+                      {project.startDate && (project.facilitiesStartLabel ?? formatDate(project.startDate))}
                       {project.startDate && project.endDate && " → "}
-                      {project.endDate && formatDate(project.endDate)}
+                      {project.endDate && (project.facilitiesEndLabel ?? formatDate(project.endDate))}
                     </span>
                   ) : (
                     "—"
@@ -266,9 +279,9 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                 {(project.startDate || project.endDate) && (
                   <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     <Calendar className="h-3.5 w-3.5" />
-                    {project.startDate && formatDate(project.startDate)}
+                    {project.startDate && (project.facilitiesStartLabel ?? formatDate(project.startDate))}
                     {project.startDate && project.endDate && " → "}
-                    {project.endDate && formatDate(project.endDate)}
+                    {project.endDate && (project.facilitiesEndLabel ?? formatDate(project.endDate))}
                   </div>
                 )}
 
@@ -352,8 +365,8 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                     <PreviewField
                       label="Date range"
                       value={[
-                        previewTarget.startDate ? formatDate(previewTarget.startDate) : null,
-                        previewTarget.endDate ? formatDate(previewTarget.endDate) : null,
+                        previewTarget.startDate ? (previewTarget.facilitiesStartLabel ?? formatDate(previewTarget.startDate)) : null,
+                        previewTarget.endDate ? (previewTarget.facilitiesEndLabel ?? formatDate(previewTarget.endDate)) : null,
                       ]
                         .filter(Boolean)
                         .join(" → ")}
