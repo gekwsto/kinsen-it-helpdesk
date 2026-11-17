@@ -757,6 +757,8 @@ export async function createProjectFromApprovedRequest(
               facilitiesEstimatedCostNotes: data.facilitiesEstimatedCostNotes ?? undefined,
               facilitiesActualCost: data.facilitiesActualCost ?? undefined,
               facilitiesActualCostNotes: data.facilitiesActualCostNotes ?? undefined,
+              facilitiesPlannedForAnnualTargets: data.facilitiesPlannedForAnnualTargets ?? undefined,
+              facilitiesIsBigProject: data.facilitiesIsBigProject ?? undefined,
             }
           : {
               startDate: data.startDate ? new Date(data.startDate) : undefined,

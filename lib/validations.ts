@@ -303,7 +303,7 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
 // updateProjectRequestOriginFieldsSchema above. Every field optional AND
 // nullable — `undefined` means "untouched" (PATCH only; a create request
 // simply never sends the key at all), `null` means "explicitly cleared".
-// Whether any of these 13 keys is even ALLOWED on a given Project (it
+// Whether any of these 15 keys is even ALLOWED on a given Project (it
 // belonging to the Facilities Services Department) is a server-side
 // business rule, not a Zod concern — see hasFacilitiesFieldsPresent/
 // resolveFacilitiesWrite in lib/services/project-facilities-service.ts,
@@ -315,6 +315,13 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
 // are. The two cost fields reuse moneyAmountSchema verbatim (same
 // non-negative/2-decimal-place/Decimal(10,2)-range rule as every other
 // money input in this app) — never a bespoke precision rule.
+//
+// facilitiesPlannedForAnnualTargets/facilitiesIsBigProject are plain
+// booleans — unlike every other field above, there is no tri-state
+// "unset"/`null` to represent (the DB column itself is non-nullable,
+// @default(false)), so these are `.optional()` only: omitted means
+// "leave as-is" on a PATCH, and any explicit `true`/`false` (including
+// false) is a real, intentional write — never nullable.
 export const facilitiesProjectFieldsSchema = z.object({
   facilitiesCompany: z.string().trim().min(1).nullable().optional(),
   facilitiesLocation: z.string().trim().min(1).nullable().optional(),
@@ -329,6 +336,8 @@ export const facilitiesProjectFieldsSchema = z.object({
   facilitiesEstimatedCostNotes: z.string().trim().min(1).nullable().optional(),
   facilitiesActualCost: moneyAmountSchema("Actual Cost").nullable().optional(),
   facilitiesActualCostNotes: z.string().trim().min(1).nullable().optional(),
+  facilitiesPlannedForAnnualTargets: z.boolean().optional(),
+  facilitiesIsBigProject: z.boolean().optional(),
 });
 
 export const projectExpenseTypeSchema = z.object({

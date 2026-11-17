@@ -130,6 +130,8 @@ export async function POST(req: NextRequest) {
       facilitiesEstimatedCostNotes,
       facilitiesActualCost,
       facilitiesActualCostNotes,
+      facilitiesPlannedForAnnualTargets,
+      facilitiesIsBigProject,
       ...rest
     } = data;
 
@@ -238,6 +240,8 @@ export async function POST(req: NextRequest) {
               facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes ?? undefined,
               facilitiesActualCost: facilitiesActualCost ?? undefined,
               facilitiesActualCostNotes: facilitiesActualCostNotes ?? undefined,
+              facilitiesPlannedForAnnualTargets: facilitiesPlannedForAnnualTargets ?? undefined,
+              facilitiesIsBigProject: facilitiesIsBigProject ?? undefined,
             }
           : { startDate: startDate ? new Date(startDate) : undefined, endDate: endDate ? new Date(endDate) : undefined }),
         members: memberIds.length

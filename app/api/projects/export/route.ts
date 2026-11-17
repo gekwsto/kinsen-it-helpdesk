@@ -7,6 +7,7 @@ import { buildProjectListQuery, type ProjectListFilterParams } from "@/lib/servi
 import { getProjectTerminalConfigsForDepartments, resolveProjectTerminal } from "@/lib/status-terminal";
 import { isProjectOverdue } from "@/lib/overdue";
 import { buildProjectsListWorkbook, type ProjectExportRow } from "@/lib/services/project-export-service";
+import { getFacilitiesServicesDepartmentId } from "@/lib/services/project-facilities-service";
 
 /**
  * "Export to Excel" for the All Projects list — intentionally re-reads the
@@ -82,6 +83,7 @@ export async function GET(request: NextRequest) {
     projects.map((p) => p.departmentId).filter((id): id is string => !!id)
   );
   const now = new Date();
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
 
   const rows: ProjectExportRow[] = projects.map((p) => {
     const ownerNames = new Set<string>();
@@ -117,6 +119,9 @@ export async function GET(request: NextRequest) {
       facilitiesEstimatedCostNotes: p.facilitiesEstimatedCostNotes,
       facilitiesActualCost: p.facilitiesActualCost,
       facilitiesActualCostNotes: p.facilitiesActualCostNotes,
+      isFacilitiesServicesWorkspace: !!facilitiesServicesDepartmentId && p.departmentId === facilitiesServicesDepartmentId,
+      facilitiesPlannedForAnnualTargets: p.facilitiesPlannedForAnnualTargets,
+      facilitiesIsBigProject: p.facilitiesIsBigProject,
     };
   });
 

@@ -1670,6 +1670,17 @@ model Project {
   facilitiesEstimatedCostNotes String?             @db.Text
   facilitiesActualCost         Decimal?            @db.Decimal(10, 2)
   facilitiesActualCostNotes    String?             @db.Text
+  // Two independent manual classification flags — NOT derived/calculated
+  // (e.g. never auto-set from cost or duration thresholds, never reset on
+  // a calendar-year rollover; see this feature's own business-rule doc
+  // comment). Plain non-nullable Boolean @default(false) — unlike every
+  // other Facilities field above, there is no tri-state "unset" to
+  // represent, so these default to false for every Project (not just
+  // Facilities ones) rather than being null outside the workspace; the
+  // "hide/write-protect outside Facilities Services" rule below is
+  // enforced the same way as every other Facilities field regardless.
+  facilitiesPlannedForAnnualTargets Boolean @default(false)
+  facilitiesIsBigProject             Boolean @default(false)
 
   members      User[]              @relation("ProjectMembers")
   // The AUTHORITATIVE full Owner set — always contains `ownerId` (the

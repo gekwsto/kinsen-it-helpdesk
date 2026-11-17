@@ -368,10 +368,18 @@ export default async function ProjectDetailPage({
             )}
 
             {/* Facilities Information — Facilities Services-only, placed
-                immediately after General Information. Company/Location are
-                both optional, so each is only ever rendered when actually
-                set (never an empty "—" placeholder cell). */}
-            {isFacilitiesServicesWorkspace && (project.facilitiesCompany || project.facilitiesLocation || project.facilitiesCategory) && (
+                immediately after General Information. Company/Location/
+                Category are all optional, so each is only ever rendered
+                when actually set (never an empty "—" placeholder cell).
+                Planned for Annual Targets/Big Project are plain, always-set
+                Booleans (never null) — shown unconditionally as Yes/No
+                whenever this Project is IN the workspace, per this
+                feature's own "show clearly as Yes/No, never hide an
+                unchecked value" requirement; this is also why the section
+                itself now renders whenever isFacilitiesServicesWorkspace is
+                true, even with no Company/Location/Category set — there's
+                always at least these two rows to show. */}
+            {isFacilitiesServicesWorkspace && (
               <div className="space-y-2">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
                   <Building2 className="h-3 w-3" /> Facilities Information
@@ -395,6 +403,14 @@ export default async function ProjectDetailPage({
                       <p className="font-medium">{project.facilitiesCategory}</p>
                     </div>
                   )}
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Planned for This Year&apos;s Targets</p>
+                    <p className="font-medium">{project.facilitiesPlannedForAnnualTargets ? "Yes" : "No"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Big Project</p>
+                    <p className="font-medium">{project.facilitiesIsBigProject ? "Yes" : "No"}</p>
+                  </div>
                 </div>
               </div>
             )}

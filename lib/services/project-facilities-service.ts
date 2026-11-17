@@ -60,6 +60,8 @@ const FACILITIES_FIELD_KEYS = [
   "facilitiesEstimatedCostNotes",
   "facilitiesActualCost",
   "facilitiesActualCostNotes",
+  "facilitiesPlannedForAnnualTargets",
+  "facilitiesIsBigProject",
 ] as const;
 
 /**

@@ -154,6 +154,23 @@ export interface ProjectExportRow {
   facilitiesEstimatedCostNotes: string | null;
   facilitiesActualCost: Prisma.Decimal | number | null;
   facilitiesActualCostNotes: string | null;
+  // Plain manual classification Booleans, never null (DB column itself is
+  // non-nullable @default(false)) — see this feature's own doc comment in
+  // prisma/schema.prisma. Unlike every other Facilities field on this row
+  // (never gated on workspace membership here, by established precedent —
+  // see Company/Location above), these two ARE gated by
+  // isFacilitiesServicesWorkspace before rendering: a plain boolean has no
+  // natural "blank/not applicable" representation the way a null string
+  // does, so without this gate every non-Facilities Project (the vast
+  // majority of rows in a mixed-department export) would show a
+  // misleading "No" for a classification that was never applicable to it
+  // in the first place. The underlying value is still exported as-is for
+  // a HISTORICALLY Facilities Project that has since moved out — it's
+  // just never rendered once outside the workspace, matching the
+  // Project Overview page's own display rule.
+  isFacilitiesServicesWorkspace: boolean;
+  facilitiesPlannedForAnnualTargets: boolean;
+  facilitiesIsBigProject: boolean;
 }
 
 export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promise<ExcelJS.Buffer> {
@@ -186,6 +203,8 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
     { header: "Estimated Cost Notes", key: "facilitiesEstimatedCostNotes", width: 30 },
     { header: "Actual Cost (EUR)", key: "facilitiesActualCost", width: 16 },
     { header: "Actual Cost Notes", key: "facilitiesActualCostNotes", width: 30 },
+    { header: "Planned for This Year's Targets", key: "facilitiesPlannedForAnnualTargets", width: 24 },
+    { header: "Big Project", key: "facilitiesIsBigProject", width: 14 },
     { header: "Created", key: "createdAt", width: 16 },
     { header: "Description", key: "description", width: 40 },
   ];
@@ -216,6 +235,8 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
         facilitiesEstimatedCostNotes: r.facilitiesEstimatedCostNotes ?? "",
         facilitiesActualCost: r.facilitiesActualCost !== null ? decimalToNumber(r.facilitiesActualCost) : null,
         facilitiesActualCostNotes: r.facilitiesActualCostNotes ?? "",
+        facilitiesPlannedForAnnualTargets: r.isFacilitiesServicesWorkspace ? (r.facilitiesPlannedForAnnualTargets ? "Yes" : "No") : "",
+        facilitiesIsBigProject: r.isFacilitiesServicesWorkspace ? (r.facilitiesIsBigProject ? "Yes" : "No") : "",
         createdAt: r.createdAt,
         description: r.description ?? "",
       })
@@ -265,6 +286,11 @@ export interface ProjectDetailExportData {
   facilitiesEstimatedCostNotes: string | null;
   facilitiesActualCost: Prisma.Decimal | number | null;
   facilitiesActualCostNotes: string | null;
+  // See ProjectExportRow's own doc comment for why these two are gated on
+  // isFacilitiesServicesWorkspace, unlike every other Facilities field.
+  isFacilitiesServicesWorkspace: boolean;
+  facilitiesPlannedForAnnualTargets: boolean;
+  facilitiesIsBigProject: boolean;
   activities: {
     title: string;
     status: string;
@@ -335,6 +361,16 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   if (data.facilitiesEstimatedCostNotes) addKeyValueRow(detailsSheet, "Facilities Estimated Cost Notes", data.facilitiesEstimatedCostNotes);
   if (data.facilitiesActualCost !== null) addKeyValueRow(detailsSheet, "Facilities Actual Cost", decimalToNumber(data.facilitiesActualCost));
   if (data.facilitiesActualCostNotes) addKeyValueRow(detailsSheet, "Facilities Actual Cost Notes", data.facilitiesActualCostNotes);
+  // Plain manual Booleans, never null — shown unconditionally as Yes/No
+  // (never hidden for a falsy value, per this feature's own Project
+  // Overview display rule) but ONLY while this Project is actually in the
+  // Facilities Services workspace — see ProjectExportRow's own doc
+  // comment for why these two, unlike every other Facilities field here,
+  // are gated on isFacilitiesServicesWorkspace.
+  if (data.isFacilitiesServicesWorkspace) {
+    addKeyValueRow(detailsSheet, "Planned for This Year's Targets", data.facilitiesPlannedForAnnualTargets ? "Yes" : "No");
+    addKeyValueRow(detailsSheet, "Big Project", data.facilitiesIsBigProject ? "Yes" : "No");
+  }
   addKeyValueRow(detailsSheet, "Progress (%)", data.progress);
   addKeyValueRow(detailsSheet, "Created", data.createdAt);
   addKeyValueRow(detailsSheet, "Description", data.description);

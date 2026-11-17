@@ -302,6 +302,11 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   const [facilitiesEstimatedCostNotes, setFacilitiesEstimatedCostNotes] = useState("");
   const [facilitiesActualCost, setFacilitiesActualCost] = useState("");
   const [facilitiesActualCostNotes, setFacilitiesActualCostNotes] = useState("");
+  // Plain booleans, default unchecked — manually maintained classification
+  // flags, never derived/calculated (see this feature's own business-rule
+  // doc comment in prisma/schema.prisma).
+  const [facilitiesPlannedForAnnualTargets, setFacilitiesPlannedForAnnualTargets] = useState(false);
+  const [facilitiesIsBigProject, setFacilitiesIsBigProject] = useState(false);
   const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
   const [facStartDate, setFacStartDate] = useState("");
   const [facStartQuarter, setFacStartQuarter] = useState("");
@@ -482,6 +487,8 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes.trim() || null,
             facilitiesActualCost: facilitiesActualCost.trim() === "" ? null : Number(facilitiesActualCost),
             facilitiesActualCostNotes: facilitiesActualCostNotes.trim() || null,
+            facilitiesPlannedForAnnualTargets,
+            facilitiesIsBigProject,
             facilitiesStartPrecision: facStartPrecision,
             facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
             facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
@@ -811,6 +818,26 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                   value={facilitiesCategory}
                   onChange={(e) => setFacilitiesCategory(e.target.value)}
                 />
+              </div>
+              <div className="sm:col-span-2 flex flex-wrap gap-6">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded"
+                    checked={facilitiesPlannedForAnnualTargets}
+                    onChange={(e) => setFacilitiesPlannedForAnnualTargets(e.target.checked)}
+                  />
+                  <span className="text-sm font-medium">Planned for This Year&apos;s Targets</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 rounded"
+                    checked={facilitiesIsBigProject}
+                    onChange={(e) => setFacilitiesIsBigProject(e.target.checked)}
+                  />
+                  <span className="text-sm font-medium">Big Project</span>
+                </label>
               </div>
             </div>
           )}

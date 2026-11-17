@@ -236,6 +236,8 @@ export async function PATCH(
       facilitiesEstimatedCostNotes,
       facilitiesActualCost,
       facilitiesActualCostNotes,
+      facilitiesPlannedForAnnualTargets,
+      facilitiesIsBigProject,
       ...rest
     } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
@@ -315,6 +317,12 @@ export async function PATCH(
           facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes !== undefined ? facilitiesEstimatedCostNotes : undefined,
           facilitiesActualCost: facilitiesActualCost !== undefined ? facilitiesActualCost : undefined,
           facilitiesActualCostNotes: facilitiesActualCostNotes !== undefined ? facilitiesActualCostNotes : undefined,
+          // Plain booleans — `undefined` (key omitted) leaves the column
+          // untouched; an explicit `false` is a real, intentional write
+          // (there is no tri-state "clear" for a non-nullable Boolean
+          // column), same "!== undefined" convention as every field above.
+          facilitiesPlannedForAnnualTargets: facilitiesPlannedForAnnualTargets !== undefined ? facilitiesPlannedForAnnualTargets : undefined,
+          facilitiesIsBigProject: facilitiesIsBigProject !== undefined ? facilitiesIsBigProject : undefined,
         }
       : {};
 

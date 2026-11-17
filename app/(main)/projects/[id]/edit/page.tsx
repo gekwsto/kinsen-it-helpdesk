@@ -96,6 +96,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [facilitiesEstimatedCostNotes, setFacilitiesEstimatedCostNotes] = useState("");
   const [facilitiesActualCost, setFacilitiesActualCost] = useState("");
   const [facilitiesActualCostNotes, setFacilitiesActualCostNotes] = useState("");
+  // Plain booleans, default unchecked — manually maintained, never
+  // derived/calculated (see this feature's own business-rule doc comment
+  // in prisma/schema.prisma).
+  const [facilitiesPlannedForAnnualTargets, setFacilitiesPlannedForAnnualTargets] = useState(false);
+  const [facilitiesIsBigProject, setFacilitiesIsBigProject] = useState(false);
   const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
   const [facStartQuarter, setFacStartQuarter] = useState("");
   const [facStartYear, setFacStartYear] = useState("");
@@ -123,6 +128,8 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setFacilitiesEstimatedCostNotes(p.facilitiesEstimatedCostNotes ?? "");
           setFacilitiesActualCost(p.facilitiesActualCost !== null && p.facilitiesActualCost !== undefined ? String(p.facilitiesActualCost) : "");
           setFacilitiesActualCostNotes(p.facilitiesActualCostNotes ?? "");
+          setFacilitiesPlannedForAnnualTargets(p.facilitiesPlannedForAnnualTargets ?? false);
+          setFacilitiesIsBigProject(p.facilitiesIsBigProject ?? false);
           setFacStartPrecision(p.facilitiesStartPrecision === "QUARTER" ? "QUARTER" : "EXACT");
           setFacStartQuarter(p.facilitiesStartQuarter ?? "");
           setFacStartYear(p.facilitiesStartYear ? String(p.facilitiesStartYear) : "");
@@ -257,6 +264,8 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes.trim() || null,
                 facilitiesActualCost: facilitiesActualCost.trim() === "" ? null : Number(facilitiesActualCost),
                 facilitiesActualCostNotes: facilitiesActualCostNotes.trim() || null,
+                facilitiesPlannedForAnnualTargets,
+                facilitiesIsBigProject,
                 facilitiesStartPrecision: facStartPrecision,
                 facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
                 facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
@@ -505,6 +514,26 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                     value={facilitiesCategory}
                     onChange={(e) => setFacilitiesCategory(e.target.value)}
                   />
+                </div>
+                <div className="sm:col-span-2 flex flex-wrap gap-6">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded"
+                      checked={facilitiesPlannedForAnnualTargets}
+                      onChange={(e) => setFacilitiesPlannedForAnnualTargets(e.target.checked)}
+                    />
+                    <span className="text-sm font-medium">Planned for This Year&apos;s Targets</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded"
+                      checked={facilitiesIsBigProject}
+                      onChange={(e) => setFacilitiesIsBigProject(e.target.checked)}
+                    />
+                    <span className="text-sm font-medium">Big Project</span>
+                  </label>
                 </div>
               </div>
             )}

@@ -3,6 +3,7 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { buildProjectDetailWorkbook, type ProjectDetailExportData } from "@/lib/services/project-export-service";
+import { getFacilitiesServicesDepartmentId } from "@/lib/services/project-facilities-service";
 
 /**
  * "Export to Excel" for a single Project's detail page — reuses
@@ -55,6 +56,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     if (o.name) ownerNames.add(o.name);
   }
 
+  const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+
   const data: ProjectDetailExportData = {
     title: project.title,
     description: project.description,
@@ -85,6 +88,9 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     facilitiesEstimatedCostNotes: project.facilitiesEstimatedCostNotes,
     facilitiesActualCost: project.facilitiesActualCost,
     facilitiesActualCostNotes: project.facilitiesActualCostNotes,
+    isFacilitiesServicesWorkspace: !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId,
+    facilitiesPlannedForAnnualTargets: project.facilitiesPlannedForAnnualTargets,
+    facilitiesIsBigProject: project.facilitiesIsBigProject,
     activities: project.activities.map((a) => ({
       title: a.title,
       status: a.status,

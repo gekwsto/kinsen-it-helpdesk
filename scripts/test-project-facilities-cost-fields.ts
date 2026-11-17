@@ -365,6 +365,9 @@ async function main() {
         facilitiesEstimatedCostNotes: "Export estimate note",
         facilitiesActualCost: 160.5,
         facilitiesActualCostNotes: "Export actual note",
+        isFacilitiesServicesWorkspace: true,
+        facilitiesPlannedForAnnualTargets: true,
+        facilitiesIsBigProject: false,
       },
     ]);
     const listWb = new ExcelJS.Workbook();
@@ -379,6 +382,8 @@ async function main() {
     check("List export Estimated Cost Notes column value", getListCell("Estimated Cost Notes") === "Export estimate note");
     check("List export Actual Cost column value", Number(getListCell("Actual Cost (EUR)")) === 160.5);
     check("List export Actual Cost Notes column value", getListCell("Actual Cost Notes") === "Export actual note");
+    check("List export shows Yes for Planned for Annual Targets", getListCell("Planned for This Year's Targets") === "Yes");
+    check("List export shows No for Big Project", getListCell("Big Project") === "No");
 
     const detailWorkbookBuffer = await buildProjectDetailWorkbook({
       title: "Detail Export",
@@ -410,6 +415,9 @@ async function main() {
       facilitiesEstimatedCostNotes: "Detail estimate note",
       facilitiesActualCost: 310.2,
       facilitiesActualCostNotes: "Detail actual note",
+      isFacilitiesServicesWorkspace: true,
+      facilitiesPlannedForAnnualTargets: true,
+      facilitiesIsBigProject: true,
       activities: [],
     });
     const detailWb = new ExcelJS.Workbook();
@@ -425,6 +433,8 @@ async function main() {
     check("Detail export has Facilities Estimated Cost Notes row", detailKeyValue["Facilities Estimated Cost Notes"] === "Detail estimate note");
     check("Detail export has Facilities Actual Cost row", Number(detailKeyValue["Facilities Actual Cost"]) === 310.2);
     check("Detail export has Facilities Actual Cost Notes row", detailKeyValue["Facilities Actual Cost Notes"] === "Detail actual note");
+    check("Detail export shows Yes for Planned for Annual Targets", detailKeyValue["Planned for This Year's Targets"] === "Yes");
+    check("Detail export shows Yes for Big Project", detailKeyValue["Big Project"] === "Yes");
   } finally {
     console.log("\nCleaning up test data...\n");
     try {
