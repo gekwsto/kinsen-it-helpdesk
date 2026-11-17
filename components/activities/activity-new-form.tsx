@@ -27,7 +27,7 @@ import { PostCreateUploadPanel } from "@/components/attachments/post-create-uplo
 // present on every /api/projects row already (a plain scalar column, never
 // select-limited there) — reused here verbatim to show/require the
 // request-origin fields below, never a client-invented flag.
-interface Project { id: string; title: string; projectRequestId: string | null }
+interface Project { id: string; title: string; projectRequestId: string | null; endDate?: string | null }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface SubDepartmentOption { id: string; name: string }
 interface StatusOption { status: ActivityStatus; label: string; color: string }
@@ -273,6 +273,11 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   // requires client-side.
   const selectedProject = projects.find((p) => p.id === projectId);
   const isRequestOrigin = !!selectedProject?.projectRequestId;
+  // Purely a non-blocking UI note — never validated/enforced server-side
+  // (an Activity's own dueDate is intentionally independent of its
+  // Project's endDate; see lib/overdue.ts, which never cross-references
+  // the two). Only ever shown, never required to be acknowledged.
+  const dueDateExceedsProjectEnd = !!(dueDate && selectedProject?.endDate && new Date(dueDate) > new Date(selectedProject.endDate));
   const selectedTaskSubType = taskSubTypes.find((t) => t.id === taskSubTypeId);
   // Whether the CURRENTLY selected Task Sub Type has no fixed configured
   // cost — the one condition that makes the manual Estimated Cost field
@@ -788,6 +793,11 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                   value={dueDate}
                   onChange={(e) => setDueDate(e.target.value)}
                 />
+                {dueDateExceedsProjectEnd && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    This is after the Project&apos;s own end date.
+                  </p>
+                )}
               </div>
             </div>
 

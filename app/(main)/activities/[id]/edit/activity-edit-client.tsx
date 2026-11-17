@@ -21,7 +21,7 @@ import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 
-interface Project { id: string; title: string; projectRequestId: string | null }
+interface Project { id: string; title: string; projectRequestId: string | null; endDate?: string | null }
 interface AssignableUser { id: string; name: string | null; email: string }
 interface StatusOption { status: ActivityStatus; label: string; color: string }
 // The NEW, universally-required classification (see TaskType in
@@ -290,6 +290,9 @@ export function ActivityEditClient({ id }: Props) {
   // that relink case.
   const selectedProject = projects.find((p) => p.id === projectId);
   const isRequestOrigin = !!selectedProject?.projectRequestId;
+  // Purely a non-blocking UI note — see ActivityNewForm's identical
+  // derivation for why this is never validated/enforced server-side.
+  const dueDateExceedsProjectEnd = !!(dueDate && selectedProject?.endDate && new Date(dueDate) > new Date(selectedProject.endDate));
 
   // Same derivation as ActivityNewForm — whether the CURRENTLY SELECTED
   // Task Sub Type has no configured cost, requiring a manual Estimated
@@ -776,6 +779,11 @@ export function ActivityEditClient({ id }: Props) {
                   value={dueDate}
                   onChange={(e) => setDueDate(e.target.value)}
                 />
+                {dueDateExceedsProjectEnd && (
+                  <p className="text-xs text-amber-700 dark:text-amber-400">
+                    This is after the Project&apos;s own end date.
+                  </p>
+                )}
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -796,6 +804,11 @@ export function ActivityEditClient({ id }: Props) {
                     value={dueDate}
                     onChange={(e) => setDueDate(e.target.value)}
                   />
+                  {dueDateExceedsProjectEnd && (
+                    <p className="text-xs text-amber-700 dark:text-amber-400">
+                      This is after the Project&apos;s own end date.
+                    </p>
+                  )}
                 </div>
               </div>
             )}

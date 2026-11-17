@@ -40,6 +40,7 @@ import {
   Maximize2,
   Minimize2,
   AlertTriangle,
+  CalendarClock,
 } from "lucide-react";
 import { getInitials } from "@/lib/utils";
 import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
@@ -93,6 +94,15 @@ export interface GanttItem {
   type: "activity" | "milestone";
   /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
   overdue?: boolean;
+  /**
+   * True when this item's own endDate is LATER than its parent Project's
+   * endDate — computed client-side, purely for display (see where
+   * `scheduledGroups` is rendered below), never a stored/validated flag.
+   * Deliberately NOT tied into `overdue` (a different, self-contained
+   * concept — see lib/overdue.ts) and never blocks anything; it only
+   * flags a scheduling inconsistency worth a human's attention.
+   */
+  extendsPastProject?: boolean;
 }
 
 export interface GanttGroup {
@@ -629,6 +639,8 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
       assigneeName?: string | null; assigneeImage?: string | null;
       ownerName?: string | null; ownerImage?: string | null;
       overdue?: boolean;
+      /** See GanttItem's own doc comment — a child-only display hint, never set on a group/project item. */
+      extendsPastProject?: boolean;
       /** Facilities Services Quarter precision only — see GanttGroup's own doc comment. */
       facilitiesStartLabel?: string | null; facilitiesEndLabel?: string | null;
     };
@@ -738,6 +750,12 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                 Overdue
               </span>
             )}
+            {item.extendsPastProject && (
+              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">
+                <CalendarClock className="h-2.5 w-2.5" />
+                Ends after project end date
+              </span>
+            )}
           </div>
           <div className="text-xs space-y-0.5">
             {/* Facilities Services with Quarter precision: show the
@@ -842,6 +860,12 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
               <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400">
                 <AlertTriangle className="h-2.5 w-2.5" />
                 Overdue
+              </span>
+            )}
+            {item.extendsPastProject && (
+              <span className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full font-medium bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400">
+                <CalendarClock className="h-2.5 w-2.5" />
+                Ends after project end date
               </span>
             )}
           </div>
@@ -1036,7 +1060,13 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                           </tr>
 
                           {/* Activity / milestone rows */}
-                          {!isCollapsed && group.children.map((child) => (
+                          {!isCollapsed && group.children.map((child) => {
+                          // Purely a display hint — never derived/validated
+                          // server-side, never affects `overdue` (a
+                          // different, self-contained concept). See
+                          // GanttItem's own doc comment.
+                          const extendsPastProject = !!(child.endDate && group.endDate && new Date(child.endDate) > new Date(group.endDate));
+                          return (
                             <tr key={child.id} style={{ height: ROW_H }} className="border-b hover:bg-muted/5 transition-colors">
                               <td
                                 className="sticky left-0 z-20 bg-background border-r"
@@ -1060,6 +1090,14 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                   {child.overdue && (
                                     <AlertTriangle className="h-3 w-3 text-red-600 dark:text-red-400 flex-shrink-0" aria-label="Overdue" />
                                   )}
+                                  {extendsPastProject && (
+                                    <CalendarClock
+                                      className="h-3 w-3 text-amber-600 dark:text-amber-400 flex-shrink-0"
+                                      aria-label="Ends after project end date"
+                                    >
+                                      <title>Ends after project end date</title>
+                                    </CalendarClock>
+                                  )}
                                   {child.type === "milestone" && (
                                     <span className="text-[9px] px-1 py-0.5 rounded font-medium flex-shrink-0 ml-auto bg-violet-50 text-violet-700 border border-violet-200">
                                       M
@@ -1080,12 +1118,13 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                   <div className="absolute inset-y-0 w-0.5 bg-red-500/70 pointer-events-none z-10" style={{ left: todayPx }} />
                                 )}
                                 {child.type === "milestone"
-                                  ? <MilestoneMarker item={child} />
-                                  : <Bar item={child} barH={16} isGroup={false} />
+                                  ? <MilestoneMarker item={{ ...child, extendsPastProject }} />
+                                  : <Bar item={{ ...child, extendsPastProject }} barH={16} isGroup={false} />
                                 }
                               </td>
                             </tr>
-                          ))}
+                          );
+                          })}
                         </Fragment>
                       );
                     })}
