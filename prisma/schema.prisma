@@ -1657,6 +1657,19 @@ model Project {
   facilitiesEndPrecision   ProjectDatePrecision?
   facilitiesEndQuarter     ProjectQuarter?
   facilitiesEndYear        Int?
+  // Category is free text (no predefined options), same convention as
+  // Company/Location above. Estimated/Actual Cost are DIRECTLY entered by
+  // an authorized user — unrelated to, and never summed/conflated with,
+  // the Activity-derived rollup computeProjectFinancials() produces (see
+  // lib/services/project-financials-service.ts). Decimal(10,2), matching
+  // the only other monetary columns in this schema (TaskSubType.cost,
+  // ProjectActivity.taskSubTypeCost) — never a float. Each cost has its
+  // own free-text Notes field, displayed alongside it.
+  facilitiesCategory           String?             @db.Text
+  facilitiesEstimatedCost      Decimal?            @db.Decimal(10, 2)
+  facilitiesEstimatedCostNotes String?             @db.Text
+  facilitiesActualCost         Decimal?            @db.Decimal(10, 2)
+  facilitiesActualCostNotes    String?             @db.Text
 
   members      User[]              @relation("ProjectMembers")
   // The AUTHORITATIVE full Owner set — always contains `ownerId` (the

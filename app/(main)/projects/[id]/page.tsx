@@ -233,6 +233,16 @@ export default async function ProjectDetailPage({
   const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId;
   const facilitiesStartLabel = isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(project.facilitiesStartQuarter, project.facilitiesStartYear) : null;
   const facilitiesEndLabel = isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(project.facilitiesEndQuarter, project.facilitiesEndYear) : null;
+  // Facilities Costs — directly entered, NEVER summed/overwritten/conflated
+  // with the Activity-derived rollup below (projectEstimatedCost/
+  // projectActualCost). Same "hidden outside the workspace, preserved in
+  // the DB" rule as the rest of this Project's Facilities metadata.
+  const hasFacilitiesCostData =
+    isFacilitiesServicesWorkspace &&
+    (project.facilitiesEstimatedCost !== null ||
+      project.facilitiesActualCost !== null ||
+      !!project.facilitiesEstimatedCostNotes ||
+      !!project.facilitiesActualCostNotes);
 
   const activitySequenceRows = project.projectRequest
     ? [...project.activities]
@@ -361,7 +371,7 @@ export default async function ProjectDetailPage({
                 immediately after General Information. Company/Location are
                 both optional, so each is only ever rendered when actually
                 set (never an empty "—" placeholder cell). */}
-            {isFacilitiesServicesWorkspace && (project.facilitiesCompany || project.facilitiesLocation) && (
+            {isFacilitiesServicesWorkspace && (project.facilitiesCompany || project.facilitiesLocation || project.facilitiesCategory) && (
               <div className="space-y-2">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
                   <Building2 className="h-3 w-3" /> Facilities Information
@@ -377,6 +387,12 @@ export default async function ProjectDetailPage({
                     <div>
                       <p className="text-xs text-muted-foreground mb-1">Location</p>
                       <p className="font-medium">{project.facilitiesLocation}</p>
+                    </div>
+                  )}
+                  {project.facilitiesCategory && (
+                    <div>
+                      <p className="text-xs text-muted-foreground mb-1">Category</p>
+                      <p className="font-medium">{project.facilitiesCategory}</p>
                     </div>
                   )}
                 </div>
@@ -483,45 +499,78 @@ export default async function ProjectDetailPage({
               </div>
             )}
 
-            {/* Financial Information — request-origin only, identical gating
-                to the old "Project Request Setup" card's own cost grid.
-                Expense Type now lives here (moved from General Information),
-                positioned before Estimated/Actual Cost since it's the input
-                those figures are derived from. projectEstimatedCost/
-                projectActualCost are derived from this Project's own
-                Activities (see computeProjectFinancials above) regardless of
-                origin, but only ever rendered here, exactly as before. Up to
-                4 fields now (Expense Type is conditional, the other 3 always
-                render in this branch) — sm:grid-cols-2 lg:grid-cols-4 stays
-                balanced whether Expense Type is present or not. */}
-            {project.projectRequest && (
-              <div className="space-y-2">
+            {/* Financial Information — TWO DISTINCT, never-conflated sources:
+                Facilities Costs (direct manual entry, Facilities Services
+                workspace only) and Activity Costs (the pre-existing
+                request-origin-only computeProjectFinancials rollup, totally
+                unmodified). A standalone Facilities Project shows only the
+                first sub-section; a request-origin Facilities Project shows
+                both; every other Project's behavior is byte-for-byte
+                unchanged from before this feature existed. */}
+            {(project.projectRequest || hasFacilitiesCostData) && (
+              <div className="space-y-4">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
                   <Wallet className="h-3 w-3" /> Financial Information
                 </p>
-                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                  {project.expenseType && (
-                    <div>
-                      <p className="text-xs text-muted-foreground mb-1">Expense Type</p>
-                      <p className="font-medium">
-                        {project.expenseType.name}
-                        {!project.expenseType.isActive && <span className="text-muted-foreground font-normal"> (inactive)</span>}
-                      </p>
+
+                {hasFacilitiesCostData && (
+                  <div className="space-y-2">
+                    {project.projectRequest && <p className="text-xs font-medium text-muted-foreground">Facilities Costs (Manual Entry)</p>}
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {(project.facilitiesEstimatedCost !== null || project.facilitiesEstimatedCostNotes) && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
+                          {project.facilitiesEstimatedCost !== null && (
+                            <p className="font-medium">{formatEUR(Number(project.facilitiesEstimatedCost))}</p>
+                          )}
+                          {project.facilitiesEstimatedCostNotes && (
+                            <p className="text-xs text-muted-foreground mt-0.5">{project.facilitiesEstimatedCostNotes}</p>
+                          )}
+                        </div>
+                      )}
+                      {(project.facilitiesActualCost !== null || project.facilitiesActualCostNotes) && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
+                          {project.facilitiesActualCost !== null && (
+                            <p className="font-medium">{formatEUR(Number(project.facilitiesActualCost))}</p>
+                          )}
+                          {project.facilitiesActualCostNotes && (
+                            <p className="text-xs text-muted-foreground mt-0.5">{project.facilitiesActualCostNotes}</p>
+                          )}
+                        </div>
+                      )}
                     </div>
-                  )}
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
-                    <p className="font-medium">{formatEUR(Number(projectEstimatedCost))}</p>
                   </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
-                    <p className="font-medium">{formatEUR(Number(projectActualCost))}</p>
+                )}
+
+                {project.projectRequest && (
+                  <div className="space-y-2">
+                    {hasFacilitiesCostData && <p className="text-xs font-medium text-muted-foreground">Activity Costs (Calculated)</p>}
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                      {project.expenseType && (
+                        <div>
+                          <p className="text-xs text-muted-foreground mb-1">Expense Type</p>
+                          <p className="font-medium">
+                            {project.expenseType.name}
+                            {!project.expenseType.isActive && <span className="text-muted-foreground font-normal"> (inactive)</span>}
+                          </p>
+                        </div>
+                      )}
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
+                        <p className="font-medium">{formatEUR(Number(projectEstimatedCost))}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
+                        <p className="font-medium">{formatEUR(Number(projectActualCost))}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground mb-1">External</p>
+                        <p className="font-medium">{project.external ? "Yes" : "No"}</p>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground mb-1">External</p>
-                    <p className="font-medium">{project.external ? "Yes" : "No"}</p>
-                  </div>
-                </div>
+                )}
               </div>
             )}
             </CardContent>

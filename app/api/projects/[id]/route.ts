@@ -231,6 +231,11 @@ export async function PATCH(
       facilitiesEndPrecision,
       facilitiesEndQuarter,
       facilitiesEndYear,
+      facilitiesCategory,
+      facilitiesEstimatedCost,
+      facilitiesEstimatedCostNotes,
+      facilitiesActualCost,
+      facilitiesActualCostNotes,
       ...rest
     } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
@@ -295,6 +300,24 @@ export async function PATCH(
       facilitiesWrite = resolution.value;
     }
 
+    // Category/Estimated-Actual Cost/Notes: plain direct inputs, no
+    // resolver/derivation involved (unlike Start/End) — computed once and
+    // applied the same way regardless of whether this request also touched
+    // a date field. `undefined` (key omitted) leaves the column untouched;
+    // `null` explicitly clears it. Never touched at all when
+    // !isFacilitiesWorkspace, which is what preserves a Project's
+    // historical Facilities cost data once it's moved to another
+    // department (same reasoning as facilitiesCompany/facilitiesLocation).
+    const facilitiesDirectFields = isFacilitiesWorkspace
+      ? {
+          facilitiesCategory: facilitiesCategory !== undefined ? facilitiesCategory : undefined,
+          facilitiesEstimatedCost: facilitiesEstimatedCost !== undefined ? facilitiesEstimatedCost : undefined,
+          facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes !== undefined ? facilitiesEstimatedCostNotes : undefined,
+          facilitiesActualCost: facilitiesActualCost !== undefined ? facilitiesActualCost : undefined,
+          facilitiesActualCostNotes: facilitiesActualCostNotes !== undefined ? facilitiesActualCostNotes : undefined,
+        }
+      : {};
+
     if (memberIds && memberIds.length > 0) {
       for (const userId of memberIds) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "project", effectiveDepartmentId);
@@ -338,13 +361,19 @@ export async function PATCH(
         // Project's HISTORICAL Facilities metadata once it's moved to a
         // different department (nothing in this branch ever clears it).
         ...(facilitiesWrite
-          ? { ...facilitiesWrite, facilitiesCompany: facilitiesCompany !== undefined ? facilitiesCompany : undefined, facilitiesLocation: facilitiesLocation !== undefined ? facilitiesLocation : undefined }
+          ? {
+              ...facilitiesWrite,
+              facilitiesCompany: facilitiesCompany !== undefined ? facilitiesCompany : undefined,
+              facilitiesLocation: facilitiesLocation !== undefined ? facilitiesLocation : undefined,
+              ...facilitiesDirectFields,
+            }
           : {
               startDate: startDate ? new Date(startDate) : undefined,
               endDate: endDate ? new Date(endDate) : undefined,
               ...(isFacilitiesWorkspace
                 ? { facilitiesCompany: facilitiesCompany !== undefined ? facilitiesCompany : undefined, facilitiesLocation: facilitiesLocation !== undefined ? facilitiesLocation : undefined }
                 : {}),
+              ...facilitiesDirectFields,
             }),
         // undefined (key omitted) -> leave untouched; null/"" (explicitly
         // cleared) -> persist NULL; a real value -> the parsed Date. Reuses

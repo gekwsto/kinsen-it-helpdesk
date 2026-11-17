@@ -55,6 +55,11 @@ const FACILITIES_FIELD_KEYS = [
   "facilitiesEndPrecision",
   "facilitiesEndQuarter",
   "facilitiesEndYear",
+  "facilitiesCategory",
+  "facilitiesEstimatedCost",
+  "facilitiesEstimatedCostNotes",
+  "facilitiesActualCost",
+  "facilitiesActualCostNotes",
 ] as const;
 
 /**

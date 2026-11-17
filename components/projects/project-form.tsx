@@ -293,6 +293,15 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   const isFacilitiesWorkspace = !!departmentId && !!effectiveFacilitiesServicesDepartmentId && departmentId === effectiveFacilitiesServicesDepartmentId;
   const [facilitiesCompany, setFacilitiesCompany] = useState("");
   const [facilitiesLocation, setFacilitiesLocation] = useState("");
+  const [facilitiesCategory, setFacilitiesCategory] = useState("");
+  // Plain text state (not react-hook-form), matching every other Facilities
+  // field above — parsed to a number (or null when blank) only at submit
+  // time, see onSubmit's facilitiesFields below. Never validated as a
+  // number while typing; the server's moneyAmountSchema is authoritative.
+  const [facilitiesEstimatedCost, setFacilitiesEstimatedCost] = useState("");
+  const [facilitiesEstimatedCostNotes, setFacilitiesEstimatedCostNotes] = useState("");
+  const [facilitiesActualCost, setFacilitiesActualCost] = useState("");
+  const [facilitiesActualCostNotes, setFacilitiesActualCostNotes] = useState("");
   const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
   const [facStartDate, setFacStartDate] = useState("");
   const [facStartQuarter, setFacStartQuarter] = useState("");
@@ -441,6 +450,18 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
           ? new Date(facEndDate)
           : null;
       if (startPreview && endPreview && startPreview > endPreview) return toast.error("Start must not be later than End.");
+      // Same non-negative/2-decimal-place rule as the server's
+      // moneyAmountSchema — a UX convenience only, re-validated
+      // authoritatively server-side regardless.
+      for (const [raw, label] of [
+        [facilitiesEstimatedCost, "Estimated Cost"],
+        [facilitiesActualCost, "Actual Cost"],
+      ] as const) {
+        if (raw.trim() === "") continue;
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) return toast.error(`${label} must be a non-negative number.`);
+        if (Math.abs(Math.round(parsed * 100) - parsed * 100) > 1e-6) return toast.error(`${label} supports at most 2 decimal places.`);
+      }
     }
 
     setIsSubmitting(true);
@@ -456,6 +477,11 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
         ? {
             facilitiesCompany: facilitiesCompany.trim() || null,
             facilitiesLocation: facilitiesLocation.trim() || null,
+            facilitiesCategory: facilitiesCategory.trim() || null,
+            facilitiesEstimatedCost: facilitiesEstimatedCost.trim() === "" ? null : Number(facilitiesEstimatedCost),
+            facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes.trim() || null,
+            facilitiesActualCost: facilitiesActualCost.trim() === "" ? null : Number(facilitiesActualCost),
+            facilitiesActualCostNotes: facilitiesActualCostNotes.trim() || null,
             facilitiesStartPrecision: facStartPrecision,
             facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
             facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
@@ -777,6 +803,63 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                   value={facilitiesLocation}
                   onChange={(e) => setFacilitiesLocation(e.target.value)}
                 />
+              </div>
+              <div className="space-y-2">
+                <Label>Category</Label>
+                <Input
+                  placeholder="e.g. Maintenance, Renovation…"
+                  value={facilitiesCategory}
+                  onChange={(e) => setFacilitiesCategory(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
+
+          {isFacilitiesWorkspace && (
+            <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+              <div>
+                <h3 className="text-sm font-semibold">Facilities Costs</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">Directly entered — separate from any Activity-based cost calculation.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Estimated Cost (EUR)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="0.00"
+                    value={facilitiesEstimatedCost}
+                    onChange={(e) => setFacilitiesEstimatedCost(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Estimated Cost Notes</Label>
+                  <Input
+                    placeholder="Optional notes…"
+                    value={facilitiesEstimatedCostNotes}
+                    onChange={(e) => setFacilitiesEstimatedCostNotes(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Actual Cost (EUR)</Label>
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="0.00"
+                    value={facilitiesActualCost}
+                    onChange={(e) => setFacilitiesActualCost(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label>Actual Cost Notes</Label>
+                  <Input
+                    placeholder="Optional notes…"
+                    value={facilitiesActualCostNotes}
+                    onChange={(e) => setFacilitiesActualCostNotes(e.target.value)}
+                  />
+                </div>
               </div>
             </div>
           )}

@@ -748,7 +748,16 @@ export async function createProjectFromApprovedRequest(
         // either Quarter or Exact). Every other workspace: the exact,
         // unmodified pre-existing behavior.
         ...(facilitiesWrite
-          ? { ...facilitiesWrite, facilitiesCompany: data.facilitiesCompany ?? undefined, facilitiesLocation: data.facilitiesLocation ?? undefined }
+          ? {
+              ...facilitiesWrite,
+              facilitiesCompany: data.facilitiesCompany ?? undefined,
+              facilitiesLocation: data.facilitiesLocation ?? undefined,
+              facilitiesCategory: data.facilitiesCategory ?? undefined,
+              facilitiesEstimatedCost: data.facilitiesEstimatedCost ?? undefined,
+              facilitiesEstimatedCostNotes: data.facilitiesEstimatedCostNotes ?? undefined,
+              facilitiesActualCost: data.facilitiesActualCost ?? undefined,
+              facilitiesActualCostNotes: data.facilitiesActualCostNotes ?? undefined,
+            }
           : {
               startDate: data.startDate ? new Date(data.startDate) : undefined,
               endDate: data.endDate ? new Date(data.endDate) : undefined,

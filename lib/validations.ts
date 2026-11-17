@@ -303,11 +303,18 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
 // updateProjectRequestOriginFieldsSchema above. Every field optional AND
 // nullable — `undefined` means "untouched" (PATCH only; a create request
 // simply never sends the key at all), `null` means "explicitly cleared".
-// Whether any of these 8 keys is even ALLOWED on a given Project (it
+// Whether any of these 13 keys is even ALLOWED on a given Project (it
 // belonging to the Facilities Services Department) is a server-side
 // business rule, not a Zod concern — see hasFacilitiesFieldsPresent/
 // resolveFacilitiesWrite in lib/services/project-facilities-service.ts,
 // the actual enforcement point in every route.
+//
+// Category/Estimated-Actual Cost/Notes are plain direct inputs — no
+// resolver/derivation involved (unlike Start/End), so they're written
+// straight through wherever facilitiesCompany/facilitiesLocation already
+// are. The two cost fields reuse moneyAmountSchema verbatim (same
+// non-negative/2-decimal-place/Decimal(10,2)-range rule as every other
+// money input in this app) — never a bespoke precision rule.
 export const facilitiesProjectFieldsSchema = z.object({
   facilitiesCompany: z.string().trim().min(1).nullable().optional(),
   facilitiesLocation: z.string().trim().min(1).nullable().optional(),
@@ -317,6 +324,11 @@ export const facilitiesProjectFieldsSchema = z.object({
   facilitiesEndPrecision: z.nativeEnum(ProjectDatePrecision).nullable().optional(),
   facilitiesEndQuarter: z.nativeEnum(ProjectQuarter).nullable().optional(),
   facilitiesEndYear: z.number().int().min(1900).max(2999).nullable().optional(),
+  facilitiesCategory: z.string().trim().min(1).nullable().optional(),
+  facilitiesEstimatedCost: moneyAmountSchema("Estimated Cost").nullable().optional(),
+  facilitiesEstimatedCostNotes: z.string().trim().min(1).nullable().optional(),
+  facilitiesActualCost: moneyAmountSchema("Actual Cost").nullable().optional(),
+  facilitiesActualCostNotes: z.string().trim().min(1).nullable().optional(),
 });
 
 export const projectExpenseTypeSchema = z.object({

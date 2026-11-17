@@ -88,6 +88,14 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [isFacilitiesServicesWorkspace, setIsFacilitiesServicesWorkspace] = useState(false);
   const [facilitiesCompany, setFacilitiesCompany] = useState("");
   const [facilitiesLocation, setFacilitiesLocation] = useState("");
+  const [facilitiesCategory, setFacilitiesCategory] = useState("");
+  // Directly entered — separate from estimatedCost/actualCost above (the
+  // read-only Activity-derived rollup). Plain text state, parsed to a
+  // number (or null when blank) only at submit time.
+  const [facilitiesEstimatedCost, setFacilitiesEstimatedCost] = useState("");
+  const [facilitiesEstimatedCostNotes, setFacilitiesEstimatedCostNotes] = useState("");
+  const [facilitiesActualCost, setFacilitiesActualCost] = useState("");
+  const [facilitiesActualCostNotes, setFacilitiesActualCostNotes] = useState("");
   const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
   const [facStartQuarter, setFacStartQuarter] = useState("");
   const [facStartYear, setFacStartYear] = useState("");
@@ -110,6 +118,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setIsFacilitiesServicesWorkspace(p.isFacilitiesServicesWorkspace ?? false);
           setFacilitiesCompany(p.facilitiesCompany ?? "");
           setFacilitiesLocation(p.facilitiesLocation ?? "");
+          setFacilitiesCategory(p.facilitiesCategory ?? "");
+          setFacilitiesEstimatedCost(p.facilitiesEstimatedCost !== null && p.facilitiesEstimatedCost !== undefined ? String(p.facilitiesEstimatedCost) : "");
+          setFacilitiesEstimatedCostNotes(p.facilitiesEstimatedCostNotes ?? "");
+          setFacilitiesActualCost(p.facilitiesActualCost !== null && p.facilitiesActualCost !== undefined ? String(p.facilitiesActualCost) : "");
+          setFacilitiesActualCostNotes(p.facilitiesActualCostNotes ?? "");
           setFacStartPrecision(p.facilitiesStartPrecision === "QUARTER" ? "QUARTER" : "EXACT");
           setFacStartQuarter(p.facilitiesStartQuarter ?? "");
           setFacStartYear(p.facilitiesStartYear ? String(p.facilitiesStartYear) : "");
@@ -202,6 +215,21 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
         toast.error("Select both a Quarter and a Year for End.");
         return;
       }
+      for (const [raw, label] of [
+        [facilitiesEstimatedCost, "Estimated Cost"],
+        [facilitiesActualCost, "Actual Cost"],
+      ] as const) {
+        if (raw.trim() === "") continue;
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          toast.error(`${label} must be a non-negative number.`);
+          return;
+        }
+        if (Math.abs(Math.round(parsed * 100) - parsed * 100) > 1e-6) {
+          toast.error(`${label} supports at most 2 decimal places.`);
+          return;
+        }
+      }
     }
     setSaving(true);
     try {
@@ -224,6 +252,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
             ? {
                 facilitiesCompany: facilitiesCompany.trim() || null,
                 facilitiesLocation: facilitiesLocation.trim() || null,
+                facilitiesCategory: facilitiesCategory.trim() || null,
+                facilitiesEstimatedCost: facilitiesEstimatedCost.trim() === "" ? null : Number(facilitiesEstimatedCost),
+                facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes.trim() || null,
+                facilitiesActualCost: facilitiesActualCost.trim() === "" ? null : Number(facilitiesActualCost),
+                facilitiesActualCostNotes: facilitiesActualCostNotes.trim() || null,
                 facilitiesStartPrecision: facStartPrecision,
                 facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
                 facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
@@ -463,6 +496,68 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                     value={facilitiesLocation}
                     onChange={(e) => setFacilitiesLocation(e.target.value)}
                   />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="facilitiesCategory">Category</Label>
+                  <Input
+                    id="facilitiesCategory"
+                    placeholder="e.g. Maintenance, Renovation…"
+                    value={facilitiesCategory}
+                    onChange={(e) => setFacilitiesCategory(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+
+            {isFacilitiesServicesWorkspace && (
+              <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+                <div>
+                  <h3 className="text-sm font-semibold">Facilities Costs</h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">Directly entered — separate from any Activity-based cost calculation.</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesEstimatedCost">Estimated Cost (EUR)</Label>
+                    <Input
+                      id="facilitiesEstimatedCost"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="0.00"
+                      value={facilitiesEstimatedCost}
+                      onChange={(e) => setFacilitiesEstimatedCost(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesEstimatedCostNotes">Estimated Cost Notes</Label>
+                    <Input
+                      id="facilitiesEstimatedCostNotes"
+                      placeholder="Optional notes…"
+                      value={facilitiesEstimatedCostNotes}
+                      onChange={(e) => setFacilitiesEstimatedCostNotes(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesActualCost">Actual Cost (EUR)</Label>
+                    <Input
+                      id="facilitiesActualCost"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      placeholder="0.00"
+                      value={facilitiesActualCost}
+                      onChange={(e) => setFacilitiesActualCost(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesActualCostNotes">Actual Cost Notes</Label>
+                    <Input
+                      id="facilitiesActualCostNotes"
+                      placeholder="Optional notes…"
+                      value={facilitiesActualCostNotes}
+                      onChange={(e) => setFacilitiesActualCostNotes(e.target.value)}
+                    />
+                  </div>
                 </div>
               </div>
             )}

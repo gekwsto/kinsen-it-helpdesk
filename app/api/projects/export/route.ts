@@ -112,6 +112,11 @@ export async function GET(request: NextRequest) {
       facilitiesStartYear: p.facilitiesStartYear,
       facilitiesEndQuarter: p.facilitiesEndQuarter,
       facilitiesEndYear: p.facilitiesEndYear,
+      facilitiesCategory: p.facilitiesCategory,
+      facilitiesEstimatedCost: p.facilitiesEstimatedCost,
+      facilitiesEstimatedCostNotes: p.facilitiesEstimatedCostNotes,
+      facilitiesActualCost: p.facilitiesActualCost,
+      facilitiesActualCostNotes: p.facilitiesActualCostNotes,
     };
   });
 

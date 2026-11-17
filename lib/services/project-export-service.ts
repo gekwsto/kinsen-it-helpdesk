@@ -145,6 +145,15 @@ export interface ProjectExportRow {
   facilitiesStartYear: number | null;
   facilitiesEndQuarter: ProjectQuarter | null;
   facilitiesEndYear: number | null;
+  // Facilities Services only — directly entered, NEVER the Activity-derived
+  // rollup (see lib/services/project-financials-service.ts, unrelated and
+  // not exported on this row at all — the list export never included
+  // Estimated/Actual Cost before this feature either).
+  facilitiesCategory: string | null;
+  facilitiesEstimatedCost: Prisma.Decimal | number | null;
+  facilitiesEstimatedCostNotes: string | null;
+  facilitiesActualCost: Prisma.Decimal | number | null;
+  facilitiesActualCostNotes: string | null;
 }
 
 export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promise<ExcelJS.Buffer> {
@@ -172,6 +181,11 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
     { header: "Location", key: "facilitiesLocation", width: 24 },
     { header: "Start (Quarter)", key: "facilitiesStartQuarterLabel", width: 16 },
     { header: "End (Quarter)", key: "facilitiesEndQuarterLabel", width: 16 },
+    { header: "Category", key: "facilitiesCategory", width: 20 },
+    { header: "Estimated Cost (EUR)", key: "facilitiesEstimatedCost", width: 18 },
+    { header: "Estimated Cost Notes", key: "facilitiesEstimatedCostNotes", width: 30 },
+    { header: "Actual Cost (EUR)", key: "facilitiesActualCost", width: 16 },
+    { header: "Actual Cost Notes", key: "facilitiesActualCostNotes", width: 30 },
     { header: "Created", key: "createdAt", width: 16 },
     { header: "Description", key: "description", width: 40 },
   ];
@@ -197,6 +211,11 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
         facilitiesLocation: r.facilitiesLocation ?? "",
         facilitiesStartQuarterLabel: formatFacilitiesQuarterLabel(r.facilitiesStartQuarter, r.facilitiesStartYear) ?? "",
         facilitiesEndQuarterLabel: formatFacilitiesQuarterLabel(r.facilitiesEndQuarter, r.facilitiesEndYear) ?? "",
+        facilitiesCategory: r.facilitiesCategory ?? "",
+        facilitiesEstimatedCost: r.facilitiesEstimatedCost !== null ? decimalToNumber(r.facilitiesEstimatedCost) : null,
+        facilitiesEstimatedCostNotes: r.facilitiesEstimatedCostNotes ?? "",
+        facilitiesActualCost: r.facilitiesActualCost !== null ? decimalToNumber(r.facilitiesActualCost) : null,
+        facilitiesActualCostNotes: r.facilitiesActualCostNotes ?? "",
         createdAt: r.createdAt,
         description: r.description ?? "",
       })
@@ -204,6 +223,9 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
   }
 
   applyDateFormat(sheet, ["expectedStartDate", "expectedFinishDate", "startDate", "endDate", "createdAt"]);
+  for (const key of ["facilitiesEstimatedCost", "facilitiesActualCost"]) {
+    sheet.getColumn(key).numFmt = '"€"#,##0.00';
+  }
   styleHeaderRow(sheet);
   applyAutoFilter(sheet);
 
@@ -238,6 +260,11 @@ export interface ProjectDetailExportData {
   facilitiesStartYear: number | null;
   facilitiesEndQuarter: ProjectQuarter | null;
   facilitiesEndYear: number | null;
+  facilitiesCategory: string | null;
+  facilitiesEstimatedCost: Prisma.Decimal | number | null;
+  facilitiesEstimatedCostNotes: string | null;
+  facilitiesActualCost: Prisma.Decimal | number | null;
+  facilitiesActualCostNotes: string | null;
   activities: {
     title: string;
     status: string;
@@ -297,16 +324,27 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   // free-text Company/Location, only when actually set.
   if (data.facilitiesCompany) addKeyValueRow(detailsSheet, "Company", data.facilitiesCompany);
   if (data.facilitiesLocation) addKeyValueRow(detailsSheet, "Location", data.facilitiesLocation);
+  if (data.facilitiesCategory) addKeyValueRow(detailsSheet, "Category", data.facilitiesCategory);
   const facilitiesStartQuarterLabel = formatFacilitiesQuarterLabel(data.facilitiesStartQuarter, data.facilitiesStartYear);
   if (facilitiesStartQuarterLabel) addKeyValueRow(detailsSheet, "Start (Quarter)", facilitiesStartQuarterLabel);
   const facilitiesEndQuarterLabel = formatFacilitiesQuarterLabel(data.facilitiesEndQuarter, data.facilitiesEndYear);
   if (facilitiesEndQuarterLabel) addKeyValueRow(detailsSheet, "End (Quarter)", facilitiesEndQuarterLabel);
+  // Facilities Costs — directly entered, NEVER the Activity-derived rollup
+  // on the Financials sheet below (unrelated, never summed/conflated).
+  if (data.facilitiesEstimatedCost !== null) addKeyValueRow(detailsSheet, "Facilities Estimated Cost", decimalToNumber(data.facilitiesEstimatedCost));
+  if (data.facilitiesEstimatedCostNotes) addKeyValueRow(detailsSheet, "Facilities Estimated Cost Notes", data.facilitiesEstimatedCostNotes);
+  if (data.facilitiesActualCost !== null) addKeyValueRow(detailsSheet, "Facilities Actual Cost", decimalToNumber(data.facilitiesActualCost));
+  if (data.facilitiesActualCostNotes) addKeyValueRow(detailsSheet, "Facilities Actual Cost Notes", data.facilitiesActualCostNotes);
   addKeyValueRow(detailsSheet, "Progress (%)", data.progress);
   addKeyValueRow(detailsSheet, "Created", data.createdAt);
   addKeyValueRow(detailsSheet, "Description", data.description);
   for (let r = 2; r <= detailsSheet.rowCount; r++) {
+    const fieldName = detailsSheet.getCell(r, 1).value;
     for (const col of ["Expected Start", "Expected Finish", "Start Date", "Due Date", "Created"]) {
-      if (detailsSheet.getCell(r, 1).value === col) detailsSheet.getCell(r, 2).numFmt = DATE_FORMAT;
+      if (fieldName === col) detailsSheet.getCell(r, 2).numFmt = DATE_FORMAT;
+    }
+    for (const col of ["Facilities Estimated Cost", "Facilities Actual Cost"]) {
+      if (fieldName === col) detailsSheet.getCell(r, 2).numFmt = '"€"#,##0.00';
     }
   }
 

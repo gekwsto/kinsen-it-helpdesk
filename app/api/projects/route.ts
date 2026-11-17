@@ -125,6 +125,11 @@ export async function POST(req: NextRequest) {
       facilitiesEndPrecision,
       facilitiesEndQuarter,
       facilitiesEndYear,
+      facilitiesCategory,
+      facilitiesEstimatedCost,
+      facilitiesEstimatedCostNotes,
+      facilitiesActualCost,
+      facilitiesActualCostNotes,
       ...rest
     } = data;
 
@@ -221,7 +226,19 @@ export async function POST(req: NextRequest) {
         // Every other workspace: the exact, unmodified pre-existing
         // behavior — a plain exact date or nothing.
         ...(isFacilitiesWorkspace && facilitiesWrite
-          ? { ...facilitiesWrite, facilitiesCompany: facilitiesCompany ?? undefined, facilitiesLocation: facilitiesLocation ?? undefined }
+          ? {
+              ...facilitiesWrite,
+              facilitiesCompany: facilitiesCompany ?? undefined,
+              facilitiesLocation: facilitiesLocation ?? undefined,
+              // Category/Estimated-Actual Cost/Notes: plain direct inputs,
+              // no resolver needed (unlike Start/End) — written straight
+              // through, same as Company/Location above.
+              facilitiesCategory: facilitiesCategory ?? undefined,
+              facilitiesEstimatedCost: facilitiesEstimatedCost ?? undefined,
+              facilitiesEstimatedCostNotes: facilitiesEstimatedCostNotes ?? undefined,
+              facilitiesActualCost: facilitiesActualCost ?? undefined,
+              facilitiesActualCostNotes: facilitiesActualCostNotes ?? undefined,
+            }
           : { startDate: startDate ? new Date(startDate) : undefined, endDate: endDate ? new Date(endDate) : undefined }),
         members: memberIds.length
           ? { connect: memberIds.map((id) => ({ id })) }
