@@ -238,6 +238,17 @@
  * WHICH case it was (absent vs. malformed vs. present-but-wrong-length) —
  * never reported as a recovery candidate either way.
  *
+ * SHARED CORRELATION LOGIC — mailbox/emailMessageId resolution, local
+ * storage-path construction, and the name-only uniqueness gate now live in
+ * scripts/attachment-graph-recovery-correlation.ts (pure extraction, no
+ * behavior change — re-verified against the full existing regression
+ * suite), imported here AND by scripts/recover-attachment-from-graph.ts,
+ * the single-record write-capable recovery tool. That tool's own
+ * "revalidate identity immediately before recovery" requirement is
+ * satisfied by construction — it runs the exact same resolution/matching
+ * code this diagnostic does, not a second implementation that could
+ * silently drift from it.
+ *
  * GRAPH REQUEST BUDGET
  *   --limit=<n> (default 50) caps the number of DISTINCT
  *   getMessageByInternetMessageId calls this run makes — NOT the number of
@@ -304,12 +315,12 @@
  *   npx tsx scripts/diagnose-attachment-graph-recovery.ts
  *   npx tsx scripts/diagnose-attachment-graph-recovery.ts --limit=200
  */
-import fs from "fs/promises";
 import path from "path";
 import { prisma } from "@/lib/prisma";
 import { UPLOAD_DIR, LEGACY_PUBLIC_UPLOAD_DIR } from "@/lib/attachment-policy";
 import { microsoftGraph, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { checkContentBytes } from "@/scripts/attachment-graph-recovery-base64";
+import { type Row, fileExistsLocally, storagePaths, resolveMailbox, resolveEmailMessageId, findUniqueAttachmentByName } from "@/scripts/attachment-graph-recovery-correlation";
 
 type Classification =
   | "file_present"
@@ -369,67 +380,6 @@ function classifyGraphFailure(err: unknown): string {
 // module's own doc comments for the stack-overflow crash this fixed and why
 // the fix is a manual scan rather than a regex.
 
-type Row = {
-  kind: "ticket" | "pending";
-  id: string;
-  ownerId: string; // ticketId or pendingTicketId
-  filename: string;
-  originalName: string;
-  mimeType: string;
-  size: number;
-};
-
-async function exists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function storagePaths(row: Row): { privatePath: string; legacyPath: string } {
-  if (row.kind === "ticket") {
-    return {
-      privatePath: path.join(UPLOAD_DIR, row.ownerId, row.filename),
-      legacyPath: path.join(LEGACY_PUBLIC_UPLOAD_DIR, row.ownerId, row.filename),
-    };
-  }
-  return {
-    privatePath: path.join(UPLOAD_DIR, "pending", row.ownerId, row.filename),
-    legacyPath: path.join(LEGACY_PUBLIC_UPLOAD_DIR, "pending", row.ownerId, row.filename),
-  };
-}
-
-/** Exactly one distinct mailbox for this messageId, or "unresolved" — never guesses among several, never falls back to a default mailbox. */
-async function resolveMailbox(emailMessageId: string): Promise<{ ok: true; mailbox: string } | { ok: false }> {
-  const logs = await prisma.emailProcessingLog.findMany({
-    where: { messageId: emailMessageId, mailbox: { not: null } },
-    select: { mailbox: true },
-  });
-  const distinct = [...new Set(logs.map((l) => l.mailbox!))];
-  if (distinct.length !== 1) return { ok: false };
-  return { ok: true, mailbox: distinct[0] };
-}
-
-/** The emailMessageId the owning entity was ingested from, or null. For a ticket-level TicketAttachment (messageId: null) this is the Ticket's own emailMessageId (the original creating email); for a reply attachment it's that specific TicketMessage's own emailMessageId (a later email in the same thread). */
-async function resolveEmailMessageId(row: Row): Promise<string | null> {
-  if (row.kind === "pending") {
-    const pending = await prisma.pendingTicket.findUnique({ where: { id: row.ownerId }, select: { emailMessageId: true } });
-    return pending?.emailMessageId ?? null;
-  }
-  const attachment = await prisma.ticketAttachment.findUnique({
-    where: { id: row.id },
-    select: { messageId: true, ticket: { select: { emailMessageId: true } } },
-  });
-  if (!attachment) return null;
-  if (attachment.messageId) {
-    const msg = await prisma.ticketMessage.findUnique({ where: { id: attachment.messageId }, select: { emailMessageId: true } });
-    if (msg?.emailMessageId) return msg.emailMessageId;
-  }
-  return attachment.ticket.emailMessageId ?? null;
-}
-
 async function main() {
   const argv = process.argv.slice(2);
   const limitArg = argv.find((a) => a.startsWith("--limit="));
@@ -477,7 +427,7 @@ async function main() {
   let filePresentCount = 0;
   for (const row of allRows) {
     const { privatePath, legacyPath } = storagePaths(row);
-    if ((await exists(privatePath)) || (await exists(legacyPath))) {
+    if ((await fileExistsLocally(privatePath)) || (await fileExistsLocally(legacyPath))) {
       results.set(rowKey(row), { classification: "file_present", detail: "Bytes found in local storage." });
       filePresentCount++;
     } else {
@@ -606,21 +556,23 @@ async function main() {
       // Step b — name is now the SOLE uniqueness gate (never disambiguate
       // by size — see GRAPH METADATA SIZE RELIABILITY above for why Graph's
       // reported size can't be trusted to pick among same-named
-      // candidates).
-      const nameMatches = message.attachments.filter((a) => a.name === row.originalName);
-      if (nameMatches.length === 0) {
+      // candidates). Shared with scripts/recover-attachment-from-graph.ts
+      // (see scripts/attachment-graph-recovery-correlation.ts) so the two
+      // tools can never apply a different uniqueness rule.
+      const nameMatch = findUniqueAttachmentByName(message.attachments, row.originalName);
+      if (nameMatch.status === "none") {
         results.set(rowKey(row), {
           classification: "graph_attachment_name_mismatch",
           detail: `Message found (mailbox ${mailbox}, ${message.attachments.length} attachment(s) on it) but none share this row's originalName.`,
         });
         continue;
       }
-      if (nameMatches.length > 1) {
-        results.set(rowKey(row), { classification: "graph_attachment_ambiguous", detail: `Message found (mailbox ${mailbox}) but ${nameMatches.length} attachments share this row's originalName — Graph's size metadata is not a trustworthy disambiguator, so cannot safely pick one.` });
+      if (nameMatch.status === "ambiguous") {
+        results.set(rowKey(row), { classification: "graph_attachment_ambiguous", detail: `Message found (mailbox ${mailbox}) but ${nameMatch.count} attachments share this row's originalName — Graph's size metadata is not a trustworthy disambiguator, so cannot safely pick one.` });
         continue;
       }
 
-      const match = nameMatches[0];
+      const match = nameMatch.match;
 
       if (match.size === row.size) {
         // Straightforward case — Graph's own metadata size agrees with the
