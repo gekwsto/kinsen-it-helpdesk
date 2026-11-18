@@ -61,14 +61,21 @@
  *      PRESENCE below, the fix for THIS round):
  *        a. COLLECTION PRESENCE — is `message.attachments` even an array,
  *           and non-empty? See ATTACHMENT COLLECTION PRESENCE below.
- *        b. NAME match — does ANY attachment on the message share this
- *           row's originalName, regardless of size?
- *        c. SIZE match (among same-name candidates) — does exactly one of
- *           those also match this row's size?
- *        d. Only once EXACTLY ONE metadata match (name AND size) is found
- *           is its byte availability checked: usable `contentBytes` ->
- *           "graph_recoverable". Not usable -> classified further by
- *           @odata.type (see METADATA VS. BYTE AVAILABILITY below).
+ *        b. NAME match — does EXACTLY ONE attachment on the message share
+ *           this row's originalName? This is now the SOLE uniqueness gate
+ *           (zero -> name mismatch, 2+ -> ambiguous) — see GRAPH METADATA
+ *           SIZE RELIABILITY below for why size is never used to pick among
+ *           same-named candidates.
+ *        c. Does that one match's Graph-reported `size` equal the row's DB
+ *           size? If so, proceed straight to byte availability (step d)
+ *           against that size. If not — a genuine, confirmed-in-production
+ *           case — Graph's `size` metadata is treated as unreliable, NOT as
+ *           proof the attachment is wrong, and the decoded contentBytes is
+ *           compared against the row's DB size instead (see GRAPH METADATA
+ *           SIZE RELIABILITY below).
+ *        d. Byte availability: usable `contentBytes` (decodes to exactly
+ *           the expected size) -> recoverable. Not usable -> classified
+ *           further (see METADATA VS. BYTE AVAILABILITY below).
  *
  * ATTACHMENT COLLECTION PRESENCE — added this round, in response to a
  * second real production run: after splitting metadata-matching from
@@ -100,20 +107,93 @@
  * still-approval-gated) confirmation that it's actually needed.
  *
  * NAME VS. SIZE MISMATCH — once a non-empty attachment collection exists,
- * matching is now two explicit sub-steps instead of one combined filter,
- * so a genuine name-only or size-only mismatch is distinguishable from
- * true ambiguity:
+ * name is checked first, independent of size:
  *   - "graph_attachment_name_mismatch" — no attachment on the message
  *     shares this row's originalName at all.
- *   - "graph_attachment_size_mismatch" — one or more attachments share the
- *     name, but none also match the row's recorded size (ingestion-side
- *     size is `Buffer.from(contentBytes, "base64").length` — the decoded
- *     byte count, the same unit Graph's own `size` property uses; traced
- *     in lib/services/pending-ticket-service.ts and
- *     lib/ticket-email-service.ts, no transformation or unit conversion
- *     found at either ingestion site).
- *   - "graph_attachment_ambiguous" — 2+ attachments match BOTH name and
- *     size — genuinely ambiguous, never guessed.
+ *   - "graph_attachment_ambiguous" — 2+ attachments share the name — no
+ *     second signal (Graph's `size` is explicitly NOT trusted to
+ *     disambiguate — see GRAPH METADATA SIZE RELIABILITY below) can safely
+ *     pick one, so this is never guessed.
+ * Exactly one name match proceeds to GRAPH METADATA SIZE RELIABILITY below.
+ *
+ * GRAPH METADATA SIZE RELIABILITY — added this round, in response to a
+ * THIRD real production run. After the previous two fixes (byte/metadata
+ * split, then collection-presence split), a run against 206 real
+ * attachment rows found exactly 10 that matched by originalName with a
+ * single unique candidate each (3 distinct successfully-found messages,
+ * no missing collections, no name mismatches, no Graph request errors) —
+ * and EVERY one of those 10 failed solely because the Graph attachment's
+ * reported `size` differed from this row's own DB-recorded `size`.
+ *
+ * Ingestion-side size (lib/services/pending-ticket-service.ts,
+ * lib/ticket-email-service.ts, re-traced this round) is
+ * `Buffer.from(att.contentBytes, "base64").length` — the DECODED byte
+ * count of the SAME Graph attachment at the time it was first ingested,
+ * not a copy of Graph's `size` field. So "DB size" and "Graph's `size`
+ * property" were never guaranteed to be the same number in the first
+ * place, even though they usually agree: Microsoft's own fileAttachment
+ * reference (learn.microsoft.com/graph/api/resources/fileattachment)
+ * documents `size` only as "the size in bytes of the attachment," with NO
+ * stated guarantee that it equals `Buffer.from(contentBytes,
+ * "base64").length`. Third-party evidence of exactly this gap exists: a
+ * documented case (microsoft-graph-docs-contrib community report) showed
+ * Graph returning a list-metadata size of 42,710 bytes for an attachment
+ * whose decoded content was actually 42,326 bytes — attributed to `size`
+ * sometimes reflecting a different internal accounting (e.g. Outlook's
+ * MAPI-level PR_ATTACH_SIZE) than the literal decoded payload length. The
+ * conclusion: Graph's `size` is provider metadata, not a byte-for-byte
+ * guarantee — the ONLY way to know the true content length is to decode
+ * `contentBytes` and measure it directly.
+ *
+ * Consequently, a metadata size mismatch is NEVER treated as proof the
+ * attachment is wrong, and (per explicit requirement) NEVER treated as
+ * recoverable on name alone either — it triggers a direct comparison of
+ * decoded contentBytes length against the row's OWN DB size (never
+ * against Graph's possibly-wrong `size` field), yielding four distinct
+ * outcomes:
+ *   - "graph_recoverable_metadata_size_mismatch" — Graph's `size` disagreed
+ *     with the DB, but the decoded `contentBytes` length matches the DB
+ *     size exactly. This marks it a RECOVERY CANDIDATE, never proof of
+ *     byte-for-byte identity with the original historical content — this
+ *     diagnostic has no hash or other content signature to verify that,
+ *     only a length match; Graph's size metadata simply shouldn't be
+ *     trusted as the deciding signal. This is the only mismatch outcome
+ *     that is actually a recovery candidate, and only because bytes were
+ *     independently checked — never because the name matched alone.
+ *   - "graph_metadata_size_mismatch_bytes_differ" — contentBytes decodes
+ *     successfully (well-formed base64) but to a length that matches
+ *     NEITHER the DB size NOR Graph's reported size — genuinely different
+ *     content, not recoverable from this response.
+ *   - "graph_metadata_size_mismatch_bytes_unavailable" — contentBytes was
+ *     absent (the field was missing from the response entirely), so the
+ *     size disagreement can't be resolved at all this run.
+ *   - "graph_metadata_size_mismatch_malformed_base64" — contentBytes was
+ *     present but is NOT well-formed base64 (see STRICT BASE64 VALIDATION
+ *     below) — not trusted either way.
+ *
+ * STRICT BASE64 VALIDATION & ZERO-BYTE ATTACHMENTS — two correctness fixes
+ * made this round, both in checkContentBytes:
+ *   1. `Buffer.from(str, "base64")` is deliberately LENIENT: it silently
+ *      drops any character outside the base64 alphabet rather than
+ *      rejecting malformed input, so a corrupted or truncated value could
+ *      previously decode into a plausible-looking (but wrong) byte
+ *      sequence without ever being flagged as malformed — just an opaque
+ *      length mismatch. This now validates the string against a strict
+ *      base64 pattern (correct alphabet, correct padding, length a
+ *      multiple of 4) BEFORE ever decoding it, so malformed input gets
+ *      its own classification ("graph_metadata_size_mismatch_malformed_
+ *      base64" / the equivalent reason text in the straightforward path)
+ *      instead of silently decoding into a confusing wrong-length result.
+ *   2. A legitimately EMPTY attachment (DB-recorded size 0) is correctly
+ *      base64-encoded as the empty string `""` — that's valid, zero-length
+ *      content, not "absent." The previous check
+ *      (`decoded.length > 0 && decoded.length === expectedSize`) would
+ *      have wrongly rejected this exact case, since 0 > 0 is false — a
+ *      real 0-byte file could never be classified recoverable. Only a
+ *      MISSING field (contentBytes is `undefined`/`null` — not in the
+ *      response at all) is "absent" now; an explicit `""` is evaluated on
+ *      its own merits like any other value and correctly comes back
+ *      "usable" when the expected size is also 0.
  *
  * METADATA VS. BYTE AVAILABILITY — Microsoft Graph only ever populates
  * `contentBytes` on a `#microsoft.graph.fileAttachment`; `itemAttachment`
@@ -142,17 +222,21 @@
  *     matches — unchanged from before.
  *
  * `contentBytes` PRESENCE IS NOT ENOUGH — "graph_recoverable" additionally
- * requires the base64 to actually decode AND the decoded byte length to
- * exactly equal the row's own recorded `size`. A present-but-truncated,
- * corrupted, or otherwise-mismatched value is real-world possible (a
- * malformed response, a proxy/gateway altering the body, etc.) and must
- * never be silently trusted as "recoverable" just because the field was
- * non-empty — see isUsableContentBytes below. A row that fails this check
+ * requires the base64 to be well-formed (see STRICT BASE64 VALIDATION
+ * above) AND the decoded byte length to exactly equal the row's own
+ * recorded `size` — and even then it is reported as a RECOVERY CANDIDATE,
+ * not proof of byte-for-byte identity with history (see GRAPH METADATA
+ * SIZE RELIABILITY above — the same caveat applies here, not just to the
+ * metadata-mismatch case). A present-but-truncated, corrupted, malformed,
+ * or otherwise-mismatched value is real-world possible (a malformed
+ * response, a proxy/gateway altering the body, etc.) and must never be
+ * silently trusted as a recovery candidate just because the field was
+ * non-empty — see checkContentBytes below. A row that fails this check
  * falls through to the same classification its absent-bytes counterpart
  * would get (graph_metadata_matched_bytes_unavailable /
  * graph_metadata_matched_not_file_type), with a detail string that says
- * WHICH case it was (absent vs. present-but-invalid) — never reported as
- * recoverable either way.
+ * WHICH case it was (absent vs. malformed vs. present-but-wrong-length) —
+ * never reported as a recovery candidate either way.
  *
  * GRAPH REQUEST BUDGET
  *   --limit=<n> (default 50) caps the number of DISTINCT
@@ -198,7 +282,10 @@ type Classification =
   | "graph_no_attachment_collection"
   | "graph_empty_attachment_collection"
   | "graph_attachment_name_mismatch"
-  | "graph_attachment_size_mismatch"
+  | "graph_recoverable_metadata_size_mismatch"
+  | "graph_metadata_size_mismatch_bytes_differ"
+  | "graph_metadata_size_mismatch_bytes_unavailable"
+  | "graph_metadata_size_mismatch_malformed_base64"
   | "graph_attachment_ambiguous"
   | "graph_message_not_found"
   | "graph_request_failed"
@@ -236,25 +323,44 @@ function classifyGraphFailure(err: unknown): string {
   return "network or unknown error (no HTTP status could be parsed from the failure)";
 }
 
+type ContentBytesCheck =
+  | { status: "usable"; length: number }
+  | { status: "absent" }
+  | { status: "malformed_base64" }
+  | { status: "length_mismatch"; length: number };
+
+// Standard base64: zero or more full 4-character quanta, optionally
+// followed by a final, correctly-padded partial quantum. Matches the
+// empty string too (zero quanta) — a 0-byte payload is valid base64, not
+// malformed. Node's own decoder does NOT enforce this — it silently
+// drops any character outside the alphabet instead of rejecting the
+// input — so this check runs BEFORE ever decoding, deliberately stricter
+// than Buffer.from's own parsing (see STRICT BASE64 VALIDATION above).
+const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function isStrictlyValidBase64(s: string): boolean {
+  return STRICT_BASE64_RE.test(s);
+}
+
 /**
- * True only if `contentBytes` is REAL, decodable, correctly-sized file
- * content — never just "the field was present." A present-but-empty,
- * malformed (not valid base64), or wrong-length value is NOT trusted as
- * recoverable; `expectedSize` is the row's own recorded size (already
- * confirmed equal to Graph's reported attachment size by the metadata
- * match this is only ever called after), so the decoded byte length must
- * match it exactly — a mismatch means the bytes we got don't actually
- * correspond to this file, whatever the reason.
+ * Decodes `contentBytes` and compares it against `expectedSize` — always
+ * the row's OWN DB-recorded size, NEVER Graph's reported attachment
+ * `size` (see GRAPH METADATA SIZE RELIABILITY above for why that field
+ * can't be trusted as the expected value).
+ *
+ * Only a MISSING field (`undefined`/`null` — contentBytes wasn't in the
+ * response at all) is "absent." An explicit empty string `""` is valid,
+ * well-formed base64 for zero bytes — it is validated and decoded like
+ * any other value, so a legitimately empty attachment (expectedSize 0)
+ * correctly comes back "usable" instead of being misclassified as absent
+ * (see STRICT BASE64 VALIDATION & ZERO-BYTE ATTACHMENTS above).
  */
-function isUsableContentBytes(contentBytes: string | undefined, expectedSize: number): boolean {
-  if (!contentBytes || contentBytes.trim().length === 0) return false;
-  let decoded: Buffer;
-  try {
-    decoded = Buffer.from(contentBytes, "base64");
-  } catch {
-    return false;
-  }
-  return decoded.length > 0 && decoded.length === expectedSize;
+function checkContentBytes(contentBytes: string | null | undefined, expectedSize: number): ContentBytesCheck {
+  if (contentBytes === undefined || contentBytes === null) return { status: "absent" };
+  if (!isStrictlyValidBase64(contentBytes)) return { status: "malformed_base64" };
+  const decoded = Buffer.from(contentBytes, "base64");
+  if (decoded.length === expectedSize) return { status: "usable", length: decoded.length };
+  return { status: "length_mismatch", length: decoded.length };
 }
 
 type Row = {
@@ -452,8 +558,10 @@ async function main() {
         continue;
       }
 
-      // Step b — name match, independent of size, so a pure size mismatch
-      // is never reported as if the name didn't match either.
+      // Step b — name is now the SOLE uniqueness gate (never disambiguate
+      // by size — see GRAPH METADATA SIZE RELIABILITY above for why Graph's
+      // reported size can't be trusted to pick among same-named
+      // candidates).
       const nameMatches = message.attachments.filter((a) => a.name === row.originalName);
       if (nameMatches.length === 0) {
         results.set(rowKey(row), {
@@ -462,51 +570,68 @@ async function main() {
         });
         continue;
       }
+      if (nameMatches.length > 1) {
+        results.set(rowKey(row), { classification: "graph_attachment_ambiguous", detail: `Message found (mailbox ${mailbox}) but ${nameMatches.length} attachments share this row's originalName — Graph's size metadata is not a trustworthy disambiguator, so cannot safely pick one.` });
+        continue;
+      }
 
-      // Step c — size match, only among the same-name candidates.
-      const metadataMatches = nameMatches.filter((a) => a.size === row.size);
-      if (metadataMatches.length === 0) {
+      const match = nameMatches[0];
+
+      if (match.size === row.size) {
+        // Straightforward case — Graph's own metadata size agrees with the
+        // DB's recorded size. Byte availability is still independently
+        // verified below — a matching size is never enough on its own, see
+        // METADATA VS. BYTE AVAILABILITY above.
+        const check = checkContentBytes(match.contentBytes, row.size);
+        if (check.status === "usable") {
+          results.set(rowKey(row), { classification: "graph_recoverable", detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — decoded contentBytes length matches the DB-recorded size; a recovery candidate (length equality is not proof of byte-for-byte identity with the original historical content).` });
+          continue;
+        }
+        const bytesReason = check.status === "absent"
+          ? "contentBytes was absent from this response"
+          : check.status === "malformed_base64"
+          ? "contentBytes was present but was not well-formed base64 (malformed) — not trusted"
+          : "contentBytes was present but decoded to a different length than expected — not trusted";
+        const odataType = (match as { ["@odata.type"]?: string })["@odata.type"];
+        if (odataType && !odataType.toLowerCase().includes("fileattachment")) {
+          results.set(rowKey(row), {
+            classification: "graph_metadata_matched_not_file_type",
+            detail: `Mailbox ${mailbox}, Graph attachment id ${match.id}, type ${odataType} — not a fileAttachment, so Graph never provides raw bytes for it via this API.`,
+          });
+        } else {
+          results.set(rowKey(row), {
+            classification: "graph_metadata_matched_bytes_unavailable",
+            detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name/size match, appears to be a fileAttachment, but ${bytesReason}. A targeted follow-up GET on this specific attachment id would be the next step — not performed by this script.`,
+          });
+        }
+        continue;
+      }
+
+      // match.size !== row.size — a GRAPH METADATA SIZE MISMATCH (see above).
+      // This is NOT treated as a dead end, and NEVER treated as recoverable
+      // on the name match alone: the only way to resolve it is to decode
+      // contentBytes and compare it against the row's OWN DB size (never
+      // against Graph's possibly-wrong `size` field).
+      const sizeCheck = checkContentBytes(match.contentBytes, row.size);
+      if (sizeCheck.status === "usable") {
         results.set(rowKey(row), {
-          classification: "graph_attachment_size_mismatch",
-          detail: `Message found (mailbox ${mailbox}); ${nameMatches.length} attachment(s) share this row's originalName but none also match its size.`,
+          classification: "graph_recoverable_metadata_size_mismatch",
+          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size} but DB recorded size ${row.size}. Decoded contentBytes length is exactly ${row.size} — a recovery candidate despite the metadata disagreement (length equality is not proof of byte-for-byte identity with the original historical content); Graph's size metadata should not be trusted as the deciding signal here.`,
         });
-        continue;
-      }
-      if (metadataMatches.length > 1) {
-        results.set(rowKey(row), { classification: "graph_attachment_ambiguous", detail: `Message found (mailbox ${mailbox}) but ${metadataMatches.length} attachments match BOTH name and size — cannot safely pick one.` });
-        continue;
-      }
-
-      const match = metadataMatches[0];
-      const bytesUsable = isUsableContentBytes(match.contentBytes, row.size);
-      if (bytesUsable) {
-        results.set(rowKey(row), { classification: "graph_recoverable", detail: `Mailbox ${mailbox}, Graph attachment id ${match.id}.` });
-        continue;
-      }
-
-      // Unique metadata match, but the bytes aren't usable — either absent
-      // from this response, or present but failed decode/length validation
-      // (isUsableContentBytes). @odata.type isn't part of the shared
-      // GraphAttachment type in lib/microsoft-graph.ts (reading it here is
-      // diagnostic-only — this never touches that module or any
-      // application ingestion behavior) — it tells us WHY: a
-      // non-fileAttachment structurally never carries contentBytes via
-      // this API at all, vs. a genuine fileAttachment that just needs a
-      // targeted follow-up GET (or whose bytes in this response were
-      // corrupt/truncated).
-      const bytesReason = !match.contentBytes
-        ? "contentBytes was absent from this response"
-        : "contentBytes was present but failed validation (did not decode to the expected byte length) — not trusted";
-      const odataType = (match as { ["@odata.type"]?: string })["@odata.type"];
-      if (odataType && !odataType.toLowerCase().includes("fileattachment")) {
+      } else if (sizeCheck.status === "absent") {
         results.set(rowKey(row), {
-          classification: "graph_metadata_matched_not_file_type",
-          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id}, type ${odataType} — not a fileAttachment, so Graph never provides raw bytes for it via this API.`,
+          classification: "graph_metadata_size_mismatch_bytes_unavailable",
+          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size} vs DB size ${row.size}, and contentBytes was absent from this response — cannot resolve which size (if either) reflects the real content.`,
+        });
+      } else if (sizeCheck.status === "malformed_base64") {
+        results.set(rowKey(row), {
+          classification: "graph_metadata_size_mismatch_malformed_base64",
+          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size} vs DB size ${row.size}, and contentBytes was present but was not well-formed base64 (malformed) — not trusted.`,
         });
       } else {
         results.set(rowKey(row), {
-          classification: "graph_metadata_matched_bytes_unavailable",
-          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name/size match, appears to be a fileAttachment, but ${bytesReason}. A targeted follow-up GET on this specific attachment id would be the next step — not performed by this script.`,
+          classification: "graph_metadata_size_mismatch_bytes_differ",
+          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size}, DB recorded size ${row.size}, decoded contentBytes length ${sizeCheck.length} — none of these three agree; genuinely not recoverable from this response.`,
         });
       }
     }
@@ -521,7 +646,10 @@ async function main() {
     graph_no_attachment_collection: 0,
     graph_empty_attachment_collection: 0,
     graph_attachment_name_mismatch: 0,
-    graph_attachment_size_mismatch: 0,
+    graph_recoverable_metadata_size_mismatch: 0,
+    graph_metadata_size_mismatch_bytes_differ: 0,
+    graph_metadata_size_mismatch_bytes_unavailable: 0,
+    graph_metadata_size_mismatch_malformed_base64: 0,
     graph_attachment_ambiguous: 0,
     graph_message_not_found: 0,
     graph_request_failed: 0,

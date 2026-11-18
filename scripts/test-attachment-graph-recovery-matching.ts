@@ -19,27 +19,78 @@
  * (a documented Graph quirk where `$filter` + `$expand=attachments` on the
  * messages LIST endpoint can return no attachments collection at all) can
  * only be confirmed by distinguishing "no collection," "empty collection,"
- * "name mismatch," and "size mismatch" as separate outcomes instead of one
- * combined `(message.attachments ?? []).filter(...)` catch-all.
+ * and "name mismatch" as separate outcomes instead of one combined
+ * `(message.attachments ?? []).filter(...)` catch-all.
+ *
+ * ROUND 3 (Graph metadata size reliability) — a third real production run
+ * against 206 real rows found exactly 10 with a unique originalName match
+ * (3 messages, no missing collections, no name mismatches, no request
+ * errors) that ALL failed solely because Graph's reported attachment
+ * `size` differed from the row's own DB size. Since Graph's `size` is
+ * documented only as "the size in bytes of the attachment" with no stated
+ * guarantee it equals `Buffer.from(contentBytes, "base64").length` (and a
+ * documented third-party report shows exactly this kind of gap), a size
+ * mismatch is no longer a dead end: name becomes the SOLE uniqueness gate
+ * (size is never used to disambiguate — it isn't trustworthy enough for
+ * that), and once a unique name match is found with a disagreeing size,
+ * the decoded contentBytes is compared against the row's OWN DB size
+ * (never Graph's) to resolve it.
+ *
+ * ROUND 4 (strict base64 validation + zero-byte attachments) — final
+ * correctness pass before shipping round 3: `Buffer.from(str, "base64")`
+ * is lenient (it silently drops characters outside the base64 alphabet
+ * instead of rejecting malformed input), so a genuinely malformed value
+ * could previously decode into a plausible-but-wrong byte sequence and
+ * only ever surface as an opaque length mismatch, never as "malformed."
+ * Fixed by validating the string against a strict base64 pattern BEFORE
+ * ever decoding it (checkContentBytes's new isStrictlyValidBase64 check).
+ * Separately, a legitimately empty attachment (DB size 0) is correctly
+ * base64-encoded as `""` — valid, zero-length content — but the previous
+ * check (`decoded.length > 0 && decoded.length === expectedSize`) would
+ * have wrongly rejected it, since 0 > 0 is false; a real 0-byte file
+ * could never have been classified recoverable. Fixed by only treating a
+ * MISSING field (`undefined`/`null`) as absent, never an explicit `""`.
+ * Also softened the "recoverable" wording throughout (both plain
+ * graph_recoverable and graph_recoverable_metadata_size_mismatch): a
+ * decoded-length match is a RECOVERY CANDIDATE, never asserted as proof
+ * of byte-for-byte identity with the original historical content (this
+ * script has no hash or other content signature to verify that).
  *
  * Covers, via a mocked microsoftGraph client (no real network/credentials
  * needed, same mock.module pattern used throughout this codebase's other
  * focused test scripts):
- *   - Unique metadata match + contentBytes present -> graph_recoverable
+ *   - Unique name+size match + contentBytes present -> graph_recoverable
  *     (unchanged happy path).
- *   - Unique metadata match + contentBytes ABSENT + @odata.type IS
+ *   - Unique name+size match + contentBytes ABSENT + @odata.type IS
  *     fileAttachment -> graph_metadata_matched_bytes_unavailable (the
  *     exact round-1 production scenario).
- *   - Unique metadata match + contentBytes ABSENT + @odata.type is
+ *   - Unique name+size match + contentBytes ABSENT + @odata.type is
  *     itemAttachment -> graph_metadata_matched_not_file_type.
+ *   - Unique name+size match, contentBytes present but NOT well-formed
+ *     base64 (contains characters outside the base64 alphabet) ->
+ *     graph_metadata_matched_bytes_unavailable with a "malformed" reason
+ *     (the round-4 strict-validation fix).
+ *   - Unique name+size match, BOTH size 0, contentBytes `""` ->
+ *     graph_recoverable (the round-4 zero-byte fix — previously
+ *     impossible to classify as recoverable).
  *   - `message.attachments` is `undefined` -> graph_no_attachment_collection
  *     (the round-2 suspected root cause).
  *   - `message.attachments` is `[]` -> graph_empty_attachment_collection.
  *   - Attachments present, none share the row's originalName ->
  *     graph_attachment_name_mismatch.
- *   - An attachment shares the name but not the size ->
- *     graph_attachment_size_mismatch.
- *   - 2+ attachments match BOTH name and size -> graph_attachment_ambiguous.
+ *   - 2+ attachments share the SAME name (size irrelevant) ->
+ *     graph_attachment_ambiguous.
+ *   - Unique name match, Graph size disagrees with DB size, but decoded
+ *     contentBytes length matches the DB size exactly ->
+ *     graph_recoverable_metadata_size_mismatch (the round-3 production
+ *     scenario — a recovery candidate despite the metadata disagreement).
+ *   - Unique name match, Graph size disagrees, contentBytes absent ->
+ *     graph_metadata_size_mismatch_bytes_unavailable.
+ *   - Unique name match, Graph size disagrees, contentBytes present but
+ *     NOT well-formed base64 -> graph_metadata_size_mismatch_malformed_base64.
+ *   - Unique name match, Graph size disagrees, decoded length matches
+ *     NEITHER the DB size nor Graph's size ->
+ *     graph_metadata_size_mismatch_bytes_differ.
  *   - Request-level failures (429/403) still classified as
  *     graph_request_failed, never conflated with "not found" (regression
  *     guard for an earlier fix, re-verified here too).
@@ -81,17 +132,34 @@ const SCENARIOS = [
   { msgId: `<${TAG}-invalid-bytes@example.com>`, originalName: "f.png", size: 600 },
   { msgId: `<${TAG}-no-collection@example.com>`, originalName: "g.png", size: 700 },
   { msgId: `<${TAG}-empty-collection@example.com>`, originalName: "h.png", size: 800 },
-  { msgId: `<${TAG}-size-mismatch@example.com>`, originalName: "i.png", size: 900 },
+  { msgId: `<${TAG}-metasize-bytes-differ@example.com>`, originalName: "i.png", size: 900 },
+  { msgId: `<${TAG}-metasize-recoverable@example.com>`, originalName: "j.png", size: 100 },
+  { msgId: `<${TAG}-metasize-bytes-unavailable@example.com>`, originalName: "k.png", size: 950 },
+  { msgId: `<${TAG}-metasize-invalid-base64@example.com>`, originalName: "l.png", size: 960 },
+  { msgId: `<${TAG}-zero-byte-valid@example.com>`, originalName: "m.png", size: 0 },
+  { msgId: `<${TAG}-malformed-base64-straightforward@example.com>`, originalName: "n.png", size: 50 },
 ];
 
-// Real base64 that decodes to EXACTLY 100 bytes — isUsableContentBytes
+// Real base64 that decodes to EXACTLY 100 bytes — checkContentBytes
 // requires an exact decoded-length match against the row's own size, not
-// merely a non-empty string, so the "recoverable" fixture must actually
+// merely a non-empty string, so the "recoverable" fixtures must actually
 // satisfy that.
 const VALID_100_BYTE_CONTENT = Buffer.from("x".repeat(100)).toString("base64");
-// Deliberately short — decodes to far fewer bytes than the row's expected
-// size (600), simulating a truncated/corrupted response.
+// Valid, well-formed base64 that decodes to far fewer bytes than the
+// row's expected size (600) — simulates a truncated/corrupted response
+// that is nonetheless NOT malformed base64 (confirmed:
+// Buffer.from("short").toString("base64") -> "c2hvcnQ=", which passes
+// strict base64 validation and decodes to exactly 5 bytes).
 const TRUNCATED_CONTENT = Buffer.from("short").toString("base64");
+// No valid base64 characters at all — fails strict base64 validation
+// outright (confirmed against the real STRICT_BASE64_RE pattern), so
+// this is now "malformed," never silently decoded into a 0-length value.
+const GARBAGE_BASE64 = "!!!!";
+// Contains characters ('@') entirely outside the base64 alphabet, at a
+// length Buffer.from would otherwise happily (and wrongly) decode from —
+// the exact case strict validation exists to catch in the straightforward
+// (size-matches) path too, not just the metadata-size-mismatch path.
+const MALFORMED_BASE64_WITH_VALID_CHARS = "not@@base64!!";
 
 mock.module("@/lib/microsoft-graph", {
   namedExports: {
@@ -129,7 +197,22 @@ mock.module("@/lib/microsoft-graph", {
           return { internetMessageId: emailMessageId, hasAttachments: true, attachments: [] }; // present but empty
         }
         if (emailMessageId === SCENARIOS[8].msgId) {
-          return { internetMessageId: emailMessageId, attachments: [{ id: "att-9", name: "i.png", size: 111, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name matches, size doesn't (row expects 900)
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-9", name: "i.png", size: 111, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name matches, Graph size (111) disagrees with DB size (900), AND decoded length (100) matches neither — genuinely unresolvable
+        }
+        if (emailMessageId === SCENARIOS[9].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-10", name: "j.png", size: 150, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name matches, Graph size (150) disagrees with DB size (100), but decoded length (100) matches the DB size exactly — recoverable despite the metadata disagreement
+        }
+        if (emailMessageId === SCENARIOS[10].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-11", name: "k.png", size: 123, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name matches, Graph size (123) disagrees with DB size (950), contentBytes absent — unresolvable this run
+        }
+        if (emailMessageId === SCENARIOS[11].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-12", name: "l.png", size: 123, contentBytes: GARBAGE_BASE64, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name matches, Graph size (123) disagrees with DB size (960), contentBytes present but NOT well-formed base64
+        }
+        if (emailMessageId === SCENARIOS[12].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-13", name: "m.png", size: 0, contentBytes: "", "@odata.type": "#microsoft.graph.fileAttachment" }] }; // straightforward path: Graph size (0) == DB size (0), contentBytes is the legitimate zero-byte encoding — must be recoverable, not "absent"
+        }
+        if (emailMessageId === SCENARIOS[13].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-14", name: "n.png", size: 50, contentBytes: MALFORMED_BASE64_WITH_VALID_CHARS, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // straightforward path: Graph size (50) == DB size (50), but contentBytes is malformed — must NOT be silently decoded into a wrong-but-plausible value
         }
         throw new Error(`Unexpected mocked lookup for ${emailMessageId}`);
       },
@@ -193,21 +276,34 @@ async function main() {
 
     const output = lines.join("\n");
 
-    check("Scenario 1 (contentBytes present, exact-length-verified) -> graph_recoverable", /graph_recoverable\s+1/.test(output));
+    check("Scenario 1 (contentBytes present, exact-length-verified) -> graph_recoverable", output.includes("att-1") && output.includes("[graph_recoverable]"));
+    check("Scenario 1 detail uses 'recovery candidate' wording, not a byte-for-byte identity claim", output.includes("recovery candidate") && output.includes("not proof of byte-for-byte identity"));
     check("Scenario 2 (unique match, bytes absent, fileAttachment) -> graph_metadata_matched_bytes_unavailable", output.includes("att-2") && output.includes("contentBytes was absent"));
     check("Scenario 3 (unique match, bytes absent, itemAttachment) -> graph_metadata_matched_not_file_type", output.includes("graph_metadata_matched_not_file_type"));
     check("Scenario 3 detail mentions itemAttachment", output.includes("itemAttachment"));
     check("Scenario 4 (no attachment shares the name) -> graph_attachment_name_mismatch", /graph_attachment_name_mismatch\s+1/.test(output));
     check("Scenario 5 (2 attachments match name+size) -> graph_attachment_ambiguous", /graph_attachment_ambiguous\s+1/.test(output) && !/graph_attachment_ambiguous_or_missing/.test(output));
     const att6Line = lines.find((l) => l.includes("att-6")) ?? "";
-    check("Scenario 6 (contentBytes present but WRONG decoded length) is NOT graph_recoverable", att6Line.length > 0 && !att6Line.includes("[graph_recoverable]"));
-    check("Scenario 6 (invalid bytes) -> graph_metadata_matched_bytes_unavailable with a validation-failure reason", att6Line.includes("graph_metadata_matched_bytes_unavailable") && att6Line.includes("failed validation"));
+    check("Scenario 6 (valid base64, WRONG decoded length) is NOT graph_recoverable", att6Line.length > 0 && !att6Line.includes("[graph_recoverable]"));
+    check("Scenario 6 (valid base64, wrong length) -> graph_metadata_matched_bytes_unavailable with a length-mismatch reason, NOT 'malformed'", att6Line.includes("graph_metadata_matched_bytes_unavailable") && att6Line.includes("decoded to a different length") && !att6Line.includes("malformed"));
     check("Scenario 7 (attachments field entirely absent) -> graph_no_attachment_collection", /graph_no_attachment_collection\s+1/.test(output));
     check("Scenario 7 detail reports hasAttachments=true despite the missing collection", output.includes("hasAttachments=true") && output.includes("no \"attachments\" field"));
     check("Scenario 8 (attachments present but empty) -> graph_empty_attachment_collection", /graph_empty_attachment_collection\s+1/.test(output));
-    check("Scenario 9 (name matches, size doesn't) -> graph_attachment_size_mismatch", /graph_attachment_size_mismatch\s+1/.test(output));
-    check("Summary shows exactly 1 graph_recoverable (scenario 6's invalid bytes correctly excluded)", /graph_recoverable\s+1/.test(output));
-    check("Summary shows exactly 2 graph_metadata_matched_bytes_unavailable (scenario 2 absent + scenario 6 invalid)", /graph_metadata_matched_bytes_unavailable\s+2/.test(output));
+    check("Scenario 9 (unique name match, Graph size disagrees, decoded bytes match NEITHER size) -> graph_metadata_size_mismatch_bytes_differ", output.includes("att-9") && output.includes("graph_metadata_size_mismatch_bytes_differ"));
+    check("Scenario 10 (unique name match, Graph size disagrees, decoded bytes match the DB size exactly) -> graph_recoverable_metadata_size_mismatch", output.includes("att-10") && output.includes("graph_recoverable_metadata_size_mismatch"));
+    check("Scenario 10 detail names both disagreeing sizes, confirms the decoded length, and uses 'recovery candidate' wording", output.includes("Graph reported size 150") && output.includes("DB recorded size 100") && output.includes("Decoded contentBytes length is exactly 100") && output.includes("recovery candidate despite the metadata disagreement"));
+    check("Scenario 11 (unique name match, Graph size disagrees, contentBytes absent) -> graph_metadata_size_mismatch_bytes_unavailable", output.includes("att-11") && output.includes("graph_metadata_size_mismatch_bytes_unavailable"));
+    check("Scenario 12 (unique name match, Graph size disagrees, contentBytes NOT well-formed base64) -> graph_metadata_size_mismatch_malformed_base64", output.includes("att-12") && output.includes("graph_metadata_size_mismatch_malformed_base64"));
+    check("graph_metadata_size_mismatch_invalid_base64 no longer exists as a classification (renamed to _malformed_base64)", !output.includes("graph_metadata_size_mismatch_invalid_base64"));
+    check("graph_attachment_size_mismatch no longer exists as a classification (superseded by the four metadata-size buckets)", !output.includes("graph_attachment_size_mismatch "));
+    const att13Line = lines.find((l) => l.includes("att-13")) ?? "";
+    check("Scenario 13 (legitimate zero-byte attachment: DB size 0, Graph size 0, contentBytes \"\") -> graph_recoverable, NOT absent/unavailable", att13Line.includes("[graph_recoverable]") && !att13Line.includes("bytes_unavailable"));
+    const att14Line = lines.find((l) => l.includes("att-14")) ?? "";
+    check("Scenario 14 (straightforward path, size matches, but contentBytes is malformed base64) -> graph_metadata_matched_bytes_unavailable with a malformed reason", att14Line.includes("graph_metadata_matched_bytes_unavailable") && att14Line.includes("not well-formed base64 (malformed)"));
+    check("Scenario 14 is NOT silently decoded into a wrong-but-plausible recoverable match", !att14Line.includes("[graph_recoverable]"));
+    check("Summary shows exactly 2 graph_recoverable (scenario 1 + scenario 13's zero-byte fix)", /graph_recoverable\s+2/.test(output));
+    check("Summary shows exactly 1 graph_recoverable_metadata_size_mismatch", /graph_recoverable_metadata_size_mismatch\s+1/.test(output));
+    check("Summary shows exactly 3 graph_metadata_matched_bytes_unavailable (scenario 2 absent + scenario 6 length-mismatch + scenario 14 malformed)", /graph_metadata_matched_bytes_unavailable\s+3/.test(output));
     check("Summary shows exactly 1 graph_metadata_matched_not_file_type", /graph_metadata_matched_not_file_type\s+1/.test(output));
   } finally {
     console.log("\nCleaning up test data...\n");
