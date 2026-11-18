@@ -309,6 +309,7 @@ import path from "path";
 import { prisma } from "@/lib/prisma";
 import { UPLOAD_DIR, LEGACY_PUBLIC_UPLOAD_DIR } from "@/lib/attachment-policy";
 import { microsoftGraph, GraphConfigurationError } from "@/lib/microsoft-graph";
+import { checkContentBytes } from "@/scripts/attachment-graph-recovery-base64";
 
 type Classification =
   | "file_present"
@@ -359,45 +360,14 @@ function classifyGraphFailure(err: unknown): string {
   return "network or unknown error (no HTTP status could be parsed from the failure)";
 }
 
-type ContentBytesCheck =
-  | { status: "usable"; length: number }
-  | { status: "absent" }
-  | { status: "malformed_base64" }
-  | { status: "length_mismatch"; length: number };
-
-// Standard base64: zero or more full 4-character quanta, optionally
-// followed by a final, correctly-padded partial quantum. Matches the
-// empty string too (zero quanta) — a 0-byte payload is valid base64, not
-// malformed. Node's own decoder does NOT enforce this — it silently
-// drops any character outside the alphabet instead of rejecting the
-// input — so this check runs BEFORE ever decoding, deliberately stricter
-// than Buffer.from's own parsing (see STRICT BASE64 VALIDATION above).
-const STRICT_BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
-function isStrictlyValidBase64(s: string): boolean {
-  return STRICT_BASE64_RE.test(s);
-}
-
-/**
- * Decodes `contentBytes` and compares it against `expectedSize` — always
- * the row's OWN DB-recorded size, NEVER Graph's reported attachment
- * `size` (see GRAPH METADATA SIZE RELIABILITY above for why that field
- * can't be trusted as the expected value).
- *
- * Only a MISSING field (`undefined`/`null` — contentBytes wasn't in the
- * response at all) is "absent." An explicit empty string `""` is valid,
- * well-formed base64 for zero bytes — it is validated and decoded like
- * any other value, so a legitimately empty attachment (expectedSize 0)
- * correctly comes back "usable" instead of being misclassified as absent
- * (see STRICT BASE64 VALIDATION & ZERO-BYTE ATTACHMENTS above).
- */
-function checkContentBytes(contentBytes: string | null | undefined, expectedSize: number): ContentBytesCheck {
-  if (contentBytes === undefined || contentBytes === null) return { status: "absent" };
-  if (!isStrictlyValidBase64(contentBytes)) return { status: "malformed_base64" };
-  const decoded = Buffer.from(contentBytes, "base64");
-  if (decoded.length === expectedSize) return { status: "usable", length: decoded.length };
-  return { status: "length_mismatch", length: decoded.length };
-}
+// checkContentBytes/isStrictlyValidBase64 live in their own side-effect-free
+// module (scripts/attachment-graph-recovery-base64.ts) specifically so a
+// focused test can exercise them directly — including multi-megabyte
+// payloads — without importing this file (which would run its own `main()`
+// as a side effect of import, same as it does for the other focused tests
+// that intentionally trigger it against a mocked Graph client). See that
+// module's own doc comments for the stack-overflow crash this fixed and why
+// the fix is a manual scan rather than a regex.
 
 type Row = {
   kind: "ticket" | "pending";
