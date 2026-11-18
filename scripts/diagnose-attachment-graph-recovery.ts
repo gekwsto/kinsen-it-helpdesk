@@ -44,12 +44,56 @@
  *      successful request, never via a thrown exception, so the two cases
  *      can never be conflated by construction, not just by convention.
  *   5. ONLY NOW, with the source email's identity verified, is the row
- *      matched within that message's own attachments by originalName +
- *      size (neither TicketAttachment nor PendingTicketAttachment stores
- *      the Graph attachment's own `id` — this is the best available
- *      correlation key). Exactly one match with contentBytes present ->
- *      "graph_recoverable". Zero matches, or more than one (ambiguous) ->
- *      "graph_attachment_ambiguous_or_missing" — never guessed.
+ *      matched within that message's own attachments — in TWO SEPARATE
+ *      steps, deliberately never collapsed into one filter (this was a
+ *      real bug, fixed here — see METADATA VS. BYTE AVAILABILITY below):
+ *        a. METADATA match by originalName + size (neither TicketAttachment
+ *           nor PendingTicketAttachment stores the Graph attachment's own
+ *           `id` — this is the best available correlation key). Zero
+ *           matches, or more than one (ambiguous), -> "graph_attachment_
+ *           ambiguous_or_missing" — never guessed.
+ *        b. Only once EXACTLY ONE metadata match is found is its byte
+ *           availability checked: `contentBytes` present -> "graph_recoverable".
+ *           Absent -> classified further by @odata.type (see below).
+ *
+ * METADATA VS. BYTE AVAILABILITY — Microsoft Graph only ever populates
+ * `contentBytes` on a `#microsoft.graph.fileAttachment`; `itemAttachment`
+ * (a forwarded email/contact/event/.msg) and `referenceAttachment` (a
+ * OneDrive/SharePoint link) NEVER have it, regardless of $select/$expand —
+ * this is documented Graph behavior, not a bug in this app's query. The
+ * PREVIOUS version of this script filtered on
+ * `name === X && size === Y && !!contentBytes` as a SINGLE condition,
+ * which meant a genuine, unique metadata match with merely-absent
+ * contentBytes was indistinguishable from "no attachment matches at all"
+ * — exactly what explained a real production run reporting 0
+ * graph_recoverable despite the source emails being found successfully.
+ * Fixed by splitting the two checks:
+ *   - "graph_recoverable" — unique metadata match, contentBytes present.
+ *   - "graph_metadata_matched_not_file_type" — unique metadata match,
+ *     but @odata.type isn't fileAttachment (itemAttachment/
+ *     referenceAttachment) — bytes are structurally unavailable this way,
+ *     not merely missing from this one response.
+ *   - "graph_metadata_matched_bytes_unavailable" — unique metadata match,
+ *     IS a fileAttachment, but contentBytes wasn't present in this
+ *     response anyway — the Graph attachment's own `id` is still known
+ *     (printed), so a targeted follow-up `GET .../attachments/{id}` (or
+ *     `/$value`) could retrieve it — NOT performed by this script, which
+ *     never makes more than the one budgeted lookup per message.
+ *   - "graph_attachment_ambiguous_or_missing" — zero or 2+ metadata
+ *     matches — unchanged from before.
+ *
+ * `contentBytes` PRESENCE IS NOT ENOUGH — "graph_recoverable" additionally
+ * requires the base64 to actually decode AND the decoded byte length to
+ * exactly equal the row's own recorded `size`. A present-but-truncated,
+ * corrupted, or otherwise-mismatched value is real-world possible (a
+ * malformed response, a proxy/gateway altering the body, etc.) and must
+ * never be silently trusted as "recoverable" just because the field was
+ * non-empty — see isUsableContentBytes below. A row that fails this check
+ * falls through to the same classification its absent-bytes counterpart
+ * would get (graph_metadata_matched_bytes_unavailable /
+ * graph_metadata_matched_not_file_type), with a detail string that says
+ * WHICH case it was (absent vs. present-but-invalid) — never reported as
+ * recoverable either way.
  *
  * GRAPH REQUEST BUDGET
  *   --limit=<n> (default 50) caps the number of DISTINCT
@@ -90,6 +134,8 @@ import { microsoftGraph, GraphConfigurationError } from "@/lib/microsoft-graph";
 type Classification =
   | "file_present"
   | "graph_recoverable"
+  | "graph_metadata_matched_bytes_unavailable"
+  | "graph_metadata_matched_not_file_type"
   | "graph_attachment_ambiguous_or_missing"
   | "graph_message_not_found"
   | "graph_request_failed"
@@ -125,6 +171,27 @@ function classifyGraphFailure(err: unknown): string {
     return `Graph API error ${status}`;
   }
   return "network or unknown error (no HTTP status could be parsed from the failure)";
+}
+
+/**
+ * True only if `contentBytes` is REAL, decodable, correctly-sized file
+ * content — never just "the field was present." A present-but-empty,
+ * malformed (not valid base64), or wrong-length value is NOT trusted as
+ * recoverable; `expectedSize` is the row's own recorded size (already
+ * confirmed equal to Graph's reported attachment size by the metadata
+ * match this is only ever called after), so the decoded byte length must
+ * match it exactly — a mismatch means the bytes we got don't actually
+ * correspond to this file, whatever the reason.
+ */
+function isUsableContentBytes(contentBytes: string | undefined, expectedSize: number): boolean {
+  if (!contentBytes || contentBytes.trim().length === 0) return false;
+  let decoded: Buffer;
+  try {
+    decoded = Buffer.from(contentBytes, "base64");
+  } catch {
+    return false;
+  }
+  return decoded.length > 0 && decoded.length === expectedSize;
 }
 
 type Row = {
@@ -295,15 +362,53 @@ async function main() {
       continue;
     }
 
-    // Identity verified above — only now is any attachment ever matched.
+    // Identity verified above — only now is any attachment ever matched,
+    // and in two SEPARATE steps: metadata match first, byte availability
+    // only after exactly one metadata match is found. Never one combined
+    // filter — see METADATA VS. BYTE AVAILABILITY above for why.
     for (const row of rows) {
-      const candidates = (message.attachments ?? []).filter((a) => a.name === row.originalName && a.size === row.size && !!a.contentBytes);
-      if (candidates.length === 1) {
-        results.set(rowKey(row), { classification: "graph_recoverable", detail: `Mailbox ${mailbox}, Graph attachment id ${candidates[0].id}.` });
-      } else if (candidates.length === 0) {
+      const metadataMatches = (message.attachments ?? []).filter((a) => a.name === row.originalName && a.size === row.size);
+
+      if (metadataMatches.length === 0) {
         results.set(rowKey(row), { classification: "graph_attachment_ambiguous_or_missing", detail: `Message found (mailbox ${mailbox}) but no attachment on it matches name/size.` });
+        continue;
+      }
+      if (metadataMatches.length > 1) {
+        results.set(rowKey(row), { classification: "graph_attachment_ambiguous_or_missing", detail: `Message found (mailbox ${mailbox}) but ${metadataMatches.length} attachments match name/size — cannot safely pick one.` });
+        continue;
+      }
+
+      const match = metadataMatches[0];
+      const bytesUsable = isUsableContentBytes(match.contentBytes, row.size);
+      if (bytesUsable) {
+        results.set(rowKey(row), { classification: "graph_recoverable", detail: `Mailbox ${mailbox}, Graph attachment id ${match.id}.` });
+        continue;
+      }
+
+      // Unique metadata match, but the bytes aren't usable — either absent
+      // from this response, or present but failed decode/length validation
+      // (isUsableContentBytes). @odata.type isn't part of the shared
+      // GraphAttachment type in lib/microsoft-graph.ts (reading it here is
+      // diagnostic-only — this never touches that module or any
+      // application ingestion behavior) — it tells us WHY: a
+      // non-fileAttachment structurally never carries contentBytes via
+      // this API at all, vs. a genuine fileAttachment that just needs a
+      // targeted follow-up GET (or whose bytes in this response were
+      // corrupt/truncated).
+      const bytesReason = !match.contentBytes
+        ? "contentBytes was absent from this response"
+        : "contentBytes was present but failed validation (did not decode to the expected byte length) — not trusted";
+      const odataType = (match as { ["@odata.type"]?: string })["@odata.type"];
+      if (odataType && !odataType.toLowerCase().includes("fileattachment")) {
+        results.set(rowKey(row), {
+          classification: "graph_metadata_matched_not_file_type",
+          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id}, type ${odataType} — not a fileAttachment, so Graph never provides raw bytes for it via this API.`,
+        });
       } else {
-        results.set(rowKey(row), { classification: "graph_attachment_ambiguous_or_missing", detail: `Message found (mailbox ${mailbox}) but ${candidates.length} attachments match name/size — cannot safely pick one.` });
+        results.set(rowKey(row), {
+          classification: "graph_metadata_matched_bytes_unavailable",
+          detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name/size match, appears to be a fileAttachment, but ${bytesReason}. A targeted follow-up GET on this specific attachment id would be the next step — not performed by this script.`,
+        });
       }
     }
   }
@@ -312,6 +417,8 @@ async function main() {
   const counts: Record<Classification, number> = {
     file_present: 0,
     graph_recoverable: 0,
+    graph_metadata_matched_bytes_unavailable: 0,
+    graph_metadata_matched_not_file_type: 0,
     graph_attachment_ambiguous_or_missing: 0,
     graph_message_not_found: 0,
     graph_request_failed: 0,
