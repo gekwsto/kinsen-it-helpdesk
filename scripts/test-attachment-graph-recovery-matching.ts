@@ -56,6 +56,20 @@
  * of byte-for-byte identity with the original historical content (this
  * script has no hash or other content signature to verify that).
  *
+ * ROUND 5 (dry-run inventory + cross-mailbox-safe distinct counting) —
+ * added the `--dry-run` flag (covered by its own dedicated test script,
+ * scripts/test-attachment-graph-recovery-dry-run.ts) and a distinct
+ * Graph-source-attachment count alongside each classification's row
+ * count. That dedup key is `${mailbox}::${emailMessageId}::${match.id}`,
+ * NEVER the bare Graph attachment id alone — Graph only documents
+ * attachment ids as unique within the message/mailbox they came from,
+ * never guaranteed unique across different mailboxes, so deduping on the
+ * bare id could theoretically undercount distinct source attachments if
+ * two different mailboxes ever produced the same id string. Scenarios 15
+ * and 16 below prove this directly: two different mailboxes, two
+ * different messages, identical bare attachment id — must count as 2
+ * distinct sources, not 1.
+ *
  * Covers, via a mocked microsoftGraph client (no real network/credentials
  * needed, same mock.module pattern used throughout this codebase's other
  * focused test scripts):
@@ -138,6 +152,14 @@ const SCENARIOS = [
   { msgId: `<${TAG}-metasize-invalid-base64@example.com>`, originalName: "l.png", size: 960 },
   { msgId: `<${TAG}-zero-byte-valid@example.com>`, originalName: "m.png", size: 0 },
   { msgId: `<${TAG}-malformed-base64-straightforward@example.com>`, originalName: "n.png", size: 50 },
+  // Cross-mailbox collision pair: two DIFFERENT mailboxes, two DIFFERENT
+  // messages, but the mocked Graph response for each reports the exact
+  // SAME bare attachment id ("att-collision-id"). Graph only documents an
+  // attachment id as unique within the message/mailbox it came from, so
+  // this must count as 2 distinct source attachments, never 1 — proving
+  // the dedup key is ${mailbox}::${emailMessageId}::${id}, not the bare id.
+  { msgId: `<${TAG}-cross-mailbox-a@example.com>`, originalName: "o.png", size: 100, mailbox: `${TAG}-mbA@example.com` },
+  { msgId: `<${TAG}-cross-mailbox-b@example.com>`, originalName: "o.png", size: 100, mailbox: `${TAG}-mbB@example.com` },
 ];
 
 // Real base64 that decodes to EXACTLY 100 bytes — checkContentBytes
@@ -214,6 +236,12 @@ mock.module("@/lib/microsoft-graph", {
         if (emailMessageId === SCENARIOS[13].msgId) {
           return { internetMessageId: emailMessageId, attachments: [{ id: "att-14", name: "n.png", size: 50, contentBytes: MALFORMED_BASE64_WITH_VALID_CHARS, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // straightforward path: Graph size (50) == DB size (50), but contentBytes is malformed — must NOT be silently decoded into a wrong-but-plausible value
         }
+        if (emailMessageId === SCENARIOS[14].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-collision-id", name: "o.png", size: 100, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // mailbox A — recoverable, bare id deliberately collides with scenario 16
+        }
+        if (emailMessageId === SCENARIOS[15].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-collision-id", name: "o.png", size: 100, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // mailbox B — recoverable, bare id deliberately collides with scenario 15 but is a DIFFERENT real attachment (different mailbox/message)
+        }
         throw new Error(`Unexpected mocked lookup for ${emailMessageId}`);
       },
     },
@@ -253,7 +281,7 @@ async function main() {
         data: { ticketId: ticket.id, uploadedById: user.id, filename: `${TAG}-missing-${ticket.id}.bin`, originalName: s.originalName, mimeType: "image/png", size: s.size, path: "/x" },
       });
       attachmentIds.push(attachment.id);
-      const log = await prisma.emailProcessingLog.create({ data: { runId: TAG, messageId: s.msgId, action: "CREATED_TICKET", mailbox: `${TAG}-mb@example.com` } });
+      const log = await prisma.emailProcessingLog.create({ data: { runId: TAG, messageId: s.msgId, action: "CREATED_TICKET", mailbox: s.mailbox ?? `${TAG}-mb@example.com` } });
       logIds.push(log.id);
       expectedRowKeyToClassification[`ticket:${attachment.id}`] = "";
     }
@@ -301,7 +329,8 @@ async function main() {
     const att14Line = lines.find((l) => l.includes("att-14")) ?? "";
     check("Scenario 14 (straightforward path, size matches, but contentBytes is malformed base64) -> graph_metadata_matched_bytes_unavailable with a malformed reason", att14Line.includes("graph_metadata_matched_bytes_unavailable") && att14Line.includes("not well-formed base64 (malformed)"));
     check("Scenario 14 is NOT silently decoded into a wrong-but-plausible recoverable match", !att14Line.includes("[graph_recoverable]"));
-    check("Summary shows exactly 2 graph_recoverable (scenario 1 + scenario 13's zero-byte fix)", /graph_recoverable\s+2/.test(output));
+    check("Summary shows exactly 4 graph_recoverable (scenario 1 + 13's zero-byte fix + 2 cross-mailbox collision rows)", /graph_recoverable\s+4/.test(output));
+    check("Cross-mailbox collision: distinct-id count is 4, not 3 — the two rows sharing the SAME bare Graph attachment id across DIFFERENT mailboxes are correctly counted as distinct sources, not deduped", /graph_recoverable\s+4 — 4 distinct Graph attachment ids/.test(output));
     check("Summary shows exactly 1 graph_recoverable_metadata_size_mismatch", /graph_recoverable_metadata_size_mismatch\s+1/.test(output));
     check("Summary shows exactly 3 graph_metadata_matched_bytes_unavailable (scenario 2 absent + scenario 6 length-mismatch + scenario 14 malformed)", /graph_metadata_matched_bytes_unavailable\s+3/.test(output));
     check("Summary shows exactly 1 graph_metadata_matched_not_file_type", /graph_metadata_matched_not_file_type\s+1/.test(output));

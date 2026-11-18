@@ -264,7 +264,43 @@
  *     were never actually checked).
  *   - Never invoked automatically — purely an operator-run diagnostic.
  *
+ * DRY RUN & BUDGET CONFIRMATION — added this round. A FOURTH real
+ * production run hit its --limit before classifying every row, leaving
+ * some rows "not checked (limit reached)." Since every run re-derives
+ * `messageGroups` from scratch (there is no cross-run memory of which
+ * messages were already looked up), guessing a larger --limit for the
+ * next run would itself be a guess — exactly what this script's own
+ * matching rules refuse to do for attachment identity, so the budget
+ * shouldn't be guessed either. `--dry-run` runs Passes 1-2 (purely local:
+ * file-presence checks and DB reads for emailMessageId/mailbox
+ * resolution) and stops BEFORE Pass 3 — the only part of this script that
+ * ever calls microsoftGraph — making this flag's own Graph request count
+ * always exactly zero. It reports the EXACT number of distinct
+ * (mailbox, emailMessageId) groups required to classify every currently-
+ * unresolved row, which is the precise --limit value needed for a single
+ * complete pass. Run `--dry-run` first, read off that number, then run
+ * for real with `--limit=<that number>` (or slightly higher, to allow for
+ * new tickets/replies ingested between the two runs).
+ *
+ * DISTINCT GRAPH ATTACHMENT ID COUNTS — added this round. The summary now
+ * reports, for every classification that resolved a specific Graph
+ * attachment id, how many DISTINCT source attachments are behind that
+ * bucket's row count — not just the row count itself. Several different
+ * attachment ROWS (e.g. the same file attached to a ticket and later
+ * re-sent in a reply, or a duplicate ingestion) can resolve to the SAME
+ * underlying Graph attachment; a plain row count alone hides that. The
+ * dedup key is `${mailbox}::${emailMessageId}::${match.id}`, NEVER the
+ * bare Graph attachment id alone — Graph only documents attachment ids as
+ * unique WITHIN the message/mailbox they came from, never guaranteed
+ * unique ACROSS different mailboxes, so deduping on the bare id could
+ * theoretically undercount if two different mailboxes ever produced the
+ * same id string. The composite key rules that out by construction. Both
+ * the printed id and the dedup key are safe diagnostic identifiers
+ * (Graph's own opaque attachment id plus the already-resolved mailbox
+ * address), never filenames or content.
+ *
  * Usage:
+ *   npx tsx scripts/diagnose-attachment-graph-recovery.ts --dry-run
  *   npx tsx scripts/diagnose-attachment-graph-recovery.ts
  *   npx tsx scripts/diagnose-attachment-graph-recovery.ts --limit=200
  */
@@ -425,8 +461,10 @@ async function resolveEmailMessageId(row: Row): Promise<string | null> {
 }
 
 async function main() {
-  const limitArg = process.argv.slice(2).find((a) => a.startsWith("--limit="));
+  const argv = process.argv.slice(2);
+  const limitArg = argv.find((a) => a.startsWith("--limit="));
   const limit = limitArg ? Number(limitArg.slice("--limit=".length)) : 50;
+  const dryRun = argv.includes("--dry-run");
 
   try {
     await prisma.$connect();
@@ -453,15 +491,25 @@ async function main() {
   ];
   console.log(`Total attachment rows: ${allRows.length}\n`);
 
-  const results = new Map<string, { classification: Classification; detail: string }>();
+  // `graphAttachmentKey` is `${mailbox}::${emailMessageId}::${match.id}`, NOT
+  // the bare Graph attachment id — Graph's own id is only documented to be
+  // unique WITHIN the message/mailbox it came from, never guaranteed unique
+  // across different mailboxes. Deduping on the bare id alone could
+  // theoretically undercount distinct source attachments if two different
+  // mailboxes ever produced the same id string; the composite key rules
+  // that out entirely, by construction, regardless of how unlikely an
+  // actual collision is in practice.
+  const results = new Map<string, { classification: Classification; detail: string; graphAttachmentKey?: string }>();
   const rowKey = (r: Row) => `${r.kind}:${r.id}`;
 
   // ── Pass 1: local storage presence — no Graph involved at all. ──
   const needsGraphCheck: Row[] = [];
+  let filePresentCount = 0;
   for (const row of allRows) {
     const { privatePath, legacyPath } = storagePaths(row);
     if ((await exists(privatePath)) || (await exists(legacyPath))) {
       results.set(rowKey(row), { classification: "file_present", detail: "Bytes found in local storage." });
+      filePresentCount++;
     } else {
       needsGraphCheck.push(row);
     }
@@ -472,20 +520,47 @@ async function main() {
   //    emailMessageId) pair so every attachment sharing one source email
   //    triggers exactly one Graph lookup, never one per attachment. ──
   const messageGroups = new Map<string, { mailbox: string; emailMessageId: string; rows: Row[] }>();
+  let noEmailCorrelationCount = 0;
+  let mailboxUnresolvedCount = 0;
   for (const row of needsGraphCheck) {
     const emailMessageId = await resolveEmailMessageId(row);
     if (!emailMessageId) {
       results.set(rowKey(row), { classification: "no_email_correlation", detail: "No emailMessageId on the owning record — not an email-ingested attachment, or source metadata was never recorded." });
+      noEmailCorrelationCount++;
       continue;
     }
     const mailboxResult = await resolveMailbox(emailMessageId);
     if (!mailboxResult.ok) {
       results.set(rowKey(row), { classification: "mailbox_unresolved", detail: `EmailProcessingLog has zero, or more than one distinct, mailbox recorded for messageId ${emailMessageId}.` });
+      mailboxUnresolvedCount++;
       continue;
     }
     const key = `${mailboxResult.mailbox}::${emailMessageId}`;
     if (!messageGroups.has(key)) messageGroups.set(key, { mailbox: mailboxResult.mailbox, emailMessageId, rows: [] });
     messageGroups.get(key)!.rows.push(row);
+  }
+
+  // ── DRY RUN — stop here. Zero Graph requests made, by construction: this
+  //    exits BEFORE Pass 3 (the only part of this script that ever calls
+  //    microsoftGraph) even runs. Every run re-derives messageGroups from
+  //    scratch (no cross-run cache of which messages were already looked
+  //    up), so the distinct-group count reported here is the exact,
+  //    CONFIRMED (not guessed/estimated) --limit needed for the NEXT real
+  //    run to classify every currently-unresolved row in one pass. ──
+  if (dryRun) {
+    const rowsNeedingGraph = [...messageGroups.values()].reduce((sum, g) => sum + g.rows.length, 0);
+    console.log("\n=== DRY RUN — no Microsoft Graph requests were made ===");
+    console.log(`Already present locally (file_present):              ${filePresentCount}`);
+    console.log(`No email correlation (not email-ingested):           ${noEmailCorrelationCount}`);
+    console.log(`Mailbox unresolved (0 or 2+ distinct mailboxes):     ${mailboxUnresolvedCount}`);
+    console.log(`Rows requiring a Graph lookup:                       ${rowsNeedingGraph}`);
+    console.log(`Distinct (mailbox, emailMessageId) groups required: ${messageGroups.size}`);
+    console.log(`\nRequired --limit for a complete single-pass run:   ${messageGroups.size}`);
+    console.log("(Every run re-derives this grouping from scratch — there is no carry-over");
+    console.log(" of previously-looked-up messages between runs — so --limit must cover ALL");
+    console.log(" currently-unresolved rows' message groups, not just newly-added ones.)");
+    await prisma.$disconnect();
+    return;
   }
 
   // ── Pass 3: ONE Graph lookup per distinct message group, bounded by
@@ -584,7 +659,7 @@ async function main() {
         // METADATA VS. BYTE AVAILABILITY above.
         const check = checkContentBytes(match.contentBytes, row.size);
         if (check.status === "usable") {
-          results.set(rowKey(row), { classification: "graph_recoverable", detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — decoded contentBytes length matches the DB-recorded size; a recovery candidate (length equality is not proof of byte-for-byte identity with the original historical content).` });
+          results.set(rowKey(row), { classification: "graph_recoverable", detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — decoded contentBytes length matches the DB-recorded size; a recovery candidate (length equality is not proof of byte-for-byte identity with the original historical content).`, graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}` });
           continue;
         }
         const bytesReason = check.status === "absent"
@@ -597,11 +672,13 @@ async function main() {
           results.set(rowKey(row), {
             classification: "graph_metadata_matched_not_file_type",
             detail: `Mailbox ${mailbox}, Graph attachment id ${match.id}, type ${odataType} — not a fileAttachment, so Graph never provides raw bytes for it via this API.`,
+            graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}`,
           });
         } else {
           results.set(rowKey(row), {
             classification: "graph_metadata_matched_bytes_unavailable",
             detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name/size match, appears to be a fileAttachment, but ${bytesReason}. A targeted follow-up GET on this specific attachment id would be the next step — not performed by this script.`,
+            graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}`,
           });
         }
         continue;
@@ -617,21 +694,25 @@ async function main() {
         results.set(rowKey(row), {
           classification: "graph_recoverable_metadata_size_mismatch",
           detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size} but DB recorded size ${row.size}. Decoded contentBytes length is exactly ${row.size} — a recovery candidate despite the metadata disagreement (length equality is not proof of byte-for-byte identity with the original historical content); Graph's size metadata should not be trusted as the deciding signal here.`,
+          graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}`,
         });
       } else if (sizeCheck.status === "absent") {
         results.set(rowKey(row), {
           classification: "graph_metadata_size_mismatch_bytes_unavailable",
           detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size} vs DB size ${row.size}, and contentBytes was absent from this response — cannot resolve which size (if either) reflects the real content.`,
+          graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}`,
         });
       } else if (sizeCheck.status === "malformed_base64") {
         results.set(rowKey(row), {
           classification: "graph_metadata_size_mismatch_malformed_base64",
           detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size} vs DB size ${row.size}, and contentBytes was present but was not well-formed base64 (malformed) — not trusted.`,
+          graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}`,
         });
       } else {
         results.set(rowKey(row), {
           classification: "graph_metadata_size_mismatch_bytes_differ",
           detail: `Mailbox ${mailbox}, Graph attachment id ${match.id} — unique name match; Graph reported size ${match.size}, DB recorded size ${row.size}, decoded contentBytes length ${sizeCheck.length} — none of these three agree; genuinely not recoverable from this response.`,
+          graphAttachmentKey: `${mailbox}::${emailMessageId}::${match.id}`,
         });
       }
     }
@@ -656,10 +737,20 @@ async function main() {
     mailbox_unresolved: 0,
     no_email_correlation: 0,
   };
+  // Distinct Graph attachment ids per classification — reveals when
+  // several DISTINCT attachment ROWS (different tickets/replies) all
+  // resolve to the SAME underlying Graph attachment, which a plain row
+  // count alone hides (e.g. a real production run: 10 records, only 5
+  // distinct Graph attachment ids behind them).
+  const distinctGraphIdsByClassification = new Map<Classification, Set<string>>();
   for (const row of allRows) {
     const result = results.get(rowKey(row));
     if (!result) continue; // skipped this run due to --limit
     counts[result.classification]++;
+    if (result.graphAttachmentKey) {
+      if (!distinctGraphIdsByClassification.has(result.classification)) distinctGraphIdsByClassification.set(result.classification, new Set());
+      distinctGraphIdsByClassification.get(result.classification)!.add(result.graphAttachmentKey);
+    }
     if (result.classification !== "file_present") {
       console.log(`  [${result.classification}] ${row.kind} ${row.id} (${row.kind === "ticket" ? "ticketId" : "pendingTicketId"}=${row.ownerId}, mimeType=${row.mimeType}) — ${result.detail}`);
     }
@@ -667,9 +758,11 @@ async function main() {
 
   console.log(`\nGraph requests made this run:        ${graphRequestsMade} (of --limit=${limit})`);
   console.log(`Rows not checked (limit reached):    ${notCheckedLimitReached}`);
-  console.log("\n=== Summary ===");
+  console.log("\n=== Summary (attachment-record counts) ===");
   for (const [bucket, count] of Object.entries(counts)) {
-    console.log(`${bucket.padEnd(38)} ${count}`);
+    const distinctIds = distinctGraphIdsByClassification.get(bucket as Classification);
+    const suffix = distinctIds ? ` — ${distinctIds.size} distinct Graph attachment id${distinctIds.size === 1 ? "" : "s"}` : "";
+    console.log(`${bucket.padEnd(38)} ${count}${suffix}`);
   }
   console.log("\nThis script wrote nothing — no DB rows changed, no files written, no emails modified or re-ingested.");
   await prisma.$disconnect();
