@@ -44,17 +44,76 @@
  *      successful request, never via a thrown exception, so the two cases
  *      can never be conflated by construction, not just by convention.
  *   5. ONLY NOW, with the source email's identity verified, is the row
- *      matched within that message's own attachments — in TWO SEPARATE
- *      steps, deliberately never collapsed into one filter (this was a
- *      real bug, fixed here — see METADATA VS. BYTE AVAILABILITY below):
- *        a. METADATA match by originalName + size (neither TicketAttachment
- *           nor PendingTicketAttachment stores the Graph attachment's own
- *           `id` — this is the best available correlation key). Zero
- *           matches, or more than one (ambiguous), -> "graph_attachment_
- *           ambiguous_or_missing" — never guessed.
- *        b. Only once EXACTLY ONE metadata match is found is its byte
- *           availability checked: `contentBytes` present -> "graph_recoverable".
- *           Absent -> classified further by @odata.type (see below).
+ *      matched within that message's own attachments — in several
+ *      SEPARATE, ordered steps, deliberately never collapsed into one
+ *      filter (collapsing them was a real bug, fixed in an earlier round
+ *      — see METADATA VS. BYTE AVAILABILITY below; a second real-world run
+ *      then showed EVERY one of 10 affected rows landing in the SAME
+ *      "zero metadata matches" bucket even after that split, across only
+ *      3 distinct messages — too uniform to be 10 independent name/size
+ *      coincidences, and the actual, most likely explanation per
+ *      Microsoft's own forums is that `$expand=attachments` combined with
+ *      `$filter=...` on the LIST endpoint this app uses
+ *      (`/messages?$filter=...&$expand=attachments`) can silently return
+ *      no attachments collection at all, even when the SAME message's
+ *      `hasAttachments` is true and a direct `/messages/{id}?$expand=
+ *      attachments` GET would have worked — see ATTACHMENT COLLECTION
+ *      PRESENCE below, the fix for THIS round):
+ *        a. COLLECTION PRESENCE — is `message.attachments` even an array,
+ *           and non-empty? See ATTACHMENT COLLECTION PRESENCE below.
+ *        b. NAME match — does ANY attachment on the message share this
+ *           row's originalName, regardless of size?
+ *        c. SIZE match (among same-name candidates) — does exactly one of
+ *           those also match this row's size?
+ *        d. Only once EXACTLY ONE metadata match (name AND size) is found
+ *           is its byte availability checked: usable `contentBytes` ->
+ *           "graph_recoverable". Not usable -> classified further by
+ *           @odata.type (see METADATA VS. BYTE AVAILABILITY below).
+ *
+ * ATTACHMENT COLLECTION PRESENCE — added this round, in response to a
+ * second real production run: after splitting metadata-matching from
+ * byte-availability (previous fix), EVERY ONE of 10 affected rows still
+ * showed zero metadata matches, across only 3 distinct successfully-found
+ * messages. That's not plausibly 10 independent name/size mismatches; it's
+ * far more consistent with `message.attachments` itself coming back
+ * empty/absent for those messages. This diagnostic now distinguishes that
+ * directly, BEFORE ever attempting a name/size match, instead of silently
+ * treating "no attachments array" and "attachments present but none
+ * match" as the same thing (`(message.attachments ?? []).filter(...)` in
+ * the previous version did exactly that, by construction):
+ *   - "graph_no_attachment_collection" — `message.attachments` is
+ *     `undefined` (the field wasn't in the response at all).
+ *   - "graph_empty_attachment_collection" — `message.attachments` is a
+ *     present-but-empty array. Both report `message.hasAttachments`
+ *     alongside (a cheap, already-selected boolean) — "collection empty
+ *     AND hasAttachments: true" is strong, direct evidence of the
+ *     suspected $expand-on-filtered-list Graph quirk, never printed as a
+ *     filename/content, just a boolean + a count.
+ * NOT fixed this round (deliberately out of scope — see "what this round
+ * does NOT do" below): if this diagnosis is confirmed, the correct next
+ * step is a dedicated fallback `GET /users/{mailbox}/messages/{id}/
+ * attachments` (the documented, reliable "list attachments" endpoint, by
+ * message id — not the filtered list query) when the first response's
+ * collection is empty/absent despite hasAttachments being true. That is a
+ * genuinely NEW Graph request shape and is intentionally not implemented
+ * or run here, pending this diagnostic's own (still budget-limited,
+ * still-approval-gated) confirmation that it's actually needed.
+ *
+ * NAME VS. SIZE MISMATCH — once a non-empty attachment collection exists,
+ * matching is now two explicit sub-steps instead of one combined filter,
+ * so a genuine name-only or size-only mismatch is distinguishable from
+ * true ambiguity:
+ *   - "graph_attachment_name_mismatch" — no attachment on the message
+ *     shares this row's originalName at all.
+ *   - "graph_attachment_size_mismatch" — one or more attachments share the
+ *     name, but none also match the row's recorded size (ingestion-side
+ *     size is `Buffer.from(contentBytes, "base64").length` — the decoded
+ *     byte count, the same unit Graph's own `size` property uses; traced
+ *     in lib/services/pending-ticket-service.ts and
+ *     lib/ticket-email-service.ts, no transformation or unit conversion
+ *     found at either ingestion site).
+ *   - "graph_attachment_ambiguous" — 2+ attachments match BOTH name and
+ *     size — genuinely ambiguous, never guessed.
  *
  * METADATA VS. BYTE AVAILABILITY — Microsoft Graph only ever populates
  * `contentBytes` on a `#microsoft.graph.fileAttachment`; `itemAttachment`
@@ -136,7 +195,11 @@ type Classification =
   | "graph_recoverable"
   | "graph_metadata_matched_bytes_unavailable"
   | "graph_metadata_matched_not_file_type"
-  | "graph_attachment_ambiguous_or_missing"
+  | "graph_no_attachment_collection"
+  | "graph_empty_attachment_collection"
+  | "graph_attachment_name_mismatch"
+  | "graph_attachment_size_mismatch"
+  | "graph_attachment_ambiguous"
   | "graph_message_not_found"
   | "graph_request_failed"
   | "mailbox_unresolved"
@@ -363,18 +426,54 @@ async function main() {
     }
 
     // Identity verified above — only now is any attachment ever matched,
-    // and in two SEPARATE steps: metadata match first, byte availability
-    // only after exactly one metadata match is found. Never one combined
-    // filter — see METADATA VS. BYTE AVAILABILITY above for why.
+    // and in several SEPARATE, ordered steps, never one combined filter —
+    // see ATTACHMENT COLLECTION PRESENCE and NAME VS. SIZE MISMATCH above
+    // for why each of these is kept distinct rather than folded into the
+    // next one's catch-all.
     for (const row of rows) {
-      const metadataMatches = (message.attachments ?? []).filter((a) => a.name === row.originalName && a.size === row.size);
+      // Step a — is there even an attachments collection to look in? This
+      // MUST run before any name/size filtering, because
+      // `(message.attachments ?? []).filter(...)` would otherwise silently
+      // treat "Graph returned no collection at all" the same as "returned
+      // a collection with no matching entry" — exactly the ambiguity a
+      // real production run showed was hiding the actual cause.
+      if (message.attachments === undefined) {
+        results.set(rowKey(row), {
+          classification: "graph_no_attachment_collection",
+          detail: `Message found (mailbox ${mailbox}) but the response had no "attachments" field at all (message.hasAttachments=${message.hasAttachments}).`,
+        });
+        continue;
+      }
+      if (message.attachments.length === 0) {
+        results.set(rowKey(row), {
+          classification: "graph_empty_attachment_collection",
+          detail: `Message found (mailbox ${mailbox}) with an empty attachments array (message.hasAttachments=${message.hasAttachments}).`,
+        });
+        continue;
+      }
 
+      // Step b — name match, independent of size, so a pure size mismatch
+      // is never reported as if the name didn't match either.
+      const nameMatches = message.attachments.filter((a) => a.name === row.originalName);
+      if (nameMatches.length === 0) {
+        results.set(rowKey(row), {
+          classification: "graph_attachment_name_mismatch",
+          detail: `Message found (mailbox ${mailbox}, ${message.attachments.length} attachment(s) on it) but none share this row's originalName.`,
+        });
+        continue;
+      }
+
+      // Step c — size match, only among the same-name candidates.
+      const metadataMatches = nameMatches.filter((a) => a.size === row.size);
       if (metadataMatches.length === 0) {
-        results.set(rowKey(row), { classification: "graph_attachment_ambiguous_or_missing", detail: `Message found (mailbox ${mailbox}) but no attachment on it matches name/size.` });
+        results.set(rowKey(row), {
+          classification: "graph_attachment_size_mismatch",
+          detail: `Message found (mailbox ${mailbox}); ${nameMatches.length} attachment(s) share this row's originalName but none also match its size.`,
+        });
         continue;
       }
       if (metadataMatches.length > 1) {
-        results.set(rowKey(row), { classification: "graph_attachment_ambiguous_or_missing", detail: `Message found (mailbox ${mailbox}) but ${metadataMatches.length} attachments match name/size — cannot safely pick one.` });
+        results.set(rowKey(row), { classification: "graph_attachment_ambiguous", detail: `Message found (mailbox ${mailbox}) but ${metadataMatches.length} attachments match BOTH name and size — cannot safely pick one.` });
         continue;
       }
 
@@ -419,7 +518,11 @@ async function main() {
     graph_recoverable: 0,
     graph_metadata_matched_bytes_unavailable: 0,
     graph_metadata_matched_not_file_type: 0,
-    graph_attachment_ambiguous_or_missing: 0,
+    graph_no_attachment_collection: 0,
+    graph_empty_attachment_collection: 0,
+    graph_attachment_name_mismatch: 0,
+    graph_attachment_size_mismatch: 0,
+    graph_attachment_ambiguous: 0,
     graph_message_not_found: 0,
     graph_request_failed: 0,
     mailbox_unresolved: 0,

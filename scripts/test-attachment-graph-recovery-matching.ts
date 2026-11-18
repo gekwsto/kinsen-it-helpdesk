@@ -1,13 +1,26 @@
 /**
- * Focused regression for the metadata-vs-byte-availability fix in
- * scripts/diagnose-attachment-graph-recovery.ts — the root cause of a real
+ * Focused regression for the attachment-matching logic in
+ * scripts/diagnose-attachment-graph-recovery.ts, covering two rounds of
+ * fixes to the same underlying script:
+ *
+ * ROUND 1 (metadata vs. byte availability) — the root cause of a real
  * production run reporting 0 graph_recoverable despite 3 source emails
- * being found successfully: the previous single filter
+ * being found successfully: the original single filter
  * (`name === X && size === Y && !!contentBytes`) could not distinguish
  * "no attachment matches at all" from "found a unique metadata match, but
  * Graph didn't include contentBytes for it" (true by design for any
  * itemAttachment/referenceAttachment, and possible even for a
  * fileAttachment in a given response).
+ *
+ * ROUND 2 (collection presence + name/size split) — after round 1 shipped,
+ * a second real production run showed EVERY affected row still landing in
+ * the single "zero metadata matches" bucket, across only 3 messages — too
+ * uniform to be independent name/size coincidences. The suspected cause
+ * (a documented Graph quirk where `$filter` + `$expand=attachments` on the
+ * messages LIST endpoint can return no attachments collection at all) can
+ * only be confirmed by distinguishing "no collection," "empty collection,"
+ * "name mismatch," and "size mismatch" as separate outcomes instead of one
+ * combined `(message.attachments ?? []).filter(...)` catch-all.
  *
  * Covers, via a mocked microsoftGraph client (no real network/credentials
  * needed, same mock.module pattern used throughout this codebase's other
@@ -16,15 +29,20 @@
  *     (unchanged happy path).
  *   - Unique metadata match + contentBytes ABSENT + @odata.type IS
  *     fileAttachment -> graph_metadata_matched_bytes_unavailable (the
- *     exact production scenario this fix targets).
+ *     exact round-1 production scenario).
  *   - Unique metadata match + contentBytes ABSENT + @odata.type is
  *     itemAttachment -> graph_metadata_matched_not_file_type.
- *   - Zero metadata matches -> graph_attachment_ambiguous_or_missing.
- *   - 2+ metadata matches (name+size collision) ->
- *     graph_attachment_ambiguous_or_missing.
+ *   - `message.attachments` is `undefined` -> graph_no_attachment_collection
+ *     (the round-2 suspected root cause).
+ *   - `message.attachments` is `[]` -> graph_empty_attachment_collection.
+ *   - Attachments present, none share the row's originalName ->
+ *     graph_attachment_name_mismatch.
+ *   - An attachment shares the name but not the size ->
+ *     graph_attachment_size_mismatch.
+ *   - 2+ attachments match BOTH name and size -> graph_attachment_ambiguous.
  *   - Request-level failures (429/403) still classified as
  *     graph_request_failed, never conflated with "not found" (regression
- *     guard for the earlier fix, re-verified here too).
+ *     guard for an earlier fix, re-verified here too).
  *
  * Usage: npx tsx --experimental-test-module-mocks scripts/test-attachment-graph-recovery-matching.ts
  */
@@ -58,9 +76,12 @@ const SCENARIOS = [
   { msgId: `<${TAG}-recoverable@example.com>`, originalName: "a.png", size: 100 },
   { msgId: `<${TAG}-bytes-unavailable@example.com>`, originalName: "b.png", size: 200 },
   { msgId: `<${TAG}-not-file-type@example.com>`, originalName: "c.png", size: 300 },
-  { msgId: `<${TAG}-zero-match@example.com>`, originalName: "d.png", size: 400 },
+  { msgId: `<${TAG}-name-mismatch@example.com>`, originalName: "d.png", size: 400 },
   { msgId: `<${TAG}-collision@example.com>`, originalName: "e.png", size: 500 },
   { msgId: `<${TAG}-invalid-bytes@example.com>`, originalName: "f.png", size: 600 },
+  { msgId: `<${TAG}-no-collection@example.com>`, originalName: "g.png", size: 700 },
+  { msgId: `<${TAG}-empty-collection@example.com>`, originalName: "h.png", size: 800 },
+  { msgId: `<${TAG}-size-mismatch@example.com>`, originalName: "i.png", size: 900 },
 ];
 
 // Real base64 that decodes to EXACTLY 100 bytes — isUsableContentBytes
@@ -87,7 +108,7 @@ mock.module("@/lib/microsoft-graph", {
           return { internetMessageId: emailMessageId, attachments: [{ id: "att-3", name: "c.png", size: 300, "@odata.type": "#microsoft.graph.itemAttachment" }] }; // no contentBytes, not a file type
         }
         if (emailMessageId === SCENARIOS[3].msgId) {
-          return { internetMessageId: emailMessageId, attachments: [{ id: "att-4", name: "other.png", size: 999, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name/size doesn't match
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-4", name: "other.png", size: 999, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // no attachment shares this row's originalName at all
         }
         if (emailMessageId === SCENARIOS[4].msgId) {
           return {
@@ -100,6 +121,15 @@ mock.module("@/lib/microsoft-graph", {
         }
         if (emailMessageId === SCENARIOS[5].msgId) {
           return { internetMessageId: emailMessageId, attachments: [{ id: "att-6", name: "f.png", size: 600, contentBytes: TRUNCATED_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // present but truncated/corrupt — must NOT be trusted as recoverable
+        }
+        if (emailMessageId === SCENARIOS[6].msgId) {
+          return { internetMessageId: emailMessageId, hasAttachments: true }; // no "attachments" field in the response at all — the suspected $expand-on-filtered-list Graph quirk
+        }
+        if (emailMessageId === SCENARIOS[7].msgId) {
+          return { internetMessageId: emailMessageId, hasAttachments: true, attachments: [] }; // present but empty
+        }
+        if (emailMessageId === SCENARIOS[8].msgId) {
+          return { internetMessageId: emailMessageId, attachments: [{ id: "att-9", name: "i.png", size: 111, contentBytes: VALID_100_BYTE_CONTENT, "@odata.type": "#microsoft.graph.fileAttachment" }] }; // name matches, size doesn't (row expects 900)
         }
         throw new Error(`Unexpected mocked lookup for ${emailMessageId}`);
       },
@@ -167,10 +197,15 @@ async function main() {
     check("Scenario 2 (unique match, bytes absent, fileAttachment) -> graph_metadata_matched_bytes_unavailable", output.includes("att-2") && output.includes("contentBytes was absent"));
     check("Scenario 3 (unique match, bytes absent, itemAttachment) -> graph_metadata_matched_not_file_type", output.includes("graph_metadata_matched_not_file_type"));
     check("Scenario 3 detail mentions itemAttachment", output.includes("itemAttachment"));
-    check("Scenario 4 (zero name/size match) counted under ambiguous_or_missing", /graph_attachment_ambiguous_or_missing\s+2/.test(output));
+    check("Scenario 4 (no attachment shares the name) -> graph_attachment_name_mismatch", /graph_attachment_name_mismatch\s+1/.test(output));
+    check("Scenario 5 (2 attachments match name+size) -> graph_attachment_ambiguous", /graph_attachment_ambiguous\s+1/.test(output) && !/graph_attachment_ambiguous_or_missing/.test(output));
     const att6Line = lines.find((l) => l.includes("att-6")) ?? "";
     check("Scenario 6 (contentBytes present but WRONG decoded length) is NOT graph_recoverable", att6Line.length > 0 && !att6Line.includes("[graph_recoverable]"));
     check("Scenario 6 (invalid bytes) -> graph_metadata_matched_bytes_unavailable with a validation-failure reason", att6Line.includes("graph_metadata_matched_bytes_unavailable") && att6Line.includes("failed validation"));
+    check("Scenario 7 (attachments field entirely absent) -> graph_no_attachment_collection", /graph_no_attachment_collection\s+1/.test(output));
+    check("Scenario 7 detail reports hasAttachments=true despite the missing collection", output.includes("hasAttachments=true") && output.includes("no \"attachments\" field"));
+    check("Scenario 8 (attachments present but empty) -> graph_empty_attachment_collection", /graph_empty_attachment_collection\s+1/.test(output));
+    check("Scenario 9 (name matches, size doesn't) -> graph_attachment_size_mismatch", /graph_attachment_size_mismatch\s+1/.test(output));
     check("Summary shows exactly 1 graph_recoverable (scenario 6's invalid bytes correctly excluded)", /graph_recoverable\s+1/.test(output));
     check("Summary shows exactly 2 graph_metadata_matched_bytes_unavailable (scenario 2 absent + scenario 6 invalid)", /graph_metadata_matched_bytes_unavailable\s+2/.test(output));
     check("Summary shows exactly 1 graph_metadata_matched_not_file_type", /graph_metadata_matched_not_file_type\s+1/.test(output));
