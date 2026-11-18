@@ -320,7 +320,7 @@ import { prisma } from "@/lib/prisma";
 import { UPLOAD_DIR, LEGACY_PUBLIC_UPLOAD_DIR } from "@/lib/attachment-policy";
 import { microsoftGraph, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { checkContentBytes } from "@/scripts/attachment-graph-recovery-base64";
-import { type Row, fileExistsLocally, storagePaths, resolveMailbox, resolveEmailMessageId, findUniqueAttachmentByName } from "@/scripts/attachment-graph-recovery-correlation";
+import { type Row, fileExistsLocally, storagePaths, resolveMailbox, resolveEmailMessageId, findUniqueAttachmentByName, classifyGraphFailure } from "@/scripts/attachment-graph-recovery-correlation";
 
 type Classification =
   | "file_present"
@@ -340,36 +340,10 @@ type Classification =
   | "mailbox_unresolved"
   | "no_email_correlation";
 
-/**
- * Distinguishes WHY a Graph request didn't succeed — authentication,
- * authorization, throttling, and network/server errors are all genuine
- * REQUEST failures (we learned nothing about whether the message exists)
- * and must never be reported as "message not found"/"deleted." Only a
- * request that actually SUCCEEDED (HTTP 2xx) with zero matching messages
- * means the message is genuinely gone — see getMessageByInternetMessageId
- * in lib/microsoft-graph.ts, which represents that case by returning
- * `null`, never by throwing. Every thrown error reaching this function is
- * therefore, by construction, a request-level failure, not a "not found."
- * Parses lib/microsoft-graph.ts's own plain Error message text (its
- * `graphRequest`/`getAccessToken` helpers throw `Error`, not a typed
- * subclass, so this is necessarily text-based) — never includes the
- * Authorization header or token value, which graphRequest's own error
- * construction already excludes.
- */
-function classifyGraphFailure(err: unknown): string {
-  const msg = err instanceof Error ? err.message : String(err);
-  if (/Failed to get access token/.test(msg)) return "authentication failure (could not obtain a Graph access token — check GRAPH_TENANT_ID/GRAPH_CLIENT_ID/GRAPH_CLIENT_SECRET)";
-  const statusMatch = msg.match(/Graph API error (\d+)/);
-  if (statusMatch) {
-    const status = Number(statusMatch[1]);
-    if (status === 401) return "authentication failure (401 Unauthorized)";
-    if (status === 403) return "authorization failure (403 Forbidden — insufficient Graph API permissions for this mailbox)";
-    if (status === 429) return "throttled (429 Too Many Requests — Graph rate limit hit)";
-    if (status >= 500) return `Graph server error (${status})`;
-    return `Graph API error ${status}`;
-  }
-  return "network or unknown error (no HTTP status could be parsed from the failure)";
-}
+// classifyGraphFailure now lives in scripts/attachment-graph-recovery-correlation.ts,
+// shared with scripts/bulk-recover-attachments-from-graph.ts (which also
+// needs its `systemic` flag to decide whether a Graph failure should abort
+// an entire batch) — see that module's own doc comment.
 
 // checkContentBytes/isStrictlyValidBase64 live in their own side-effect-free
 // module (scripts/attachment-graph-recovery-base64.ts) specifically so a
@@ -510,7 +484,7 @@ async function main() {
       // represents "genuinely not found" by returning null from a
       // SUCCESSFUL request (see the branch below), so this catch block
       // must never be classified the same way as that one.
-      const detail = `Request failed, message existence unknown: ${classifyGraphFailure(err)}.`;
+      const detail = `Request failed, message existence unknown: ${classifyGraphFailure(err).description}.`;
       for (const row of rows) results.set(rowKey(row), { classification: "graph_request_failed", detail });
       continue;
     }

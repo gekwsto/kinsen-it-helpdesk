@@ -103,10 +103,19 @@ import { prisma } from "@/lib/prisma";
 import { UPLOAD_DIR, isSafeStoredFilename, resolvesInsideDir } from "@/lib/attachment-policy";
 import { microsoftGraph, GraphConfigurationError } from "@/lib/microsoft-graph";
 import { isStrictlyValidBase64 } from "@/scripts/attachment-graph-recovery-base64";
-import { type Row, fileExistsLocally, storagePaths, resolveMailbox, resolveEmailMessageId, findUniqueAttachmentByName } from "@/scripts/attachment-graph-recovery-correlation";
+import { type Row, fileExistsLocally, storagePaths, resolveMailbox, resolveEmailMessageId, findUniqueAttachmentByName, classifyGraphFailure } from "@/scripts/attachment-graph-recovery-correlation";
 
+// `systemic: true` marks a failure that would recur IDENTICALLY for every
+// other record too (Graph isn't configured at all, authentication/
+// authorization is flatly rejected, or the storage layout itself looks
+// compromised — a symlink escaping UPLOAD_DIR) — set ONLY on those few
+// branches below. Every other failure (unsafe filename, no correlation,
+// unresolved mailbox, name mismatch, byte mismatch, …) is specific to
+// THIS one record and leaves `systemic` unset. scripts/bulk-recover-
+// attachments-from-graph.ts uses this to decide "abort the whole batch"
+// vs. "log this record and continue to the next one."
 export type RecoveryResult =
-  | { ok: false; reason: string }
+  | { ok: false; reason: string; systemic?: boolean }
   | { ok: true; recordId: string; kind: "ticket" | "pending"; status: "already_present"; destinationPath: string }
   | { ok: true; recordId: string; kind: "ticket" | "pending"; status: "dry_run_verified"; mailbox: string; graphAttachmentId: string; expectedSize: number; sha256: string; destinationPath: string }
   | { ok: true; recordId: string; kind: "ticket" | "pending"; status: "published"; mailbox: string; graphAttachmentId: string; expectedSize: number; writtenSize: number; sha256: string; destinationPath: string }
@@ -238,8 +247,9 @@ export async function recoverAttachment(kind: "ticket" | "pending", id: string, 
   try {
     message = await microsoftGraph.getMessageByInternetMessageId(mailboxResult.mailbox, emailMessageId);
   } catch (err) {
-    if (err instanceof GraphConfigurationError) return { ok: false, reason: `Microsoft Graph is not configured in this environment: ${err.message}` };
-    return { ok: false, reason: `Graph request failed (message existence unknown, never treated as "not found"): ${err instanceof Error ? err.message : String(err)}` };
+    if (err instanceof GraphConfigurationError) return { ok: false, reason: `Microsoft Graph is not configured in this environment: ${err.message}`, systemic: true };
+    const classified = classifyGraphFailure(err);
+    return { ok: false, reason: `Graph request failed (message existence unknown, never treated as "not found"): ${classified.description}`, systemic: classified.systemic };
   }
   if (!message || message.internetMessageId !== emailMessageId) {
     return { ok: false, reason: `Graph request succeeded but found no message with internetMessageId ${emailMessageId} in mailbox ${mailboxResult.mailbox} (or returned a mismatched one) — refusing to recover from an unverified source.` };
@@ -283,7 +293,7 @@ export async function recoverAttachment(kind: "ticket" | "pending", id: string, 
   // every ancestor including UPLOAD_DIR itself) exists.
   const [realDir, realUploadRoot] = await Promise.all([fs.realpath(dir), fs.realpath(UPLOAD_DIR)]);
   if (!resolvesInsideDir(realDir, realUploadRoot)) {
-    return { ok: false, reason: `Refusing to recover ${kind} attachment ${id} — the destination directory resolves (after following symlinks) outside UPLOAD_DIR.` };
+    return { ok: false, reason: `Refusing to recover ${kind} attachment ${id} — the destination directory resolves (after following symlinks) outside UPLOAD_DIR.`, systemic: true };
   }
 
   const tempPath = path.join(dir, `.recover-${randomBytes(8).toString("hex")}.tmp`);
