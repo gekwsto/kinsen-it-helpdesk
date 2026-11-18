@@ -84,8 +84,15 @@ async function main() {
   check("A2. List (GET) checks hasProjectViewAccess(...) — the canonical Project read gate (wraps hasEffectiveEntityPermission's project.view union, extended for request-origin Owner(s)/Audience)", /hasProjectViewAccess\(/.test(listRouteSrc));
   check("A3. Upload (POST) checks hasEffectiveEntityPermission(...) with 'project.edit' (a stricter gate than list)", /hasEffectiveEntityPermission\([^)]*"project\.edit"/.test(listRouteSrc));
   check("A4. Upload reuses the shared attachment policy (MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, entityAttachmentDir) rather than inventing new constants", /from "@\/lib\/attachment-policy"/.test(listRouteSrc) && /entityAttachmentDir\("projects"/.test(listRouteSrc));
-  check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("fs.writeFile"));
-  check("A6. Upload rejects an oversized file before ever writing to disk", /MAX_ATTACHMENT_SIZE_BYTES/.test(listRouteSrc) && listRouteSrc.indexOf("MAX_ATTACHMENT_SIZE_BYTES") < listRouteSrc.indexOf("fs.writeFile"));
+  // Writes now go through the shared lib/attachment-storage-service.ts
+  // (writeAttachmentFile), not a bare fs.writeFile call in this route's
+  // own source — see that module's own doc comment for why (a shared
+  // durability guard + atomic-publish core used by every attachment
+  // write path, added after a real production incident). The ordering
+  // guarantee this check cares about — validation happens before any
+  // write is attempted — still holds, just against the new call name.
+  check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("writeAttachmentFile"));
+  check("A6. Upload rejects an oversized file before ever writing to disk", /MAX_ATTACHMENT_SIZE_BYTES/.test(listRouteSrc) && listRouteSrc.indexOf("MAX_ATTACHMENT_SIZE_BYTES") < listRouteSrc.indexOf("writeAttachmentFile"));
   check("A6b. Never active workspace, never hasPermission/hasEffectiveModulePermission, never a hardcoded role name", !/getActiveWorkspace|hasEffectiveModulePermission|"ADMIN"|Role\.ADMIN/.test(listRouteSrc) && !/\bhasPermission\(/.test(listRouteSrc));
 
   const itemRoutePath = path.join(process.cwd(), "app/api/projects/[id]/attachments/[attachmentId]/route.ts");

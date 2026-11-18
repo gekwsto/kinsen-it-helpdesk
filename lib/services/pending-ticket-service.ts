@@ -8,6 +8,7 @@ import { resolveDefaultStatusId, resolveDefaultPriorityId, isDepartmentAccepting
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import { publishTicketListInvalidationInTransaction } from "@/lib/realtime/ticket-list-invalidation";
 import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, buildMigratedAttachmentFilename } from "@/lib/attachment-policy";
+import { writeAttachmentFile, copyAttachmentFile } from "@/lib/attachment-storage-service";
 
 export type AcceptPendingTicketResult =
   | { ok: true; ticket: { id: string; ticketNumber: number; title: string } }
@@ -57,43 +58,108 @@ async function findOrCreateRequester(fromEmail: string, fromName: string): Promi
  * already-accepted ticket. Attachments are saved under a `pending/` subtree
  * so they never collide with a real Ticket's own upload directory naming.
  */
+/**
+ * Idempotent: if a PendingTicket for this exact email ALREADY exists —
+ * e.g. this is a RETRY after a previous attempt created the PendingTicket
+ * successfully but then failed partway through saving its attachments —
+ * reuses it instead of calling prisma.pendingTicket.create again, which
+ * would otherwise throw a unique-constraint violation on emailMessageId.
+ * That violation is caught by this function's own caller
+ * (lib/ticket-email-service.ts) as `isUniqueConstraintViolation` and
+ * classified "SKIPPED_DUPLICATE" — silently abandoning the retry before
+ * it ever reached the attachments. Reusing the row here is what makes a
+ * genuine retry actually retry the thing that failed, instead of being
+ * mistaken for an already-fully-handled duplicate.
+ */
 export async function createPendingTicketFromEmail(
   parsed: ParsedEmail,
   department: { id: string } | null
 ): Promise<{ id: string }> {
   const requester = await findOrCreateRequester(parsed.fromEmail, parsed.fromName);
 
-  const pendingTicket = await prisma.pendingTicket.create({
-    data: {
-      emailMessageId: parsed.messageId,
-      emailThreadId: parsed.conversationId,
-      fromEmail: parsed.fromEmail,
-      fromName: parsed.fromName || null,
-      subject: parsed.subject || "Email Support Request",
-      // The normalized, readable representation — never parsed.bodyHtml
-      // (raw markup). See ParsedEmail.bodyText's doc comment in
-      // lib/email-ticket-parser.ts (BUG 1 fix): this is what
-      // acceptPendingTicket later copies verbatim into Ticket.description
-      // and the initial TicketMessage.body, so normalizing it once, here,
-      // at the single point every pending ticket is created from, is
-      // enough — no downstream re-cleaning needed.
-      body: parsed.bodyText,
-      receivedAt: parsed.receivedAt,
-      departmentId: department?.id ?? null,
-      requesterId: requester.id,
-    },
-    select: { id: true },
-  });
+  let pendingTicket = await prisma.pendingTicket.findUnique({ where: { emailMessageId: parsed.messageId }, select: { id: true } });
+  if (!pendingTicket) {
+    pendingTicket = await prisma.pendingTicket.create({
+      data: {
+        emailMessageId: parsed.messageId,
+        emailThreadId: parsed.conversationId,
+        fromEmail: parsed.fromEmail,
+        fromName: parsed.fromName || null,
+        subject: parsed.subject || "Email Support Request",
+        // The normalized, readable representation — never parsed.bodyHtml
+        // (raw markup). See ParsedEmail.bodyText's doc comment in
+        // lib/email-ticket-parser.ts (BUG 1 fix): this is what
+        // acceptPendingTicket later copies verbatim into Ticket.description
+        // and the initial TicketMessage.body, so normalizing it once, here,
+        // at the single point every pending ticket is created from, is
+        // enough — no downstream re-cleaning needed.
+        body: parsed.bodyText,
+        receivedAt: parsed.receivedAt,
+        departmentId: department?.id ?? null,
+        requesterId: requester.id,
+      },
+      select: { id: true },
+    });
+  }
 
-  await savePendingAttachments(parsed.attachments, pendingTicket.id);
+  const summary = await savePendingAttachments(parsed.attachments, pendingTicket.id);
+  if (summary.recoverableFailureCount > 0) {
+    // A RECOVERABLE failure (storage unavailable, or a write that failed
+    // verification) — throw so the caller's EXISTING retry-on-next-poll
+    // mechanism (lib/ticket-email-service.ts's stopAdvancingCursor) retries
+    // this exact message. The reuse-existing-PendingTicket logic above
+    // makes that retry idempotent: it will reuse this same row and the
+    // per-attachment dedup check inside savePendingAttachments will skip
+    // whichever attachments already succeeded, retrying only the rest.
+    // A PERMANENT rejection (disallowed MIME, oversized) is never a reason
+    // to retry — retrying changes nothing about those — so it does not
+    // throw here; it was already logged inside savePendingAttachments.
+    throw new Error(`Attachment storage was unavailable for ${summary.recoverableFailureCount} of ${parsed.attachments.length} attachment(s) on pending ticket ${pendingTicket.id} — this message will be retried on the next poll.`);
+  }
 
   return pendingTicket;
 }
 
-async function savePendingAttachments(
-  attachments: Array<{ name: string; contentType: string; size: number; contentBytes: string }>,
+export type AttachmentSaveSummary = { savedCount: number; alreadyPresentCount: number; permanentlyRejectedCount: number; recoverableFailureCount: number };
+
+/** Exported (in addition to being used internally by createPendingTicketFromEmail) purely so scripts/test-attachment-ingestion-failure-boundaries.ts can exercise its idempotency and compensation behavior directly — see that test file's own doc comment. No behavior change from being exported. */
+export async function savePendingAttachments(
+  attachments: Array<{ id: string; name: string; contentType: string; size: number; contentBytes: string }>,
   pendingTicketId: string
-) {
+): Promise<AttachmentSaveSummary> {
+  const summary: AttachmentSaveSummary = { savedCount: 0, alreadyPresentCount: 0, permanentlyRejectedCount: 0, recoverableFailureCount: 0 };
+
+  // Idempotency pre-check for a RETRY of this exact pending ticket: an
+  // attachment already represented by an existing PendingTicketAttachment
+  // row was already successfully saved in an earlier attempt and must
+  // never be re-attempted or duplicated. Two separate keys, for two
+  // separate generations of row:
+  //   - sourceAttachmentId (the Graph-sourced identity — see
+  //     schema.prisma) for any row saved by the CURRENT code. Keyed on
+  //     the source's own stable id rather than (originalName, size): two
+  //     DIFFERENT attachments in one email can legitimately share both a
+  //     name and a size (see buildMigratedAttachmentFilename's own doc
+  //     comment), and that old heuristic would have wrongly collapsed
+  //     them into one on a retry.
+  //   - (originalName, size) for a LEGACY row that predates the
+  //     sourceAttachmentId column (sourceAttachmentId is NULL on every
+  //     row that existed before that additive migration ran — never
+  //     backfilled, since the Graph id it would need isn't recoverable
+  //     after the fact). Without this fallback, a PendingTicket that was
+  //     already PARTIALLY saved before this column existed (a real,
+  //     expected case: storage was down, some attachments saved, the
+  //     message is still being retried on every poll) would have every
+  //     one of its legacy rows invisible to the new id-based check above
+  //     and get them all RE-saved as duplicates on the very next retry.
+  //     Carries the exact same known, accepted limitation the old
+  //     heuristic always had (two genuinely different legacy attachments
+  //     sharing both name AND size are indistinguishable) — unchanged
+  //     from before this round, only ever applied to rows that predate
+  //     it.
+  const existing = await prisma.pendingTicketAttachment.findMany({ where: { pendingTicketId }, select: { sourceAttachmentId: true, originalName: true, size: true } });
+  const alreadySavedById = new Set(existing.map((e) => e.sourceAttachmentId).filter((id): id is string => id !== null));
+  const alreadySavedLegacyKey = new Set(existing.filter((e) => e.sourceAttachmentId === null).map((e) => `${e.originalName}\u0000${e.size}`));
+
   for (const att of attachments) {
     try {
       // Same policy the WEB upload route has always enforced (type
@@ -105,9 +171,10 @@ async function savePendingAttachments(
       // difference from the web upload path, where the browser itself
       // reports `file.type`; both are equally "client-claimed," so this is
       // not a weaker guarantee, just the same one applied to a different
-      // client.
+      // client. These are PERMANENT rejections — retrying changes nothing.
       if (!isAllowedAttachmentMimeType(att.contentType)) {
         console.warn(`[pending-ticket] Skipping attachment ${att.name} — disallowed MIME type ${att.contentType}`);
+        summary.permanentlyRejectedCount++;
         continue;
       }
 
@@ -116,30 +183,63 @@ async function savePendingAttachments(
       // metadata field — never trust that a claimed size matches reality.
       if (bytes.length > MAX_ATTACHMENT_SIZE_BYTES) {
         console.warn(`[pending-ticket] Skipping attachment ${att.name} — ${bytes.length} bytes exceeds the ${MAX_ATTACHMENT_SIZE_BYTES}-byte cap`);
+        summary.permanentlyRejectedCount++;
+        continue;
+      }
+
+      if (alreadySavedById.has(att.id) || alreadySavedLegacyKey.has(`${att.name}\u0000${bytes.length}`)) {
+        summary.alreadyPresentCount++;
         continue;
       }
 
       const dir = path.join(UPLOAD_DIR, "pending", pendingTicketId);
-      await fs.mkdir(dir, { recursive: true });
-
       const filename = generateStoredFilename(att.name);
-      const filePath = path.join(dir, filename);
-      await fs.writeFile(filePath, bytes);
 
-      await prisma.pendingTicketAttachment.create({
-        data: {
-          pendingTicketId,
-          filename,
-          originalName: att.name,
-          mimeType: att.contentType,
-          size: bytes.length,
-          path: `/uploads/pending/${pendingTicketId}/${filename}`,
-        },
-      });
+      // writeAttachmentFile (lib/attachment-storage-service.ts) — shared
+      // with every other attachment write path — verifies UPLOAD_DIR is a
+      // durable mount before writing, and atomically publishes (never
+      // overwrites). A failure here is RECOVERABLE (storage unavailable or
+      // a write that failed verification) — counted as such so the caller
+      // knows to retry this whole message later, never silently dropped.
+      const writeResult = await writeAttachmentFile(bytes, dir, filename);
+      if (!writeResult.ok) {
+        console.error(`[pending-ticket] Failed to save attachment ${att.name}: ${writeResult.reason}`);
+        summary.recoverableFailureCount++;
+        continue;
+      }
+
+      try {
+        await prisma.pendingTicketAttachment.create({
+          data: {
+            pendingTicketId,
+            filename,
+            originalName: att.name,
+            mimeType: att.contentType,
+            size: writeResult.size,
+            path: `/uploads/pending/${pendingTicketId}/${filename}`,
+            sourceAttachmentId: att.id,
+          },
+        });
+        summary.savedCount++;
+      } catch (dbErr) {
+        // Compensation: the file above was JUST published, in THIS SAME
+        // call, at this EXACT path this function itself computed — never
+        // any pre-existing attachment. The DB row that would reference it
+        // never committed, so removing it leaves no dangling reference and
+        // no pre-existing file is ever touched. Counted as recoverable: a
+        // retry will attempt this attachment again (not yet represented by
+        // any row, so the idempotency check above won't skip it).
+        await fs.unlink(path.join(dir, filename)).catch(() => {});
+        console.error(`[pending-ticket] Published attachment ${att.name} but the database record failed — removed the orphaned file:`, dbErr);
+        summary.recoverableFailureCount++;
+      }
     } catch (err) {
       console.error(`[pending-ticket] Failed to save attachment ${att.name}:`, err);
+      summary.recoverableFailureCount++;
     }
   }
+
+  return summary;
 }
 
 /**
@@ -344,36 +444,63 @@ export async function acceptPendingTicket(
     try {
       const sourcePath = path.join(UPLOAD_DIR, "pending", pendingTicket.id, att.filename);
       const destDir = path.join(UPLOAD_DIR, ticket.id);
-      await fs.mkdir(destDir, { recursive: true });
-      const destPath = path.join(destDir, destFilename);
-      await fs.copyFile(sourcePath, destPath);
 
-      await prisma.ticketAttachment.create({
-        data: {
-          ticketId: ticket.id,
-          // Ticket-level (messageId: null), NOT tied to the initial email
-          // message — BUG 2's actual root cause. This is what makes a
-          // migrated attachment behave exactly like one uploaded through
-          // the normal web ticket-creation flow (app/api/tickets/[id]/
-          // attachments/route.ts also writes messageId: null for a fresh
-          // ticket's own attachments): the ticket detail page's
-          // "Attachments" panel only ever queries
-          // `attachments: { where: { messageId: null } }` (see
-          // app/(main)/tickets/[id]/page.tsx). Attaching it to the initial
-          // TicketMessage instead — the previous behavior — silently
-          // excluded it from that panel: the file and its TicketAttachment
-          // row both existed, but nothing in the normal Ticket UI ever
-          // surfaced them (confirmed via a direct reproduction — see this
-          // change's PR/commit description).
-          messageId: null,
-          uploadedById: requesterId,
-          filename: destFilename,
-          originalName: att.originalName,
-          mimeType: att.mimeType,
-          size: att.size,
-          path: `/uploads/${ticket.id}/${destFilename}`,
-        },
-      });
+      // copyAttachmentFile (lib/attachment-storage-service.ts) — the same
+      // verify-gate/write/verify/atomic-publish core as a fresh upload,
+      // just reading its bytes from an existing file instead of a request
+      // body. Unlike the previous bare fs.copyFile (which silently
+      // OVERWRITES an existing destination by default), this never does —
+      // the existingFilenames idempotency guard above already prevents a
+      // normal re-run from reaching here for an already-migrated
+      // attachment, and this adds the same filesystem-level guarantee the
+      // other write paths have as defense in depth.
+      const copyResult = await copyAttachmentFile(sourcePath, destDir, destFilename);
+      if (!copyResult.ok) {
+        console.error(`[pending-ticket] Failed to copy attachment ${att.filename} on accept: ${copyResult.reason}`);
+        continue;
+      }
+
+      try {
+        await prisma.ticketAttachment.create({
+          data: {
+            ticketId: ticket.id,
+            // Ticket-level (messageId: null), NOT tied to the initial email
+            // message — BUG 2's actual root cause. This is what makes a
+            // migrated attachment behave exactly like one uploaded through
+            // the normal web ticket-creation flow (app/api/tickets/[id]/
+            // attachments/route.ts also writes messageId: null for a fresh
+            // ticket's own attachments): the ticket detail page's
+            // "Attachments" panel only ever queries
+            // `attachments: { where: { messageId: null } }` (see
+            // app/(main)/tickets/[id]/page.tsx). Attaching it to the initial
+            // TicketMessage instead — the previous behavior — silently
+            // excluded it from that panel: the file and its TicketAttachment
+            // row both existed, but nothing in the normal Ticket UI ever
+            // surfaced them (confirmed via a direct reproduction — see this
+            // change's PR/commit description).
+            messageId: null,
+            uploadedById: requesterId,
+            filename: destFilename,
+            originalName: att.originalName,
+            mimeType: att.mimeType,
+            size: copyResult.size,
+            path: `/uploads/${ticket.id}/${destFilename}`,
+          },
+        });
+      } catch (dbErr) {
+        // Compensation: the copy above was JUST published, in THIS SAME
+        // call, at this EXACT destDir/destFilename this function itself
+        // computed — never any pre-existing attachment. The ORIGINAL
+        // source file under pending/ is untouched either way
+        // (copyAttachmentFile never deletes its source), so a future retry
+        // of acceptPendingTicket can still copy it again cleanly — the
+        // existingFilenames idempotency guard above only skips a
+        // destination filename that's already represented by a real
+        // TicketAttachment row, which this one, after cleanup, no longer
+        // is.
+        await fs.unlink(path.join(destDir, destFilename)).catch(() => {});
+        console.error(`[pending-ticket] Copied attachment ${att.filename} on accept but the database record failed — removed the orphaned copy:`, dbErr);
+      }
     } catch (err) {
       console.error(`[pending-ticket] Failed to copy attachment ${att.filename} on accept:`, err);
     }

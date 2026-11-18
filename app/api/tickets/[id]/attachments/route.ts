@@ -4,8 +4,19 @@ import { requireAuth, canViewAllTickets } from "@/lib/permissions";
 import path from "path";
 import fs from "fs/promises";
 import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
+import { writeAttachmentFile } from "@/lib/attachment-storage-service";
 import { publishTicketListInvalidation } from "@/lib/realtime/ticket-list-invalidation";
 
+/**
+ * Writes via writeAttachmentFile (lib/attachment-storage-service.ts) —
+ * shared by every attachment write path in the app — which verifies
+ * UPLOAD_DIR is a genuinely durable mount before ever touching the
+ * filesystem, and atomically publishes (never overwrites) once written
+ * bytes are confirmed to read back identical. Returns the storage
+ * service's own statusCode (503 if storage isn't currently verified as
+ * durable, 409 on a destination collision, 500 on a write/verify
+ * failure) rather than a bare 500 for every failure mode.
+ */
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -40,35 +51,47 @@ export async function POST(
     }
 
     const dir = path.join(UPLOAD_DIR, id);
-    await fs.mkdir(dir, { recursive: true });
-
     const filename = generateStoredFilename(file.name);
-    const filePath = path.join(dir, filename);
-
     const buffer = Buffer.from(await file.arrayBuffer());
-    await fs.writeFile(filePath, buffer);
 
-    const attachment = await prisma.ticketAttachment.create({
-      data: {
-        ticketId: id,
-        messageId: messageId ?? null,
-        uploadedById: session.user.id,
-        filename,
-        originalName: file.name,
-        mimeType: file.type,
-        size: file.size,
-        // No longer a working static URL now that UPLOAD_DIR is private
-        // (see lib/attachment-policy.ts) — kept in this same shape purely
-        // for data-shape/audit continuity. The real, authenticated download
-        // path is GET /api/tickets/[id]/attachments/[attachmentId], which
-        // never reads this field (it reconstructs the file location from
-        // UPLOAD_DIR + ticketId + filename instead).
-        path: `/uploads/${id}/${filename}`,
-      },
-      include: {
-        uploadedBy: { select: { id: true, name: true } },
-      },
-    });
+    const writeResult = await writeAttachmentFile(buffer, dir, filename);
+    if (!writeResult.ok) {
+      console.error("Upload error:", writeResult.reason);
+      return NextResponse.json({ error: writeResult.reason }, { status: writeResult.statusCode });
+    }
+
+    let attachment;
+    try {
+      attachment = await prisma.ticketAttachment.create({
+        data: {
+          ticketId: id,
+          messageId: messageId ?? null,
+          uploadedById: session.user.id,
+          filename,
+          originalName: file.name,
+          mimeType: file.type,
+          size: writeResult.size,
+          // No longer a working static URL now that UPLOAD_DIR is private
+          // (see lib/attachment-policy.ts) — kept in this same shape purely
+          // for data-shape/audit continuity. The real, authenticated download
+          // path is GET /api/tickets/[id]/attachments/[attachmentId], which
+          // never reads this field (it reconstructs the file location from
+          // UPLOAD_DIR + ticketId + filename instead).
+          path: `/uploads/${id}/${filename}`,
+        },
+        include: {
+          uploadedBy: { select: { id: true, name: true } },
+        },
+      });
+    } catch (dbErr) {
+      // Compensation: the file above was JUST published, in THIS SAME
+      // request, at this EXACT path this handler itself computed — never
+      // any pre-existing attachment. The DB row that would reference it
+      // never committed, so removing it leaves no dangling reference and
+      // no pre-existing file is ever touched.
+      await fs.unlink(path.join(dir, filename)).catch(() => {});
+      throw dbErr;
+    }
 
     await prisma.ticketHistory.create({
       data: {

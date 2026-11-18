@@ -1447,6 +1447,14 @@ model PendingTicketAttachment {
   size         Int
   path         String
 
+  // Microsoft Graph's own per-message attachment id (GraphAttachment.id —
+  // see lib/microsoft-graph.ts), carried through ParsedAttachment.id (see
+  // lib/email-ticket-parser.ts) — NULL for a WEB upload, which has no Graph
+  // attachment at all. See TicketAttachment.sourceAttachmentId's own doc
+  // comment below for the full rationale (this is the identical field,
+  // just on the pending-ticket side).
+  sourceAttachmentId String?
+
   createdAt DateTime @default(now())
 
   @@index([pendingTicketId])
@@ -1522,7 +1530,22 @@ model TicketAttachment {
   mimeType     String
   size         Int
   path         String
-  createdAt    DateTime       @default(now())
+  // Microsoft Graph's own per-message attachment id (GraphAttachment.id —
+  // see lib/microsoft-graph.ts), carried through ParsedAttachment.id (see
+  // lib/email-ticket-parser.ts) — NULL for a WEB upload, which has no
+  // Graph attachment at all. The stable, source-derived identity
+  // savePendingAttachments/saveEmailAttachments (lib/services/pending-
+  // ticket-service.ts, lib/ticket-email-service.ts) use to recognize "this
+  // exact attachment was already saved" on a retry, replacing the earlier
+  // (originalName, size) heuristic — which could never tell two genuinely
+  // different attachments that happen to share both apart. No DB-level
+  // unique constraint here (Graph only guarantees this id unique WITHIN
+  // one message, and application-level dedup — querying existing rows for
+  // this exact owning entity before insert — is already this codebase's
+  // established pattern for attachment identity, e.g.
+  // buildMigratedAttachmentFilename's own existingFilenames check).
+  sourceAttachmentId String?
+  createdAt          DateTime @default(now())
 
   @@index([ticketId])
 }
@@ -1537,7 +1560,20 @@ model TicketHistory {
   oldValue    String?
   newValue    String?
   description String?
-  createdAt   DateTime          @default(now())
+  // Set ONLY for the COMMENT_ADDED entry appendEmailReply (lib/ticket-
+  // email-service.ts) creates for an inbound email reply — the source
+  // email's own internetMessageId. NULL for every other history entry
+  // (status/assignee/department changes, etc.), which never set it.
+  // Unique (like Ticket.emailMessageId/TicketMessage.emailMessageId/
+  // PendingTicket.emailMessageId already are) so a crash between this
+  // entry committing and the mailbox poll cursor advancing past this
+  // message — which would otherwise cause the NEXT poll to reprocess an
+  // already-fully-handled message from scratch — is caught as a genuine
+  // DB-unique-constraint violation (the same isUniqueConstraintViolation
+  // idiom already used throughout this file) rather than silently
+  // creating a second, duplicate history entry.
+  emailMessageId String?  @unique
+  createdAt      DateTime @default(now())
 
   @@index([ticketId])
 }

@@ -12,6 +12,7 @@ import { matchDepartmentForRecipients, createPendingTicketFromEmail } from "@/li
 import { getMailboxesToPoll, getMailboxPollCursor, advanceMailboxPollCursor, type MailboxToPoll } from "@/lib/services/inbound-mailbox-service";
 import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
 import { UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename } from "@/lib/attachment-policy";
+import { writeAttachmentFile } from "@/lib/attachment-storage-service";
 import path from "path";
 import fs from "fs/promises";
 
@@ -398,44 +399,117 @@ async function logEmail(
 
 // ── Append reply to existing ticket ──────────────────────────────────────────
 
-async function appendEmailReply(
+/**
+ * Idempotent: if a TicketMessage for this exact reply email ALREADY
+ * exists — a RETRY after a previous attempt created the message but then
+ * failed partway through saving its attachments — reuses it instead of
+ * calling prisma.ticketMessage.create again, which would otherwise throw
+ * a unique-constraint violation on emailMessageId. That violation is
+ * caught by this function's own caller as `isUniqueConstraintViolation`
+ * and classified "SKIPPED_DUPLICATE" — silently abandoning the retry
+ * before it ever reached the attachments, same gap as
+ * createPendingTicketFromEmail fixes for the new-thread path.
+ *
+ * Exported (in addition to its normal use from processInboundEmails)
+ * purely so scripts/test-attachment-ingestion-failure-boundaries.ts can
+ * exercise its idempotency and recoverable-failure-propagation behavior
+ * directly, without mocking the entire Graph polling pipeline. No
+ * behavior change from being exported.
+ */
+export async function appendEmailReply(
   parsed: ParsedEmail,
   ticket: { id: string; ticketNumber: number; title: string },
   userId: string
 ) {
-  const msg = await prisma.ticketMessage.create({
-    data: {
-      ticketId: ticket.id,
-      authorId: userId,
-      // Normalized readable text, never parsed.bodyHtml — same BUG 1 fix as
-      // acceptPendingTicket/createPendingTicketFromEmail: this is the reply
-      // path (a follow-up email to an ALREADY-accepted ticket), the other
-      // place a raw-HTML TicketMessage.body could previously be created.
-      // See lib/email-ticket-parser.ts's ParsedEmail.bodyText doc comment.
-      body: parsed.bodyText,
-      direction: "INBOUND",
-      emailMessageId: parsed.messageId,
-      fromEmail: parsed.fromEmail,
-      fromName: parsed.fromName,
-    },
+  let msg = await prisma.ticketMessage.findUnique({
+    where: { emailMessageId: parsed.messageId },
     include: {
       author: { select: { id: true, name: true, email: true, image: true, role: true } },
       attachments: true,
     },
   });
 
-  await saveEmailAttachments(parsed.attachments, ticket.id, msg.id, userId);
+  if (!msg) {
+    msg = await prisma.ticketMessage.create({
+      data: {
+        ticketId: ticket.id,
+        authorId: userId,
+        // Normalized readable text, never parsed.bodyHtml — same BUG 1 fix as
+        // acceptPendingTicket/createPendingTicketFromEmail: this is the reply
+        // path (a follow-up email to an ALREADY-accepted ticket), the other
+        // place a raw-HTML TicketMessage.body could previously be created.
+        // See lib/email-ticket-parser.ts's ParsedEmail.bodyText doc comment.
+        body: parsed.bodyText,
+        direction: "INBOUND",
+        emailMessageId: parsed.messageId,
+        fromEmail: parsed.fromEmail,
+        fromName: parsed.fromName,
+      },
+      include: {
+        author: { select: { id: true, name: true, email: true, image: true, role: true } },
+        attachments: true,
+      },
+    });
+  }
 
-  await prisma.ticketHistory.create({
-    data: {
-      ticketId: ticket.id,
-      changedById: userId,
-      type: "COMMENT_ADDED",
-      description: `Email reply received from ${parsed.fromEmail}`,
-    },
-  });
+  const summary = await saveEmailAttachments(parsed.attachments, ticket.id, msg.id, userId);
+  if (summary.recoverableFailureCount > 0) {
+    // RECOVERABLE (storage unavailable, or a write that failed
+    // verification) — throw so the top-level caller's existing
+    // stopAdvancingCursor retry-on-next-poll mechanism retries this exact
+    // message; the reuse-existing-message logic above makes that retry
+    // idempotent. Deliberately BEFORE the ticketHistory/publish steps
+    // below — those only make sense once attachments are fully settled,
+    // and will correctly run on the retry that finally succeeds.
+    throw new Error(`Attachment storage was unavailable for ${summary.recoverableFailureCount} of ${parsed.attachments.length} attachment(s) on reply message ${msg.id} — this message will be retried on the next poll.`);
+  }
 
-  // Notify anyone currently viewing the ticket
+  // Reached once attachments are fully settled without throwing. This is
+  // NOT necessarily the first time these two steps run for this message:
+  // the mailbox poll cursor (advanceMailboxPollCursor, in the top-level
+  // caller) only advances ONCE PER BATCH, after every message in it has
+  // been processed — not per-message. A process crash between this exact
+  // point (this message's reply + history fully committed) and that
+  // batch-level cursor commit means the NEXT poll re-fetches and
+  // re-processes this SAME message from scratch: the findUnique at the
+  // top of this function correctly reuses the existing TicketMessage, but
+  // without the guard below, this would still create a SECOND
+  // TicketHistory row for the exact same reply. emailMessageId is
+  // `@unique` on TicketHistory (see schema.prisma) specifically to catch
+  // that: a genuine duplicate hits a real DB unique-constraint violation
+  // here, treated as "this reply's history was already written by an
+  // earlier, crashed attempt" — skip the create, never throw.
+  try {
+    await prisma.ticketHistory.create({
+      data: {
+        ticketId: ticket.id,
+        changedById: userId,
+        type: "COMMENT_ADDED",
+        description: `Email reply received from ${parsed.fromEmail}`,
+        emailMessageId: parsed.messageId,
+      },
+    });
+  } catch (err) {
+    if (!isUniqueConstraintViolation(err)) throw err;
+  }
+
+  // Notify anyone currently viewing the ticket. Deliberately OUTSIDE the
+  // try/catch above and reached on BOTH the fresh-create path and the
+  // caught-duplicate path above — never skipped on a retry. This closes a
+  // DIFFERENT crash window from the one above: a process crash between
+  // the history row committing and THIS call running would otherwise
+  // permanently drop the notification for that reply (there is no
+  // separate durable, replayable outbox for it to be re-delivered from —
+  // ticketEventBus is explicitly in-process/ephemeral and
+  // publishTicketListInvalidation is a content-free "something changed"
+  // pulse, not a record of this specific event — see their own doc
+  // comments), since the very next retry's history-create would hit the
+  // unique constraint and, if it returned there instead of falling
+  // through to here, would never reach this call again. Calling it again
+  // on a retry that already notified is always safe: both of these are
+  // idempotent-by-design, fire-and-forget signals to currently-connected
+  // clients to refresh from the (already correct) database state, not a
+  // one-shot delivery that duplicating would corrupt.
   publishTicketEvent("TICKET_MESSAGE_CREATED", ticket.id, userId, msg);
 }
 
@@ -452,34 +526,69 @@ async function findOrCreateRequesterForReply(parsed: ParsedEmail): Promise<{ id:
 
 // ── Save base64 attachments to disk ──────────────────────────────────────────
 
-async function saveEmailAttachments(
-  attachments: Array<{ name: string; contentType: string; size: number; contentBytes: string }>,
+export type AttachmentSaveSummary = { savedCount: number; alreadyPresentCount: number; permanentlyRejectedCount: number; recoverableFailureCount: number };
+
+/** Exported purely for scripts/test-attachment-ingestion-failure-boundaries.ts — see appendEmailReply's own doc comment. No behavior change. */
+export async function saveEmailAttachments(
+  attachments: Array<{ id: string; name: string; contentType: string; size: number; contentBytes: string }>,
   ticketId: string,
   messageId: string,
   uploadedById: string
-) {
+): Promise<AttachmentSaveSummary> {
+  const summary: AttachmentSaveSummary = { savedCount: 0, alreadyPresentCount: 0, permanentlyRejectedCount: 0, recoverableFailureCount: 0 };
+
+  // Idempotency pre-check for a RETRY of this exact reply message — same
+  // two-key scheme (and the same reasoning) as savePendingAttachments in
+  // lib/services/pending-ticket-service.ts: sourceAttachmentId (the
+  // Graph-sourced identity) for a row saved by the CURRENT code, with a
+  // (originalName, size) fallback for a LEGACY row that predates the
+  // sourceAttachmentId column (NULL on every row saved before that
+  // additive migration ran, never backfilled) — otherwise a message
+  // still mid-retry across that migration boundary would have its
+  // already-saved legacy attachments duplicated on the very next retry.
+  const existing = await prisma.ticketAttachment.findMany({ where: { messageId }, select: { sourceAttachmentId: true, originalName: true, size: true } });
+  const alreadySavedById = new Set(existing.map((e) => e.sourceAttachmentId).filter((id): id is string => id !== null));
+  const alreadySavedLegacyKey = new Set(existing.filter((e) => e.sourceAttachmentId === null).map((e) => `${e.originalName}\u0000${e.size}`));
+
   for (const att of attachments) {
     try {
       // Same policy (allowlist + real byte-length cap) as
       // savePendingAttachments in lib/services/pending-ticket-service.ts —
       // see its own comment for why this previously had no check at all.
+      // These are PERMANENT rejections — retrying changes nothing.
       if (!isAllowedAttachmentMimeType(att.contentType)) {
         console.warn(`[email] Skipping attachment ${att.name} — disallowed MIME type ${att.contentType}`);
+        summary.permanentlyRejectedCount++;
         continue;
       }
 
       const bytes = Buffer.from(att.contentBytes, "base64");
       if (bytes.length > MAX_ATTACHMENT_SIZE_BYTES) {
         console.warn(`[email] Skipping attachment ${att.name} — ${bytes.length} bytes exceeds the ${MAX_ATTACHMENT_SIZE_BYTES}-byte cap`);
+        summary.permanentlyRejectedCount++;
+        continue;
+      }
+
+      if (alreadySavedById.has(att.id) || alreadySavedLegacyKey.has(`${att.name}\u0000${bytes.length}`)) {
+        summary.alreadyPresentCount++;
         continue;
       }
 
       const dir = path.join(UPLOAD_DIR, ticketId);
-      await fs.mkdir(dir, { recursive: true });
-
       const filename = generateStoredFilename(att.name);
-      const filePath = path.join(dir, filename);
-      await fs.writeFile(filePath, bytes);
+
+      // writeAttachmentFile (lib/attachment-storage-service.ts) — shared
+      // with every other attachment write path — verifies UPLOAD_DIR is a
+      // durable mount before writing, and atomically publishes (never
+      // overwrites). A failure here is RECOVERABLE (storage unavailable or
+      // a write that failed verification) — counted as such so the caller
+      // knows to retry this whole message later, never silently dropped.
+      const writeResult = await writeAttachmentFile(bytes, dir, filename);
+      if (!writeResult.ok) {
+        console.error(`[email] Failed to save attachment ${att.name}: ${writeResult.reason}`);
+        summary.recoverableFailureCount++;
+        continue;
+      }
 
       // Unlike the initial-message migration in acceptPendingTicket (fixed
       // to messageId: null — see its own comment), a REPLY's attachments
@@ -487,22 +596,39 @@ async function saveEmailAttachments(
       // reply, appear under this specific message bubble in the thread, and
       // there is no "ticket-level attachments" expectation for a reply the
       // way there is for the ticket's own initial creation.
-      await prisma.ticketAttachment.create({
-        data: {
-          ticketId,
-          messageId,
-          uploadedById,
-          filename,
-          originalName: att.name,
-          mimeType: att.contentType,
-          size: bytes.length,
-          path: `/uploads/${ticketId}/${filename}`,
-        },
-      });
+      try {
+        await prisma.ticketAttachment.create({
+          data: {
+            ticketId,
+            messageId,
+            uploadedById,
+            filename,
+            originalName: att.name,
+            mimeType: att.contentType,
+            size: writeResult.size,
+            path: `/uploads/${ticketId}/${filename}`,
+            sourceAttachmentId: att.id,
+          },
+        });
+        summary.savedCount++;
+      } catch (dbErr) {
+        // Compensation: the file above was JUST published, in THIS SAME
+        // call, at this EXACT path this function itself computed — never
+        // any pre-existing attachment. Removing it leaves no dangling
+        // reference, and a retry will attempt this attachment again (not
+        // yet represented by any row, so the idempotency check above
+        // won't skip it).
+        await fs.unlink(path.join(dir, filename)).catch(() => {});
+        console.error(`[email] Published attachment ${att.name} but the database record failed — removed the orphaned file:`, dbErr);
+        summary.recoverableFailureCount++;
+      }
     } catch (err) {
       console.error(`[email] Failed to save attachment ${att.name}:`, err);
+      summary.recoverableFailureCount++;
     }
   }
+
+  return summary;
 }
 
 // ── Admin: create synthetic test pending ticket ──────────────────────────────

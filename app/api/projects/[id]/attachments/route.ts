@@ -6,6 +6,7 @@ import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import path from "path";
 import fs from "fs/promises";
 import { MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, entityAttachmentDir } from "@/lib/attachment-policy";
+import { writeAttachmentFile } from "@/lib/attachment-storage-service";
 
 const attachmentInclude = {
   uploadedBy: { select: { id: true, name: true, email: true } },
@@ -90,25 +91,35 @@ export async function POST(
     }
 
     const dir = entityAttachmentDir("projects", id);
-    await fs.mkdir(dir, { recursive: true });
-
     const filename = generateStoredFilename(file.name);
-    const filePath = path.join(dir, filename);
-
     const buffer = Buffer.from(await file.arrayBuffer());
-    await fs.writeFile(filePath, buffer);
 
-    const attachment = await prisma.projectAttachment.create({
-      data: {
-        projectId: id,
-        uploadedById: session.user.id,
-        filename,
-        originalName: file.name,
-        mimeType: file.type,
-        size: file.size,
-      },
-      include: attachmentInclude,
-    });
+    const writeResult = await writeAttachmentFile(buffer, dir, filename);
+    if (!writeResult.ok) {
+      console.error("Project attachment upload error:", writeResult.reason);
+      return NextResponse.json({ error: writeResult.reason }, { status: writeResult.statusCode });
+    }
+
+    let attachment;
+    try {
+      attachment = await prisma.projectAttachment.create({
+        data: {
+          projectId: id,
+          uploadedById: session.user.id,
+          filename,
+          originalName: file.name,
+          mimeType: file.type,
+          size: writeResult.size,
+        },
+        include: attachmentInclude,
+      });
+    } catch (dbErr) {
+      // Compensation: the file above was JUST published, in THIS SAME
+      // request, at this EXACT path this handler itself computed — never
+      // any pre-existing attachment.
+      await fs.unlink(path.join(dir, filename)).catch(() => {});
+      throw dbErr;
+    }
 
     return NextResponse.json(attachment, { status: 201 });
   } catch (error: any) {

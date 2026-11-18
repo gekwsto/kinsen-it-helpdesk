@@ -82,8 +82,15 @@ async function main() {
   check("A2. List (GET) checks hasEffectiveEntityPermission(...) with 'activity.view' (global grant OR the activity's own department grant — no longer a bare canActOnEntity)", /hasEffectiveEntityPermission\([^)]*"activity\.view"/.test(listRouteSrc));
   check("A3. Upload (POST) checks hasEffectiveEntityPermission(...) with 'activity.edit' (a stricter gate than list)", /hasEffectiveEntityPermission\([^)]*"activity\.edit"/.test(listRouteSrc));
   check("A4. Upload reuses the shared attachment policy (UPLOAD_DIR, MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename) rather than inventing new constants", /from "@\/lib\/attachment-policy"/.test(listRouteSrc));
-  check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("fs.writeFile"));
-  check("A6. Upload rejects an oversized file before ever writing to disk", /MAX_ATTACHMENT_SIZE_BYTES/.test(listRouteSrc) && listRouteSrc.indexOf("MAX_ATTACHMENT_SIZE_BYTES") < listRouteSrc.indexOf("fs.writeFile"));
+  // Writes now go through the shared lib/attachment-storage-service.ts
+  // (writeAttachmentFile), not a bare fs.writeFile call in this route's
+  // own source — see that module's own doc comment for why (a shared
+  // durability guard + atomic-publish core used by every attachment
+  // write path, added after a real production incident). The ordering
+  // guarantee this check cares about — validation happens before any
+  // write is attempted — still holds, just against the new call name.
+  check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("writeAttachmentFile"));
+  check("A6. Upload rejects an oversized file before ever writing to disk", /MAX_ATTACHMENT_SIZE_BYTES/.test(listRouteSrc) && listRouteSrc.indexOf("MAX_ATTACHMENT_SIZE_BYTES") < listRouteSrc.indexOf("writeAttachmentFile"));
 
   const itemRoutePath = path.join(process.cwd(), "app/api/activities/[id]/attachments/[attachmentId]/route.ts");
   const itemRouteSrc = await fs.readFile(itemRoutePath, "utf8");

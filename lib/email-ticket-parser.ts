@@ -28,6 +28,17 @@ export interface ParsedEmail {
 }
 
 export interface ParsedAttachment {
+  // Graph's own per-message attachment id (GraphAttachment.id) — stable
+  // and unique WITHIN this one message across repeated fetches of it
+  // (e.g. a retried poll re-fetching the same email), never reused for a
+  // DIFFERENT attachment on the same message. This is the stable,
+  // source-derived identity savePendingAttachments/saveEmailAttachments
+  // (lib/services/pending-ticket-service.ts, lib/ticket-email-service.ts)
+  // use to recognize "this exact attachment was already saved" on a
+  // retry — replacing an earlier (originalName, size) heuristic that
+  // could never tell two genuinely different, identically-named,
+  // identically-sized attachments apart.
+  id: string;
   name: string;
   contentType: string;
   size: number;
@@ -57,6 +68,7 @@ export function parseIncomingEmail(message: GraphMailMessage): ParsedEmail {
   const attachments: ParsedAttachment[] = (message.attachments ?? [])
     .filter((a): a is GraphAttachment & { contentBytes: string } => !!a.contentBytes && !a.isInline)
     .map((a) => ({
+      id: a.id,
       name: a.name,
       contentType: a.contentType,
       size: a.size,
