@@ -15,6 +15,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Select,
@@ -24,7 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatDateTime, formatBytes, getInitials } from "@/lib/utils";
-import { Paperclip, Trash2, Loader2, XCircle, Plug, ExternalLink } from "lucide-react";
+import { Paperclip, Trash2, Loader2, XCircle, Plug, ExternalLink, UserPlus, CheckCircle2 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
@@ -216,6 +217,18 @@ export function TicketDetailClient({
   const [selectedCancelReasonId, setSelectedCancelReasonId] = useState("");
   const [cancelNote, setCancelNote] = useState("");
 
+  // Quick Actions (Assign to me / Resolve) — call the EXACT same endpoints
+  // the "Assign Agent"/"Change Status" dialogs in TicketActions use, so
+  // permission checks, audit history and realtime invalidation are
+  // identical; the SSE handler below (TICKET_ASSIGNEE_CHANGED/
+  // TICKET_STATUS_CHANGED) already updates `assignedAgent`/`status`
+  // regardless of which control triggered the change, so no extra
+  // state-sync code is needed here beyond the two booleans guarding
+  // against a duplicate submit.
+  const [assigningToMe, setAssigningToMe] = useState(false);
+  const [resolveConfirmOpen, setResolveConfirmOpen] = useState(false);
+  const [resolving, setResolving] = useState(false);
+
   const handleEvent = useCallback(
     (event: TicketRealtimeEvent) => {
       switch (event.type) {
@@ -313,6 +326,61 @@ export function TicketDetailClient({
 
   // True when this user is allowed to cancel and the ticket is still open
   const canCancelNow = (isAdmin || isRequester) && !cancelReasonId && !status.isClosed;
+
+  // "Resolved" has no canonical/terminal flag in this data model — found by
+  // name within this department's own already-fetched `statuses` list,
+  // same lookup convention already used elsewhere (e.g. the dashboard
+  // route). Gracefully absent (button hidden) if a department renamed or
+  // never created a status literally named "Resolved".
+  const resolvedStatus = statuses.find((s) => s.name === "Resolved") ?? null;
+  const isAssignedToMe = assignedAgent?.id === currentUserId;
+  // Mirrors the Assign Agent dialog's own `agents` option list (the
+  // department-scoped, eligible-assignee set already resolved
+  // server-side) — hides the button instead of letting a user who holds
+  // ticket.assign but lacks ticket.assignable in this department hit a
+  // 400 assignee_not_assignable after clicking. Deliberately NOT gated on
+  // isAdmin — these two retain their own existing authorization/visibility
+  // rules regardless of which card displays them.
+  const canAssignToMe = canAssign && !isAssignedToMe && agents.some((a) => a.id === currentUserId);
+  const canResolveNow = canChangeStatus && !!resolvedStatus && status.id !== resolvedStatus.id;
+
+  const handleAssignToMe = async () => {
+    setAssigningToMe(true);
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}/assign`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assignedAgentId: currentUserId }),
+      });
+      if (!res.ok) throw new Error("Request failed");
+      toast.success("Assignment updated");
+      // Real-time SSE event (TICKET_ASSIGNEE_CHANGED) updates `assignedAgent` — no router.refresh() needed
+    } catch {
+      toast.error("Failed to update assignment");
+    } finally {
+      setAssigningToMe(false);
+    }
+  };
+
+  const handleResolve = async () => {
+    if (!resolvedStatus) return;
+    setResolving(true);
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ statusId: resolvedStatus.id }),
+      });
+      if (!res.ok) throw new Error("Request failed");
+      toast.success("Status updated");
+      setResolveConfirmOpen(false);
+      // Real-time SSE event (TICKET_STATUS_CHANGED) updates `status` — no router.refresh() needed
+    } catch {
+      toast.error("Failed to update status");
+    } finally {
+      setResolving(false);
+    }
+  };
 
   // Build the ticket object TicketActions expects (synced to live state)
   const ticketForActions = {
@@ -560,14 +628,65 @@ export function TicketDetailClient({
           </Card>
         )}
 
-        {/* Admin destructive actions */}
-        {isAdmin && (
+        {/* Admin Actions — Delete/Cancel stay strictly admin-only (gated
+            individually below); Assign to me/Resolve retain their own
+            pre-existing authorization/visibility rules (canAssignToMe/
+            canResolveNow) regardless of admin status, so this card is now
+            shown to any eligible user, not just admins. */}
+        {(isAdmin || canAssignToMe || canResolveNow) && (
           <Card className="border-destructive/30">
             <CardHeader className="pb-3">
               <CardTitle className="text-sm text-destructive">Admin Actions</CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
-              {canCancelNow && (
+              {(canAssignToMe || canResolveNow) && (
+                <div className="flex gap-2">
+                  {canAssignToMe && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="flex-1 justify-start gap-2"
+                      onClick={handleAssignToMe}
+                      disabled={assigningToMe}
+                    >
+                      {assigningToMe ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <UserPlus className="h-3.5 w-3.5" />
+                      )}
+                      Assign to me
+                    </Button>
+                  )}
+                  {canResolveNow && (
+                    <Dialog open={resolveConfirmOpen} onOpenChange={setResolveConfirmOpen}>
+                      <DialogTrigger asChild>
+                        <Button variant="outline" size="sm" className="flex-1 justify-start gap-2">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          Resolve
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent>
+                        <DialogHeader>
+                          <DialogTitle>Resolve this ticket?</DialogTitle>
+                        </DialogHeader>
+                        <p className="text-sm text-muted-foreground py-2">
+                          This sets the status to <span className="font-medium text-foreground">Resolved</span>. The ticket stays open and can still be updated afterward.
+                        </p>
+                        <DialogFooter>
+                          <Button variant="outline" onClick={() => setResolveConfirmOpen(false)} disabled={resolving}>
+                            Cancel
+                          </Button>
+                          <Button onClick={handleResolve} disabled={resolving}>
+                            {resolving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+                            Resolve
+                          </Button>
+                        </DialogFooter>
+                      </DialogContent>
+                    </Dialog>
+                  )}
+                </div>
+              )}
+              {isAdmin && canCancelNow && (
                 <Button
                   variant="outline"
                   size="sm"
@@ -580,6 +699,7 @@ export function TicketDetailClient({
                   Cancel Ticket
                 </Button>
               )}
+              {isAdmin && (
               <Button
                 variant="destructive"
                 size="sm"
@@ -589,6 +709,7 @@ export function TicketDetailClient({
                 <Trash2 className="h-3.5 w-3.5 mr-1.5" />
                 Delete Ticket
               </Button>
+              )}
             </CardContent>
           </Card>
         )}

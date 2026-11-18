@@ -135,3 +135,53 @@ export function resolvesInsideDir(filePath: string, expectedDir: string): boolea
 export function entityAttachmentDir(subdir: "activities" | "projects", entityId: string): string {
   return path.join(UPLOAD_DIR, subdir, entityId);
 }
+
+/**
+ * RFC 6266 / RFC 5987-compliant `Content-Disposition` header value for a
+ * download, built from an uploader/sender-controlled `originalName` —
+ * untrusted free text that may contain ANY Unicode codepoint (Greek, CJK,
+ * emoji, U+202F NARROW NO-BREAK SPACE, etc.).
+ *
+ * THE BUG THIS FIXES: the WHATWG Fetch/Headers spec requires every header
+ * VALUE to be a ByteString (every UTF-16 code unit in 0-255) — setting a
+ * header containing even one character above U+00FF throws
+ * `TypeError: Cannot convert argument to a ByteString because the
+ * character at index N has a value of <code point> which is greater than
+ * 255` the moment `new NextResponse(...)` tries to construct the Headers
+ * object, crashing the whole route before any bytes are sent (confirmed in
+ * production: a PNG named with a Greek/Latin mix including U+202F). Every
+ * ticket/project/activity attachment download route previously built this
+ * header with `attachment.originalName.replace(/[\r\n"]/g, "_")` for the
+ * plain `filename="..."` parameter — that only ever stripped CR/LF/quotes,
+ * never any OTHER non-Latin-1 character, so any real non-ASCII original
+ * filename reached the header construction unmodified and crashed it.
+ *
+ * Fix, per RFC 6266 §4.3 / RFC 5987 (the two-parameter pattern every modern
+ * browser already supports):
+ *   - `filename="..."` is now a SAFE, PURE-ASCII fallback (every byte in
+ *     the printable 0x20-0x7E range) for a client that only understands
+ *     the plain parameter — any other character (Greek, CJK, U+202F, …)
+ *     is replaced with "_"; the quoted-string's own two special
+ *     characters (`"` and `\`) are *escaped* (`\"`/`\\`), not merely
+ *     stripped, so a filename legitimately containing them still displays
+ *     sensibly instead of being silently mangled.
+ *   - `filename*=UTF-8''...` carries the REAL, full-Unicode original name
+ *     as a percent-encoded UTF-8 octet sequence (RFC 5987) —
+ *     `encodeURIComponent`'s output is always pure ASCII, so this half was
+ *     never actually the cause of the crash; every modern browser prefers
+ *     filename* over filename when both are present, so the user-visible
+ *     saved filename is unaffected for any realistic client.
+ *   - Control characters (0x00-0x1F, 0x7F — the existing CR/LF
+ *     header-injection guard) are stripped from BOTH parameters up front,
+ *     not just the ASCII fallback as before.
+ */
+export function buildContentDispositionHeader(originalName: string): string {
+  const controlCharsStripped = originalName.replace(/[\x00-\x1f\x7f]/g, "");
+  const asciiFallback =
+    controlCharsStripped
+      .replace(/[^\x20-\x7e]/g, "_")
+      .replace(/["\\]/g, (c) => `\\${c}`)
+      .trim() || "download";
+  const utf8Encoded = encodeURIComponent(controlCharsStripped);
+  return `attachment; filename="${asciiFallback}"; filename*=UTF-8''${utf8Encoded}`;
+}

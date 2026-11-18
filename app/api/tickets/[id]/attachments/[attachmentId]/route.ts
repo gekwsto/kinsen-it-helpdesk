@@ -4,7 +4,7 @@ import fs from "fs/promises";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { canViewTicket } from "@/lib/services/department-scope-service";
-import { UPLOAD_DIR, isSafeStoredFilename, resolvesInsideDir } from "@/lib/attachment-policy";
+import { UPLOAD_DIR, isSafeStoredFilename, resolvesInsideDir, buildContentDispositionHeader } from "@/lib/attachment-policy";
 
 /**
  * Authenticated attachment download — the ONLY way to read an attachment's
@@ -84,18 +84,18 @@ export async function GET(
       return NextResponse.json({ error: "File not found" }, { status: 404 });
     }
 
-    // originalName is sender/uploader-controlled free text — strip control
-    // characters (CR/LF header-injection, in particular) before it ever
-    // reaches a response header; the visible download filename otherwise
+    // originalName is sender/uploader-controlled free text and may contain
+    // any Unicode codepoint (Greek, CJK, U+202F, …) — buildContentDispositionHeader
+    // builds an RFC 6266/5987-compliant value (ASCII fallback + UTF-8
+    // extended parameter) so the Headers constructor never throws a
+    // ByteString TypeError; the visible download filename otherwise
     // remains exactly what was uploaded/emailed in.
-    const safeDownloadName = attachment.originalName.replace(/[\r\n"]/g, "_");
-
     return new NextResponse(new Uint8Array(bytes), {
       status: 200,
       headers: {
         "Content-Type": attachment.mimeType || "application/octet-stream",
         "Content-Length": String(bytes.length),
-        "Content-Disposition": `attachment; filename="${safeDownloadName}"; filename*=UTF-8''${encodeURIComponent(attachment.originalName)}`,
+        "Content-Disposition": buildContentDispositionHeader(attachment.originalName),
         "Cache-Control": "private, no-store",
       },
     });
