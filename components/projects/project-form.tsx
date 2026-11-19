@@ -861,14 +861,6 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label>Estimated Cost Notes</Label>
-                  <Input
-                    placeholder="Optional notes…"
-                    value={facilitiesEstimatedCostNotes}
-                    onChange={(e) => setFacilitiesEstimatedCostNotes(e.target.value)}
-                  />
-                </div>
-                <div className="space-y-2">
                   <Label>Actual Cost (EUR)</Label>
                   <Input
                     type="number"
@@ -879,12 +871,24 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                     onChange={(e) => setFacilitiesActualCost(e.target.value)}
                   />
                 </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Estimated Cost Notes</Label>
+                  <Textarea
+                    placeholder="Optional notes…"
+                    value={facilitiesEstimatedCostNotes}
+                    onChange={(e) => setFacilitiesEstimatedCostNotes(e.target.value)}
+                    className="min-h-[100px]"
+                  />
+                </div>
                 <div className="space-y-2">
                   <Label>Actual Cost Notes</Label>
-                  <Input
+                  <Textarea
                     placeholder="Optional notes…"
                     value={facilitiesActualCostNotes}
                     onChange={(e) => setFacilitiesActualCostNotes(e.target.value)}
+                    className="min-h-[100px]"
                   />
                 </div>
               </div>

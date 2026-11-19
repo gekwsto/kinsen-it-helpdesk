@@ -558,15 +558,6 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="facilitiesEstimatedCostNotes">Estimated Cost Notes</Label>
-                    <Input
-                      id="facilitiesEstimatedCostNotes"
-                      placeholder="Optional notes…"
-                      value={facilitiesEstimatedCostNotes}
-                      onChange={(e) => setFacilitiesEstimatedCostNotes(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-2">
                     <Label htmlFor="facilitiesActualCost">Actual Cost (EUR)</Label>
                     <Input
                       id="facilitiesActualCost"
@@ -578,13 +569,26 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                       onChange={(e) => setFacilitiesActualCost(e.target.value)}
                     />
                   </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesEstimatedCostNotes">Estimated Cost Notes</Label>
+                    <Textarea
+                      id="facilitiesEstimatedCostNotes"
+                      placeholder="Optional notes…"
+                      value={facilitiesEstimatedCostNotes}
+                      onChange={(e) => setFacilitiesEstimatedCostNotes(e.target.value)}
+                      className="min-h-[100px]"
+                    />
+                  </div>
                   <div className="space-y-2">
                     <Label htmlFor="facilitiesActualCostNotes">Actual Cost Notes</Label>
-                    <Input
+                    <Textarea
                       id="facilitiesActualCostNotes"
                       placeholder="Optional notes…"
                       value={facilitiesActualCostNotes}
                       onChange={(e) => setFacilitiesActualCostNotes(e.target.value)}
+                      className="min-h-[100px]"
                     />
                   </div>
                 </div>

@@ -530,32 +530,40 @@ export default async function ProjectDetailPage({
                 </p>
 
                 {hasFacilitiesCostData && (
-                  <div className="space-y-2">
+                  <div className="space-y-3">
                     {project.projectRequest && <p className="text-xs font-medium text-muted-foreground">Facilities Costs (Manual Entry)</p>}
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      {(project.facilitiesEstimatedCost !== null || project.facilitiesEstimatedCostNotes) && (
-                        <div>
-                          <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
-                          {project.facilitiesEstimatedCost !== null && (
+                    {(project.facilitiesEstimatedCost !== null || project.facilitiesActualCost !== null) && (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {project.facilitiesEstimatedCost !== null && (
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Estimated Cost</p>
                             <p className="font-medium">{formatEUR(Number(project.facilitiesEstimatedCost))}</p>
-                          )}
-                          {project.facilitiesEstimatedCostNotes && (
-                            <p className="text-xs text-muted-foreground mt-0.5">{project.facilitiesEstimatedCostNotes}</p>
-                          )}
-                        </div>
-                      )}
-                      {(project.facilitiesActualCost !== null || project.facilitiesActualCostNotes) && (
-                        <div>
-                          <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
-                          {project.facilitiesActualCost !== null && (
+                          </div>
+                        )}
+                        {project.facilitiesActualCost !== null && (
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Actual Cost</p>
                             <p className="font-medium">{formatEUR(Number(project.facilitiesActualCost))}</p>
-                          )}
-                          {project.facilitiesActualCostNotes && (
-                            <p className="text-xs text-muted-foreground mt-0.5">{project.facilitiesActualCostNotes}</p>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {(project.facilitiesEstimatedCostNotes || project.facilitiesActualCostNotes) && (
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {project.facilitiesEstimatedCostNotes && (
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Estimated Cost Notes</p>
+                            <p className="text-xs text-muted-foreground whitespace-pre-wrap">{project.facilitiesEstimatedCostNotes}</p>
+                          </div>
+                        )}
+                        {project.facilitiesActualCostNotes && (
+                          <div>
+                            <p className="text-xs text-muted-foreground mb-1">Actual Cost Notes</p>
+                            <p className="text-xs text-muted-foreground whitespace-pre-wrap">{project.facilitiesActualCostNotes}</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
