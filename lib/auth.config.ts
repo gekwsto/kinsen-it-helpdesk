@@ -33,22 +33,34 @@ const PUBLIC_PATHS = [
   "/auth/sso-entry",
 ];
 
-// Exact-pathname bypass, checked separately from PUBLIC_PATHS's
-// startsWith() matching on purpose — a startsWith("/api/integrations")
+// Precise PATTERN bypass (never a startsWith()/prefix match) — checked
+// separately from PUBLIC_PATHS on purpose. A startsWith("/api/integrations")
 // entry would also make /api/admin/integrations* "public" at this layer
 // (admin integration management must stay session + integration.manage
-// protected, see app/api/admin/integrations/**). "Public" here means only
-// "skip the NextAuth browser-session redirect" — the route itself still
-// requires and strictly verifies its own server-to-server Bearer API key
-// (see verifyIntegrationKey in lib/services/integration-key-service.ts);
-// it is never unauthenticated. A session-less/invalid-key/disabled-
-// integration request must get this endpoint's own JSON error contract
-// (401/403/etc.), never an HTML /login redirect — Postman (and any real
-// integration caller) auto-following a redirect to a 200 HTML login page
-// is exactly the bug this fixes.
-const PUBLIC_API_TRANSPORT_PATHS = new Set<string>([
-  "/api/integrations/tickets",
-]);
+// protected, see app/api/admin/integrations/**), which is exactly why each
+// pattern below is anchored (^...$) and uses [^/]+ for the one dynamic
+// segment — it can only ever match these two exact external-integration
+// endpoints, never a sibling /api/admin/integrations/** path, and never an
+// arbitrary deeper sub-path. "Public" here means only "skip the NextAuth
+// browser-session redirect" — each route still independently requires and
+// strictly verifies its own server-to-server Bearer API key (see
+// verifyIntegrationKey in lib/services/integration-key-service.ts); it is
+// never unauthenticated. A session-less/invalid-key/disabled-integration
+// request must get that endpoint's own JSON error contract (401/403/etc.),
+// never an HTML /login redirect — Postman (and any real integration caller)
+// auto-following a redirect to a 200 HTML login page is exactly the bug
+// this guards against.
+//
+// POST /api/integrations/tickets/{ticketId}/attachments was added to this
+// app WITHOUT a matching entry here — a real gap, caught only by adding
+// live-HTTP-through-the-real-middleware coverage (see
+// scripts/test-integration-middleware-bypass.ts), never by a route-handler
+// unit test alone, since the failure happens before the route handler is
+// ever reached.
+const PUBLIC_API_TRANSPORT_PATH_PATTERNS: RegExp[] = [
+  /^\/api\/integrations\/tickets$/,
+  /^\/api\/integrations\/tickets\/[^/]+\/attachments$/,
+];
 
 const TENANT_ID = process.env.AUTH_MICROSOFT_ENTRA_ID_TENANT_ID;
 
@@ -129,7 +141,7 @@ export const authConfig = {
         nextUrl.pathname.startsWith(p)
       );
       if (isPublic) return true;
-      if (PUBLIC_API_TRANSPORT_PATHS.has(nextUrl.pathname)) return true;
+      if (PUBLIC_API_TRANSPORT_PATH_PATTERNS.some((pattern) => pattern.test(nextUrl.pathname))) return true;
 
       if (!isLoggedIn) {
         // `auth` resolves to `null` for BOTH "never signed in" and "signed

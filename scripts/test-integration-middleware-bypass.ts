@@ -9,6 +9,16 @@
  * `authorized()` callback, the actual decision function NextAuth's
  * middleware invokes for every request.
  *
+ * ALSO covers a second instance of the SAME bug class found later: POST
+ * /api/integrations/tickets/{ticketId}/attachments was added without a
+ * matching middleware bypass entry at all — every real HTTP call to it
+ * would have been redirected to /login exactly like the original
+ * incident, undetected by the attachment route's own (route-handler-only)
+ * test suite. Fixed by converting the bypass list from exact-string
+ * matches to precise, anchored regex patterns (lib/auth.config.ts's
+ * PUBLIC_API_TRANSPORT_PATH_PATTERNS) — still never a prefix/startsWith
+ * match, so /api/admin/integrations/** remains fully protected.
+ *
  * Two layers of proof:
  *
  *  1. Direct tests of `authorized()` itself — the real decision logic, not
@@ -147,6 +157,33 @@ async function main() {
     !(await isAuthorized("/api/integrations", false))
   );
 
+  // The attachment endpoint's own pattern — this is the second, later-
+  // discovered instance of the bug this whole file exists to catch.
+  check(
+    "POST /api/integrations/tickets/{id}/attachments IS bypassed with NO session (the later-discovered gap)",
+    await isAuthorized("/api/integrations/tickets/cm0abc123xyz/attachments", false)
+  );
+  check(
+    "The attachments bypass holds for any single ticketId segment, not a hardcoded id",
+    await isAuthorized("/api/integrations/tickets/some-other-ticket-id/attachments", false)
+  );
+  check(
+    "/api/admin/integrations/{id}/attachments (lookalike, admin prefix) is NOT granted bypass",
+    !(await isAuthorized("/api/admin/integrations/abc123/attachments", false))
+  );
+  check(
+    "A path with an EXTRA nested segment (/api/integrations/tickets/abc/extra/attachments) is NOT granted bypass — [^/]+ only matches ONE segment",
+    !(await isAuthorized("/api/integrations/tickets/abc/extra/attachments", false))
+  );
+  check(
+    "/api/integrations/tickets/{id} with no trailing /attachments is NOT granted bypass",
+    !(await isAuthorized("/api/integrations/tickets/abc123", false))
+  );
+  check(
+    "/api/integrations/tickets/{id}/attachmentsomethingelse (lookalike suffix) is NOT granted bypass — exact segment match",
+    !(await isAuthorized("/api/integrations/tickets/abc123/attachmentsomethingelse", false))
+  );
+
   // Pre-existing public paths — untouched by this fix, confirmed as a
   // regression guard.
   check("/login remains public", await isAuthorized("/login", false));
@@ -188,6 +225,29 @@ async function main() {
     ]);
     check("Invalid key -> 401 JSON, not HTML", badKey?.status === 401 && !!badKey?.headers["content-type"]?.includes("application/json"));
 
+    // Attachment endpoint, through the REAL live server — the exact gap
+    // this round's fix closes. A fake ticket id is fine here: the
+    // assertion is that the MIDDLEWARE lets the request reach the route
+    // handler at all (no redirect), not what the handler then does with
+    // an id that doesn't exist.
+    const attachNoAuth = curlFull([
+      "-X", "POST", `${BASE_URL}/api/integrations/tickets/fake-ticket-id-${RUN_ID}/attachments`,
+      "-H", "Content-Type: multipart/form-data; boundary=----mwtest",
+      "--data-binary", "------mwtest--\r\n",
+    ]);
+    check("Attachments, no Authorization header -> first hop is 401 (not 307/302)", attachNoAuth?.status === 401);
+    check("Attachments, no Authorization header -> Content-Type is application/json", !!attachNoAuth?.headers["content-type"]?.includes("application/json"));
+    check("Attachments, no Authorization header -> no Location header (not a redirect)", !attachNoAuth?.headers["location"]);
+    check('Attachments, no Authorization header -> body is the JSON error contract (code: "invalid_api_key")', (() => {
+      try { return JSON.parse(attachNoAuth!.body).code === "invalid_api_key"; } catch { return false; }
+    })());
+
+    const attachBadKey = curlFull([
+      "-X", "POST", `${BASE_URL}/api/integrations/tickets/fake-ticket-id-${RUN_ID}/attachments`,
+      "-H", "Authorization: Bearer tkint_not_a_real_key",
+    ]);
+    check("Attachments, invalid key -> 401 JSON, not HTML", attachBadKey?.status === 401 && !!attachBadKey?.headers["content-type"]?.includes("application/json"));
+
     // Admin routes: still real redirects to /login (session-protected,
     // unaffected by this fix).
     const adminList = curlHeadersOnly([`${BASE_URL}/api/admin/integrations`]);
@@ -198,6 +258,9 @@ async function main() {
 
     const adminRotate = curlHeadersOnly(["-X", "POST", `${BASE_URL}/api/admin/integrations/abc123/rotate`]);
     check("POST /api/admin/integrations/[id]/rotate (no session) -> 307 redirect to /login", adminRotate?.status === 307 && !!adminRotate?.headers["location"]?.startsWith("/login"));
+
+    const adminAttachmentsLookalike = curlHeadersOnly(["-X", "POST", `${BASE_URL}/api/admin/integrations/abc123/attachments`]);
+    check("Lookalike /api/admin/integrations/[id]/attachments (no session) -> still 307 redirect to /login", adminAttachmentsLookalike?.status === 307 && !!adminAttachmentsLookalike?.headers["location"]?.startsWith("/login"));
 
     const unrelatedApi = curlHeadersOnly([`${BASE_URL}/api/tickets`]);
     check("GET /api/tickets (unrelated, no session) -> still 307 redirect to /login (matcher not broadened)", unrelatedApi?.status === 307 && !!unrelatedApi?.headers["location"]?.startsWith("/login"));

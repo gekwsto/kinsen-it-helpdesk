@@ -43,8 +43,24 @@ export const MAX_INTEGRATION_METADATA_BYTES = 10 * 1024;
 export const createIntegrationTicketSchema = z
   .object({
     externalReferenceId: z.string().trim().min(1, "externalReferenceId is required").max(200),
+    // Always required, unchanged — kept even when requesterMicrosoftUserId
+    // is also supplied (see below). Backward-compatible by construction:
+    // an existing integration that has never heard of Entra identity
+    // fields sends exactly what it always has and nothing about its
+    // behavior changes.
     requesterEmail: z.string().trim().email("requesterEmail must be a valid email address").max(320),
     requesterName: z.string().trim().min(1).max(200).optional(),
+    // Entra `oid`/`tid` claims — optional, and only meaningful together.
+    // See lib/services/requester-resolution-service.ts's
+    // resolveOrCreateRequesterByEntraIdentity for how these are used:
+    // oid becomes the PRIMARY identity signal (not email) once present,
+    // with requesterEmail kept as a corroborating signal and as the
+    // fallback/bootstrap path. Entra oid/tid are always GUIDs, hence the
+    // length bound — not a strict format check, since this app has no
+    // other precedent for rejecting a slightly-malformed GUID string
+    // outright rather than just failing the lookup it's used for.
+    requesterMicrosoftUserId: z.string().trim().min(1).max(100).optional(),
+    requesterTenantId: z.string().trim().min(1).max(100).optional(),
     // Same lower bound as createTicketSchema above. The upper bound is new
     // here (createTicketSchema has none) — a human typing in the WEB form
     // self-limits in practice, but an external API caller doesn't, so this
@@ -103,7 +119,16 @@ export const createIntegrationTicketSchema = z
         { message: `metadata must not exceed ${MAX_INTEGRATION_METADATA_BYTES} bytes when serialized` }
       ),
   })
-  .strict();
+  .strict()
+  // An oid with no tenant to validate it against is not a usable identity
+  // signal on its own — tid is what lets the route confirm the oid comes
+  // from OUR configured Entra tenant before ever using it to resolve a
+  // User. Enforced here (422, same as every other field-shape error on
+  // this endpoint) rather than deeper in the resolution logic.
+  .refine((data) => !data.requesterMicrosoftUserId || !!data.requesterTenantId, {
+    message: "requesterTenantId is required when requesterMicrosoftUserId is supplied",
+    path: ["requesterTenantId"],
+  });
 
 export type CreateIntegrationTicketInput = z.infer<typeof createIntegrationTicketSchema>;
 

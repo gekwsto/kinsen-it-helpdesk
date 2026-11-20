@@ -8,14 +8,14 @@
  * Bearer-token authenticated, not session-cookie authenticated, so there's
  * no browser/cookie state to fake, unlike most of this app's other routes.
  *
- * Usage: npx tsx scripts/test-integration-tickets-api.ts
+ * Usage: node --require ./scripts/test-support-server-only-stub.cjs --experimental-test-module-mocks --import tsx scripts/test-integration-tickets-api.ts
  * Requires a reachable DATABASE_URL and INTEGRATION_KEY_PEPPER — reports
  * clearly and exits if either is missing.
  */
+import { mock } from "node:test";
 import { NextRequest } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { Prisma } from "@prisma/client";
-import { POST as integrationTicketsPOST } from "@/app/api/integrations/tickets/route";
 import { generateIntegrationKey } from "@/lib/services/integration-key-service";
 import {
   ensureStatusForDepartment,
@@ -23,6 +23,8 @@ import {
   ensurePriorityForDepartment,
   STARTER_STATUSES,
 } from "@/lib/services/config-starter-data";
+
+let integrationTicketsPOST: (req: NextRequest) => Promise<Response>;
 
 let passed = 0;
 let failed = 0;
@@ -56,6 +58,20 @@ async function callEndpoint(token: string | null, body: unknown) {
 const RUN_ID = Date.now();
 
 async function main() {
+  // next/server's after() requires a real Next.js request-scoped
+  // AsyncLocalStorage context that only exists inside an actual running
+  // Next.js server — calling it from a plain script throws. Unrelated to
+  // what this suite tests (ticket-creation persistence/idempotency); stub
+  // it to a no-op, same convention as scripts/test-web-ticket-creation-
+  // regression.ts. Must run BEFORE the route module is ever imported, so
+  // the route itself is loaded dynamically here instead of via a static
+  // top-level import.
+  const realNextServer = await import("next/server");
+  mock.module("next/server", {
+    namedExports: { ...realNextServer, after: (_cb: () => unknown) => {} },
+  });
+  ({ POST: integrationTicketsPOST } = await import("@/app/api/integrations/tickets/route"));
+
   try {
     await prisma.$connect();
   } catch (err) {
@@ -178,7 +194,10 @@ async function main() {
         metadata: { vehicleId: 99114, plate: "ABC1234" },
       });
       check("Valid request -> 201 created:true", status === 201 && json.success === true && json.created === true);
-      check("Response has ticket id/ticketNumber/url", !!json.ticket?.id && !!json.ticket?.ticketNumber && json.ticket?.url === `/tickets/${json.ticket.id}`);
+      check(
+        "Response has ticket id/ticketNumber/absolute url built from APP_URL",
+        !!json.ticket?.id && !!json.ticket?.ticketNumber && json.ticket?.url === `${process.env.APP_URL || "http://localhost:3000"}/tickets/${json.ticket.id}`
+      );
       firstTicketId = json.ticket?.id;
       if (firstTicketId) ticketIds.push(firstTicketId);
     }

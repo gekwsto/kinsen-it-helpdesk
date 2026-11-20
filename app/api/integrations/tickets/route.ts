@@ -4,7 +4,12 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { apiError, zodErrorResponse, internalErrorResponse } from "@/lib/api-errors";
 import { extractBearerToken, verifyIntegrationKey, IntegrationPepperMissingError } from "@/lib/services/integration-key-service";
-import { resolveOrCreateRequester } from "@/lib/services/requester-resolution-service";
+import {
+  resolveOrCreateRequester,
+  resolveOrCreateRequesterByEntraIdentity,
+  EntraTenantMismatchError,
+  EntraIdentityConflictError,
+} from "@/lib/services/requester-resolution-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { isDepartmentAcceptingTickets } from "@/lib/services/department-scope-service";
 import { notifyDepartmentOfNewTicket } from "@/lib/ticket-notification-service";
@@ -13,6 +18,8 @@ import {
   resolveIntegrationTicketDefaults,
 } from "@/lib/services/ticket-creation-service";
 import { createIntegrationTicketSchema, type CreateIntegrationTicketInput } from "@/lib/validations";
+import { resolveAppOrigin, AppUrlMisconfiguredError } from "@/lib/services/app-url-service";
+import { checkIntegrationRateLimit } from "@/lib/services/integration-rate-limiter";
 
 // Comfortably above the worst-case sum of every bounded field (title 200 +
 // description 50,000 + requesterEmail 320 + requesterName 200 + sourceUrl
@@ -32,8 +39,15 @@ const MAX_REQUEST_BODY_BYTES = 128 * 1024;
 
 type TicketResponseShape = { id: string; ticketNumber: number; url: string };
 
-function toTicketResponse(ticket: { id: string; ticketNumber: number }): TicketResponseShape {
-  return { id: ticket.id, ticketNumber: ticket.ticketNumber, url: `/tickets/${ticket.id}` };
+function toTicketResponse(ticket: { id: string; ticketNumber: number }, appOrigin: string): TicketResponseShape {
+  return { id: ticket.id, ticketNumber: ticket.ticketNumber, url: new URL(`/tickets/${ticket.id}`, appOrigin).toString() };
+}
+
+function rateLimitedResponse(retryAfterSeconds: number) {
+  return NextResponse.json(apiError("rate_limited", "Too many requests. Please slow down and retry later."), {
+    status: 429,
+    headers: { "Retry-After": String(retryAfterSeconds) },
+  });
 }
 
 /**
@@ -148,6 +162,23 @@ export async function POST(req: NextRequest) {
     }
     const integration = verification.integration;
 
+    // Applied ONLY after a successfully verified key — an invalid/unknown
+    // key is rejected above and never reaches this check, so the limiter's
+    // state can never be grown by unauthenticated/bad-key attempts (see
+    // lib/services/integration-rate-limiter.ts's own doc comment).
+    const rateLimit = checkIntegrationRateLimit(integration.id, "ticket_creation");
+    if (!rateLimit.allowed) {
+      return rateLimitedResponse(rateLimit.retryAfterSeconds);
+    }
+
+    // Validated BEFORE any ticket is created (not lazily when building the
+    // response) — a misconfigured APP_URL must never let a request create
+    // a real ticket and only then fail because its own URL can't be
+    // built. Thrown error is caught by this function's outer catch below
+    // and mapped to a controlled 503, same contract as a missing
+    // INTEGRATION_KEY_PEPPER.
+    const appOrigin = resolveAppOrigin();
+
     const declaredLength = Number(req.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
       return NextResponse.json(apiError("validation_failed", "Request body is too large."), { status: 413 });
@@ -213,7 +244,7 @@ export async function POST(req: NextRequest) {
       const conflicts = findIdempotencyConflicts(data, existingTicket);
       if (conflicts.length > 0) return conflictResponse(conflicts);
       return NextResponse.json(
-        { success: true, created: false, ticket: toTicketResponse(existingTicket) },
+        { success: true, created: false, ticket: toTicketResponse(existingTicket, appOrigin) },
         { status: 200 }
       );
     }
@@ -262,7 +293,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(apiError(defaults.code, defaults.message, field ? { field } : undefined), { status: 422 });
     }
 
-    const requester = await resolveOrCreateRequester(data.requesterEmail, data.requesterName);
+    // Entra-identity-aware resolution ONLY when the request supplies
+    // requesterMicrosoftUserId (the schema already requires
+    // requesterTenantId alongside it — see createIntegrationTicketSchema).
+    // Every existing integration that has never heard of these fields
+    // takes the exact same resolveOrCreateRequester(email, name) path it
+    // always has — zero behavior change for them.
+    const requester = data.requesterMicrosoftUserId
+      ? await resolveOrCreateRequesterByEntraIdentity({
+          microsoftUserId: data.requesterMicrosoftUserId,
+          tenantId: data.requesterTenantId!,
+          rawEmail: data.requesterEmail,
+          rawName: data.requesterName,
+        })
+      : await resolveOrCreateRequester(data.requesterEmail, data.requesterName);
 
     try {
       const ticket = await createTicketAtomic(
@@ -295,7 +339,7 @@ export async function POST(req: NextRequest) {
       after(() => notifyDepartmentOfNewTicket({ ticketId: ticket.id }));
 
       return NextResponse.json(
-        { success: true, created: true, ticket: toTicketResponse(ticket) },
+        { success: true, created: true, ticket: toTicketResponse(ticket, appOrigin) },
         { status: 201 }
       );
     } catch (error) {
@@ -318,7 +362,7 @@ export async function POST(req: NextRequest) {
           const conflicts = findIdempotencyConflicts(data, winner);
           if (conflicts.length > 0) return conflictResponse(conflicts);
           return NextResponse.json(
-            { success: true, created: false, ticket: toTicketResponse(winner) },
+            { success: true, created: false, ticket: toTicketResponse(winner, appOrigin) },
             { status: 200 }
           );
         }
@@ -333,6 +377,36 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         apiError("configuration_required", "Integration authentication is not configured on this server."),
         { status: 503 }
+      );
+    }
+    if (error instanceof AppUrlMisconfiguredError) {
+      // Thrown by resolveAppOrigin() BEFORE any ticket is created (see its
+      // call site above) — a request can never create a ticket and then
+      // fail to report its URL. Never echoes the raw internal reason
+      // (which may restate the misconfigured value) to the caller.
+      return NextResponse.json(
+        apiError("configuration_required", "This server's public URL is not configured correctly. Contact the TicketApp administrator."),
+        { status: 503 }
+      );
+    }
+    if (error instanceof EntraTenantMismatchError) {
+      return NextResponse.json(
+        apiError("tenant_mismatch", "requesterTenantId does not match this server's configured Entra tenant.", { field: "requesterTenantId" }),
+        { status: 422 }
+      );
+    }
+    if (error instanceof EntraIdentityConflictError) {
+      // Never created by this request — no ticket, no partial write. The
+      // caller (or a human reviewing the AI Agent's logs) needs to
+      // reconcile which signal is stale/wrong; TicketApp never guesses.
+      const field = error.reason === "oid_linked_to_different_email" ? "requesterMicrosoftUserId" : "requesterEmail";
+      return NextResponse.json(
+        apiError(
+          "requester_identity_conflict",
+          "requesterMicrosoftUserId and requesterEmail resolve to two different existing identities — this request was rejected rather than guessing which one is correct.",
+          { field, fieldErrors: { [field]: error.reason } }
+        ),
+        { status: 409 }
       );
     }
     return internalErrorResponse();
