@@ -233,6 +233,38 @@ async function main() {
     const readLegacyDirector = await prisma.user.findUnique({ where: { id: legacyDirectorUser.id } });
     check("14. The existing legacy DIRECTOR user remains readable", readLegacyDirector?.role === Role.DIRECTOR);
 
+    // ══════════════ 19. BUG REPRO: a user with BOTH a customRoleId AND a
+    //    ghost base `role` can still be re-saved/deactivated ══════════════
+    // Reproduces the real reported bug: the Block/Unblock toggle (and any
+    // other caller that isn't touching the custom-role dimension at all)
+    // sends `{ role: user.role }` with no `customRoleId` key — this must
+    // be recognized as a no-op purely because `role` itself is unchanged,
+    // regardless of whether the user ALSO happens to have an active
+    // customRoleId set (a completely normal, independent combination —
+    // see the schema: `role` is never null, `customRoleId` is a separate,
+    // optional override). The previous `!current?.customRoleId && ...`
+    // condition wrongly treated that combination as a genuinely NEW plain-
+    // role assignment, so any such user with a ghost base role (like this
+    // DIRECTOR one) could never be deactivated at all.
+    console.log("\n=== 19. A user with customRoleId SET and a ghost base role can still be re-saved/deactivated ===\n");
+    await prisma.user.update({ where: { id: legacyDirectorUser.id }, data: { customRoleId: customRole.id } });
+    const legacyDirectorWithCustomRole = await prisma.user.findUnique({ where: { id: legacyDirectorUser.id } });
+    check("19. Fixture: the legacy DIRECTOR user now also has an active customRoleId", legacyDirectorWithCustomRole?.customRoleId === customRole.id);
+
+    let blockUnblockReproThrew = false;
+    try {
+      // Exact shape of components/admin/user-management.tsx's Block/Unblock
+      // request: only `role` is sent/validated, never `customRoleId`.
+      await assertGlobalRoleAssignable(
+        { role: Role.DIRECTOR },
+        { role: legacyDirectorWithCustomRole!.role, customRoleId: legacyDirectorWithCustomRole!.customRoleId },
+        prisma
+      );
+    } catch {
+      blockUnblockReproThrew = true;
+    }
+    check("19. Re-saving the SAME role for a user who ALSO has a customRoleId set does not throw (the reported bug)", !blockUnblockReproThrew);
+
     let authorizationCrashed = false;
     let viewAll = false;
     let manageProjects = false;
