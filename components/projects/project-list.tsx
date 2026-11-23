@@ -83,6 +83,17 @@ export interface ProjectListItem {
    */
   facilitiesStartLabel?: string | null;
   facilitiesEndLabel?: string | null;
+  /**
+   * Facilities Services Project Scoring — all four pre-formatted
+   * server-side (lib/services/project-scoring-service.ts, the one
+   * canonical calculation; `null` for a non-Facilities Project, or a
+   * Facilities one missing an input — rendered as "Not set" by the
+   * preview below, never a silent blank). Never affects sort/filter.
+   */
+  facilitiesProjectImportanceOverall?: number | null;
+  facilitiesImportanceScoreLabel?: string | null;
+  facilitiesProjectScore?: number | null;
+  facilitiesScoreLabel?: string | null;
 }
 
 interface ProjectListProps {
@@ -380,6 +391,17 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                 />
                 {previewTarget.audience.length > 0 && (
                   <PreviewField label="Audience" value={previewTarget.audience.map((a) => a.name ?? "Unnamed").join(", ")} />
+                )}
+                {previewTarget.facilitiesProjectImportanceOverall !== null && previewTarget.facilitiesProjectImportanceOverall !== undefined && (
+                  <PreviewField
+                    label="Project Scoring"
+                    value={[
+                      `Importance Overall: ${previewTarget.facilitiesProjectImportanceOverall}`,
+                      `Importance Score: ${previewTarget.facilitiesImportanceScoreLabel ?? "Not set"}`,
+                      `Project Score: ${previewTarget.facilitiesProjectScore ?? "Not set"}`,
+                      `Score: ${previewTarget.facilitiesScoreLabel ?? "Not set"}`,
+                    ].join("  ·  ")}
+                  />
                 )}
                 {previewTarget.projectRequest && (
                   <div className="px-4 py-3">

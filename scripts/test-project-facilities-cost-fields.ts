@@ -368,6 +368,10 @@ async function main() {
         isFacilitiesServicesWorkspace: true,
         facilitiesPlannedForAnnualTargets: true,
         facilitiesIsBigProject: false,
+        facilitiesProjectImportanceOverall: null,
+        facilitiesProjectScore: null,
+        facilitiesImportanceScoreLabel: null,
+        facilitiesScoreLabel: null,
       },
     ]);
     const listWb = new ExcelJS.Workbook();
@@ -418,6 +422,10 @@ async function main() {
       isFacilitiesServicesWorkspace: true,
       facilitiesPlannedForAnnualTargets: true,
       facilitiesIsBigProject: true,
+      facilitiesProjectImportanceOverall: null,
+      facilitiesProjectScore: null,
+      facilitiesImportanceScoreLabel: null,
+      facilitiesScoreLabel: null,
       activities: [],
     });
     const detailWb = new ExcelJS.Workbook();

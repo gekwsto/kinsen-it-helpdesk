@@ -171,6 +171,17 @@ export interface ProjectExportRow {
   isFacilitiesServicesWorkspace: boolean;
   facilitiesPlannedForAnnualTargets: boolean;
   facilitiesIsBigProject: boolean;
+  // Project Scoring — the raw persisted inputs plus the two ALREADY-
+  // COMPUTED percentage labels (see lib/services/project-scoring-
+  // service.ts, the one canonical calculation; computed by the calling
+  // route, never here — this module never queries the database). Gated
+  // on isFacilitiesServicesWorkspace the same way as Planned/Big Project
+  // above, for the same reason (a plain Int has no natural "blank"
+  // representation outside the workspace).
+  facilitiesProjectImportanceOverall: number | null;
+  facilitiesProjectScore: number | null;
+  facilitiesImportanceScoreLabel: string | null;
+  facilitiesScoreLabel: string | null;
 }
 
 export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promise<ExcelJS.Buffer> {
@@ -205,6 +216,10 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
     { header: "Actual Cost Notes", key: "facilitiesActualCostNotes", width: 30 },
     { header: "Planned for This Year's Targets", key: "facilitiesPlannedForAnnualTargets", width: 24 },
     { header: "Big Project", key: "facilitiesIsBigProject", width: 14 },
+    { header: "Project Importance Overall", key: "facilitiesProjectImportanceOverall", width: 14 },
+    { header: "Project Importance Score", key: "facilitiesImportanceScoreLabel", width: 16 },
+    { header: "Project Score", key: "facilitiesProjectScore", width: 12 },
+    { header: "Score", key: "facilitiesScoreLabel", width: 12 },
     { header: "Created", key: "createdAt", width: 16 },
     { header: "Description", key: "description", width: 40 },
   ];
@@ -237,6 +252,10 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
         facilitiesActualCostNotes: r.facilitiesActualCostNotes ?? "",
         facilitiesPlannedForAnnualTargets: r.isFacilitiesServicesWorkspace ? (r.facilitiesPlannedForAnnualTargets ? "Yes" : "No") : "",
         facilitiesIsBigProject: r.isFacilitiesServicesWorkspace ? (r.facilitiesIsBigProject ? "Yes" : "No") : "",
+        facilitiesProjectImportanceOverall: r.isFacilitiesServicesWorkspace ? r.facilitiesProjectImportanceOverall ?? "" : "",
+        facilitiesImportanceScoreLabel: r.isFacilitiesServicesWorkspace ? r.facilitiesImportanceScoreLabel ?? "" : "",
+        facilitiesProjectScore: r.isFacilitiesServicesWorkspace ? r.facilitiesProjectScore ?? "" : "",
+        facilitiesScoreLabel: r.isFacilitiesServicesWorkspace ? r.facilitiesScoreLabel ?? "" : "",
         createdAt: r.createdAt,
         description: r.description ?? "",
       })
@@ -291,6 +310,12 @@ export interface ProjectDetailExportData {
   isFacilitiesServicesWorkspace: boolean;
   facilitiesPlannedForAnnualTargets: boolean;
   facilitiesIsBigProject: boolean;
+  // Project Scoring — see ProjectExportRow's own doc comment above for why
+  // these are pre-computed by the caller, never queried here.
+  facilitiesProjectImportanceOverall: number | null;
+  facilitiesProjectScore: number | null;
+  facilitiesImportanceScoreLabel: string | null;
+  facilitiesScoreLabel: string | null;
   activities: {
     title: string;
     status: string;
@@ -370,6 +395,13 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   if (data.isFacilitiesServicesWorkspace) {
     addKeyValueRow(detailsSheet, "Planned for This Year's Targets", data.facilitiesPlannedForAnnualTargets ? "Yes" : "No");
     addKeyValueRow(detailsSheet, "Big Project", data.facilitiesIsBigProject ? "Yes" : "No");
+    // Project Scoring — always shown (never hidden) within the Facilities
+    // Services workspace, each field "Not set" rather than omitted when
+    // missing, same convention as the Project Overview page.
+    addKeyValueRow(detailsSheet, "Project Importance Overall", data.facilitiesProjectImportanceOverall ?? "Not set");
+    addKeyValueRow(detailsSheet, "Project Importance Score", data.facilitiesImportanceScoreLabel ?? "Not set");
+    addKeyValueRow(detailsSheet, "Project Score", data.facilitiesProjectScore ?? "Not set");
+    addKeyValueRow(detailsSheet, "Score", data.facilitiesScoreLabel ?? "Not set");
   }
   addKeyValueRow(detailsSheet, "Progress (%)", data.progress);
   addKeyValueRow(detailsSheet, "Created", data.createdAt);

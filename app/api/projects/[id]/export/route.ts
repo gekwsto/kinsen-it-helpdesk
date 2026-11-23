@@ -4,6 +4,8 @@ import { prisma } from "@/lib/prisma";
 import { hasProjectViewAccess } from "@/lib/services/project-access-service";
 import { buildProjectDetailWorkbook, type ProjectDetailExportData } from "@/lib/services/project-export-service";
 import { getFacilitiesServicesDepartmentId } from "@/lib/services/project-facilities-service";
+import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
+import { formatScorePercent, getImportanceScoreFraction } from "@/lib/project-scoring-shared";
 
 /**
  * "Export to Excel" for a single Project's detail page — reuses
@@ -57,6 +59,10 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   }
 
   const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+  const isFacilitiesServicesWorkspaceForExport = !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId;
+  const facilitiesScorePercentForExport = isFacilitiesServicesWorkspaceForExport
+    ? computeFacilitiesScorePercent(project.facilitiesProjectImportanceOverall, project.facilitiesProjectScore, await getFacilitiesImportanceGroupCounts())
+    : null;
 
   const data: ProjectDetailExportData = {
     title: project.title,
@@ -88,9 +94,13 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     facilitiesEstimatedCostNotes: project.facilitiesEstimatedCostNotes,
     facilitiesActualCost: project.facilitiesActualCost,
     facilitiesActualCostNotes: project.facilitiesActualCostNotes,
-    isFacilitiesServicesWorkspace: !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId,
+    isFacilitiesServicesWorkspace: isFacilitiesServicesWorkspaceForExport,
     facilitiesPlannedForAnnualTargets: project.facilitiesPlannedForAnnualTargets,
     facilitiesIsBigProject: project.facilitiesIsBigProject,
+    facilitiesProjectImportanceOverall: project.facilitiesProjectImportanceOverall,
+    facilitiesProjectScore: project.facilitiesProjectScore,
+    facilitiesImportanceScoreLabel: formatScorePercent(getImportanceScoreFraction(project.facilitiesProjectImportanceOverall)),
+    facilitiesScoreLabel: formatScorePercent(facilitiesScorePercentForExport),
     activities: project.activities.map((a) => ({
       title: a.title,
       status: a.status,

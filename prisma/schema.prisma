@@ -1717,6 +1717,19 @@ model Project {
   // enforced the same way as every other Facilities field regardless.
   facilitiesPlannedForAnnualTargets Boolean @default(false)
   facilitiesIsBigProject             Boolean @default(false)
+  // Project Scoring — ONLY these two are persisted (both nullable: no
+  // automatic rating for existing/historical Projects). Importance Score
+  // (the 10%/30%/60% mapping of Importance Overall) and Score (the Excel
+  // formula result) are NEVER stored — both are derived fresh on every
+  // read by lib/services/project-scoring-service.ts, so there is no stale
+  // calculated value to invalidate when a sibling Facilities Project is
+  // created/deleted/reassigned or when this Project's own Importance
+  // Overall changes; the live query against the CURRENT department-wide
+  // data is simply always correct. Same "nullable at schema, enforced at
+  // the application boundary, never cleared on department reassignment"
+  // rule as every other field in this block.
+  facilitiesProjectImportanceOverall Int?
+  facilitiesProjectScore             Int?
 
   members      User[]              @relation("ProjectMembers")
   // The AUTHORITATIVE full Owner set — always contains `ownerId` (the

@@ -18,6 +18,7 @@ import {
   facilitiesResolutionErrorMessage,
   type ResolvedFacilitiesWrite,
 } from "@/lib/services/project-facilities-service";
+import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
 import { Role } from "@prisma/client";
 
 // Every field the Project List (table) or Grid (card) view actually
@@ -107,7 +108,15 @@ export async function GET(
     const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
     const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && project.departmentId === facilitiesServicesDepartmentId;
 
-    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace });
+    // Computed fresh on every GET, never stored — see
+    // lib/services/project-scoring-service.ts's own doc comment. Only
+    // queried when actually needed (a non-Facilities Project has nothing
+    // to compute).
+    const facilitiesScorePercent = isFacilitiesServicesWorkspace
+      ? computeFacilitiesScorePercent(project.facilitiesProjectImportanceOverall, project.facilitiesProjectScore, await getFacilitiesImportanceGroupCounts())
+      : null;
+
+    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace, facilitiesScorePercent });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -238,6 +247,8 @@ export async function PATCH(
       facilitiesActualCostNotes,
       facilitiesPlannedForAnnualTargets,
       facilitiesIsBigProject,
+      facilitiesProjectImportanceOverall,
+      facilitiesProjectScore,
       ...rest
     } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
@@ -323,6 +334,12 @@ export async function PATCH(
           // column), same "!== undefined" convention as every field above.
           facilitiesPlannedForAnnualTargets: facilitiesPlannedForAnnualTargets !== undefined ? facilitiesPlannedForAnnualTargets : undefined,
           facilitiesIsBigProject: facilitiesIsBigProject !== undefined ? facilitiesIsBigProject : undefined,
+          // Project Scoring's two persisted inputs — same convention as
+          // every field above: `undefined` leaves the column untouched,
+          // `null` explicitly clears it. Importance Score/Score are
+          // derived, never written here.
+          facilitiesProjectImportanceOverall: facilitiesProjectImportanceOverall !== undefined ? facilitiesProjectImportanceOverall : undefined,
+          facilitiesProjectScore: facilitiesProjectScore !== undefined ? facilitiesProjectScore : undefined,
         }
       : {};
 
@@ -439,7 +456,15 @@ export async function PATCH(
       await notifyOwnerOfProjectCompletion({ id: project.id, title: project.title, projectRequestId: existing.projectRequestId, owner: project.owner });
     }
 
-    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace: isFacilitiesWorkspace });
+    // Recomputed from the just-committed row, same as GET — a Save always
+    // reflects the result of what was just saved, never a stale value
+    // from before this request (see the "Edit" UX: the displayed Score
+    // refreshes after Save).
+    const facilitiesScorePercent = isFacilitiesWorkspace
+      ? computeFacilitiesScorePercent(project.facilitiesProjectImportanceOverall, project.facilitiesProjectScore, await getFacilitiesImportanceGroupCounts())
+      : null;
+
+    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace: isFacilitiesWorkspace, facilitiesScorePercent });
   } catch (error: any) {
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });

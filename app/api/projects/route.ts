@@ -132,6 +132,8 @@ export async function POST(req: NextRequest) {
       facilitiesActualCostNotes,
       facilitiesPlannedForAnnualTargets,
       facilitiesIsBigProject,
+      facilitiesProjectImportanceOverall,
+      facilitiesProjectScore,
       ...rest
     } = data;
 
@@ -242,6 +244,12 @@ export async function POST(req: NextRequest) {
               facilitiesActualCostNotes: facilitiesActualCostNotes ?? undefined,
               facilitiesPlannedForAnnualTargets: facilitiesPlannedForAnnualTargets ?? undefined,
               facilitiesIsBigProject: facilitiesIsBigProject ?? undefined,
+              // Project Scoring's two persisted inputs — same "plain
+              // direct input, no resolver needed" treatment as Category/
+              // Cost above. Importance Score/Score are never written
+              // anywhere (always derived on read).
+              facilitiesProjectImportanceOverall: facilitiesProjectImportanceOverall ?? undefined,
+              facilitiesProjectScore: facilitiesProjectScore ?? undefined,
             }
           : { startDate: startDate ? new Date(startDate) : undefined, endDate: endDate ? new Date(endDate) : undefined }),
         members: memberIds.length

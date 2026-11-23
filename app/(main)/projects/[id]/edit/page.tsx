@@ -19,6 +19,7 @@ import {
 import { ChevronRight, Loader2 } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
+import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
 
 interface AssignableUser {
   id: string;
@@ -107,6 +108,18 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [facEndPrecision, setFacEndPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
   const [facEndQuarter, setFacEndQuarter] = useState("");
   const [facEndYear, setFacEndYear] = useState("");
+  // Project Scoring. `facilitiesScorePercent` is the server-computed value
+  // as of the last load/save — NOT recalculated per keystroke (that would
+  // mean a live API call on every selection change, which conflicts with
+  // "efficient, not per-project"). `savedImportance`/`savedScore` are the
+  // snapshot it was computed against; once either current value drifts
+  // from that snapshot, the displayed Score is flagged as stale (still
+  // shown, never hidden) until the next successful Save refreshes both.
+  const [facilitiesProjectImportanceOverall, setFacilitiesProjectImportanceOverall] = useState("");
+  const [facilitiesProjectScore, setFacilitiesProjectScore] = useState("");
+  const [facilitiesScorePercent, setFacilitiesScorePercent] = useState<number | null>(null);
+  const [savedScoreInputs, setSavedScoreInputs] = useState({ importance: "", score: "" });
+  const scoreInputsDirty = facilitiesProjectImportanceOverall !== savedScoreInputs.importance || facilitiesProjectScore !== savedScoreInputs.score;
 
   useEffect(() => {
     fetch(`/api/projects/${id}`)
@@ -130,6 +143,14 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setFacilitiesActualCostNotes(p.facilitiesActualCostNotes ?? "");
           setFacilitiesPlannedForAnnualTargets(p.facilitiesPlannedForAnnualTargets ?? false);
           setFacilitiesIsBigProject(p.facilitiesIsBigProject ?? false);
+          {
+            const importanceStr = p.facilitiesProjectImportanceOverall !== null && p.facilitiesProjectImportanceOverall !== undefined ? String(p.facilitiesProjectImportanceOverall) : "";
+            const scoreStr = p.facilitiesProjectScore !== null && p.facilitiesProjectScore !== undefined ? String(p.facilitiesProjectScore) : "";
+            setFacilitiesProjectImportanceOverall(importanceStr);
+            setFacilitiesProjectScore(scoreStr);
+            setFacilitiesScorePercent(typeof p.facilitiesScorePercent === "number" ? p.facilitiesScorePercent : null);
+            setSavedScoreInputs({ importance: importanceStr, score: scoreStr });
+          }
           setFacStartPrecision(p.facilitiesStartPrecision === "QUARTER" ? "QUARTER" : "EXACT");
           setFacStartQuarter(p.facilitiesStartQuarter ?? "");
           setFacStartYear(p.facilitiesStartYear ? String(p.facilitiesStartYear) : "");
@@ -266,6 +287,8 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 facilitiesActualCostNotes: facilitiesActualCostNotes.trim() || null,
                 facilitiesPlannedForAnnualTargets,
                 facilitiesIsBigProject,
+                facilitiesProjectImportanceOverall: facilitiesProjectImportanceOverall === "" ? null : Number(facilitiesProjectImportanceOverall),
+                facilitiesProjectScore: facilitiesProjectScore === "" ? null : Number(facilitiesProjectScore),
                 facilitiesStartPrecision: facStartPrecision,
                 facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
                 facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
@@ -590,6 +613,60 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                       onChange={(e) => setFacilitiesActualCostNotes(e.target.value)}
                       className="min-h-[100px]"
                     />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {isFacilitiesServicesWorkspace && (
+              <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+                <div>
+                  <h3 className="text-sm font-semibold">Project Scoring</h3>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {scoreInputsDirty
+                      ? "Score below reflects previously saved values — save to recalculate."
+                      : "Score is recalculated whenever Facilities Projects change."}
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesProjectImportanceOverall">Project Importance Overall</Label>
+                    <Select value={facilitiesProjectImportanceOverall} onValueChange={setFacilitiesProjectImportanceOverall}>
+                      <SelectTrigger id="facilitiesProjectImportanceOverall">
+                        <SelectValue placeholder="Select…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PROJECT_IMPORTANCE_OPTIONS.map((n) => (
+                          <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesProjectImportanceScore">Project Importance Score</Label>
+                    <Input
+                      id="facilitiesProjectImportanceScore"
+                      disabled
+                      readOnly
+                      value={formatScorePercent(getImportanceScoreFraction(facilitiesProjectImportanceOverall === "" ? null : Number(facilitiesProjectImportanceOverall)))}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesProjectScore">Project Score</Label>
+                    <Select value={facilitiesProjectScore} onValueChange={setFacilitiesProjectScore}>
+                      <SelectTrigger id="facilitiesProjectScore">
+                        <SelectValue placeholder="Select…" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {PROJECT_SCORE_OPTIONS.map((n) => (
+                          <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="facilitiesScore">Score{scoreInputsDirty ? " (previously saved)" : ""}</Label>
+                    <Input id="facilitiesScore" disabled readOnly value={formatScorePercent(facilitiesScorePercent)} />
                   </div>
                 </div>
               </div>

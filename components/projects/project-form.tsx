@@ -26,6 +26,7 @@ import { PendingAttachmentsField } from "@/components/attachments/pending-attach
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
 import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
+import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
 
 interface AssignableUser {
   id: string;
@@ -307,6 +308,15 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   // doc comment in prisma/schema.prisma).
   const [facilitiesPlannedForAnnualTargets, setFacilitiesPlannedForAnnualTargets] = useState(false);
   const [facilitiesIsBigProject, setFacilitiesIsBigProject] = useState(false);
+  // Project Scoring — plain string <select> values ("" = unset), same
+  // shape as every other Facilities-only field above. Importance Score is
+  // a pure client-side preview (the fixed 10/30/60% mapping, no server
+  // round trip); the final Score can't be previewed at all on Create —
+  // there's no Project yet to join a same-Importance group, and the
+  // denominator itself changes the moment this one is created — so it's
+  // shown as "Calculated after creation" instead of a guessed number.
+  const [facilitiesProjectImportanceOverall, setFacilitiesProjectImportanceOverall] = useState("");
+  const [facilitiesProjectScore, setFacilitiesProjectScore] = useState("");
   const [facStartPrecision, setFacStartPrecision] = useState<"EXACT" | "QUARTER">("EXACT");
   const [facStartDate, setFacStartDate] = useState("");
   const [facStartQuarter, setFacStartQuarter] = useState("");
@@ -489,6 +499,8 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             facilitiesActualCostNotes: facilitiesActualCostNotes.trim() || null,
             facilitiesPlannedForAnnualTargets,
             facilitiesIsBigProject,
+            facilitiesProjectImportanceOverall: facilitiesProjectImportanceOverall === "" ? null : Number(facilitiesProjectImportanceOverall),
+            facilitiesProjectScore: facilitiesProjectScore === "" ? null : Number(facilitiesProjectScore),
             facilitiesStartPrecision: facStartPrecision,
             facilitiesStartQuarter: facStartPrecision === "QUARTER" ? facStartQuarter : null,
             facilitiesStartYear: facStartPrecision === "QUARTER" ? (facStartYear ? parseInt(facStartYear) : null) : null,
@@ -890,6 +902,51 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                     onChange={(e) => setFacilitiesActualCostNotes(e.target.value)}
                     className="min-h-[100px]"
                   />
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isFacilitiesWorkspace && (
+            <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
+              <div>
+                <h3 className="text-sm font-semibold">Project Scoring</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">Score is calculated after this Project is created.</p>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>Project Importance Overall</Label>
+                  <Select value={facilitiesProjectImportanceOverall} onValueChange={setFacilitiesProjectImportanceOverall}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PROJECT_IMPORTANCE_OPTIONS.map((n) => (
+                        <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Project Importance Score</Label>
+                  <Input disabled readOnly value={formatScorePercent(getImportanceScoreFraction(facilitiesProjectImportanceOverall === "" ? null : Number(facilitiesProjectImportanceOverall)))} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Project Score</Label>
+                  <Select value={facilitiesProjectScore} onValueChange={setFacilitiesProjectScore}>
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select…" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {PROJECT_SCORE_OPTIONS.map((n) => (
+                        <SelectItem key={n} value={String(n)}>{n}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Score</Label>
+                  <Input disabled readOnly value="Calculated after creation" />
                 </div>
               </div>
             </div>

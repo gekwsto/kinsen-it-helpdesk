@@ -363,6 +363,13 @@ export const facilitiesProjectFieldsSchema = z.object({
   facilitiesActualCostNotes: z.string().trim().min(1).nullable().optional(),
   facilitiesPlannedForAnnualTargets: z.boolean().optional(),
   facilitiesIsBigProject: z.boolean().optional(),
+  // Project Scoring — the only two persisted inputs (Importance Score/
+  // Score are derived, never accepted here). Nullable (explicit clear,
+  // same as every other optional-rating field above) + strict integer
+  // ranges, enforced server-side regardless of what a <select> UI already
+  // constrains client-side.
+  facilitiesProjectImportanceOverall: z.number().int().min(1, "Project Importance Overall must be 1, 2, or 3").max(3, "Project Importance Overall must be 1, 2, or 3").nullable().optional(),
+  facilitiesProjectScore: z.number().int().min(1, "Project Score must be between 1 and 5").max(5, "Project Score must be between 1 and 5").nullable().optional(),
 });
 
 export const projectExpenseTypeSchema = z.object({

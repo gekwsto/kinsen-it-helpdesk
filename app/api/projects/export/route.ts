@@ -8,6 +8,8 @@ import { getProjectTerminalConfigsForDepartments, resolveProjectTerminal } from 
 import { isProjectOverdue } from "@/lib/overdue";
 import { buildProjectsListWorkbook, type ProjectExportRow } from "@/lib/services/project-export-service";
 import { getFacilitiesServicesDepartmentId } from "@/lib/services/project-facilities-service";
+import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
+import { formatScorePercent, getImportanceScoreFraction } from "@/lib/project-scoring-shared";
 
 /**
  * "Export to Excel" for the All Projects list — intentionally re-reads the
@@ -84,6 +86,8 @@ export async function GET(request: NextRequest) {
   );
   const now = new Date();
   const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+  // ONE grouped query for the whole export, never per-row.
+  const facilitiesImportanceGroupCounts = await getFacilitiesImportanceGroupCounts();
 
   const rows: ProjectExportRow[] = projects.map((p) => {
     const ownerNames = new Set<string>();
@@ -122,6 +126,10 @@ export async function GET(request: NextRequest) {
       isFacilitiesServicesWorkspace: !!facilitiesServicesDepartmentId && p.departmentId === facilitiesServicesDepartmentId,
       facilitiesPlannedForAnnualTargets: p.facilitiesPlannedForAnnualTargets,
       facilitiesIsBigProject: p.facilitiesIsBigProject,
+      facilitiesProjectImportanceOverall: p.facilitiesProjectImportanceOverall,
+      facilitiesProjectScore: p.facilitiesProjectScore,
+      facilitiesImportanceScoreLabel: formatScorePercent(getImportanceScoreFraction(p.facilitiesProjectImportanceOverall)),
+      facilitiesScoreLabel: formatScorePercent(computeFacilitiesScorePercent(p.facilitiesProjectImportanceOverall, p.facilitiesProjectScore, facilitiesImportanceGroupCounts)),
     };
   });
 

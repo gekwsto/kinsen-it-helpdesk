@@ -62,6 +62,12 @@ const FACILITIES_FIELD_KEYS = [
   "facilitiesActualCostNotes",
   "facilitiesPlannedForAnnualTargets",
   "facilitiesIsBigProject",
+  // Project Scoring's two persisted inputs — same write-protection gate as
+  // every other Facilities-only field (see lib/services/project-scoring-
+  // service.ts for the derived Importance Score/Score, which are never
+  // persisted and so never need a gate of their own here).
+  "facilitiesProjectImportanceOverall",
+  "facilitiesProjectScore",
 ] as const;
 
 /**

@@ -24,6 +24,8 @@ import { computeProjectFinancials } from "@/lib/services/project-financials-serv
 import { getProjectFeedbackEligibility } from "@/lib/services/project-feedback-service";
 import { ProjectFeedbackCtaCard } from "@/components/projects/project-feedback-cta-card";
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
+import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
+import { getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
 import { FolderKanban, Wallet, Building2 } from "lucide-react";
 
 export default async function ProjectDetailPage({
@@ -244,6 +246,16 @@ export default async function ProjectDetailPage({
       !!project.facilitiesEstimatedCostNotes ||
       !!project.facilitiesActualCostNotes);
 
+  // Project Scoring — computed fresh on every load, never stored (see
+  // lib/services/project-scoring-service.ts). The grouped count is fetched
+  // ONCE here, not per-project; this page only ever renders one Project.
+  const facilitiesImportanceScoreFraction = isFacilitiesServicesWorkspace
+    ? getImportanceScoreFraction(project.facilitiesProjectImportanceOverall)
+    : null;
+  const facilitiesScorePercent = isFacilitiesServicesWorkspace
+    ? computeFacilitiesScorePercent(project.facilitiesProjectImportanceOverall, project.facilitiesProjectScore, await getFacilitiesImportanceGroupCounts())
+    : null;
+
   const activitySequenceRows = project.projectRequest
     ? [...project.activities]
         .sort((a, b) => {
@@ -410,6 +422,37 @@ export default async function ProjectDetailPage({
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Big Project</p>
                     <p className="font-medium">{project.facilitiesIsBigProject ? "Yes" : "No"}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Project Scoring — Facilities Services-only, compact, all
+                four fields always shown (never hidden for an unset value —
+                "Not set" instead, same convention as Score below). Score/
+                Importance Score are derived fresh on every page load, never
+                a stored value — see lib/services/project-scoring-service.ts. */}
+            {isFacilitiesServicesWorkspace && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                  <Target className="h-3 w-3" /> Project Scoring
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Project Importance Overall</p>
+                    <p className="font-medium">{project.facilitiesProjectImportanceOverall ?? "Not set"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Project Importance Score</p>
+                    <p className="font-medium">{formatScorePercent(facilitiesImportanceScoreFraction)}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Project Score</p>
+                    <p className="font-medium">{project.facilitiesProjectScore ?? "Not set"}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Score</p>
+                    <p className="font-medium">{formatScorePercent(facilitiesScorePercent)}</p>
                   </div>
                 </div>
               </div>

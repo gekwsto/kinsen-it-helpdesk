@@ -23,6 +23,8 @@ import {
 import { parsePageParam, parsePageSizeParam, computePagination, isOutOfRange } from "@/lib/pagination";
 import { ExportProjectsButton } from "@/components/projects/export-projects-button";
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
+import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
+import { getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
 
 // Pagination/view-only params — every FILTER/sort param (search, status,
 // origin, date ranges, etc.) comes from ProjectListFilterParams, the SAME
@@ -180,6 +182,12 @@ export default async function ProjectsPage({
   // same rule as the Project Overview page and Gantt. Resolved ONCE, not
   // per row.
   const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+  // ONE grouped query for the whole page, never per-row — see
+  // lib/services/project-scoring-service.ts's own doc comment. Skipped
+  // entirely (stays {}) when no Project on this page is even in
+  // Facilities, which computeFacilitiesScorePercent already treats as
+  // "Not set" for every row either way, so no extra conditional is needed.
+  const facilitiesImportanceGroupCounts = await getFacilitiesImportanceGroupCounts();
   // Project.budget/estimatedCost/actualCost no longer exist as DB columns
   // at all (removed — see
   // prisma/migrations/20261005090000_remove_project_budget_and_cost_columns);
@@ -198,6 +206,16 @@ export default async function ProjectsPage({
       // with Quarter precision — never affecting what's sorted/filtered.
       facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesStartQuarter, p.facilitiesStartYear) : null,
       facilitiesEndLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesEndQuarter, p.facilitiesEndYear) : null,
+      // Project Scoring — pre-formatted here (pure, synchronous, against
+      // the one already-fetched group-count map above), same "server
+      // computes, client just renders a string" convention as the two
+      // labels above.
+      facilitiesProjectImportanceOverall: isFacilitiesServicesWorkspace ? p.facilitiesProjectImportanceOverall : null,
+      facilitiesImportanceScoreLabel: isFacilitiesServicesWorkspace ? formatScorePercent(getImportanceScoreFraction(p.facilitiesProjectImportanceOverall)) : null,
+      facilitiesProjectScore: isFacilitiesServicesWorkspace ? p.facilitiesProjectScore : null,
+      facilitiesScoreLabel: isFacilitiesServicesWorkspace
+        ? formatScorePercent(computeFacilitiesScorePercent(p.facilitiesProjectImportanceOverall, p.facilitiesProjectScore, facilitiesImportanceGroupCounts))
+        : null,
     };
   });
 

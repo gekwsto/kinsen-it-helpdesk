@@ -321,6 +321,10 @@ async function main() {
         isFacilitiesServicesWorkspace: true,
         facilitiesPlannedForAnnualTargets: true,
         facilitiesIsBigProject: false,
+        facilitiesProjectImportanceOverall: null,
+        facilitiesProjectScore: null,
+        facilitiesImportanceScoreLabel: null,
+        facilitiesScoreLabel: null,
       },
       {
         title: "Out-of-workspace row (unrelated department)",
@@ -353,6 +357,10 @@ async function main() {
         isFacilitiesServicesWorkspace: false,
         facilitiesPlannedForAnnualTargets: false,
         facilitiesIsBigProject: false,
+        facilitiesProjectImportanceOverall: null,
+        facilitiesProjectScore: null,
+        facilitiesImportanceScoreLabel: null,
+        facilitiesScoreLabel: null,
       },
     ]);
     const listWb = new ExcelJS.Workbook();
@@ -402,6 +410,10 @@ async function main() {
       isFacilitiesServicesWorkspace: true,
       facilitiesPlannedForAnnualTargets: false,
       facilitiesIsBigProject: true,
+      facilitiesProjectImportanceOverall: null,
+      facilitiesProjectScore: null,
+      facilitiesImportanceScoreLabel: null,
+      facilitiesScoreLabel: null,
       activities: [],
     });
     const detailWb = new ExcelJS.Workbook();
@@ -448,6 +460,10 @@ async function main() {
       isFacilitiesServicesWorkspace: false,
       facilitiesPlannedForAnnualTargets: true,
       facilitiesIsBigProject: true,
+      facilitiesProjectImportanceOverall: null,
+      facilitiesProjectScore: null,
+      facilitiesImportanceScoreLabel: null,
+      facilitiesScoreLabel: null,
       activities: [],
     });
     const detailWbOutside = new ExcelJS.Workbook();
