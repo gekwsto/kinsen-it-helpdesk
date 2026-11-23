@@ -2,12 +2,13 @@ import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { hasProjectViewAccess } from "@/lib/services/project-access-service";
+import { canViewProjectRequest } from "@/lib/services/project-request-service";
 import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { formatDate, getInitials } from "@/lib/utils";
+import { formatDate, formatDateTime, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target } from "lucide-react";
 import { GoalStatus } from "@prisma/client";
 import { ProjectActivitiesCard } from "@/components/projects/project-activities-card";
@@ -26,7 +27,7 @@ import { ProjectFeedbackCtaCard } from "@/components/projects/project-feedback-c
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
 import { getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
-import { FolderKanban, Wallet, Building2 } from "lucide-react";
+import { FolderKanban, Wallet, Building2, ClipboardCheck } from "lucide-react";
 
 export default async function ProjectDetailPage({
   params,
@@ -59,7 +60,35 @@ export default async function ProjectDetailPage({
       },
       yearlyGoals: { select: { id: true, year: true, status: true, targetValue: true, currentValue: true, unit: true } },
       expenseType: { select: { id: true, name: true, isActive: true } },
-      projectRequest: { select: { id: true, title: true } },
+      // Request & Approvals section below — one extra query depth, not an
+      // extra round trip (same `include`, loaded alongside everything
+      // else this page already needs). requesterId/departmentId are
+      // selected ONLY for the canViewProjectRequest authorization check
+      // below, never rendered directly.
+      projectRequest: {
+        select: {
+          id: true,
+          title: true,
+          requesterId: true,
+          departmentId: true,
+          submittedAt: true,
+          requester: { select: { id: true, name: true, email: true, image: true } },
+          intermediateApprovers: {
+            select: {
+              id: true,
+              status: true,
+              decidedAt: true,
+              businessAssessment: true,
+              approver: { select: { id: true, name: true, email: true, image: true } },
+            },
+            orderBy: { createdAt: "asc" },
+          },
+          approver: { select: { id: true, name: true, email: true, image: true } },
+          approvedAt: true,
+          rejectedAt: true,
+          businessAssessment: true,
+        },
+      },
     },
   });
 
@@ -73,6 +102,21 @@ export default async function ProjectDetailPage({
   // exactly the Department-scoped checks below, completely untouched.
   const canView = await hasProjectViewAccess(session.user.id, session.user.role, session.user.customRoleId, project);
   if (!canView) redirect("/dashboard");
+
+  // Request & Approvals section — gated by the SAME, narrower
+  // authorization rule the Project Request detail page itself uses
+  // (canViewProjectRequest: the original requester, a user with effective
+  // projectRequest.approve for the request's own department, or one of
+  // the request's own selected intermediate approvers). Deliberately NOT
+  // the broader canView above — a Project Member/Owner/Audience user can
+  // see this Project without being entitled to see who was asked to
+  // approve it or their individual written justifications, which is
+  // exactly the exposure this separate check exists to prevent. A Project
+  // with no originating request at all trivially never shows the section
+  // either way.
+  const canViewRequestApprovals = project.projectRequest
+    ? await canViewProjectRequest(session.user.id, session.user.role, session.user.customRoleId, project.projectRequest)
+    : false;
 
   // project.edit — computed server-side and passed down as a boolean, used
   // by BOTH the Notes composer's visibility AND the quick-status dropdown's
@@ -376,6 +420,121 @@ export default async function ProjectDetailPage({
                     </div>
                   )}
                 </div>
+              </div>
+            )}
+
+            {/* Request & Approvals — gated on canViewRequestApprovals, a
+                NARROWER check than this whole page's own canView (see its
+                computation above): a Project Member/Owner/Audience user who
+                can see this Project at all does not automatically see who
+                was asked to approve its originating request or their
+                individual written justifications. Displays ONLY the actual
+                persisted history (ProjectRequest/ProjectRequestIntermediate
+                Approver rows) — never inferred/reconstructed. Omitted
+                entirely for a manually-created Project (project.projectRequest
+                is null), matching "Manually created Projects must remain
+                unchanged." */}
+            {canViewRequestApprovals && project.projectRequest && (
+              <div className="space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center gap-1">
+                  <ClipboardCheck className="h-3 w-3" /> Request &amp; Approvals
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Requested By</p>
+                    <p className="font-medium">{project.projectRequest.requester.name ?? project.projectRequest.requester.email}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Submitted</p>
+                    <p className="font-medium">{formatDateTime(project.projectRequest.submittedAt)}</p>
+                  </div>
+                  <div className="sm:col-span-2">
+                    <p className="text-xs text-muted-foreground mb-1">Original Project Request</p>
+                    <Link href={`/project-requests/${project.projectRequest.id}`} className="inline-flex items-center gap-1.5 font-medium text-primary hover:underline">
+                      <FolderKanban className="h-3.5 w-3.5" />
+                      {project.projectRequest.title}
+                    </Link>
+                  </div>
+                </div>
+
+                {/* Intermediate approvers — EVERY selected approver shown
+                    individually with their OWN decision/timestamp/comment
+                    (never collapsed into a single "approved" summary),
+                    preserving the unanimous-multi-approver distinction from
+                    the final stage below. Empty for a request that skipped
+                    this stage entirely (intermediateApprovalSkipReason) —
+                    nothing to show, not an error. */}
+                {project.projectRequest.intermediateApprovers.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">Intermediate Approval</p>
+                    <div className="divide-y rounded-md border">
+                      {project.projectRequest.intermediateApprovers.map((row) => (
+                        <div key={row.id} className="px-3 py-2 text-xs space-y-1">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="flex items-center gap-1.5 font-medium">
+                              <Avatar className="h-5 w-5">
+                                <AvatarImage src={row.approver.image ?? undefined} />
+                                <AvatarFallback className="text-[9px]">{getInitials(row.approver.name)}</AvatarFallback>
+                              </Avatar>
+                              {row.approver.name ?? row.approver.email}
+                              <span className="text-muted-foreground font-normal">· Intermediate Approver</span>
+                            </span>
+                            <span
+                              className={
+                                row.status === "APPROVED"
+                                  ? "font-medium text-green-700"
+                                  : row.status === "REJECTED"
+                                  ? "font-medium text-red-700"
+                                  : "font-medium text-muted-foreground"
+                              }
+                            >
+                              {row.status === "APPROVED" ? "Approved" : row.status === "REJECTED" ? "Rejected" : "Pending"}
+                              {row.decidedAt && <span className="text-muted-foreground font-normal"> · {formatDateTime(row.decidedAt)}</span>}
+                            </span>
+                          </div>
+                          {row.businessAssessment && <p className="text-muted-foreground whitespace-pre-wrap">{row.businessAssessment}</p>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Final approval — distinct from the intermediate stage
+                    above (separate fields, separate audit trail — see
+                    ProjectRequest's own schema doc comment). Always
+                    "Approved" in practice here (a Project only exists once
+                    its request's FINAL approval completed), but rendered
+                    from the actual persisted approver/approvedAt/
+                    businessAssessment rather than assumed. */}
+                {project.projectRequest.approver && (
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">Final Approval</p>
+                    <div className="rounded-md border px-3 py-2 text-xs space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5 font-medium">
+                          <Avatar className="h-5 w-5">
+                            <AvatarImage src={project.projectRequest.approver.image ?? undefined} />
+                            <AvatarFallback className="text-[9px]">{getInitials(project.projectRequest.approver.name)}</AvatarFallback>
+                          </Avatar>
+                          {project.projectRequest.approver.name ?? project.projectRequest.approver.email}
+                          <span className="text-muted-foreground font-normal">· Final Approver</span>
+                        </span>
+                        <span className={project.projectRequest.approvedAt ? "font-medium text-green-700" : "font-medium text-red-700"}>
+                          {project.projectRequest.approvedAt ? "Approved" : "Rejected"}
+                          {(project.projectRequest.approvedAt ?? project.projectRequest.rejectedAt) && (
+                            <span className="text-muted-foreground font-normal">
+                              {" "}
+                              · {formatDateTime(project.projectRequest.approvedAt ?? project.projectRequest.rejectedAt!)}
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      {project.projectRequest.businessAssessment && (
+                        <p className="text-muted-foreground whitespace-pre-wrap">{project.projectRequest.businessAssessment}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
