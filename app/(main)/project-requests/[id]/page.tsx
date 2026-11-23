@@ -25,6 +25,7 @@ export default async function ProjectRequestDetailPage({
       projectType: { select: { id: true, name: true } },
       department: { select: { id: true, name: true } },
       requester: { select: { id: true, name: true, email: true } },
+      requesterDepartment: { select: { id: true, name: true } },
       approver: { select: { id: true, name: true, email: true } },
       intermediateApprovers: {
         include: { approver: { select: { id: true, name: true, email: true } } },
@@ -96,6 +97,13 @@ export default async function ProjectRequestDetailPage({
           <Field label="Solution/project to be replaced" value={request.replacementDescription} multiline />
         )}
         <Field label="Requester" value={request.requester.name ?? request.requester.email} />
+        {/* Read-only snapshot of the requester's OWN department at
+            submission time — never the request's target department
+            (above) and never editable here. "Not recorded" for a request
+            created before this field existed, or whose requester had no
+            primary department at the time — never guessed from their
+            CURRENT membership. */}
+        <Field label="Requester Department" value={request.requesterDepartment?.name ?? "Not recorded"} />
         <Field label="Submitted" value={request.submittedAt.toLocaleString()} />
         {request.legacyRequesterBusinessAssessment && (
           <Field label="Legacy requester business assessment" value={request.legacyRequesterBusinessAssessment} multiline />

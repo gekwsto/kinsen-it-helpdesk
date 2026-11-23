@@ -93,6 +93,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(apiError("invalid_intermediate_approvers", message, { field: "intermediateApproverIds" }), { status: 400 });
     }
 
+    // Requester Department — a one-time SNAPSHOT of the requester's own
+    // department at submission, completely independent of departmentId
+    // above (the TARGET department this request is FOR). Resolved from
+    // User.departmentId — the legacy "home department" FK that
+    // setPrimaryDepartmentMembership keeps in sync with whichever
+    // DepartmentMembership row is flagged isPrimary (see that function's
+    // own doc comment) — the one existing, already-canonical "this user's
+    // single department" value used elsewhere in the app (e.g. it's what
+    // populates session.user.departmentId). Read FRESH from the database
+    // here rather than trusted from the session/JWT, which is only
+    // refreshed at sign-in and could be stale if an admin changed this
+    // user's primary department earlier in the same session. Never
+    // accepted from the request body at all (not merely ignored — there is
+    // no such key anywhere in createProjectRequestSchema), so a client can
+    // never spoof it. Null when the requester currently has no primary
+    // department — stored as null, rendered as "Not recorded", never
+    // guessed.
+    const requesterForDepartmentSnapshot = await prisma.user.findUnique({ where: { id: session.user.id }, select: { departmentId: true } });
+    const requesterDepartmentId = requesterForDepartmentSnapshot?.departmentId ?? null;
+
     // The ProjectRequest row and (when the intermediate stage isn't being
     // skipped) its full set of ProjectRequestIntermediateApprover rows are
     // created atomically.
@@ -108,6 +128,7 @@ export async function POST(req: NextRequest) {
           replacementDescription,
           requesterId: session.user.id,
           departmentId: departmentResolution.departmentId,
+          requesterDepartmentId,
           // status defaults to PENDING_INTERMEDIATE_APPROVAL at the schema
           // level — overridden to PENDING_APPROVAL only when the requester
           // has a VERIFIED "no manager" record, or holds

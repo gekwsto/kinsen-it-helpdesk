@@ -73,6 +73,11 @@ export default async function ProjectDetailPage({
           departmentId: true,
           submittedAt: true,
           requester: { select: { id: true, name: true, email: true, image: true } },
+          // Snapshot of the requester's OWN department at submission —
+          // never the request's target department (`project.department`
+          // above, unrelated). Read from the relation, never re-derived
+          // from the requester's current membership.
+          requesterDepartment: { select: { id: true, name: true } },
           intermediateApprovers: {
             select: {
               id: true,
@@ -443,6 +448,16 @@ export default async function ProjectDetailPage({
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Requested By</p>
                     <p className="font-medium">{project.projectRequest.requester.name ?? project.projectRequest.requester.email}</p>
+                  </div>
+                  {/* Snapshot of the requester's OWN department at
+                      submission — distinct from this Project's own
+                      department above, and never re-derived from the
+                      requester's CURRENT membership. "Not recorded" for a
+                      request that predates this field or whose requester
+                      had no primary department at submission time. */}
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Requester Department</p>
+                    <p className="font-medium">{project.projectRequest.requesterDepartment?.name ?? "Not recorded"}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Submitted</p>

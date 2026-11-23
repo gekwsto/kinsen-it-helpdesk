@@ -106,6 +106,11 @@ async function main() {
     console.log("\n=== Fixtures ===\n");
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
     departmentIds.push(dept.id);
+    // The REQUESTER's own department — deliberately a DIFFERENT department
+    // than `dept` (the target/project department) above, proving the two
+    // are never conflated.
+    const requesterDept = await createDepartment({ name: `${TAG}-requester-dept`, slug: `${TAG}-requester-dept` });
+    departmentIds.push(requesterDept.id);
 
     const requester = await prisma.user.create({ data: { email: `${TAG}-requester@example.com`, name: "Rita Requester", role: Role.USER, authProvider: AuthProvider.CREDENTIALS, passwordHash: "x" } });
     const approver1 = await prisma.user.create({ data: { email: `${TAG}-approver1@example.com`, name: "Alan Approver", role: Role.USER, authProvider: AuthProvider.CREDENTIALS, passwordHash: "x" } });
@@ -128,6 +133,7 @@ async function main() {
         expectedBenefits: "benefits",
         requesterId: requester.id,
         departmentId: dept.id,
+        requesterDepartmentId: requesterDept.id,
         status: ProjectRequestStatus.APPROVED,
         submittedAt,
         approverId: finalApprover.id,
@@ -188,7 +194,18 @@ async function main() {
     const requesterText = await renderText(requestOriginProject.id, requester.id);
     check("Section heading present", requesterText.includes("Request & Approvals"));
     check("Correct Requested By", requesterText.includes("Rita Requester"));
+    check("Correct Requester Department (distinct from the Project's own target department)", requesterText.includes(`${TAG}-requester-dept`));
     check("Original Project Request link text (title) present", requesterText.includes(`${TAG} Request`));
+    {
+      // Exact field order: Requested By -> Requester Department -> Submitted.
+      const idxRequestedBy = requesterText.indexOf("Requested By");
+      const idxRequesterDept = requesterText.indexOf("Requester Department");
+      const idxSubmitted = requesterText.indexOf("Submitted");
+      check(
+        "Field order is exactly Requested By -> Requester Department -> Submitted",
+        idxRequestedBy !== -1 && idxRequesterDept !== -1 && idxSubmitted !== -1 && idxRequestedBy < idxRequesterDept && idxRequesterDept < idxSubmitted
+      );
+    }
 
     // ── 3. Multiple intermediate approvers, each with independent decision ─
     console.log("\n3. Multiple intermediate approvers shown individually ===\n");
@@ -207,6 +224,34 @@ async function main() {
     // ── 5. Missing/optional comment renders safely (no crash, no 'null') ──
     console.log("\n5. Missing comment (approver2 had none) renders safely ===\n");
     check("No literal 'null' leaked into the rendered text", !requesterText.includes("null"));
+
+    // ── 5b. Null Requester Department (historical row) renders safely ────
+    console.log("\n5b. A null Requester Department (e.g. historical row) renders 'Not recorded' without breaking the section ===\n");
+    const noDeptRequest = await prisma.projectRequest.create({
+      data: {
+        title: `${TAG} No-Dept Request`,
+        description: "d",
+        importance: 1,
+        teamConcerned: "IT",
+        expectedBenefits: "b",
+        requesterId: requester.id,
+        departmentId: dept.id,
+        // requesterDepartmentId omitted -> null, simulating a historical row.
+        status: ProjectRequestStatus.APPROVED,
+        submittedAt: new Date("2026-09-01T00:00:00Z"),
+        approverId: finalApprover.id,
+        approvedAt: new Date("2026-09-02T00:00:00Z"),
+      },
+    });
+    projectRequestIds.push(noDeptRequest.id);
+    const noDeptProject = await prisma.project.create({
+      data: { title: `${TAG} No-Dept Project`, ownerId: requester.id, owners: { connect: [{ id: requester.id }] }, departmentId: dept.id, projectRequestId: noDeptRequest.id },
+    });
+    projectIds.push(noDeptProject.id);
+    const noDeptText = await renderText(noDeptProject.id, requester.id);
+    check("Section still renders for a null Requester Department", noDeptText.includes("Request & Approvals"));
+    check('Null Requester Department renders "Not recorded"', noDeptText.includes("Not recorded"));
+    check("No literal 'null' leaked for the missing department either", !noDeptText.includes("null"));
 
     // ── 6. Authorization — viewed by someone with NO request-level access ──
     console.log("\n6. An authorized Project viewer with NO request-level access sees the Project but not the section ===\n");

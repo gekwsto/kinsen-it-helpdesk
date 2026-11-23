@@ -314,7 +314,11 @@ model Department {
   pendingTickets          PendingTicket[]
   projects                Project[]
   activities              ProjectActivity[]
-  projectRequests         ProjectRequest[]
+  // Named to disambiguate from requesterDepartmentProjectRequests below —
+  // two independent relations to ProjectRequest now exist (target
+  // department vs. the requester's own department snapshot).
+  projectRequests                     ProjectRequest[] @relation("ProjectRequestTargetDepartment")
+  requesterDepartmentProjectRequests  ProjectRequest[] @relation("ProjectRequestRequesterDepartment")
   categories              TicketCategory[]
   priorities              TicketPriority[]
   statuses                TicketStatus[]
@@ -2293,8 +2297,31 @@ model ProjectRequest {
   // echoed back from client input on submission or on any approval action.
   requester    User       @relation("ProjectRequestRequester", fields: [requesterId], references: [id])
   requesterId  String
-  department   Department @relation(fields: [departmentId], references: [id])
+  // The TARGET department — which department this request is FOR, resolved
+  // via resolveDepartmentForRequest (the requester's own accessible-
+  // workspace set, client-selectable when ambiguous). Explicitly named
+  // (disambiguates from requesterDepartment below — two independent
+  // relations to Department now exist on this model) but otherwise
+  // completely unchanged: same column, same semantics, same every
+  // existing read/write path.
+  department   Department @relation("ProjectRequestTargetDepartment", fields: [departmentId], references: [id])
   departmentId String
+  // A SNAPSHOT of the requester's own department (User.departmentId — the
+  // legacy "home department" FK, kept in sync with the primary
+  // DepartmentMembership by the one canonical write path,
+  // setPrimaryDepartmentMembership) taken at THIS request's submission
+  // time — see POST /api/project-requests. Deliberately independent of
+  // `departmentId` above (the target department): a requester may submit a
+  // request FOR a department they don't belong to. Nullable because (a) a
+  // requester with no primary department at submission time legitimately
+  // has none to capture, and (b) every historical request created before
+  // this field existed has no real value — both render as "Not recorded",
+  // never guessed or backfilled from the requester's CURRENT membership.
+  // Never recomputed/overwritten after creation — not on edit, approval,
+  // or Project creation — so a requester's later department transfer never
+  // alters this request's own historical record.
+  requesterDepartment   Department? @relation("ProjectRequestRequesterDepartment", fields: [requesterDepartmentId], references: [id])
+  requesterDepartmentId String?
 
   // New requests start awaiting unanimous intermediate approval (see
   // ProjectRequestIntermediateApprover) — only after every selected
@@ -2376,6 +2403,7 @@ model ProjectRequest {
 
   @@index([status])
   @@index([departmentId])
+  @@index([requesterDepartmentId])
   @@index([requesterId])
   @@index([approverId])
   @@index([createdAt])
