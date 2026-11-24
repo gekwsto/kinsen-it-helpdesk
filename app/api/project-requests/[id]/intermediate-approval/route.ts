@@ -34,6 +34,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             apiError("invalid_status", "This Project Request is no longer awaiting your intermediate approval.", { field: "status" }),
             { status: 409 }
           );
+        case "not_standard_request":
+          return NextResponse.json(
+            apiError("not_standard_request", "This Project Request is a historical import and is not eligible for the normal approval workflow."),
+            { status: 409 }
+          );
         case "invalid_assessment":
           return NextResponse.json(
             apiError("invalid_assessment", "Business Assessment is required.", { field: "businessAssessment" }),

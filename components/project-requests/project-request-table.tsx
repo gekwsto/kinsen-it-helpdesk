@@ -26,7 +26,7 @@ import { ProjectRequestDecisionDialog } from "@/components/project-requests/proj
 import { PreviewField } from "@/components/shared/preview-field";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { formatDate, formatDateTime } from "@/lib/utils";
-import type { ProjectRequestStatus, IntermediateApprovalStatus } from "@prisma/client";
+import type { ProjectRequestStatus, IntermediateApprovalStatus, ProjectRequestSource } from "@prisma/client";
 
 export interface ProjectRequestRow {
   id: string;
@@ -43,8 +43,15 @@ export interface ProjectRequestRow {
   // Activity. Null for every request submitted after that change.
   projectType: { id: string; name: string } | null;
   department: { id: string; name: string };
-  requester: { name: string | null; email: string };
-  submittedAt: Date;
+  // Phase 3 — distinguishes a STANDARD request (always has a real
+  // requester/submittedAt, same as before) from a HISTORICAL_IMPORT one,
+  // which may not.
+  source: ProjectRequestSource;
+  // Null ONLY for a HISTORICAL_IMPORT request whose original requester
+  // isn't known from the source data — never fabricated/guessed. Renders
+  // as "Not recorded".
+  requester: { name: string | null; email: string } | null;
+  submittedAt: Date | null;
   approver: { name: string | null; email: string } | null;
   approvedAt: Date | null;
   rejectedAt: Date | null;
@@ -205,11 +212,20 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                     </TableCell>
                     <TableCell className="text-muted-foreground">{r.projectType?.name ?? "—"}</TableCell>
                     <TableCell className="text-muted-foreground">{r.department.name}</TableCell>
-                    <TableCell className="text-muted-foreground">{r.requester.name ?? r.requester.email}</TableCell>
+                    <TableCell className="text-muted-foreground">{r.requester ? r.requester.name ?? r.requester.email : "Not recorded"}</TableCell>
                     <TableCell>
+                      {/* Phase 3.1: the status badge alone now already
+                          visually distinguishes a Historical Import row
+                          (its own "Imported" status/color, never
+                          "Approved") — the separate source pill this used
+                          to need (back when both shared the "Approved"
+                          status/color) is no longer necessary and was
+                          removed to avoid redundant clutter. Source itself
+                          is still shown explicitly in the Preview dialog
+                          below. */}
                       <ProjectRequestStatusBadge status={r.status} />
                     </TableCell>
-                    <TableCell className="text-muted-foreground whitespace-nowrap">{formatDate(r.submittedAt)}</TableCell>
+                    <TableCell className="text-muted-foreground whitespace-nowrap">{r.submittedAt ? formatDate(r.submittedAt) : "Not recorded"}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-1.5">
                         <Button size="sm" variant="ghost" onClick={() => setPreviewTarget(r)} title="Preview this request">
@@ -264,15 +280,19 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                 </div>
                 <div>
                   <span className="text-muted-foreground">Submitted: </span>
-                  <span className="font-medium">{formatDateTime(previewTarget.submittedAt)}</span>
+                  <span className="font-medium">{previewTarget.submittedAt ? formatDateTime(previewTarget.submittedAt) : "Not recorded"}</span>
                 </div>
                 <div>
                   <span className="text-muted-foreground">Requester: </span>
-                  <span className="font-medium">{previewTarget.requester.name ?? previewTarget.requester.email}</span>
+                  <span className="font-medium">{previewTarget.requester ? previewTarget.requester.name ?? previewTarget.requester.email : "Not recorded"}</span>
                 </div>
                 <div>
                   <span className="text-muted-foreground">Importance: </span>
                   <span className="font-medium">{PROJECT_PRIORITY_LABEL[previewTarget.importance] ?? String(previewTarget.importance)}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Source: </span>
+                  <span className="font-medium">{previewTarget.source === "HISTORICAL_IMPORT" ? "Historical Import" : "Standard"}</span>
                 </div>
               </div>
 
@@ -307,17 +327,35 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                     </div>
                   </div>
                 )}
-                {previewTarget.approver && (
+                {(previewTarget.status === "APPROVED" || previewTarget.status === "REJECTED" || previewTarget.status === "IMPORTED") && (
                   <div className="px-4 py-3">
                     <p className="text-xs font-medium text-muted-foreground mb-1">
-                      {previewTarget.status === "APPROVED" ? "Approved by" : "Rejected by"}
+                      {previewTarget.status === "APPROVED" ? "Approved by" : previewTarget.status === "REJECTED" ? "Rejected by" : "Imported"}
                     </p>
-                    <p className="text-sm">{previewTarget.approver.name ?? previewTarget.approver.email}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {formatDateTime((previewTarget.approvedAt ?? previewTarget.rejectedAt) as Date)}
-                    </p>
-                    {previewTarget.businessAssessment && (
-                      <p className="text-sm whitespace-pre-wrap mt-2">{previewTarget.businessAssessment}</p>
+                    {/* Historical Import (status IMPORTED, Phase 3.1) may
+                        have a real, preserved approver/approvedAt from
+                        source data, or none at all — both shown
+                        explicitly, never fabricated. The Project
+                        link/setup status below is deliberately OUTSIDE
+                        this null-check, so it's never hidden just because
+                        the approver is unknown. */}
+                    {previewTarget.approver ? (
+                      <>
+                        <p className="text-sm">
+                          {previewTarget.status === "IMPORTED" && "Approved by "}
+                          {previewTarget.approver.name ?? previewTarget.approver.email}
+                        </p>
+                        {(previewTarget.approvedAt ?? previewTarget.rejectedAt) && (
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            {formatDateTime((previewTarget.approvedAt ?? previewTarget.rejectedAt) as Date)}
+                          </p>
+                        )}
+                        {previewTarget.businessAssessment && (
+                          <p className="text-sm whitespace-pre-wrap mt-2">{previewTarget.businessAssessment}</p>
+                        )}
+                      </>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Not recorded (historical import)</p>
                     )}
                     {previewTarget.project ? (
                       <Link

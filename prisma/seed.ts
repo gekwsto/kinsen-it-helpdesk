@@ -117,6 +117,15 @@ const PERMISSIONS = [
   // ProjectRequest.intermediateApprovalSkipReason recorded as
   // PERMISSION_BYPASS for audit.
   { key: "projectRequest.skipIntermediateApproval", description: "Skip intermediate approval on your own Project Request submissions, going straight to Final Approval", module: "projectRequests" },
+  // Phase 3 — the privileged Historical Import mechanism (see
+  // createHistoricalProjectRequest in lib/services/project-request-
+  // historical-import-service.ts and POST /api/admin/project-requests/
+  // historical-import). Seeded with NO default RolePermission rows (same
+  // "ADMIN-only via hasPermission's own unconditional role===ADMIN
+  // shortcut, never auto-granted to any custom role" convention as
+  // projectRequest.approve/intermediateApprove above) — never implied by
+  // projectRequest.approve or any other Project Request permission.
+  { key: "projectRequest.historicalImport", description: "Create Historical Import Project Requests (bulk/legacy data import of existing external Projects)", module: "projectRequests" },
   // Goals
   { key: "goal.view", description: "View yearly goals", module: "goals" },
   { key: "goal.create", description: "Create yearly goals", module: "goals" },

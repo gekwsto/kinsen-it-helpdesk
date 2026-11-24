@@ -16,7 +16,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ChevronRight, Loader2 } from "lucide-react";
+import { ChevronRight, Loader2, Building2, Briefcase } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
 import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
@@ -44,6 +44,29 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [saving, setSaving] = useState(false);
   const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
   const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
+  // Audience — Users: system-wide (never Department-scoped), same
+  // eligibility rule Owner(s) always used — editable here for EVERY
+  // Project as of Phase 1.1 (previously request-origin-creation-only, with
+  // no edit surface anywhere). A separate fetch/list from assignableUsers
+  // (Members), same "GET /api/users, every active user" shape
+  // components/projects/project-form.tsx's own systemWideUsers already uses.
+  const [systemWideUsers, setSystemWideUsers] = useState<AssignableUser[]>([]);
+  const [selectedAudienceIds, setSelectedAudienceIds] = useState<Set<string>>(new Set());
+  const [audienceSearch, setAudienceSearch] = useState("");
+  // Responsible People (Phase 2) — own independent relation, never
+  // Audience. Same system-wide eligibility, reuses the SAME
+  // systemWideUsers list (no separate fetch).
+  const [selectedResponsiblePeopleIds, setSelectedResponsiblePeopleIds] = useState<Set<string>>(new Set());
+  const [responsiblePeopleSearch, setResponsiblePeopleSearch] = useState("");
+  // Organizational Audience (Phase 1) — editable here for EVERY Project
+  // (manual or request-origin). Owner(s) stays request-origin-creation-only
+  // and has no edit surface here — unchanged, out of scope for Phase 1.1.
+  const [audienceDepartmentOptions, setAudienceDepartmentOptions] = useState<{ id: string; name: string }[]>([]);
+  const [audienceBusinessUnitOptions, setAudienceBusinessUnitOptions] = useState<{ id: string; name: string }[]>([]);
+  const [selectedAudienceDepartmentIds, setSelectedAudienceDepartmentIds] = useState<Set<string>>(new Set());
+  const [selectedAudienceBusinessUnitIds, setSelectedAudienceBusinessUnitIds] = useState<Set<string>>(new Set());
+  const [audienceDepartmentSearch, setAudienceDepartmentSearch] = useState("");
+  const [audienceBusinessUnitSearch, setAudienceBusinessUnitSearch] = useState("");
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -165,6 +188,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
             (p.members ?? []).map((m: { id: string }) => m.id)
           );
           setSelectedMemberIds(existingIds);
+          setSelectedAudienceIds(new Set((p.audience ?? []).map((a: { id: string }) => a.id)));
+          setSelectedResponsiblePeopleIds(new Set((p.responsiblePeople ?? []).map((r: { id: string }) => r.id)));
+          setSelectedAudienceDepartmentIds(new Set((p.audienceDepartments ?? []).map((d: { id: string }) => d.id)));
+          setSelectedAudienceBusinessUnitIds(new Set((p.audienceBusinessUnits ?? []).map((b: { id: string }) => b.id)));
 
           setProjectRequestId(p.projectRequestId ?? null);
           if (p.projectRequestId) {
@@ -212,6 +239,76 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
       })
       .finally(() => setLoading(false));
   }, [id]);
+
+  // Audience — Users options — fetched once, independent of the Project's
+  // own department (unlike Members above), same "any active user in the
+  // system" rule Owner(s) always used.
+  useEffect(() => {
+    fetch("/api/users")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((users) => setSystemWideUsers(Array.isArray(users) ? users : []))
+      .catch(() => {});
+  }, []);
+
+  // Organizational Audience options — fetched once, independent of the
+  // Project's own department (unlike Members above).
+  useEffect(() => {
+    fetch("/api/departments")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((depts) => setAudienceDepartmentOptions(Array.isArray(depts) ? depts : []))
+      .catch(() => {});
+    fetch("/api/business-units")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((bus) => setAudienceBusinessUnitOptions(Array.isArray(bus) ? bus : []))
+      .catch(() => {});
+  }, []);
+
+  const toggleAudienceMember = (userId: string) => {
+    setSelectedAudienceIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
+  const audienceSearchResults = (() => {
+    const q = audienceSearch.trim().toLowerCase();
+    if (!q) return systemWideUsers;
+    return systemWideUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  })();
+
+  const toggleResponsiblePerson = (userId: string) => {
+    setSelectedResponsiblePeopleIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(userId)) next.delete(userId);
+      else next.add(userId);
+      return next;
+    });
+  };
+  const responsiblePeopleSearchResults = (() => {
+    const q = responsiblePeopleSearch.trim().toLowerCase();
+    if (!q) return systemWideUsers;
+    return systemWideUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+  })();
+
+  const toggleAudienceDepartment = (deptId: string) => {
+    setSelectedAudienceDepartmentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(deptId)) next.delete(deptId);
+      else next.add(deptId);
+      return next;
+    });
+  };
+  const toggleAudienceBusinessUnit = (buId: string) => {
+    setSelectedAudienceBusinessUnitIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(buId)) next.delete(buId);
+      else next.add(buId);
+      return next;
+    });
+  };
+  const audienceDepartmentSearchResults = audienceDepartmentOptions.filter((d) => d.name.toLowerCase().includes(audienceDepartmentSearch.trim().toLowerCase()));
+  const audienceBusinessUnitSearchResults = audienceBusinessUnitOptions.filter((b) => b.name.toLowerCase().includes(audienceBusinessUnitSearch.trim().toLowerCase()));
 
   const toggleMember = (userId: string) => {
     setSelectedMemberIds((prev) => {
@@ -301,6 +398,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
             : { startDate: startDate || undefined, endDate: endDate || undefined }),
           successTarget: successTarget || undefined,
           memberIds: Array.from(selectedMemberIds),
+          audienceIds: Array.from(selectedAudienceIds),
+          audienceDepartmentIds: Array.from(selectedAudienceDepartmentIds),
+          audienceBusinessUnitIds: Array.from(selectedAudienceBusinessUnitIds),
+          responsiblePeopleIds: Array.from(selectedResponsiblePeopleIds),
           isGoal,
           subDepartmentId: subDepartmentId || null,
           // All 7 fields are OPTIONAL here (unlike at request-origin setup
@@ -831,6 +932,107 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">
                   No eligible users for this workspace yet.
                 </p>
+              )}
+            </div>
+
+            {/* Audience — Users: available on every Project as of Phase
+                1.1 (previously creation-time-only, no edit surface at
+                all). Any active user in the system, same eligibility rule
+                Owner(s) always used (Owner(s) itself stays unchanged — set
+                only at request-origin creation, no edit surface here). */}
+            <div className="space-y-2">
+              <Label htmlFor="project-audience">Audience — Users</Label>
+              <p className="text-xs text-muted-foreground">Optional — users who should be able to view this Project&apos;s progress without being a Member or an Owner. Any active user in the system.</p>
+              <Input placeholder="Search by name or email…" value={audienceSearch} onChange={(e) => setAudienceSearch(e.target.value)} className="h-8 text-sm" />
+              {systemWideUsers.length > 0 ? (
+                <div id="project-audience" className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                  {audienceSearchResults.map((u) => (
+                    <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" className="h-4 w-4 rounded" checked={selectedAudienceIds.has(u.id)} onChange={() => toggleAudienceMember(u.id)} />
+                      <span className="text-sm">{u.name ?? u.email}</span>
+                    </label>
+                  ))}
+                  {audienceSearchResults.length === 0 && (
+                    <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{audienceSearch}&quot;.</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
+              )}
+            </div>
+
+            {/* Responsible People (Phase 2) — a PERMANENT, independent
+                relationship, deliberately separate from Owner(s)/Members/
+                Audience above (never written into any of those). Same
+                system-wide eligibility, same read-only visibility as
+                Audience (buildProjectAudienceWhere). */}
+            <div className="space-y-2">
+              <Label htmlFor="project-responsible-people">Responsible People</Label>
+              <p className="text-xs text-muted-foreground">Optional — users responsible for this Project, independent of Owner(s), Members and Audience. Any active user in the system.</p>
+              <Input placeholder="Search by name or email…" value={responsiblePeopleSearch} onChange={(e) => setResponsiblePeopleSearch(e.target.value)} className="h-8 text-sm" />
+              {systemWideUsers.length > 0 ? (
+                <div id="project-responsible-people" className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                  {responsiblePeopleSearchResults.map((u) => (
+                    <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" className="h-4 w-4 rounded" checked={selectedResponsiblePeopleIds.has(u.id)} onChange={() => toggleResponsiblePerson(u.id)} />
+                      <span className="text-sm">{u.name ?? u.email}</span>
+                    </label>
+                  ))}
+                  {responsiblePeopleSearchResults.length === 0 && (
+                    <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{responsiblePeopleSearch}&quot;.</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
+              )}
+            </div>
+
+            {/* Organizational Audience (Phase 1) — available on every
+                Project, same as Audience — Users above. Selecting a
+                Department/Business Unit grants dynamic, live-resolved read
+                access to its CURRENT active members — see
+                hasProjectViewAccess in lib/services/project-access-service.ts. */}
+            <div className="space-y-2">
+              <Label htmlFor="project-audience-departments">Audience — Departments</Label>
+              <p className="text-xs text-muted-foreground">Optional — every active member of the selected Department(s) can view this Project, dynamically.</p>
+              <Input placeholder="Search departments…" value={audienceDepartmentSearch} onChange={(e) => setAudienceDepartmentSearch(e.target.value)} className="h-8 text-sm" />
+              {audienceDepartmentOptions.length > 0 ? (
+                <div id="project-audience-departments" className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                  {audienceDepartmentSearchResults.map((d) => (
+                    <label key={d.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" className="h-4 w-4 rounded" checked={selectedAudienceDepartmentIds.has(d.id)} onChange={() => toggleAudienceDepartment(d.id)} />
+                      <Building2 className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-sm">{d.name}</span>
+                    </label>
+                  ))}
+                  {audienceDepartmentSearchResults.length === 0 && (
+                    <p className="text-xs text-muted-foreground px-3 py-2">No departments match &quot;{audienceDepartmentSearch}&quot;.</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active departments exist.</p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="project-audience-business-units">Audience — Business Units</Label>
+              <p className="text-xs text-muted-foreground">Optional — every active member of any Department under the selected Business Unit(s) can view this Project, dynamically.</p>
+              <Input placeholder="Search business units…" value={audienceBusinessUnitSearch} onChange={(e) => setAudienceBusinessUnitSearch(e.target.value)} className="h-8 text-sm" />
+              {audienceBusinessUnitOptions.length > 0 ? (
+                <div id="project-audience-business-units" className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                  {audienceBusinessUnitSearchResults.map((b) => (
+                    <label key={b.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" className="h-4 w-4 rounded" checked={selectedAudienceBusinessUnitIds.has(b.id)} onChange={() => toggleAudienceBusinessUnit(b.id)} />
+                      <Briefcase className="h-3.5 w-3.5 text-muted-foreground" />
+                      <span className="text-sm">{b.name}</span>
+                    </label>
+                  ))}
+                  {audienceBusinessUnitSearchResults.length === 0 && (
+                    <p className="text-xs text-muted-foreground px-3 py-2">No business units match &quot;{audienceBusinessUnitSearch}&quot;.</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No business units exist.</p>
               )}
             </div>
 

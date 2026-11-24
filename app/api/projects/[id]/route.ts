@@ -19,6 +19,7 @@ import {
   type ResolvedFacilitiesWrite,
 } from "@/lib/services/project-facilities-service";
 import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
+import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
 import { Role } from "@prisma/client";
 
 // Every field the Project List (table) or Grid (card) view actually
@@ -46,6 +47,16 @@ const PROJECT_INCLUDE = {
   department: { select: { id: true, name: true } },
   businessUnit: { select: { id: true, name: true } },
   members: { select: { id: true, name: true, email: true, image: true } },
+  // Audience — available on every Project (Phase 1.1), needed here so the
+  // Edit page can pre-populate all three picker groups (see
+  // components/projects/project-form.tsx's "audience" state and the
+  // standalone edit page's mirror of it).
+  audience: { select: { id: true, name: true, email: true, image: true } },
+  audienceDepartments: { select: { id: true, name: true } },
+  audienceBusinessUnits: { select: { id: true, name: true } },
+  // Responsible People (Phase 2) — its own, separate relation (never
+  // Audience), needed here for the same Edit-page pre-population reason.
+  responsiblePeople: { select: { id: true, name: true, email: true, image: true } },
   // Included unconditionally (even for a Project with no expenseTypeId at
   // all — Prisma simply returns null) so a now-INACTIVE type a
   // request-origin Project already references still displays by name
@@ -249,9 +260,59 @@ export async function PATCH(
       facilitiesIsBigProject,
       facilitiesProjectImportanceOverall,
       facilitiesProjectScore,
+      audienceIds,
+      audienceDepartmentIds,
+      audienceBusinessUnitIds,
+      responsiblePeopleIds,
       ...rest
     } = data;
     const effectiveDepartmentId = data.departmentId !== undefined ? data.departmentId : existing.departmentId;
+
+    // Organizational Audience — available on every Project. `undefined`
+    // (key omitted) leaves that set untouched; an explicit array (even
+    // empty) REPLACES the full set — same "omitted vs. explicit" PATCH
+    // convention as every other optional field on this route. Department
+    // and Business Unit audience are independently omittable — resolving
+    // BOTH together only when both are actually present would otherwise
+    // wrongly treat an omitted one as "clear it".
+    let resolvedAudienceDepartmentIds: string[] | undefined;
+    let resolvedAudienceBusinessUnitIds: string[] | undefined;
+    if (audienceDepartmentIds !== undefined || audienceBusinessUnitIds !== undefined) {
+      const resolution = await resolveProjectAudienceOrganizationalIds(audienceDepartmentIds ?? [], audienceBusinessUnitIds ?? []);
+      if (!resolution.ok) {
+        const message =
+          resolution.code === "invalid_audience_department"
+            ? "One or more selected Audience Departments do not exist or are not active."
+            : "One or more selected Audience Business Units do not exist.";
+        return NextResponse.json({ error: message, code: resolution.code }, { status: 400 });
+      }
+      if (audienceDepartmentIds !== undefined) resolvedAudienceDepartmentIds = resolution.departmentIds;
+      if (audienceBusinessUnitIds !== undefined) resolvedAudienceBusinessUnitIds = resolution.businessUnitIds;
+    }
+
+    // Individual Audience — available on every Project as of Phase 1.1,
+    // same independent omit-vs-replace semantics as the Organizational
+    // Audience fields above (omitted leaves it untouched; an explicit
+    // array, even empty, replaces the full set).
+    let resolvedAudienceUserIds: string[] | undefined;
+    if (audienceIds !== undefined) {
+      const resolved = await resolveSystemWideActiveUserIds(audienceIds);
+      if (resolved === null) {
+        return NextResponse.json({ error: "One or more selected Audience users are not real, active users.", code: "invalid_audience" }, { status: 400 });
+      }
+      resolvedAudienceUserIds = resolved;
+    }
+
+    // Responsible People (Phase 2) — same independent omit-vs-replace
+    // semantics, same system-wide validation, own separate relation.
+    let resolvedResponsiblePeopleIds: string[] | undefined;
+    if (responsiblePeopleIds !== undefined) {
+      const resolved = await resolveSystemWideActiveUserIds(responsiblePeopleIds);
+      if (resolved === null) {
+        return NextResponse.json({ error: "One or more selected Responsible People are not real, active users.", code: "invalid_responsible_people" }, { status: 400 });
+      }
+      resolvedResponsiblePeopleIds = resolved;
+    }
 
     // Facilities Services-only metadata — rejected outright (requirement:
     // "prevent unauthorized changes") for a Project whose EFFECTIVE
@@ -409,6 +470,10 @@ export async function PATCH(
         members: memberIds
           ? { set: memberIds.map((memberId) => ({ id: memberId })) }
           : undefined,
+        audience: resolvedAudienceUserIds !== undefined ? { set: resolvedAudienceUserIds.map((id) => ({ id })) } : undefined,
+        audienceDepartments: resolvedAudienceDepartmentIds !== undefined ? { set: resolvedAudienceDepartmentIds.map((id) => ({ id })) } : undefined,
+        audienceBusinessUnits: resolvedAudienceBusinessUnitIds !== undefined ? { set: resolvedAudienceBusinessUnitIds.map((id) => ({ id })) } : undefined,
+        responsiblePeople: resolvedResponsiblePeopleIds !== undefined ? { set: resolvedResponsiblePeopleIds.map((id) => ({ id })) } : undefined,
       },
       include: PROJECT_INCLUDE,
     });

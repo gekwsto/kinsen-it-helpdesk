@@ -11,6 +11,7 @@ import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/servic
 import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
 import { findSqlGeneralUserByUsername, type SqlGeneralUserRecord } from "@/lib/sqlgeneral-api-client";
 import { wholeCalendarDaysBetween } from "@/lib/date-only";
+import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
 import {
   getFacilitiesServicesDepartmentId,
   hasFacilitiesFieldsPresent,
@@ -383,7 +384,19 @@ export function buildAwaitingMyIntermediateApprovalWhere(userId: string): Prisma
   };
 }
 
-/** History tab: Approved/Rejected requests this user was actually involved in (requester, or within their own effective approval scope) — never every request in the system. */
+/**
+ * History tab: Approved/Rejected/Imported requests this user was actually
+ * involved in (requester, or within their own effective approval scope —
+ * for a HISTORICAL_IMPORT row, "their own department" is still exactly
+ * the request's own TARGET department, never its Requester Department,
+ * which grants nothing here) — never every request in the system.
+ * IMPORTED is included deliberately (Phase 3.1): a historical import must
+ * stay discoverable in History, same as any other decided request, even
+ * though it's never counted as "Approved" anywhere that distinguishes the
+ * two (status badges, the Final Approval UI, decideApproval's own
+ * PENDING_APPROVAL-only guard) — this bucket is "decided/settled", not
+ * "went through the standard approval workflow."
+ */
 export function buildHistoryWhere(userId: string, scope: RequesterApprovalScope): Prisma.ProjectRequestWhereInput {
   if (scope.hasGlobalApprove) {
     // Global approve -> every decided request is "their own involvement",
@@ -395,19 +408,22 @@ export function buildHistoryWhere(userId: string, scope: RequesterApprovalScope)
     // requesterId-only and hid every other decided request from a global
     // approver's History tab until this was caught by a real browser
     // smoke test.
-    return { status: { in: ["APPROVED", "REJECTED"] } };
+    return { status: { in: ["APPROVED", "REJECTED", "IMPORTED"] } };
   }
   const or: Prisma.ProjectRequestWhereInput[] = [
     { requesterId: userId },
     // Any request they were EVER asked to intermediate-approve, regardless
     // of how they decided (or whether another approver's rejection beat
-    // them to it) — real involvement, not department-scoped.
+    // them to it) — real involvement, not department-scoped. A
+    // HISTORICAL_IMPORT row never has any such row, so this never matches
+    // one — it only ever reaches History via requesterId or the
+    // departmentId branch below.
     { intermediateApprovers: { some: { approverId: userId } } },
   ];
   if (scope.approveDepartmentIds.length > 0) {
     or.push({ departmentId: { in: scope.approveDepartmentIds } });
   }
-  return { status: { in: ["APPROVED", "REJECTED"] }, OR: or };
+  return { status: { in: ["APPROVED", "REJECTED", "IMPORTED"] }, OR: or };
 }
 
 /** Detail-page/API visibility — requester, within effective FINAL approval scope for THIS request's own department, OR one of THIS request's own selected intermediate approvers (even though they hold no department-scoped grant at all — their authority is the explicit per-request selection, not a department). Never a broader "any admin-adjacent role" shortcut. */
@@ -415,7 +431,11 @@ export async function canViewProjectRequest(
   userId: string,
   role: Role,
   customRoleId: string | null | undefined,
-  request: { id: string; requesterId: string; departmentId: string }
+  // requesterId is null for a HISTORICAL_IMPORT request with an unknown
+  // requester — `null === userId` is never true for a real session user,
+  // so this naturally, correctly denies the "I am the requester" path for
+  // such a row without any special-casing.
+  request: { id: string; requesterId: string | null; departmentId: string }
 ): Promise<boolean> {
   if (request.requesterId === userId) return true;
   const isFinalApprover = await hasEffectiveEntityPermission(userId, role, customRoleId, request.departmentId, APPROVE_PERMISSION_KEY);
@@ -433,7 +453,13 @@ export type ApprovalActionError =
   | { code: "not_found" }
   | { code: "forbidden" }
   | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
-  | { code: "invalid_assessment" };
+  | { code: "invalid_assessment" }
+  // Phase 3 — an explicit, independent invariant check (never relying
+  // solely on the incidental fact that a HISTORICAL_IMPORT row can never
+  // actually reach PENDING_APPROVAL/have a PENDING intermediate row) that
+  // this normal-workflow action was attempted against a source !==
+  // STANDARD request. See ProjectRequestSource's own doc comment.
+  | { code: "not_standard_request" };
 
 export type ApprovalActionResult =
   | { ok: true }
@@ -485,10 +511,23 @@ export async function decideApproval(
 
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, status: true, departmentId: true, requesterId: true },
+    select: { id: true, title: true, status: true, departmentId: true, requesterId: true, source: true },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
+  // Explicit invariant: this entire normal-workflow action is reserved for
+  // STANDARD requests. Checked independently of status (which already
+  // makes this unreachable for a HISTORICAL_IMPORT row today, since it's
+  // created directly at APPROVED) — see ApprovalActionError's own doc
+  // comment on this code.
+  if (existing.source !== "STANDARD") return { ok: false, error: { code: "not_standard_request" } };
   if (existing.status !== "PENDING_APPROVAL") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
+  // A STANDARD request always has a real requester, set from the
+  // authenticated session at submission (POST /api/project-requests) and
+  // never cleared afterward — this is never actually null in practice; a
+  // thrown error here (rather than a quiet fallback) is deliberate: it
+  // would mean this invariant was somehow violated elsewhere.
+  if (!existing.requesterId) throw new Error(`STANDARD ProjectRequest ${existing.id} has no requesterId — data integrity violation`);
+  const requesterId = existing.requesterId;
 
   const allowed = await hasEffectiveEntityPermission(userId, role, customRoleId, existing.departmentId, APPROVE_PERMISSION_KEY);
   if (!allowed) return { ok: false, error: { code: "forbidden" } };
@@ -513,7 +552,7 @@ export async function decideApproval(
     const decisionLabel = decision === "approve" ? "approved" : "rejected";
     notificationRow = await tx.notification.create({
       data: {
-        userId: existing.requesterId,
+        userId: requesterId,
         title: `Project Request ${decisionLabel}`,
         body: `Your Project Request "${existing.title}" was ${decisionLabel}.`,
         link: `/project-requests/${requestId}`,
@@ -543,8 +582,18 @@ export type CreateProjectFromRequestError =
   | { code: "not_found" }
   | { code: "forbidden" }
   | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
+  // Phase 3 — same explicit, independent invariant check as
+  // ApprovalActionError's own "not_standard_request" (see its doc
+  // comment). A HISTORICAL_IMPORT request already has its Project linked
+  // at creation time, so this is also unreachable in practice via the
+  // `if (existing.project)` short-circuit below — this is the second,
+  // explicit guard, not the only one.
+  | { code: "not_standard_request" }
   | { code: "invalid_project_owner" }
   | { code: "invalid_audience" }
+  | { code: "invalid_audience_department" }
+  | { code: "invalid_audience_business_unit" }
+  | { code: "invalid_responsible_people" }
   | { code: "invalid_expense_type" }
   | { code: "invalid_sub_department" }
   | { code: "invalid_member" }
@@ -552,23 +601,10 @@ export type CreateProjectFromRequestError =
   | { code: "facilities_quarter_fields_incomplete"; field: "start" | "end" }
   | { code: "facilities_invalid_date_range" };
 
-/**
- * Validates a set of user ids for Owner(s)/Audience — deliberately NEVER
- * Department/Workspace-scoped, unlike Members' own
- * userHasAssignablePermissionForEntity: both are explicitly "ANY active
- * user in the entire system" per this feature's own spec (no requirement
- * the user belongs to the Project's department, holds any particular
- * permission, or is already a Member). Deduplicates, rejects blank
- * entries, and returns null if ANY id doesn't resolve to a real, currently
- * active User — never silently drops an invalid one and proceeds with the
- * rest (fail closed, same philosophy as the Member-eligibility loop below).
- */
-async function resolveSystemWideActiveUserIds(ids: string[]): Promise<string[] | null> {
-  const deduped = Array.from(new Set(ids.map((id) => id.trim()).filter((id) => id.length > 0)));
-  if (deduped.length === 0) return deduped;
-  const activeCount = await prisma.user.count({ where: { id: { in: deduped }, isActive: true } });
-  return activeCount === deduped.length ? deduped : null;
-}
+// resolveSystemWideActiveUserIds (Owner(s)/Audience — "any active user in
+// the entire system") now lives in lib/services/project-audience-service.ts
+// (imported above) — relocated there in Phase 1.1 once manual Project
+// creation/edit needed the exact same validation for individual Audience.
 
 export type CreateProjectFromRequestResult =
   | { ok: true; projectId: string; alreadyExisted: boolean }
@@ -624,9 +660,15 @@ export async function createProjectFromApprovedRequest(
 ): Promise<CreateProjectFromRequestResult> {
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, status: true, departmentId: true, approverId: true, project: { select: { id: true } } },
+    select: { id: true, status: true, departmentId: true, approverId: true, source: true, project: { select: { id: true } } },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
+  // Explicit invariant — same reasoning as decideApproval's own check.
+  // Placed BEFORE the `existing.project` short-circuit below so a
+  // HISTORICAL_IMPORT request (whose Project is already linked at
+  // creation time) never resolves as a quiet "alreadyExisted: true" no-op
+  // through this normal-workflow entry point — it fails explicitly instead.
+  if (existing.source !== "STANDARD") return { ok: false, error: { code: "not_standard_request" } };
   if (existing.status !== "APPROVED") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
   const allowed = await hasEffectiveEntityPermission(userId, role, customRoleId, existing.departmentId, APPROVE_PERMISSION_KEY);
   if (!allowed) return { ok: false, error: { code: "forbidden" } };
@@ -681,6 +723,18 @@ export async function createProjectFromApprovedRequest(
   // genuinely INVALID (non-existent/inactive) submitted id fails this.
   const audienceIds = await resolveSystemWideActiveUserIds(data.audienceIds ?? []);
   if (audienceIds === null) return { ok: false, error: { code: "invalid_audience" } };
+
+  // Organizational Audience (Phase 1) — available here too, same as plain
+  // manual Project creation (see POST /api/projects). Every id re-verified
+  // against real, existing (and for Departments, active) rows.
+  const audienceOrgResolution = await resolveProjectAudienceOrganizationalIds(data.audienceDepartmentIds ?? [], data.audienceBusinessUnitIds ?? []);
+  if (!audienceOrgResolution.ok) return { ok: false, error: { code: audienceOrgResolution.code } };
+
+  // Responsible People (Phase 2) — available here too, same as plain
+  // manual Project creation (see POST /api/projects). Its own separate
+  // relation, never connected into `audience`.
+  const responsiblePeopleIds = await resolveSystemWideActiveUserIds(data.responsiblePeopleIds ?? []);
+  if (responsiblePeopleIds === null) return { ok: false, error: { code: "invalid_responsible_people" } };
 
   const expenseType = await prisma.projectExpenseType.findUnique({ where: { id: data.expenseTypeId }, select: { id: true, isActive: true } });
   if (!expenseType || !expenseType.isActive) return { ok: false, error: { code: "invalid_expense_type" } };
@@ -744,6 +798,9 @@ export async function createProjectFromApprovedRequest(
         // hasProjectViewAccess, lib/services/project-access-service.ts,
         // for the ONLY effect Audience membership has).
         audience: audienceIds.length ? { connect: audienceIds.map((id) => ({ id })) } : undefined,
+        audienceDepartments: audienceOrgResolution.departmentIds.length ? { connect: audienceOrgResolution.departmentIds.map((id) => ({ id })) } : undefined,
+        audienceBusinessUnits: audienceOrgResolution.businessUnitIds.length ? { connect: audienceOrgResolution.businessUnitIds.map((id) => ({ id })) } : undefined,
+        responsiblePeople: responsiblePeopleIds.length ? { connect: responsiblePeopleIds.map((id) => ({ id })) } : undefined,
         // Facilities Services: the resolved write wins (derived from
         // either Quarter or Exact). Every other workspace: the exact,
         // unmodified pre-existing behavior.
@@ -856,9 +913,20 @@ export async function decideIntermediateApproval(
 
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, status: true, departmentId: true, requesterId: true },
+    select: { id: true, title: true, status: true, departmentId: true, requesterId: true, source: true },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
+  // Explicit invariant — see decideApproval's identical check and
+  // ApprovalActionError's own doc comment on this code. Independent of
+  // status (which already makes this unreachable for a HISTORICAL_IMPORT
+  // row today, since it never has any ProjectRequestIntermediateApprover
+  // rows for `myRow` below to find at all).
+  if (existing.source !== "STANDARD") return { ok: false, error: { code: "not_standard_request" } };
+  // A STANDARD request always has a real requester (see decideApproval's
+  // identical assertion) — a thrown error here is deliberate, not a quiet
+  // fallback.
+  if (!existing.requesterId) throw new Error(`STANDARD ProjectRequest ${existing.id} has no requesterId — data integrity violation`);
+  const requesterId = existing.requesterId;
 
   // Never selected for THIS request at all -> forbidden. Selection IS the
   // authorization now (see this function's own doc comment).
@@ -923,7 +991,7 @@ export async function decideIntermediateApproval(
       if (parentUpdate.count > 0) {
         rejectNotificationRow = await tx.notification.create({
           data: {
-            userId: existing.requesterId,
+            userId: requesterId,
             title: "Project Request rejected",
             body: `Your Project Request "${existing.title}" was rejected during intermediate approval.`,
             link: `/project-requests/${requestId}`,

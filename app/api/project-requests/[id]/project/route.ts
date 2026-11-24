@@ -38,6 +38,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             apiError("invalid_status", "This Project Request must be APPROVED before its Project can be set up.", { field: "status" }),
             { status: 409 }
           );
+        case "not_standard_request":
+          return NextResponse.json(
+            apiError("not_standard_request", "This Project Request is a historical import and is not eligible for normal Project setup — it already has a linked Project."),
+            { status: 409 }
+          );
         case "invalid_project_owner":
           return NextResponse.json(
             apiError("invalid_project_owner", "Select at least one real, active user to own this Project.", { field: "ownerIds" }),
@@ -46,6 +51,21 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
         case "invalid_audience":
           return NextResponse.json(
             apiError("invalid_audience", "One or more selected Audience users are not real, active users.", { field: "audienceIds" }),
+            { status: 422 }
+          );
+        case "invalid_audience_department":
+          return NextResponse.json(
+            apiError("invalid_audience_department", "One or more selected Audience Departments do not exist or are not active.", { field: "audienceDepartmentIds" }),
+            { status: 422 }
+          );
+        case "invalid_audience_business_unit":
+          return NextResponse.json(
+            apiError("invalid_audience_business_unit", "One or more selected Audience Business Units do not exist.", { field: "audienceBusinessUnitIds" }),
+            { status: 422 }
+          );
+        case "invalid_responsible_people":
+          return NextResponse.json(
+            apiError("invalid_responsible_people", "One or more selected Responsible People are not real, active users.", { field: "responsiblePeopleIds" }),
             { status: 422 }
           );
         case "invalid_expense_type":

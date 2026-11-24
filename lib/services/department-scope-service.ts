@@ -7,6 +7,7 @@ import { getUserSubDepartmentIds, getSubDepartmentMembership } from "@/lib/servi
 import { resolveActiveWorkspace } from "@/lib/services/workspace-service";
 import { hasDepartmentPermission, hasPermission, canViewAllDepartments } from "@/lib/permissions";
 import { canViewFullOrganizationTree } from "@/lib/services/organization-scope-service";
+import { buildProjectAudienceWhere } from "@/lib/services/project-audience-service";
 import type { DepartmentSummary } from "@/types/department";
 
 /**
@@ -755,8 +756,39 @@ export function buildCreatedByMeWhere(userId: string, requestedDepartmentId?: st
     : { requesterId: userId };
 }
 
+/**
+ * Project list/search/Gantt/dashboard scoping — department-authorization
+ * (buildEntityListWhere, same as Activity/Ticket.pending/Resource Planning)
+ * OR'd, Phase 1.1 onward, with Audience-derived visibility
+ * (buildProjectAudienceWhere in project-audience-service.ts — the SAME
+ * predicate hasProjectViewAccess uses at record level, so a list can never
+ * disagree with the detail page about which Projects a user can see).
+ * Every consumer of this function (the All Projects list, its Excel
+ * export, the Projects Dashboard's counts/aggregations, the Gantt view,
+ * and the command-palette's global search) gets this automatically,
+ * without each having to know Audience exists — this is deliberately the
+ * ONLY place that OR is added, never duplicated per-caller.
+ *
+ * The OR is added ONLY for the unscoped "all accessible" view
+ * (requestedDepartmentId omitted — e.g. the "All Workspaces" selector,
+ * command-palette search) or for a canViewAllDepartments role (where it
+ * would be a no-op anyway, so skipped). An EXPLICIT single-department
+ * filter (?departmentId=/a chosen single workspace) is left completely
+ * unchanged, including its existing denial when the caller holds no
+ * Department-level access there — Audience grants visibility to the
+ * specific Project(s) it actually covers, never general browsing access to
+ * their owning Department (see this feature's own spec: "Audience must not
+ * grant general access to the owning Department"). An Audience-only
+ * Project outside the caller's accessible Departments therefore surfaces
+ * in the unscoped list/search, exactly satisfying "discoverable through
+ * the appropriate application views, not only through a direct URL" —
+ * filtering down to one specific, otherwise-inaccessible Department is a
+ * separate, narrower ask this function does not attempt.
+ */
 export async function buildProjectListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {
-  return buildEntityListWhere(userId, role, "project.view", requestedDepartmentId);
+  const scoped = await buildEntityListWhere(userId, role, "project.view", requestedDepartmentId);
+  if (canViewAllDepartments(role) || requestedDepartmentId || "denied" in scoped) return scoped;
+  return { OR: [scoped, buildProjectAudienceWhere(userId)] };
 }
 
 export async function buildActivityListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {

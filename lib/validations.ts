@@ -200,6 +200,32 @@ export const createProjectSchema = z.object({
   successTarget: z.string().optional(),
   memberIds: z.array(z.string()).default([]),
   isGoal: z.boolean().default(false),
+  // Audience — available on every Project, manual or request-origin.
+  // Individual Users (audienceIds) were request-origin-only through Phase
+  // 1; Phase 1.1 removes that restriction so manual Project
+  // creation/editing can set it too, same as Departments/Business Units
+  // (audienceDepartmentIds/audienceBusinessUnitIds — Phase 1, universal
+  // from the start; see Project.audienceDepartments/audienceBusinessUnits'
+  // own schema doc comment). Every id is independently re-verified
+  // server-side against real, existing (and active, where applicable)
+  // rows before being connected — never trusted as-is. `.partial()` below
+  // (updateProjectSchema) makes all three optional on PATCH, same as every
+  // other field on this schema; omitted means "leave unchanged," an empty
+  // array means "clear." Project Owner semantics (ownerIds, request-origin
+  // creation only) are explicitly UNCHANGED by this — see
+  // createProjectFromRequestSchema below, still the only place ownerIds is
+  // accepted.
+  audienceIds: z.array(z.string()).default([]),
+  audienceDepartmentIds: z.array(z.string()).default([]),
+  audienceBusinessUnitIds: z.array(z.string()).default([]),
+  // Responsible People (Phase 2) — a PERMANENT, independent relationship
+  // (Project.responsiblePeople), never written into audienceIds/owners/
+  // memberIds. Available on every Project, manual or request-origin,
+  // regardless of Department or status — same universal availability and
+  // "any active user in the system" re-verification (resolveSystemWideActiveUserIds
+  // in lib/services/project-audience-service.ts) as audienceIds. Same
+  // omitted-vs-explicit-empty-array PATCH convention as every field above.
+  responsiblePeopleIds: z.array(z.string()).default([]),
 });
 
 export const updateProjectSchema = createProjectSchema.partial();
@@ -321,6 +347,66 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
   // (unknown keys), never persisted.
   external: z.boolean().optional(),
 });
+
+// ─── Historical Project Request Import (Phase 3) ───────────────────────────
+// A deliberately SEPARATE schema from createProjectRequestSchema/
+// createProjectFromRequestSchema — Historical Import creates the
+// ProjectRequest AND its Project together in one call (see
+// createHistoricalProjectRequest in
+// lib/services/project-request-historical-import-service.ts), so its
+// required-field shape differs meaningfully from either normal-flow
+// schema: requesterId/submittedAt/approverId/approvedAt/businessAssessment
+// are all OPTIONAL (never fabricated when the source data doesn't support
+// them), while departmentId, ownerIds, externalSourceId, and the Project's
+// own projectStatus are REQUIRED (there is no separate request-origin
+// Project-setup step to collect them later). Only ever accepted by the
+// privileged, permission-gated POST /api/admin/project-requests/
+// historical-import route — never the standard user-facing
+// POST /api/project-requests endpoint.
+export const createHistoricalProjectRequestSchema = z.object({
+  title: z.string().trim().min(3, "Title must be at least 3 characters").max(200),
+  description: z.string().trim().min(1, "Description is required").max(5000),
+  importance: z.number().int().min(1).max(3),
+  teamConcerned: z.string().trim().min(1, "Team concerned is required").max(200),
+  expectedBenefits: z.string().trim().min(1, "Expected benefits is required").max(5000),
+  replacesExisting: z.boolean().default(false),
+  replacementDescription: z.string().trim().max(5000).optional(),
+  // A stable identifier from the external source system — required, so
+  // every import is idempotency-checked; never left to an auto-generated
+  // id a re-run couldn't recognize.
+  externalSourceId: z.string().trim().min(1, "External source id is required"),
+
+  departmentId: z.string().trim().min(1, "Department is required"),
+
+  // All optional/nullable — set ONLY when the source data genuinely
+  // supports them. `null` and omission are both "unknown", never a
+  // fabricated value.
+  requesterId: z.string().trim().min(1).nullable().optional(),
+  requesterDepartmentId: z.string().trim().min(1).nullable().optional(),
+  // Accepts an ISO date string (the request boundary's own transport
+  // shape); the route converts to a real Date before calling the service.
+  submittedAt: z.string().min(1).nullable().optional(),
+  approverId: z.string().trim().min(1).nullable().optional(),
+  approvedAt: z.string().min(1).nullable().optional(),
+  businessAssessment: z.string().trim().max(5000).nullable().optional(),
+
+  // The Project's OWN current lifecycle state — independent of the
+  // request's (always APPROVED) status; see this feature's own "Preserve
+  // Project lifecycle status independently from Request approval state."
+  projectStatus: z.nativeEnum(ProjectStatus),
+  projectTitle: z.string().trim().min(3).max(200).optional(),
+  projectDescription: z.string().trim().max(5000).nullable().optional(),
+  startDate: z.string().min(1).nullable().optional(),
+  endDate: z.string().min(1).nullable().optional(),
+
+  ownerIds: z.array(z.string()).min(1, "At least one Project Owner is required"),
+  audienceIds: z.array(z.string()).default([]),
+  audienceDepartmentIds: z.array(z.string()).default([]),
+  audienceBusinessUnitIds: z.array(z.string()).default([]),
+  responsiblePeopleIds: z.array(z.string()).default([]),
+});
+
+export type CreateHistoricalProjectRequestSchemaInput = z.infer<typeof createHistoricalProjectRequestSchema>;
 
 // Facilities Services-only Project metadata — a SEPARATE schema, merged in
 // at each of the 3 creation paths and at PATCH /api/projects/[id], same

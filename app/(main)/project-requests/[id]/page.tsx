@@ -96,15 +96,24 @@ export default async function ProjectRequestDetailPage({
         {request.replacesExisting && request.replacementDescription && (
           <Field label="Solution/project to be replaced" value={request.replacementDescription} multiline />
         )}
-        <Field label="Requester" value={request.requester.name ?? request.requester.email} />
+        {/* Source — always shown, so "Standard" vs. "Historical Import" is
+            never ambiguous from absence alone (see this feature's own
+            "do not display misleading approval badges" requirement —
+            applies just as much to leaving the source itself unstated). */}
+        <Field label="Source" value={request.source === "HISTORICAL_IMPORT" ? "Historical Import" : "Standard"} />
+        {/* Null (rendered "Not recorded") ONLY for a HISTORICAL_IMPORT
+            request whose original requester genuinely isn't known from the
+            source data — never guessed/fabricated. */}
+        <Field label="Requester" value={request.requester ? request.requester.name ?? request.requester.email : "Not recorded"} />
         {/* Read-only snapshot of the requester's OWN department at
             submission time — never the request's target department
             (above) and never editable here. "Not recorded" for a request
-            created before this field existed, or whose requester had no
-            primary department at the time — never guessed from their
+            created before this field existed, whose requester had no
+            primary department at the time, or a HISTORICAL_IMPORT request
+            whose source data didn't record one — never guessed from their
             CURRENT membership. */}
         <Field label="Requester Department" value={request.requesterDepartment?.name ?? "Not recorded"} />
-        <Field label="Submitted" value={request.submittedAt.toLocaleString()} />
+        <Field label="Submitted" value={request.submittedAt ? request.submittedAt.toLocaleString() : "Not recorded"} />
         {request.legacyRequesterBusinessAssessment && (
           <Field label="Legacy requester business assessment" value={request.legacyRequesterBusinessAssessment} multiline />
         )}

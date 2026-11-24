@@ -134,6 +134,49 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
     );
   }
 
+  // Historical Import (Phase 3.1 — its own distinct terminal status,
+  // never APPROVED/REJECTED; see ProjectRequestStatus's own schema doc
+  // comment). approver/approvedAt/businessAssessment may be genuinely
+  // known (preserved from source data) or genuinely unknown — both are
+  // handled here explicitly, never silently falling through to the
+  // "Awaiting approval..." branch below, which would be actively
+  // misleading for a request that's already been imported with a real,
+  // operational Project. The View Project / Complete Setup affordance is
+  // offered exactly as the standard-APPROVED branch above does.
+  if (status === "IMPORTED") {
+    return (
+      <div className="text-sm">
+        <p className="text-muted-foreground font-medium">Imported</p>
+        {approver ? (
+          <>
+            <p className="text-sm mt-1">
+              Approved by <span className="font-medium">{approver.name ?? approver.email}</span>
+            </p>
+            {approvedAt && <p className="text-muted-foreground">{formatDateTime(approvedAt)}</p>}
+            {businessAssessment && <p className="whitespace-pre-wrap mt-1">{businessAssessment}</p>}
+          </>
+        ) : (
+          <p className="text-xs text-muted-foreground mt-1">Approval history not recorded (historical import).</p>
+        )}
+        {project ? (
+          <Link href={`/projects/${project.id}`} className="inline-flex items-center gap-1.5 mt-2 text-primary hover:underline">
+            <FolderKanban className="h-3.5 w-3.5" />
+            View Project
+          </Link>
+        ) : canCompleteSetup ? (
+          <Button size="sm" className="mt-2" asChild>
+            <Link href={`/projects/new?projectRequestId=${requestId}`}>
+              <Wrench className="h-3.5 w-3.5 mr-1.5" />
+              Complete Project Setup
+            </Link>
+          </Button>
+        ) : (
+          <p className="text-xs text-muted-foreground mt-2">Project setup is still pending, from someone with final-approval rights in this department.</p>
+        )}
+      </div>
+    );
+  }
+
   if (!canDecideNow) {
     return <p className="text-sm text-muted-foreground">Awaiting approval from someone in this department with approval rights.</p>;
   }

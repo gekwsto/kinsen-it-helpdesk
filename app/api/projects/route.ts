@@ -10,6 +10,7 @@ import {
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { resolveActiveDepartmentMemberIds } from "@/lib/services/department-membership-service";
+import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createProjectSchema, createProjectMemberEligibilitySchema, facilitiesProjectFieldsSchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
@@ -134,8 +135,41 @@ export async function POST(req: NextRequest) {
       facilitiesIsBigProject,
       facilitiesProjectImportanceOverall,
       facilitiesProjectScore,
+      audienceIds,
+      audienceDepartmentIds,
+      audienceBusinessUnitIds,
+      responsiblePeopleIds,
       ...rest
     } = data;
+
+    // Organizational Audience — available on every Project, manual or
+    // request-origin. Every id re-verified against real, existing (and for
+    // Departments, active) rows — never trusted as-is.
+    const audienceOrgResolution = await resolveProjectAudienceOrganizationalIds(audienceDepartmentIds, audienceBusinessUnitIds);
+    if (!audienceOrgResolution.ok) {
+      const message =
+        audienceOrgResolution.code === "invalid_audience_department"
+          ? "One or more selected Audience Departments do not exist or are not active."
+          : "One or more selected Audience Business Units do not exist.";
+      return NextResponse.json({ error: message, code: audienceOrgResolution.code }, { status: 400 });
+    }
+
+    // Individual Audience — available on every Project as of Phase 1.1
+    // (previously request-origin-only, see createProjectFromRequestSchema's
+    // own history). Same system-wide "any active user" re-verification
+    // createProjectFromApprovedRequest already uses for this exact field.
+    const resolvedAudienceUserIds = await resolveSystemWideActiveUserIds(audienceIds);
+    if (resolvedAudienceUserIds === null) {
+      return NextResponse.json({ error: "One or more selected Audience users are not real, active users.", code: "invalid_audience" }, { status: 400 });
+    }
+
+    // Responsible People (Phase 2) — available on every Project, same
+    // system-wide "any active user" re-verification as Audience, but its
+    // own independent relation (never connected to `audience`).
+    const resolvedResponsiblePeopleIds = await resolveSystemWideActiveUserIds(responsiblePeopleIds);
+    if (resolvedResponsiblePeopleIds === null) {
+      return NextResponse.json({ error: "One or more selected Responsible People are not real, active users.", code: "invalid_responsible_people" }, { status: 400 });
+    }
 
     // Facilities Services-only metadata — rejected outright for any other
     // workspace (requirement: "prevent cross-workspace writes"), resolved
@@ -224,6 +258,10 @@ export async function POST(req: NextRequest) {
         // behavior changes — no UI, no permission check, reads this
         // relation differently for a manual Project.
         owners: { connect: [{ id: session.user.id }] },
+        audience: resolvedAudienceUserIds.length ? { connect: resolvedAudienceUserIds.map((id) => ({ id })) } : undefined,
+        audienceDepartments: audienceOrgResolution.departmentIds.length ? { connect: audienceOrgResolution.departmentIds.map((id) => ({ id })) } : undefined,
+        audienceBusinessUnits: audienceOrgResolution.businessUnitIds.length ? { connect: audienceOrgResolution.businessUnitIds.map((id) => ({ id })) } : undefined,
+        responsiblePeople: resolvedResponsiblePeopleIds.length ? { connect: resolvedResponsiblePeopleIds.map((id) => ({ id })) } : undefined,
         // Facilities Services: the resolved write wins outright (it
         // already derived startDate/endDate from either the exact date or
         // the Quarter boundary, plus the precision/quarter/year metadata).

@@ -112,6 +112,30 @@ export async function getActiveDepartmentMemberUsers(departmentId: string): Prom
 }
 
 /**
+ * Active users with an active DepartmentMembership in ANY Department that
+ * belongs to this BusinessUnit (Department.businessUnitId) — the dynamic,
+ * hierarchy-aware definition of "who's in this Business Unit" used by the
+ * Organizational Audience extension (see getEffectiveProjectAudienceUserIds/
+ * hasProjectViewAccess in lib/services/project-access-service.ts).
+ *
+ * Deliberately NOT based on the separate, direct User.businessUnitId FK
+ * (BusinessUnit.users) — that field is the same kind of legacy "home"
+ * placement pointer as User.departmentId (see DepartmentMembership's own
+ * schema doc comment on why that one is "decoupled" from live membership
+ * truth); DepartmentMembership is this app's one canonical, live-updated
+ * membership record everywhere else "who's actively in X right now" is
+ * resolved, so Business Unit audience membership is defined the same way,
+ * never a second, parallel membership model.
+ */
+export async function getActiveBusinessUnitMemberUsers(businessUnitId: string): Promise<DepartmentMemberUserSummary[]> {
+  return prisma.user.findMany({
+    where: { isActive: true, departmentMemberships: { some: { isActive: true, department: { businessUnitId } } } },
+    select: memberUserSelect,
+    orderBy: { name: "asc" },
+  });
+}
+
+/**
  * Write-time counterpart to getActiveDepartmentMemberUsers above — never
  * trusts a client-submitted memberId list as-is. Dedupes/trims first, then
  * requires EVERY id to resolve to a real, currently-active User with an

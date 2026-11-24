@@ -271,6 +271,9 @@ model BusinessUnit {
   users       User[]
   projects    Project[]
   activities  ProjectActivity[]
+  // Back-relation for the Organizational Audience extension — see
+  // Project.audienceBusinessUnits' own doc comment.
+  audienceOfProjects Project[]    @relation("ProjectAudienceBusinessUnits")
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
 }
@@ -313,6 +316,9 @@ model Department {
   tickets                 Ticket[]
   pendingTickets          PendingTicket[]
   projects                Project[]
+  // Back-relation for the Organizational Audience extension — see
+  // Project.audienceDepartments' own doc comment.
+  audienceOfProjects      Project[]                    @relation("ProjectAudienceDepartments")
   activities              ProjectActivity[]
   // Named to disambiguate from requesterDepartmentProjectRequests below —
   // two independent relations to ProjectRequest now exist (target
@@ -1042,9 +1048,15 @@ model User {
   // own doc comment for the exact "primary vs. full set" relationship with
   // ownedProjects/ownerId above.
   projectOwnerships                   Project[]                            @relation("ProjectOwners")
-  // Request-origin Projects this user follows (NOT a Member, NOT an Owner)
-  // — see Project.audience's own doc comment.
+  // Projects this user follows (NOT a Member, NOT an Owner) — available on
+  // every Project, manual or request-origin, as of Phase 1.1 — see
+  // Project.audience's own doc comment.
   projectAudienceOf                   Project[]                            @relation("ProjectAudience")
+  // Every Project this user is a Responsible Person for — Phase 2, a
+  // permanent, independent relationship (never Owner/Member/Audience
+  // storage), available on every Project regardless of Department or
+  // status. See Project.responsiblePeople's own doc comment.
+  responsibleForProjects              Project[]                            @relation("ProjectResponsiblePeople")
   projectRequestsSubmitted            ProjectRequest[]                     @relation("ProjectRequestRequester")
   projectRequestsApproved             ProjectRequest[]                     @relation("ProjectRequestApprover")
   submittedProjectFeedback            ProjectFeedback[]                    @relation("ProjectFeedbackSubmitter")
@@ -1750,15 +1762,48 @@ model Project {
   // automatically a Member, and vice versa (see PROJECT_OWNER_AUDIENCE
   // feature's own spec: "Do not use Members as storage for Owners").
   owners       User[]              @relation("ProjectOwners")
-  // Users who may follow/view a request-origin Project's progress without
-  // being a Member or an Owner — see hasProjectViewAccess
-  // (lib/services/project-access-service.ts), the ONLY place Audience
-  // membership has any effect: it extends READ access to the Project
-  // detail/notes/attachments surfaces, nothing else — never edit/delete,
-  // never Member/Owner status. Always empty for a manual Project (never
-  // written to outside the request-origin creation path). Zero or more,
-  // system-wide (never Department/Workspace-scoped, unlike `members`).
+  // Users who may follow/view a Project's progress without being a Member
+  // or an Owner — see hasProjectViewAccess (lib/services/project-access-
+  // service.ts) and buildProjectAudienceWhere (lib/services/project-
+  // audience-service.ts), which together are the ONLY place Audience
+  // membership has any effect: it extends READ access (record-level AND
+  // list/Gantt/dashboard/search), nothing else — never edit/delete, never
+  // Member/Owner status, never Project Request/Ticket/Activity access.
+  // Available on EVERY Project, manual or request-origin, as of Phase 1.1
+  // (Phase 1 restricted this to request-origin Projects only — see
+  // Project.owners above, which keeps that original restriction
+  // unchanged: Owner semantics were explicitly out of scope for Phase
+  // 1.1). Zero or more, system-wide (never Department/Workspace-scoped,
+  // unlike `members`).
   audience     User[]              @relation("ProjectAudience")
+  // Organizational Audience — Phase 1 extension of the individual-user
+  // Audience above, universal from the start (never request-origin-only).
+  // Deliberately NOT expanded into a static list of individual users at
+  // write time: a Department/BusinessUnit connected here grants read
+  // access DYNAMICALLY to whichever users are its currently-active
+  // members (via DepartmentMembership — see buildProjectAudienceWhere in
+  // lib/services/project-audience-service.ts, the single centralized
+  // resolver shared by both the record-level and list-level checks), so
+  // an organizational membership change updates effective access
+  // automatically, with nothing to re-sync here. Implicit many-to-many —
+  // no join-row metadata (added-by/added-at) is needed.
+  audienceDepartments   Department[]   @relation("ProjectAudienceDepartments")
+  audienceBusinessUnits BusinessUnit[] @relation("ProjectAudienceBusinessUnits")
+  // Responsible People — Phase 2. A PERMANENT, independent relationship,
+  // deliberately separate from Owner(s)/Members/Audience (never written
+  // into any of those relations, and never populated automatically for a
+  // pre-existing Project by the migration that introduces this column).
+  // Available on every Project, manual or request-origin, regardless of
+  // Department or status — same universal availability as Organizational
+  // Audience above. Grants the SAME read-only visibility Audience does
+  // (record-level AND list/Gantt/dashboard/search/export) — see
+  // buildProjectAudienceWhere in lib/services/project-audience-service.ts,
+  // which ORs this relation in alongside the Audience checks — but is
+  // tracked as its own relation/UI field/label throughout, never silently
+  // merged into `audience` at write time. NEVER grants edit/delete/
+  // approval/Department-level/related-entity (Project Request/Ticket/
+  // Activity) access — exactly like Audience, this is read-only.
+  responsiblePeople User[] @relation("ProjectResponsiblePeople")
   activities   ProjectActivity[]
   tickets      Ticket[]
   yearlyGoals  YearlyGoal[]        @relation("GoalProjects")
@@ -2225,6 +2270,22 @@ enum ProjectRequestStatus {
   PENDING_APPROVAL
   APPROVED
   REJECTED
+  // Phase 3.1 — the terminal status for a HISTORICAL_IMPORT request (see
+  // ProjectRequestSource's own doc comment), DELIBERATELY DISTINCT from
+  // APPROVED: a historical row has a genuinely operational, already-linked
+  // Project, but it never went through (and must never be conflated with)
+  // the standard multi-stage approval workflow that APPROVED represents.
+  // A STANDARD request NEVER transitions here — the only writer of this
+  // status is createHistoricalProjectRequest (lib/services/project-
+  // request-historical-import-service.ts), at creation time, never a
+  // later transition from any other status. Every status-dependent
+  // consumer that buckets "decided"/"History" requests together
+  // (buildHistoryWhere) includes this status explicitly so historical
+  // requests stay discoverable there; every consumer that counts/labels
+  // "Approved" specifically (status badges, the Final Approval UI,
+  // decideApproval's own PENDING_APPROVAL-only guard) deliberately does
+  // NOT, so approval KPIs are never distorted by an import.
+  IMPORTED
 }
 
 enum IntermediateApprovalStatus {
@@ -2239,18 +2300,36 @@ enum IntermediateApprovalSkipReason {
   PERMISSION_BYPASS
 }
 
+// Phase 3 — distinguishes a normal user-submitted request (the complete
+// lifecycle this model's own doc comment describes) from a row created by
+// the privileged Historical Import mechanism (see
+// lib/services/project-request-historical-import-service.ts) for an
+// external Project being brought into this app's request-origin Project
+// architecture after the fact, with no fabricated requester identity or
+// approval history. EVERY existing row before this field existed is
+// STANDARD (the column's own default backfills this declaratively — no
+// separate data migration needed). Checked explicitly as an invariant at
+// every normal-workflow write boundary (decideApproval,
+// decideIntermediateApproval, createProjectFromApprovedRequest) — a
+// HISTORICAL_IMPORT row is never eligible for any of those, structurally
+// (its status/presence-of-rows already make it unreachable there) AND
+// explicitly (the source check fails closed first, as a second,
+// independent guard).
+enum ProjectRequestSource {
+  STANDARD
+  HISTORICAL_IMPORT
+}
+
 // A user-submitted request to start a new Project, routed through a SINGLE
 // department-scoped approval stage before anyone is authorized to act on
 // it — see lib/services/project-request-service.ts for the full state
 // machine. Approval is never tied to the requester's own org-chart manager;
 // it's ANY user who holds effective `projectRequest.approve` for this
 // request's own department (global grant, or that department's own
-// grant — same union project.edit/gantt.view already use). This model is
-// intentionally NOT linked to Project at all (no projectId field anywhere
-// in either direction): reaching APPROVED only records that the business
-// case was accepted, it is a distinct milestone, not a trigger. Turning an
-// approved request into a real Project is an explicitly out-of-scope
-// future feature.
+// grant — same union project.edit/gantt.view already use). Reaching
+// APPROVED is what makes this request eligible for request-origin Project
+// setup (see Project.projectRequestId/createProjectFromApprovedRequest) —
+// a distinct, later step, not an automatic trigger.
 model ProjectRequest {
   id String @id @default(cuid())
 
@@ -2295,8 +2374,15 @@ model ProjectRequest {
   // Every field below this point is written ONLY by the server (see
   // lib/services/project-request-service.ts) — never accepted, trusted, or
   // echoed back from client input on submission or on any approval action.
-  requester    User       @relation("ProjectRequestRequester", fields: [requesterId], references: [id])
-  requesterId  String
+  // Nullable as of Phase 3 — a STANDARD request ALWAYS has a real,
+  // verified requester (set from the authenticated session, never
+  // accepted as client input; enforced as an explicit invariant at every
+  // normal write boundary, not merely incidental). Null is reserved for a
+  // HISTORICAL_IMPORT request whose original requester genuinely isn't
+  // known from the source data — NEVER fabricated/guessed to fill this in.
+  // Renders as "Not recorded" wherever shown.
+  requester    User?       @relation("ProjectRequestRequester", fields: [requesterId], references: [id])
+  requesterId  String?
   // The TARGET department — which department this request is FOR, resolved
   // via resolveDepartmentForRequest (the requester's own accessible-
   // workspace set, client-selectable when ambiguous). Explicitly named
@@ -2319,7 +2405,17 @@ model ProjectRequest {
   // never guessed or backfilled from the requester's CURRENT membership.
   // Never recomputed/overwritten after creation — not on edit, approval,
   // or Project creation — so a requester's later department transfer never
-  // alters this request's own historical record.
+  // alters this request's own historical record. Phase 3: a
+  // HISTORICAL_IMPORT request may set this explicitly (an admin-provided
+  // fact about the external request) even when `requester` itself is
+  // unknown/null — the two are independent; neither implies the other.
+  // Reused verbatim, no schema change needed for that new use — it was
+  // already nullable and already never fed into any authorization check
+  // (confirmed: canViewProjectRequest/buildAwaitingMyApprovalWhere/
+  // buildHistoryWhere never reference requesterDepartmentId at all), so a
+  // HISTORICAL_IMPORT request's Requester Department can never grant
+  // department-wide Request access or approval permissions, same as it
+  // never has for a STANDARD request.
   requesterDepartment   Department? @relation("ProjectRequestRequesterDepartment", fields: [requesterDepartmentId], references: [id])
   requesterDepartmentId String?
 
@@ -2393,13 +2489,38 @@ model ProjectRequest {
 
   // The ONE delayed reminder scheduled when this request is approved — see
   // ProjectRequestSetupReminder's own doc comment. Null for a request never
-  // approved; non-null for every APPROVED request, scheduled once and never
-  // duplicated, regardless of its own PENDING/SENT/CANCELLED status.
+  // approved through the normal workflow (decideApproval) — non-null for
+  // every request APPROVED that way, scheduled once and never duplicated,
+  // regardless of its own PENDING/SENT/CANCELLED status. Phase 3: a
+  // HISTORICAL_IMPORT request is created directly at APPROVED with its
+  // Project already linked, never through decideApproval — it NEVER gets
+  // one of these, by construction (no retroactive reminder is ever
+  // generated for it).
   setupReminder ProjectRequestSetupReminder?
 
-  submittedAt DateTime @default(now())
+  // Nullable as of Phase 3 (previously always auto-populated at creation
+  // time) — the column default still applies for every STANDARD
+  // submission (which never sets this explicitly, same as before), while a
+  // HISTORICAL_IMPORT request may explicitly persist null when the source
+  // data genuinely doesn't record a submission date, rendering as "Not
+  // recorded" rather than a fabricated "now".
+  submittedAt DateTime? @default(now())
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
+
+  // Phase 3 — see ProjectRequestSource's own doc comment. Defaults to
+  // STANDARD so every pre-existing row is correctly classified by the
+  // migration's own column default, with no separate backfill needed.
+  source ProjectRequestSource @default(STANDARD)
+  // Phase 3 — a stable identifier from the external source system a
+  // HISTORICAL_IMPORT request originated from (e.g. a legacy spreadsheet
+  // row key), used to detect "this exact external record was already
+  // imported" and resolve to the existing row instead of creating a
+  // duplicate on a re-run (see createHistoricalProjectRequest in
+  // lib/services/project-request-historical-import-service.ts). Always
+  // null for a STANDARD request — never a real-world value is invented
+  // when one is genuinely absent on a historical row either.
+  externalSourceId String? @unique
 
   @@index([status])
   @@index([departmentId])
@@ -2407,6 +2528,7 @@ model ProjectRequest {
   @@index([requesterId])
   @@index([approverId])
   @@index([createdAt])
+  @@index([source])
 }
 
 // One row per user the requester selected as an intermediate approver for a

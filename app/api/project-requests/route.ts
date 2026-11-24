@@ -129,6 +129,12 @@ export async function POST(req: NextRequest) {
           requesterId: session.user.id,
           departmentId: departmentResolution.departmentId,
           requesterDepartmentId,
+          // Explicit, even though it's also the column default — every
+          // request submitted through this normal, user-facing endpoint is
+          // a STANDARD request; Historical Import is a separate, privileged
+          // mechanism (see lib/services/project-request-historical-import-
+          // service.ts) never reachable from here.
+          source: "STANDARD",
           // status defaults to PENDING_INTERMEDIATE_APPROVAL at the schema
           // level — overridden to PENDING_APPROVAL only when the requester
           // has a VERIFIED "no manager" record, or holds

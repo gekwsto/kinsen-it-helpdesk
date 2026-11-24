@@ -27,7 +27,9 @@ import { ProjectFeedbackCtaCard } from "@/components/projects/project-feedback-c
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
 import { getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
-import { FolderKanban, Wallet, Building2, ClipboardCheck } from "lucide-react";
+import { FolderKanban, Wallet, Building2, ClipboardCheck, Briefcase } from "lucide-react";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { UserAvatarTooltip } from "@/components/shared/user-avatar-tooltip";
 
 export default async function ProjectDetailPage({
   params,
@@ -48,6 +50,19 @@ export default async function ProjectDetailPage({
       // Request Setup card below, never on a manual Project.
       owners: { select: { id: true, name: true, email: true, image: true } },
       audience: { select: { id: true, name: true, email: true, image: true } },
+      // Organizational Audience (Phase 1) — unlike `audience` above,
+      // available on EVERY Project (not request-origin-only); see
+      // Project.audienceDepartments/audienceBusinessUnits's own schema
+      // doc comment. Membership is resolved dynamically elsewhere
+      // (hasProjectViewAccess) — these are only the entities THEMSELVES,
+      // never expanded into their member users here.
+      audienceDepartments: { select: { id: true, name: true } },
+      audienceBusinessUnits: { select: { id: true, name: true } },
+      // Responsible People (Phase 2) — a PERMANENT, independent
+      // relationship (never Audience/Owner(s)/Members storage), available
+      // on EVERY Project regardless of Department or status; see
+      // Project.responsiblePeople's own schema doc comment.
+      responsiblePeople: { select: { id: true, name: true, email: true, image: true } },
       department: { select: { id: true, name: true } },
       businessUnit: { select: { id: true, name: true } },
       members: { select: { id: true, name: true, email: true, image: true } },
@@ -72,6 +87,8 @@ export default async function ProjectDetailPage({
           requesterId: true,
           departmentId: true,
           submittedAt: true,
+          source: true,
+          status: true,
           requester: { select: { id: true, name: true, email: true, image: true } },
           // Snapshot of the requester's OWN department at submission —
           // never the request's target department (`project.department`
@@ -445,23 +462,34 @@ export default async function ProjectDetailPage({
                   <ClipboardCheck className="h-3 w-3" /> Request &amp; Approvals
                 </p>
                 <div className="grid gap-3 sm:grid-cols-2">
+                  {/* Source — always shown (Standard vs. Historical
+                      Import), same reasoning as the standalone Project
+                      Request detail page's own Source field. */}
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1">Source</p>
+                    <p className="font-medium">{project.projectRequest.source === "HISTORICAL_IMPORT" ? "Historical Import" : "Standard"}</p>
+                  </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Requested By</p>
-                    <p className="font-medium">{project.projectRequest.requester.name ?? project.projectRequest.requester.email}</p>
+                    <p className="font-medium">
+                      {project.projectRequest.requester ? project.projectRequest.requester.name ?? project.projectRequest.requester.email : "Not recorded"}
+                    </p>
                   </div>
                   {/* Snapshot of the requester's OWN department at
                       submission — distinct from this Project's own
                       department above, and never re-derived from the
                       requester's CURRENT membership. "Not recorded" for a
-                      request that predates this field or whose requester
-                      had no primary department at submission time. */}
+                      request that predates this field, whose requester had
+                      no primary department at submission time, or a
+                      Historical Import request whose source data didn't
+                      record one. */}
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Requester Department</p>
                     <p className="font-medium">{project.projectRequest.requesterDepartment?.name ?? "Not recorded"}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Submitted</p>
-                    <p className="font-medium">{formatDateTime(project.projectRequest.submittedAt)}</p>
+                    <p className="font-medium">{project.projectRequest.submittedAt ? formatDateTime(project.projectRequest.submittedAt) : "Not recorded"}</p>
                   </div>
                   <div className="sm:col-span-2">
                     <p className="text-xs text-muted-foreground mb-1">Original Project Request</p>
@@ -516,39 +544,81 @@ export default async function ProjectDetailPage({
 
                 {/* Final approval — distinct from the intermediate stage
                     above (separate fields, separate audit trail — see
-                    ProjectRequest's own schema doc comment). Always
-                    "Approved" in practice here (a Project only exists once
-                    its request's FINAL approval completed), but rendered
-                    from the actual persisted approver/approvedAt/
-                    businessAssessment rather than assumed. */}
-                {project.projectRequest.approver && (
+                    ProjectRequest's own schema doc comment). A Project
+                    only exists once its request's FINAL approval
+                    completed (status APPROVED) OR it was brought in via
+                    Historical Import (status IMPORTED, its OWN distinct
+                    terminal status — see ProjectRequestStatus's own
+                    schema doc comment, Phase 3.1). The label itself is
+                    derived from `status`, never inferred from
+                    approvedAt/rejectedAt presence alone — an IMPORTED
+                    request may have a real, preserved approvedAt from
+                    source data without ever having gone through the
+                    standard workflow, and must never display as literal
+                    "Approved" in that case. A Historical Import request
+                    whose source data didn't record WHO approved it
+                    (approver null) shows an explicit "Not recorded" —
+                    never silently omitted (which would look like approval
+                    never happened at all) and never fabricated. */}
+                {project.projectRequest.status === "IMPORTED" ? (
                   <div className="space-y-1.5">
                     <p className="text-xs text-muted-foreground">Final Approval</p>
-                    <div className="rounded-md border px-3 py-2 text-xs space-y-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="flex items-center gap-1.5 font-medium">
-                          <Avatar className="h-5 w-5">
-                            <AvatarImage src={project.projectRequest.approver.image ?? undefined} />
-                            <AvatarFallback className="text-[9px]">{getInitials(project.projectRequest.approver.name)}</AvatarFallback>
-                          </Avatar>
-                          {project.projectRequest.approver.name ?? project.projectRequest.approver.email}
-                          <span className="text-muted-foreground font-normal">· Final Approver</span>
-                        </span>
-                        <span className={project.projectRequest.approvedAt ? "font-medium text-green-700" : "font-medium text-red-700"}>
-                          {project.projectRequest.approvedAt ? "Approved" : "Rejected"}
-                          {(project.projectRequest.approvedAt ?? project.projectRequest.rejectedAt) && (
-                            <span className="text-muted-foreground font-normal">
-                              {" "}
-                              · {formatDateTime(project.projectRequest.approvedAt ?? project.projectRequest.rejectedAt!)}
-                            </span>
-                          )}
-                        </span>
+                    {project.projectRequest.approver ? (
+                      <div className="rounded-md border px-3 py-2 text-xs space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1.5 font-medium">
+                            <Avatar className="h-5 w-5">
+                              <AvatarImage src={project.projectRequest.approver.image ?? undefined} />
+                              <AvatarFallback className="text-[9px]">{getInitials(project.projectRequest.approver.name)}</AvatarFallback>
+                            </Avatar>
+                            {project.projectRequest.approver.name ?? project.projectRequest.approver.email}
+                            <span className="text-muted-foreground font-normal">· Final Approver</span>
+                          </span>
+                          <span className="font-medium text-muted-foreground">
+                            Imported
+                            {project.projectRequest.approvedAt && (
+                              <span className="font-normal"> · {formatDateTime(project.projectRequest.approvedAt)}</span>
+                            )}
+                          </span>
+                        </div>
+                        {project.projectRequest.businessAssessment && (
+                          <p className="text-muted-foreground whitespace-pre-wrap">{project.projectRequest.businessAssessment}</p>
+                        )}
                       </div>
-                      {project.projectRequest.businessAssessment && (
-                        <p className="text-muted-foreground whitespace-pre-wrap">{project.projectRequest.businessAssessment}</p>
-                      )}
-                    </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground rounded-md border px-3 py-2">Not recorded (historical import)</p>
+                    )}
                   </div>
+                ) : (
+                  project.projectRequest.approver && (
+                    <div className="space-y-1.5">
+                      <p className="text-xs text-muted-foreground">Final Approval</p>
+                      <div className="rounded-md border px-3 py-2 text-xs space-y-1">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-1.5 font-medium">
+                            <Avatar className="h-5 w-5">
+                              <AvatarImage src={project.projectRequest.approver.image ?? undefined} />
+                              <AvatarFallback className="text-[9px]">{getInitials(project.projectRequest.approver.name)}</AvatarFallback>
+                            </Avatar>
+                            {project.projectRequest.approver.name ?? project.projectRequest.approver.email}
+                            <span className="text-muted-foreground font-normal">· Final Approver</span>
+                          </span>
+                          <span className={project.projectRequest.approvedAt ? "font-medium text-green-700" : "font-medium text-red-700"}>
+                            {project.projectRequest.approvedAt ? "Approved" : "Rejected"}
+                            {(project.projectRequest.approvedAt ?? project.projectRequest.rejectedAt) && (
+                              <span className="text-muted-foreground font-normal">
+                                {" "}
+                                · {formatDateTime(project.projectRequest.approvedAt ?? project.projectRequest.rejectedAt!)}
+                              </span>
+                            )}
+                          </span>
+                        </div>
+                        {project.projectRequest.businessAssessment && (
+                          <p className="text-muted-foreground whitespace-pre-wrap">{project.projectRequest.businessAssessment}</p>
+                        )}
+                      </div>
+                    </div>
+                  )
                 )}
               </div>
             )}
@@ -634,9 +704,12 @@ export default async function ProjectDetailPage({
 
             {/* People — always at least an Owner (every Project has one; see
                 ownersToShow's own doc comment above), Members/Audience only
-                when non-empty. */}
+                when non-empty. Wrapped in TooltipProvider for Responsible
+                People's own name+role hover preview (UserAvatarTooltip) —
+                same established convention as project-activities-card.tsx. */}
             <div className="space-y-2">
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">People</p>
+              <TooltipProvider delayDuration={200}>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div>
                   <p className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1">
@@ -674,11 +747,12 @@ export default async function ProjectDetailPage({
                   </div>
                 )}
 
-                {/* Audience — request-origin only, zero or more; distinct
+                {/* Audience — available on every Project as of Phase 1.1
+                    (previously request-origin only), zero or more; distinct
                     from both Owner(s) and Members. Only rendered when
                     non-empty, same "no empty placeholder" convention as
                     Members. */}
-                {project.projectRequest && project.audience.length > 0 && (
+                {project.audience.length > 0 && (
                   <div>
                     <p className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1">
                       <Users className="h-3 w-3" /> Audience
@@ -696,7 +770,66 @@ export default async function ProjectDetailPage({
                     </div>
                   </div>
                 )}
+
+                {/* Responsible People (Phase 2) — a PERMANENT, independent
+                    relationship, distinct from Owner(s)/Members/Audience
+                    above (never written into any of those relations).
+                    Available on every Project regardless of Department or
+                    status. Uses UserAvatarTooltip (name + role on hover)
+                    per this feature's own UI requirement — unlike the
+                    plain avatar+name chips above, which this task leaves
+                    untouched. */}
+                {project.responsiblePeople.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1">
+                      <Users className="h-3 w-3" /> Responsible People
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {project.responsiblePeople.map((r) => (
+                        <UserAvatarTooltip key={r.id} user={r} roles={["Responsible"]} avatarClassName="h-5 w-5" fallbackClassName="text-[9px]" />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Organizational Audience (Phase 1) — available on EVERY
+                    Project (unlike the request-origin-only Audience block
+                    above), since Department/Business Unit audience
+                    membership is resolved dynamically rather than
+                    expanded into a static list; see
+                    hasProjectViewAccess's own doc comment. Rendered as
+                    entity names, never their member users. */}
+                {project.audienceDepartments.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1">
+                      <Building2 className="h-3 w-3" /> Audience — Departments
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {project.audienceDepartments.map((d) => (
+                        <Badge key={d.id} variant="secondary" className="text-xs font-normal">
+                          {d.name}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {project.audienceBusinessUnits.length > 0 && (
+                  <div>
+                    <p className="text-xs text-muted-foreground mb-1.5 flex items-center gap-1">
+                      <Briefcase className="h-3 w-3" /> Audience — Business Units
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {project.audienceBusinessUnits.map((b) => (
+                        <Badge key={b.id} variant="secondary" className="text-xs font-normal">
+                          {b.name}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
+              </TooltipProvider>
             </div>
 
             {hasTimeline && (
