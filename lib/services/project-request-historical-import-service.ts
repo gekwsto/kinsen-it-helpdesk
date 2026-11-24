@@ -78,20 +78,113 @@
  * ALREADY-CREATED ProjectRequest/Project (alreadyExisted: true) rather
  * than creating a duplicate — safe to re-run an import batch after a
  * partial failure.
+ *
+ * ─── Final Import Safety Corrections — canonical payload fingerprint ───
+ * The ORIGINAL Phase 4.1 conflict check compared only title/departmentId —
+ * too narrow (a payload differing in, say, Owners or Audiences but
+ * sharing the same title/department would have been silently accepted as
+ * "the same import"). Replaced by computeImportPayloadFingerprint: a
+ * sha256 hash of the COMPLETE normalized payload — every persisted field
+ * and relationship (Owners, Requester Department, Audiences, Responsible
+ * People, Project status, every date, historicalSourceMetadata) —
+ * computed BEFORE any DB resolution, directly from the caller's own input
+ * ids (never from names, never DB-dependent), and persisted ONCE, at
+ * creation, into the IMMUTABLE ProjectRequest.historicalImportFingerprint
+ * column (see its own doc comment). A second call with the same
+ * externalSourceId:
+ *   - SAME normalized payload (same fingerprint) -> idempotent success
+ *     (alreadyExisted: true), even if the LIVE Project/Request have since
+ *     been edited through the normal UI — the comparison is always
+ *     against the ORIGINAL stored fingerprint, never the current row.
+ *   - DIFFERENT normalized payload (different fingerprint) -> rejected as
+ *     external_source_id_conflict, never silently resolved to the
+ *     existing, now-mismatched row.
+ * Unordered relationship id collections (ownerIds/audienceIds/
+ * audienceDepartmentIds/audienceBusinessUnitIds/responsiblePeopleIds) are
+ * sorted before hashing, so the SAME set in a different order still
+ * fingerprints identically. This never "overwrites" either way (no write
+ * ever happens on the idempotent OR the conflict path); the check exists
+ * purely to surface a mismatched-identity bug loudly instead of masking it
+ * behind a deceptively successful 200.
+ *
+ * ─── Phase 4.1 — mandatory-field relaxation for Historical Imports ───
+ * description/importance/teamConcerned/expectedBenefits are all OPTIONAL
+ * here (nullable on ProjectRequest as of this phase) because the real
+ * source data for the first production import batch has no column at all
+ * for importance/teamConcerned/expectedBenefits, and is missing
+ * description for at least one row — see the schema's own doc comments.
+ * STANDARD submissions are COMPLETELY UNAFFECTED: createProjectRequestSchema
+ * (lib/validations.ts) still requires all four, so this relaxation is
+ * reachable ONLY through this function. When importance is absent, the
+ * linked Project's OWN `priority` is left unset here so its column default
+ * (2/Medium) applies — the same default every OTHER Project creation path
+ * already falls back to when no priority is chosen; this is a live-field
+ * default for an ongoing Project property, never a fabricated HISTORICAL
+ * fact recorded on the request itself (which stays genuinely null).
+ *
+ * ─── Phase 4.1 — Expected Start/Finish ───
+ * expectedStartDate/expectedFinishDate extend the historical contract to
+ * the SAME canonical Project fields createProjectFromApprovedRequest
+ * populates for a standard request-origin Project (Project.
+ * expectedStartDate/expectedFinishDate/expectedTotalInitialDays) — reused
+ * verbatim, not a parallel pair of historical-only columns. Deliberately
+ * independent of startDate/endDate above (those keep their own pre-
+ * existing "actual" Gantt/filter semantics; see Project's own doc
+ * comment). expectedTotalInitialDays is computed the SAME way
+ * createProjectFromApprovedRequest computes it (wholeCalendarDaysBetween)
+ * — but ONLY when BOTH expected dates are actually known; a historical row
+ * missing either one simply leaves it null, never estimated from Total
+ * Days or any other proxy (see this file's own note on Total Days below).
+ *
+ * ─── Phase 4.1 — historicalSourceMetadata ───
+ * A structured, OPTIONAL bag for source fields with no canonical
+ * destination anywhere else (see ProjectRequest.historicalSourceMetadata's
+ * own doc comment for the restriction to Historical Imports). The ONE
+ * deliberately-omitted source field here is "Total Days": its relationship
+ * to Expected/Actual Start/Finish could not be verified against the real
+ * source data (neither difference matches it consistently across sample
+ * rows), so it is preserved here, verbatim, as originalTotalDays — NEVER
+ * assigned to expectedTotalInitialDays or any Activity duration field
+ * without that evidence. Ticket ID and Zoho Link are NEVER accepted here —
+ * both are explicitly out of scope for import (see this feature's own
+ * "Explicit exclusions") and this function has no field for either.
  */
 import { prisma } from "@/lib/prisma";
-import type { ProjectStatus } from "@prisma/client";
+import { Prisma, type ProjectStatus } from "@prisma/client";
 import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
+import { wholeCalendarDaysBetween } from "@/lib/date-only";
+import crypto from "crypto";
+
+// Phase 4.1 — see this file's own "historicalSourceMetadata" doc comment.
+// A closed shape (never an open index signature) so every key this app
+// ever writes here is deliberate and documented — "other meaningful
+// unmapped information" from a future source file extends this type
+// explicitly, rather than accepting arbitrary caller-supplied keys.
+// Each field is independently nullable (distinct from omitted) so a real
+// zero is never confused with "not recorded" — see the schema's own note.
+export interface HistoricalSourceMetadata {
+  feedbackUsers?: string | null;
+  originalEstimatedCost?: number | null;
+  originalActualCost?: number | null;
+  // Preserved verbatim ONLY when no verified canonical mapping exists for
+  // it (see this file's own top-level doc comment) — never written
+  // alongside a derived expectedTotalInitialDays as if the two agreed.
+  originalTotalDays?: number | null;
+}
 
 export interface CreateHistoricalProjectRequestInput {
   // ─── Request + Project shared fields ───
   title: string;
-  description: string;
-  importance: number; // 1(Low)/2(Medium)/3(High) — reused verbatim as Project.priority, never a second scale.
+  // Phase 4.1 — optional/nullable; see this file's own doc comment on
+  // mandatory-field relaxation. Never fabricated when the source data
+  // genuinely has none.
+  description?: string | null;
+  importance?: number | null; // 1(Low)/2(Medium)/3(High) — reused verbatim as Project.priority, never a second scale.
 
   // ─── Request-only fields ───
-  teamConcerned: string;
-  expectedBenefits: string;
+  // Phase 4.1 — both optional/nullable; see this file's own doc comment.
+  teamConcerned?: string | null;
+  expectedBenefits?: string | null;
   replacesExisting?: boolean;
   replacementDescription?: string | null;
   externalSourceId: string;
@@ -126,12 +219,84 @@ export interface CreateHistoricalProjectRequestInput {
   projectDescription?: string | null;
   startDate?: Date | null;
   endDate?: Date | null;
+  // Phase 4.1 — see this file's own "Expected Start/Finish" doc comment.
+  expectedStartDate?: Date | null;
+  expectedFinishDate?: Date | null;
+
+  // Phase 4.1 — see this file's own "historicalSourceMetadata" doc comment.
+  historicalSourceMetadata?: HistoricalSourceMetadata | null;
 
   ownerIds: string[];
   audienceIds?: string[];
   audienceDepartmentIds?: string[];
   audienceBusinessUnitIds?: string[];
   responsiblePeopleIds?: string[];
+}
+
+function normalizeDate(d: Date | null | undefined): string | null {
+  return d ? d.toISOString() : null;
+}
+
+function normalizeIdSet(ids: string[] | undefined): string[] {
+  // Sorted so the SAME unordered set fingerprints identically regardless
+  // of the order the caller happened to list it in.
+  return [...(ids ?? [])].sort();
+}
+
+function normalizeMetadata(m: HistoricalSourceMetadata | null | undefined) {
+  return {
+    feedbackUsers: m?.feedbackUsers ?? null,
+    originalEstimatedCost: m?.originalEstimatedCost ?? null,
+    originalActualCost: m?.originalActualCost ?? null,
+    originalTotalDays: m?.originalTotalDays ?? null,
+  };
+}
+
+/**
+ * Final Import Safety Corrections — see this file's own top-level doc
+ * comment ("canonical payload fingerprint"). A PURE function of the input
+ * as given — never touches the database, never resolves a name to an id
+ * — so it can run both BEFORE validation (to short-circuit an idempotent/
+ * conflicting retry early) and, identically, at creation time to persist
+ * the value that later retries are compared against. Deliberately
+ * excludes externalSourceId itself (the lookup key, not part of "the rest
+ * of the payload") and replacesExisting/replacementDescription's own
+ * conditional relationship is preserved exactly as the create call itself
+ * applies it, so a replacementDescription value that would be silently
+ * discarded at creation (replacesExisting: false) never affects the
+ * fingerprint either.
+ */
+export function computeImportPayloadFingerprint(input: CreateHistoricalProjectRequestInput): string {
+  const canonical = {
+    title: input.title,
+    description: input.description ?? null,
+    importance: input.importance ?? null,
+    teamConcerned: input.teamConcerned ?? null,
+    expectedBenefits: input.expectedBenefits ?? null,
+    replacesExisting: input.replacesExisting ?? false,
+    replacementDescription: input.replacesExisting ? input.replacementDescription ?? null : null,
+    departmentId: input.departmentId,
+    requesterId: input.requesterId ?? null,
+    requesterDepartmentId: input.requesterDepartmentId ?? null,
+    submittedAt: normalizeDate(input.submittedAt),
+    approverId: input.approverId ?? null,
+    approvedAt: normalizeDate(input.approvedAt),
+    businessAssessment: input.businessAssessment ?? null,
+    projectStatus: input.projectStatus,
+    projectTitle: input.projectTitle ?? null,
+    projectDescription: input.projectDescription !== undefined ? input.projectDescription : null,
+    startDate: normalizeDate(input.startDate),
+    endDate: normalizeDate(input.endDate),
+    expectedStartDate: normalizeDate(input.expectedStartDate),
+    expectedFinishDate: normalizeDate(input.expectedFinishDate),
+    historicalSourceMetadata: normalizeMetadata(input.historicalSourceMetadata),
+    ownerIds: normalizeIdSet(input.ownerIds),
+    audienceIds: normalizeIdSet(input.audienceIds),
+    audienceDepartmentIds: normalizeIdSet(input.audienceDepartmentIds),
+    audienceBusinessUnitIds: normalizeIdSet(input.audienceBusinessUnitIds),
+    responsiblePeopleIds: normalizeIdSet(input.responsiblePeopleIds),
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
 export type CreateHistoricalProjectRequestError =
@@ -143,7 +308,9 @@ export type CreateHistoricalProjectRequestError =
   | { code: "invalid_responsible_people" }
   | { code: "invalid_requester" }
   | { code: "invalid_requester_department" }
-  | { code: "invalid_approver" };
+  | { code: "invalid_approver" }
+  // Phase 4.1 — see this file's own "Idempotency" doc comment.
+  | { code: "external_source_id_conflict" };
 
 export type CreateHistoricalProjectRequestResult =
   | { ok: true; projectRequestId: string; projectId: string; alreadyExisted: boolean }
@@ -159,11 +326,23 @@ export async function createHistoricalProjectRequest(
   // same transaction, below) — deliberately not special-cased here; the
   // transaction's own externalSourceId unique constraint is the real
   // backstop against a genuine race, never silently reused.
+  //
+  // Computed BEFORE any DB resolution (see computeImportPayloadFingerprint's
+  // own doc comment) so the idempotent/conflict decision never depends on
+  // whether department/owner/etc. names happen to resolve.
+  const fingerprint = computeImportPayloadFingerprint(input);
   const existingByExternalId = await prisma.projectRequest.findUnique({
     where: { externalSourceId: input.externalSourceId },
-    select: { id: true, project: { select: { id: true } } },
+    select: { id: true, historicalImportFingerprint: true, project: { select: { id: true } } },
   });
   if (existingByExternalId?.project) {
+    // Final Import Safety Corrections — compared against the STORED,
+    // immutable fingerprint from the ORIGINAL creation, never against the
+    // live Project/Request's current (possibly since-edited) state — see
+    // this file's own top-level doc comment.
+    if (existingByExternalId.historicalImportFingerprint !== fingerprint) {
+      return { ok: false, error: { code: "external_source_id_conflict" } };
+    }
     return { ok: true, projectRequestId: existingByExternalId.id, projectId: existingByExternalId.project.id, alreadyExisted: true };
   }
 
@@ -202,14 +381,21 @@ export async function createHistoricalProjectRequest(
     if (!u) return { ok: false, error: { code: "invalid_approver" } };
   }
 
+  // Phase 4.1 — see this file's own "Expected Start/Finish" doc comment:
+  // computed ONLY when both dates are actually known, exactly like
+  // createProjectFromApprovedRequest's own calculation; never estimated
+  // from Total Days or any other proxy.
+  const expectedTotalInitialDays =
+    input.expectedStartDate && input.expectedFinishDate ? wholeCalendarDaysBetween(input.expectedStartDate, input.expectedFinishDate) : undefined;
+
   const { projectRequestId, projectId } = await prisma.$transaction(async (tx) => {
     const projectRequest = await tx.projectRequest.create({
       data: {
         title: input.title,
-        description: input.description,
-        importance: input.importance,
-        teamConcerned: input.teamConcerned,
-        expectedBenefits: input.expectedBenefits,
+        description: input.description ?? null,
+        importance: input.importance ?? null,
+        teamConcerned: input.teamConcerned ?? null,
+        expectedBenefits: input.expectedBenefits ?? null,
         replacesExisting: input.replacesExisting ?? false,
         replacementDescription: input.replacesExisting ? input.replacementDescription ?? null : null,
         departmentId: department.id,
@@ -227,6 +413,10 @@ export async function createHistoricalProjectRequest(
         approvedAt: input.approvedAt ?? null,
         businessAssessment: input.businessAssessment ?? null,
         externalSourceId: input.externalSourceId,
+        historicalSourceMetadata: (input.historicalSourceMetadata as Prisma.InputJsonValue | undefined) ?? Prisma.JsonNull,
+        // Written ONCE, here, and never again — see this column's own doc
+        // comment and computeImportPayloadFingerprint's.
+        historicalImportFingerprint: fingerprint,
       },
       select: { id: true },
     });
@@ -234,12 +424,19 @@ export async function createHistoricalProjectRequest(
     const project = await tx.project.create({
       data: {
         title: input.projectTitle ?? input.title,
-        description: input.projectDescription !== undefined ? input.projectDescription : input.description,
+        description: input.projectDescription !== undefined ? input.projectDescription : input.description ?? null,
         status: input.projectStatus,
-        priority: input.importance,
+        // Omitted (not `null`) when unknown, so Project's OWN column
+        // default (2/Medium) applies — see this file's own doc comment on
+        // mandatory-field relaxation ("never a fabricated HISTORICAL fact
+        // ... a live-field default").
+        priority: input.importance ?? undefined,
         departmentId: department.id,
         startDate: input.startDate ?? undefined,
         endDate: input.endDate ?? undefined,
+        expectedStartDate: input.expectedStartDate ?? undefined,
+        expectedFinishDate: input.expectedFinishDate ?? undefined,
+        expectedTotalInitialDays,
         projectRequestId: projectRequest.id,
         ownerId: ownerIds[0],
         // Mirrors the single canonical owner into the authoritative

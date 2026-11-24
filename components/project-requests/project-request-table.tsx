@@ -32,10 +32,15 @@ export interface ProjectRequestRow {
   id: string;
   title: string;
   status: ProjectRequestStatus;
-  description: string;
-  importance: number;
-  teamConcerned: string;
-  expectedBenefits: string;
+  // Phase 4.1 — null ONLY for a HISTORICAL_IMPORT request whose source
+  // data genuinely has none (no column at all, in the real first import
+  // batch) — a STANDARD request always has real values, enforced at the
+  // application boundary. Never guessed/fabricated; renders as "Not
+  // recorded".
+  description: string | null;
+  importance: number | null;
+  teamConcerned: string | null;
+  expectedBenefits: string | null;
   replacesExisting: boolean;
   replacementDescription: string | null;
   // Historical only (the former "Project Type" on a Project Request) — a
@@ -288,7 +293,9 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                 </div>
                 <div>
                   <span className="text-muted-foreground">Importance: </span>
-                  <span className="font-medium">{PROJECT_PRIORITY_LABEL[previewTarget.importance] ?? String(previewTarget.importance)}</span>
+                  <span className="font-medium">
+                    {previewTarget.importance != null ? PROJECT_PRIORITY_LABEL[previewTarget.importance] ?? String(previewTarget.importance) : "Not recorded"}
+                  </span>
                 </div>
                 <div>
                   <span className="text-muted-foreground">Source: </span>
@@ -297,9 +304,9 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
               </div>
 
               <div className="flex-1 min-h-0 overflow-y-auto rounded-md border divide-y">
-                <PreviewField label="Description" value={previewTarget.description} multiline />
-                <PreviewField label="Team concerned" value={previewTarget.teamConcerned} />
-                <PreviewField label="Expected benefits" value={previewTarget.expectedBenefits} multiline />
+                <PreviewField label="Description" value={previewTarget.description ?? "Not recorded"} multiline />
+                <PreviewField label="Team concerned" value={previewTarget.teamConcerned ?? "Not recorded"} />
+                <PreviewField label="Expected benefits" value={previewTarget.expectedBenefits ?? "Not recorded"} multiline />
                 <PreviewField label="Replaces an existing solution/project" value={previewTarget.replacesExisting ? "Yes" : "No"} />
                 {previewTarget.replacesExisting && previewTarget.replacementDescription && (
                   <PreviewField label="Solution/project to be replaced" value={previewTarget.replacementDescription} multiline />

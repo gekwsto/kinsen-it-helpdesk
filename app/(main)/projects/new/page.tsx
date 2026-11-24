@@ -87,6 +87,12 @@ export default async function NewProjectPage({
           </div>
         </div>
 
+        {/* request.importance is nullable as of Phase 4.1 (HISTORICAL_IMPORT
+            rows only) but this branch is only ever reached for an APPROVED
+            STANDARD request (status check above already excludes
+            IMPORTED) — STANDARD always has a real importance. `?? 2` is
+            the exact same column default Project.priority itself falls
+            back to, never a fabricated historical fact. */}
         <ProjectForm
           departments={[]}
           editableDepartmentIds={[]}
@@ -94,7 +100,7 @@ export default async function NewProjectPage({
           fromRequestId={request.id}
           fixedDepartmentId={request.department.id}
           fixedDepartmentName={request.department.name}
-          fromRequestPrefill={{ title: request.title, description: request.description, priority: request.importance }}
+          fromRequestPrefill={{ title: request.title, description: request.description, priority: request.importance ?? 2 }}
           facilitiesServicesDepartmentId={facilitiesServicesDepartmentId}
         />
       </div>

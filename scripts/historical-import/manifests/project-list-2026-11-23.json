@@ -1,0 +1,167 @@
+{
+  "sourceFile": "ProjectList_ 23-11-2026 (15 10).xlsx",
+  "generatedAt": "2026-11-24T13:51:42.919Z",
+  "note": "Stable externalSourceId assignments for each source Project row — generated ONCE by scripts/historical-import/generate-manifest.ts and never regenerated for a row already matched here. The natural key is title + team + expectedStartDate ONLY — Ticket ID and Zoho Link are REMOVED entirely from recognition logic (both out of scope for import — see Phase 4.1's own 'Explicit exclusions'). A row matching no existing entry, or more than one, is NEVER silently assigned/kept — see this script's own 'reviewRequired' output and its --approve-new flag.",
+  "entries": [
+    {
+      "externalSourceId": "historical-import:project-list:303a8a32-d2bd-4846-a669-523b354c1051",
+      "naturalKey": {
+        "title": "HRMS Coupons",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2025-12-02T00:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:5ca7c48a-7b4d-4da7-a4ec-3d9c8f790ef6",
+      "naturalKey": {
+        "title": "Dashboard",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2025-06-16T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:5df9423a-41b4-4f55-af78-9597680343a1",
+      "naturalKey": {
+        "title": "Procedures Repository and Logs",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-01-29T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:1faa62c0-a539-454b-8c93-ec80f7a3b2ec",
+      "naturalKey": {
+        "title": "Employee Dashboard",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-01-15T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:aa341809-9dd4-4cee-8049-c46fd90d109c",
+      "naturalKey": {
+        "title": "Auditing Tool",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-02-06T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:04511e2e-26aa-4734-9ce7-6f2dc9c18027",
+      "naturalKey": {
+        "title": "Honda Moto Test Ride - Integrate From Honda Site",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-02-20T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:89421355-cbcf-4f7d-9235-db926638afe6",
+      "naturalKey": {
+        "title": "CRM by zAppDev (zCRM)",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-01-02T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:aa118310-c020-483a-9da8-3b4b6dfa6797",
+      "naturalKey": {
+        "title": "Procurement Request Inventory",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-03-02T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:50050fa5-f900-4bb0-a2d5-ec46a7806f5b",
+      "naturalKey": {
+        "title": "SQL 2025 Migration",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-03-16T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:acae0cb0-4c0b-48f8-b03e-a9f2f3a24535",
+      "naturalKey": {
+        "title": "ECM Apps SMTP Email Replacement (Azure communication service)",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-03-18T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:4931c191-bb8a-45fe-b958-ac4c8d0f6b55",
+      "naturalKey": {
+        "title": "SharedData on SQL General (Support for Other Teams)",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-03-26T10:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:a985d1b4-cff3-4895-bd46-fad028dec876",
+      "naturalKey": {
+        "title": "Project Management Tool για το Facilities",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-07-23T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:9cb4374c-ba9a-44da-be5e-154716bfac12",
+      "naturalKey": {
+        "title": "New Application: eVHC (Εlectronic Vehicle Health Check)",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-05-25T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:31c10295-36b3-4243-84ab-1e634455c211",
+      "naturalKey": {
+        "title": "Multi-company Expense Forms ",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-09-04T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:6cbfaae2-16f4-4907-81d0-20e581357e97",
+      "naturalKey": {
+        "title": "zAppDev Angular v17 upgrade to v20",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-05-11T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:12f9831c-9e3b-49e8-b906-88e2db0aaeb5",
+      "naturalKey": {
+        "title": "App/Site for the collection of bulky waste items for the Municipality of Heraklion",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-04-21T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:9f84af8a-e94e-478b-bece-d5de873de91e",
+      "naturalKey": {
+        "title": "HRMS Automatic Organization Structure, Versioning and Org5",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-09-01T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:d29b2ae3-f94f-4477-a511-cbae1826d163",
+      "naturalKey": {
+        "title": "Route Public Transportation Expenses to HR",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-09-03T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:dbe39780-06ed-4a22-a178-e3497e20f423",
+      "naturalKey": {
+        "title": "HR Onboarding tool",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-09-01T09:00:00.000Z"
+      }
+    },
+    {
+      "externalSourceId": "historical-import:project-list:8ab56689-dd16-40d1-9ef7-e8fd49f4211d",
+      "naturalKey": {
+        "title": "New Approval Flow Method",
+        "team": "AppsAndReports",
+        "expectedStartDate": "2026-10-21T09:00:00.000Z"
+      }
+    }
+  ]
+}

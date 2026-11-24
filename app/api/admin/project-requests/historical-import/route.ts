@@ -55,6 +55,9 @@ export async function POST(req: NextRequest) {
       projectDescription: data.projectDescription,
       startDate: data.startDate ? new Date(data.startDate) : null,
       endDate: data.endDate ? new Date(data.endDate) : null,
+      expectedStartDate: data.expectedStartDate ? new Date(data.expectedStartDate) : null,
+      expectedFinishDate: data.expectedFinishDate ? new Date(data.expectedFinishDate) : null,
+      historicalSourceMetadata: data.historicalSourceMetadata ?? null,
       ownerIds: data.ownerIds,
       audienceIds: data.audienceIds,
       audienceDepartmentIds: data.audienceDepartmentIds,
@@ -73,6 +76,7 @@ export async function POST(req: NextRequest) {
         invalid_requester: "requesterId",
         invalid_requester_department: "requesterDepartmentId",
         invalid_approver: "approverId",
+        external_source_id_conflict: "externalSourceId",
       };
       const messageByCode: Record<string, string> = {
         invalid_department: "The selected Department does not exist or is not active.",
@@ -84,6 +88,7 @@ export async function POST(req: NextRequest) {
         invalid_requester: "The selected Requester does not exist.",
         invalid_requester_department: "The selected Requester Department does not exist.",
         invalid_approver: "The selected Approver does not exist.",
+        external_source_id_conflict: "This External Source Id is already used by a Project Request with a different import payload (e.g. different Owners, Audiences, dates, or other persisted field) — resolve the conflict before retrying.",
       };
       const code = result.error.code;
       return NextResponse.json(apiError(code, messageByCode[code] ?? code, { field: fieldByCode[code] }), { status: 422 });

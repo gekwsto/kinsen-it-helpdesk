@@ -222,7 +222,20 @@ async function main() {
 
     // ══════════════════════ 3. Idempotency ══════════════════════
     console.log("\n=== 3. Stable external identifiers prevent duplicate imports ===\n");
-    const dupRes = await createHistoricalProjectRequest({ ...baseInput(), externalSourceId: `ext-${RUN_ID}-core`, requesterDepartmentId: requesterSnapshotDept.id });
+    // Final Import Safety Corrections — the retry must be the EXACT SAME
+    // payload as the original `coreRes` call (including audienceIds/
+    // responsiblePeopleIds) for this to be a genuine "identical retry"
+    // check under the new full-payload fingerprint; a payload differing
+    // in those fields is correctly a conflict, not idempotent — see
+    // scripts/test-historical-import-safety-corrections.ts section 2b/2c
+    // for that behavior's own dedicated coverage.
+    const dupRes = await createHistoricalProjectRequest({
+      ...baseInput(),
+      externalSourceId: `ext-${RUN_ID}-core`,
+      requesterDepartmentId: requesterSnapshotDept.id,
+      audienceIds: [audienceUser.id],
+      responsiblePeopleIds: [responsibleUser.id],
+    });
     check("A second call with the SAME externalSourceId -> ok, alreadyExisted: true", dupRes.ok && dupRes.alreadyExisted === true);
     if (dupRes.ok) {
       check("...resolves to the EXACT SAME ProjectRequest/Project, never a duplicate", dupRes.projectRequestId === coreRes.projectRequestId && dupRes.projectId === coreRes.projectId);

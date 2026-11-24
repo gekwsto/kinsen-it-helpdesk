@@ -2334,12 +2334,22 @@ model ProjectRequest {
   id String @id @default(cuid())
 
   title       String
-  description String @db.Text
+  // Phase 4.1: nullable at the DB level ONLY to allow a HISTORICAL_IMPORT
+  // row whose source data genuinely has no description — a STANDARD
+  // request ALWAYS has a real, non-empty description, enforced as always
+  // at the application boundary (createProjectRequestSchema), never here.
+  // Renders as "Not recorded" wherever shown when null.
+  description String? @db.Text
   // Reuses Project's OWN 1(Low)/2(Medium)/3(High) Int scale verbatim (see
   // lib/project-priority.ts's PROJECT_PRIORITY_LABEL/projectPriorityKey) —
   // the same semantic meaning, deliberately not a second/independent
-  // importance mapping.
-  importance  Int
+  // importance mapping. Phase 4.1: nullable ONLY for a HISTORICAL_IMPORT
+  // row whose source data has no importance/priority signal at all — a
+  // STANDARD request always has a real value, enforced at the application
+  // boundary. When null, the linked Project's OWN priority is left at ITS
+  // column default (2/Medium) rather than inheriting a fabricated value —
+  // see createHistoricalProjectRequest.
+  importance  Int?
 
   // HISTORICAL ONLY as of the Task Type move to Activity — the field/
   // relation name is deliberately left unchanged (a renamed historical
@@ -2351,8 +2361,13 @@ model ProjectRequest {
   projectType   TaskType? @relation(fields: [projectTypeId], references: [id])
   projectTypeId String?
 
-  teamConcerned                     String
-  expectedBenefits                  String  @db.Text
+  // Phase 4.1: both nullable ONLY for a HISTORICAL_IMPORT row whose source
+  // data has no corresponding column at all (never the case for a
+  // STANDARD request, which still requires both at the application
+  // boundary — createProjectRequestSchema is unchanged). Render as "Not
+  // recorded" wherever shown when null — never a fabricated placeholder.
+  teamConcerned                     String?
+  expectedBenefits                  String? @db.Text
   // Legacy only — this was the requester-filled "Business Assessment" field
   // from the original form. The requester no longer fills ANY business
   // assessment; that moved entirely to the approver's decision (see
@@ -2521,6 +2536,43 @@ model ProjectRequest {
   // null for a STANDARD request — never a real-world value is invented
   // when one is genuinely absent on a historical row either.
   externalSourceId String? @unique
+
+  // Phase 4.1 — a structured, OPAQUE bag for source fields that have no
+  // canonical destination anywhere else on ProjectRequest/Project (e.g.
+  // the source system's own feedback-submitter name, its separately
+  // tracked Estimated/Actual Cost, or a Total Days figure whose meaning
+  // relative to Expected/Actual Start/Finish couldn't be verified — see
+  // createHistoricalProjectRequest's own doc comment for exactly which
+  // keys this holds and why each has no better home). ALWAYS null for a
+  // STANDARD request — the only writer of this field is
+  // createHistoricalProjectRequest, same restriction as source/
+  // externalSourceId above. Deliberately never a dumping ground for
+  // Ticket ID or Zoho Link, which are explicitly OUT OF SCOPE for import
+  // (see this feature's own "Explicit exclusions") — never read into this
+  // field by any caller. `null` means "no such unmapped source data was
+  // ever recorded for this row," not "unknown" — e.g. a cost of 0 and an
+  // absent cost are both preserved distinctly (0 vs null), never
+  // conflated. Rendered read-only in the UI as plain key/value pairs,
+  // never interpreted as executable content.
+  historicalSourceMetadata Json?
+
+  // Final Import Safety Corrections — an IMMUTABLE sha256 fingerprint of
+  // the complete, normalized import payload (every persisted field and
+  // relationship: Owners, Requester Department, Audiences, Responsible
+  // People, Project status, every date, historicalSourceMetadata — see
+  // computeImportPayloadFingerprint in createHistoricalProjectRequest's
+  // own module for the exact canonicalization). Written ONCE at creation
+  // and NEVER updated afterward — a later edit to the Project/Request
+  // through the normal UI never touches this column, which is exactly
+  // the point: a legitimate retry of the ORIGINAL import call must still
+  // match this stored fingerprint and resolve idempotently, regardless of
+  // what's since changed on the live record. A second call with the same
+  // externalSourceId but a DIFFERENT normalized payload produces a
+  // DIFFERENT fingerprint here and is rejected as a conflict rather than
+  // silently resolved — see this file's own externalSourceId doc comment.
+  // Always null for a STANDARD request — same restriction as source/
+  // externalSourceId/historicalSourceMetadata above.
+  historicalImportFingerprint String?
 
   @@index([status])
   @@index([departmentId])

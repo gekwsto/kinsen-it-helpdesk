@@ -88,10 +88,19 @@ export default async function ProjectRequestDetailPage({
       </div>
 
       <div className="rounded-lg border divide-y">
-        <Field label="Description" value={request.description} multiline />
-        <Field label="Importance level" value={PROJECT_PRIORITY_LABEL[request.importance] ?? String(request.importance)} />
-        <Field label="Team concerned" value={request.teamConcerned} />
-        <Field label="Expected benefits" value={request.expectedBenefits} multiline />
+        {/* Phase 4.1 — description/importance/teamConcerned/expectedBenefits
+            are null ONLY for a HISTORICAL_IMPORT request whose source data
+            genuinely has no value for them (no column at all, in the real
+            first import batch) — a STANDARD request always has real
+            values, enforced at the application boundary. Never guessed;
+            renders as "Not recorded". */}
+        <Field label="Description" value={request.description ?? "Not recorded"} multiline />
+        <Field
+          label="Importance level"
+          value={request.importance != null ? PROJECT_PRIORITY_LABEL[request.importance] ?? String(request.importance) : "Not recorded"}
+        />
+        <Field label="Team concerned" value={request.teamConcerned ?? "Not recorded"} />
+        <Field label="Expected benefits" value={request.expectedBenefits ?? "Not recorded"} multiline />
         <Field label="Replaces an existing solution/project" value={request.replacesExisting ? "Yes" : "No"} />
         {request.replacesExisting && request.replacementDescription && (
           <Field label="Solution/project to be replaced" value={request.replacementDescription} multiline />
@@ -116,6 +125,15 @@ export default async function ProjectRequestDetailPage({
         <Field label="Submitted" value={request.submittedAt ? request.submittedAt.toLocaleString() : "Not recorded"} />
         {request.legacyRequesterBusinessAssessment && (
           <Field label="Legacy requester business assessment" value={request.legacyRequesterBusinessAssessment} multiline />
+        )}
+        {/* Phase 4.1 — read-only, Historical Import only. Opaque source
+            fields preserved with no canonical destination elsewhere (see
+            ProjectRequest.historicalSourceMetadata's own doc comment) —
+            plain key/value text, never interpreted/executed. Ticket ID and
+            Zoho Link are never stored here (out of scope for import) so
+            they never appear in this block. */}
+        {request.source === "HISTORICAL_IMPORT" && request.historicalSourceMetadata != null && (
+          <HistoricalSourceMetadataFields metadata={request.historicalSourceMetadata as Record<string, unknown>} />
         )}
       </div>
 
@@ -156,6 +174,35 @@ function Field({ label, value, multiline }: { label: string; value: string; mult
     <div className="px-4 py-3">
       <p className="text-xs font-medium text-muted-foreground mb-1">{label}</p>
       <p className={multiline ? "text-sm whitespace-pre-wrap" : "text-sm"}>{value}</p>
+    </div>
+  );
+}
+
+// Phase 4.1 — labels every key this app's own HistoricalSourceMetadata
+// shape (lib/services/project-request-historical-import-service.ts) can
+// ever contain; any other key is shown with its own raw name rather than
+// silently dropped, so nothing persisted is ever invisible here.
+const HISTORICAL_SOURCE_METADATA_LABELS: Record<string, string> = {
+  feedbackUsers: "Feedback user(s) (source)",
+  originalEstimatedCost: "Original estimated cost (source)",
+  originalActualCost: "Original actual cost (source)",
+  originalTotalDays: "Original \"Total Days\" (source, unverified mapping)",
+};
+
+function HistoricalSourceMetadataFields({ metadata }: { metadata: Record<string, unknown> }) {
+  const entries = Object.entries(metadata).filter(([, v]) => v !== null && v !== undefined);
+  if (entries.length === 0) return null;
+  return (
+    <div className="px-4 py-3">
+      <p className="text-xs font-medium text-muted-foreground mb-1.5">Preserved historical source data (unmapped)</p>
+      <div className="space-y-1">
+        {entries.map(([key, value]) => (
+          <p key={key} className="text-sm">
+            <span className="text-muted-foreground">{HISTORICAL_SOURCE_METADATA_LABELS[key] ?? key}: </span>
+            {String(value)}
+          </p>
+        ))}
+      </div>
     </div>
   );
 }

@@ -363,12 +363,33 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
 // privileged, permission-gated POST /api/admin/project-requests/
 // historical-import route — never the standard user-facing
 // POST /api/project-requests endpoint.
+// Phase 4.1 — see ProjectRequest.historicalSourceMetadata's own doc
+// comment. `.strict()` so an unrecognized key (e.g. a future caller
+// accidentally trying to smuggle in Ticket ID/Zoho Link, both explicitly
+// out of scope) is rejected loudly rather than silently persisted.
+export const historicalSourceMetadataSchema = z
+  .object({
+    feedbackUsers: z.string().trim().min(1).nullable().optional(),
+    originalEstimatedCost: z.number().nullable().optional(),
+    originalActualCost: z.number().nullable().optional(),
+    originalTotalDays: z.number().int().nullable().optional(),
+  })
+  .strict();
+
 export const createHistoricalProjectRequestSchema = z.object({
   title: z.string().trim().min(3, "Title must be at least 3 characters").max(200),
-  description: z.string().trim().min(1, "Description is required").max(5000),
-  importance: z.number().int().min(1).max(3),
-  teamConcerned: z.string().trim().min(1, "Team concerned is required").max(200),
-  expectedBenefits: z.string().trim().min(1, "Expected benefits is required").max(5000),
+  // Phase 4.1 — optional/nullable: the real first import batch has at
+  // least one source row with no description at all. Never fabricated;
+  // renders as "Not recorded". STANDARD submissions are unaffected — this
+  // schema is never used for those (createProjectRequestSchema still
+  // requires it there).
+  description: z.string().trim().max(5000).nullable().optional(),
+  // Phase 4.1 — optional/nullable: no source column exists for this at
+  // all in the real first import batch.
+  importance: z.number().int().min(1).max(3).nullable().optional(),
+  // Phase 4.1 — both optional/nullable, same reason as importance above.
+  teamConcerned: z.string().trim().max(200).nullable().optional(),
+  expectedBenefits: z.string().trim().max(5000).nullable().optional(),
   replacesExisting: z.boolean().default(false),
   replacementDescription: z.string().trim().max(5000).optional(),
   // A stable identifier from the external source system — required, so
@@ -398,6 +419,14 @@ export const createHistoricalProjectRequestSchema = z.object({
   projectDescription: z.string().trim().max(5000).nullable().optional(),
   startDate: z.string().min(1).nullable().optional(),
   endDate: z.string().min(1).nullable().optional(),
+  // Phase 4.1 — extends the historical contract to the same canonical
+  // Expected Start/Finish fields createProjectFromApprovedRequest already
+  // populates for a standard request-origin Project.
+  expectedStartDate: z.string().min(1).nullable().optional(),
+  expectedFinishDate: z.string().min(1).nullable().optional(),
+
+  // Phase 4.1 — see historicalSourceMetadataSchema above.
+  historicalSourceMetadata: historicalSourceMetadataSchema.nullable().optional(),
 
   ownerIds: z.array(z.string()).min(1, "At least one Project Owner is required"),
   audienceIds: z.array(z.string()).default([]),
