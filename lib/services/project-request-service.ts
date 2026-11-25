@@ -10,7 +10,7 @@ import { createInAppNotification, dispatchCreatedNotification } from "@/lib/noti
 import { scheduleSetupReminderInTx, cancelSetupReminderInTx } from "@/lib/services/project-request-setup-reminder-service";
 import { APPROVE_PERMISSION_KEY, getEligibleApproverUserIds } from "@/lib/services/project-request-approver-eligibility-service";
 import { findSqlGeneralUserByUsername, type SqlGeneralUserRecord } from "@/lib/sqlgeneral-api-client";
-import { wholeCalendarDaysBetween } from "@/lib/date-only";
+import { resolveProjectDuration } from "@/lib/project-duration";
 import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
 import {
   getFacilitiesServicesDepartmentId,
@@ -473,10 +473,10 @@ const MAX_BUSINESS_ASSESSMENT_LENGTH = 5000;
  * (global grant OR that department's own grant), re-checked here
  * server-side regardless of what the UI showed — never tied to the
  * requester's own manager/org-chart in any way. `businessAssessment` is the
- * approver's OWN mandatory justification for this specific decision —
- * re-validated here (trimmed, non-empty, length-capped) rather than trusting
- * the route's zod check alone, since this is the actual persistence
- * boundary. Guarded atomically by the CURRENT status in the same
+ * approver's OWN OPTIONAL justification for this specific decision —
+ * re-normalized here (trimmed, empty -> null, length-capped) rather than
+ * trusting the route's zod check alone, since this is the actual
+ * persistence boundary. Guarded atomically by the CURRENT status in the same
  * conditional `updateMany` that performs the transition (never a separate
  * read-then-write with a race window) — a concurrent double-click or two
  * different approvers racing each other can only ever have ONE of them
@@ -502,10 +502,10 @@ export async function decideApproval(
   role: Role,
   customRoleId: string | null | undefined,
   decision: "approve" | "reject",
-  businessAssessment: string
+  businessAssessment?: string | null
 ): Promise<ApprovalActionResult> {
-  const trimmedAssessment = businessAssessment.trim();
-  if (trimmedAssessment.length === 0 || trimmedAssessment.length > MAX_BUSINESS_ASSESSMENT_LENGTH) {
+  const trimmedAssessment = businessAssessment?.trim() || null;
+  if (trimmedAssessment && trimmedAssessment.length > MAX_BUSINESS_ASSESSMENT_LENGTH) {
     return { ok: false, error: { code: "invalid_assessment" } };
   }
 
@@ -593,6 +593,7 @@ export type CreateProjectFromRequestError =
   | { code: "invalid_audience" }
   | { code: "invalid_audience_department" }
   | { code: "invalid_audience_business_unit" }
+  | { code: "audience_business_units_not_allowed" }
   | { code: "invalid_responsible_people" }
   | { code: "invalid_expense_type" }
   | { code: "invalid_sub_department" }
@@ -727,7 +728,13 @@ export async function createProjectFromApprovedRequest(
   // Organizational Audience (Phase 1) — available here too, same as plain
   // manual Project creation (see POST /api/projects). Every id re-verified
   // against real, existing (and for Departments, active) rows.
-  const audienceOrgResolution = await resolveProjectAudienceOrganizationalIds(data.audienceDepartmentIds ?? [], data.audienceBusinessUnitIds ?? []);
+  // Business Unit Audience is never accepted on this path (see
+  // createProjectFromRequestSchema) — re-asserted here at the persistence
+  // boundary so no other caller of this function can connect one either.
+  if (data.audienceBusinessUnitIds && data.audienceBusinessUnitIds.length > 0) {
+    return { ok: false, error: { code: "audience_business_units_not_allowed" } };
+  }
+  const audienceOrgResolution = await resolveProjectAudienceOrganizationalIds(data.audienceDepartmentIds ?? [], []);
   if (!audienceOrgResolution.ok) return { ok: false, error: { code: audienceOrgResolution.code } };
 
   // Responsible People (Phase 2) — available here too, same as plain
@@ -751,12 +758,20 @@ export async function createProjectFromApprovedRequest(
     }
   }
 
-  // Computed ONCE here, server-side — the authoritative baseline. The
-  // client may show a live preview of the same arithmetic for UX, but this
-  // is the only value that is ever actually persisted; a client-submitted
-  // duration is never read (the field isn't even accepted by
-  // createProjectFromRequestSchema).
-  const expectedTotalInitialDays = wholeCalendarDaysBetween(new Date(data.expectedStartDate), new Date(data.expectedFinishDate));
+  // Both durations resolved server-side through the ONE canonical resolver
+  // (lib/project-duration.ts): calculated from their dates unless the
+  // creator supplied an explicit manual override. The client only previews
+  // the same calculation; a raw duration value is never accepted.
+  const expectedDuration = resolveProjectDuration({
+    start: data.expectedStartDate,
+    finish: data.expectedFinishDate,
+    override: data.expectedTotalInitialDaysOverride ?? undefined,
+  });
+  const actualDuration = resolveProjectDuration({
+    start: facilitiesWrite ? facilitiesWrite.startDate : data.startDate,
+    finish: facilitiesWrite ? facilitiesWrite.endDate : data.endDate,
+    override: data.actualTotalDaysOverride ?? undefined,
+  });
 
   let createdProjectId: string | null = null;
   let alreadyExisted = false;
@@ -799,7 +814,6 @@ export async function createProjectFromApprovedRequest(
         // for the ONLY effect Audience membership has).
         audience: audienceIds.length ? { connect: audienceIds.map((id) => ({ id })) } : undefined,
         audienceDepartments: audienceOrgResolution.departmentIds.length ? { connect: audienceOrgResolution.departmentIds.map((id) => ({ id })) } : undefined,
-        audienceBusinessUnits: audienceOrgResolution.businessUnitIds.length ? { connect: audienceOrgResolution.businessUnitIds.map((id) => ({ id })) } : undefined,
         responsiblePeople: responsiblePeopleIds.length ? { connect: responsiblePeopleIds.map((id) => ({ id })) } : undefined,
         // Facilities Services: the resolved write wins (derived from
         // either Quarter or Exact). Every other workspace: the exact,
@@ -827,7 +841,10 @@ export async function createProjectFromApprovedRequest(
         projectRequestId: requestId,
         expectedStartDate: new Date(data.expectedStartDate),
         expectedFinishDate: new Date(data.expectedFinishDate),
-        expectedTotalInitialDays,
+        expectedTotalInitialDays: expectedDuration.value,
+        expectedTotalInitialDaysOverridden: expectedDuration.overridden,
+        actualTotalDays: actualDuration.value,
+        actualTotalDaysOverridden: actualDuration.overridden,
         expenseTypeId: data.expenseTypeId,
         // Budget/Estimated Cost/Actual Cost are never written here — Budget
         // was removed entirely, and Estimated/Actual Cost are now derived

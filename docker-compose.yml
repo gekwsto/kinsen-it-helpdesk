@@ -40,6 +40,31 @@ services:
     networks:
       - kinsen-helpdesk-net
 
+  # One-off OPERATIONS container — never started by `docker compose up`
+  # (the "ops" profile must be named explicitly). Used only for controlled,
+  # human-run tasks during a maintenance window: `prisma migrate deploy` and
+  # the approval-gated working-days backfill (report / snapshot / apply /
+  # validate / rollback). Same database + network as the app. Output files
+  # (reports, snapshots, run records) land in ./ops-output on the host.
+  #   docker compose --profile ops run --rm kinsen-helpdesk-ops <command>
+  # See docs/working-days-deployment.md for the exact sequence.
+  kinsen-helpdesk-ops:
+    build:
+      context: .
+      target: ops
+    profiles: ["ops"]
+    depends_on:
+      - kinsen-helpdesk-db
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://kinsen_user:StrongPassword123@kinsen-helpdesk-db:5432/kinsen_helpdesk
+      NODE_ENV: production
+    volumes:
+      - ./ops-output:/out
+    networks:
+      - kinsen-helpdesk-net
+
   # Vercel's cron (vercel.json) only fires when the app is actually deployed
   # on Vercel — it does nothing for this Docker Compose deployment, which
   # otherwise has no scheduler at all. This single, always-on sidecar is

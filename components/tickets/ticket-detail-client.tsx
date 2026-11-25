@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { AttachmentFileIcon } from "@/components/attachments/attachment-dropzone";
 import { Role } from "@prisma/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -609,7 +610,7 @@ export function TicketDetailClient({
                   rel="noopener noreferrer"
                   className="flex items-start gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs hover:bg-muted transition-colors"
                 >
-                  <Paperclip className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
+                  <AttachmentFileIcon mimeType={att.mimeType} name={att.originalName} className="h-3.5 w-3.5 mt-0.5" />
                   <div className="min-w-0 flex-1">
                     <p className="font-medium truncate">{att.originalName}</p>
                     <p className="text-muted-foreground mt-0.5">

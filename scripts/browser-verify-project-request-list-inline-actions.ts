@@ -202,10 +202,10 @@ async function main() {
     await previewDialog.getByRole("button", { name: "Approve", exact: true }).click();
     await approverPage.waitForSelector('text=Approve Project Request');
 
-    // Confirm with an EMPTY Business Assessment -> inline validation error, no mutation.
+    // Business Assessment is OPTIONAL for final decisions — the field is
+    // shown, labelled optional, and never blocks confirm.
     const confirmBtn = approverPage.getByRole("button", { name: "Approve request" });
-    await confirmBtn.click();
-    check("Confirming with an EMPTY Business Assessment shows an inline validation error", await approverPage.getByText("Business Assessment is required.").isVisible());
+    check("Business Assessment is shown and labelled optional", /\(optional\)/.test(await approverPage.locator('label[for="pr-decision-assessment"]').innerText()));
 
     // Now fill a real assessment and confirm for real.
     await approverPage.fill("#pr-decision-assessment", "Looks good, approving via inline list action.");

@@ -127,9 +127,13 @@ async function main() {
   const customRoleKeys: string[] = [];
   const ticketIds: string[] = [];
 
+  let fixtureTaskTypeId: string | null = null;
   try {
     console.log("\n=== Fixtures: Department A + Department B, admin + a limited (ticket-only) member ===\n");
     const deptA = await createDepartment({ name: `${TAG}-A`, slug: `${TAG}-a` });
+    // Task Type is REQUIRED for every Activity (createActivitySchema) — fixture supplies one.
+    const fixtureTaskType = await prisma.taskType.create({ data: { name: `${TAG}-tasktype` } });
+    fixtureTaskTypeId = fixtureTaskType.id;
     const deptB = await createDepartment({ name: `${TAG}-B`, slug: `${TAG}-b` });
     departmentIds.push(deptA.id, deptB.id);
 
@@ -168,7 +172,7 @@ async function main() {
     // ── 5/6. Inline Activity creation inherits the SAME department, links to that project ──
     console.log("\n5/6. POST /api/activities with explicit departmentId + preselected projectId ===\n");
     const activityRes = await createActivityPOST(
-      jsonReq("http://localhost/api/activities", { title: `${TAG} Inline Activity`, departmentId: deptA.id, projectId: project.id })
+      jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} Inline Activity`, departmentId: deptA.id, projectId: project.id })
     );
     check("POST /api/activities with explicit departmentId + projectId -> 201", activityRes.status === 201);
     const activity = await activityRes.json();
@@ -212,7 +216,7 @@ async function main() {
     currentSession = { user: { id: limitedUser.id, role: Role.USER, customRoleId: null } };
     const deniedProjectRes = await createProjectPOST(jsonReq("http://localhost/api/projects", { title: `${TAG} Denied Project`, departmentId: deptA.id }));
     check("A REQUESTER-role member without project.create -> denied (not 201)", deniedProjectRes.status !== 201, `got ${deniedProjectRes.status}`);
-    const deniedActivityRes = await createActivityPOST(jsonReq("http://localhost/api/activities", { title: `${TAG} Denied Activity`, departmentId: deptA.id }));
+    const deniedActivityRes = await createActivityPOST(jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} Denied Activity`, departmentId: deptA.id }));
     check("A REQUESTER-role member without activity.create -> denied (not 201)", deniedActivityRes.status !== 201, `got ${deniedActivityRes.status}`);
 
     // ── 14. Even a user who COULD create Projects/Activities still cannot LINK a ticket to one ──
@@ -284,7 +288,7 @@ async function main() {
     const secondProject = await secondProjectRes.json();
     if (secondProject?.id) projectIds.push(secondProject.id);
     const secondActivityRes = await createActivityPOST(
-      jsonReq("http://localhost/api/activities", { title: `${TAG} Second Activity`, departmentId: deptA.id, projectId: secondProject.id })
+      jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} Second Activity`, departmentId: deptA.id, projectId: secondProject.id })
     );
     const secondActivity = await secondActivityRes.json();
     if (secondActivity?.id) activityIds.push(secondActivity.id);
@@ -330,6 +334,7 @@ async function main() {
     try {
       await prisma.ticket.deleteMany({ where: { id: { in: ticketIds } } });
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
+      if (fixtureTaskTypeId) await prisma.taskType.delete({ where: { id: fixtureTaskTypeId } }).catch(() => {});
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.departmentMembership.deleteMany({ where: { id: { in: membershipIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });

@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { AttachmentFileIcon } from "@/components/attachments/attachment-dropzone";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials, formatDateTime, formatBytes } from "@/lib/utils";
 import { Role, MessageDirection } from "@prisma/client";
-import { Paperclip, Lock, Mail, ArrowDown } from "lucide-react";
+import { Lock, Mail, ArrowDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { renderNoteBodyWithMentions } from "@/components/notes/mention-render";
 
@@ -263,7 +264,7 @@ function MessageBubble({
                 rel="noopener noreferrer"
                 className="flex items-center gap-1 rounded border bg-background px-2 py-1 text-xs hover:bg-muted transition-colors"
               >
-                <Paperclip className="h-3 w-3 text-muted-foreground" />
+                <AttachmentFileIcon mimeType={att.mimeType} name={att.originalName} className="h-3 w-3" />
                 <span className="max-w-[120px] truncate">{att.originalName}</span>
                 <span className="text-muted-foreground">
                   ({formatBytes(att.size)})

@@ -10,6 +10,8 @@ import { updateProjectSchema, updateProjectRequestOriginFieldsSchema, facilities
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
+import { resolveProjectDuration } from "@/lib/project-duration";
+import { isSameDateOnly } from "@/lib/date-only";
 import { notifyOwnerOfProjectCompletion } from "@/lib/services/project-feedback-service";
 import {
   getFacilitiesServicesDepartmentId,
@@ -149,6 +151,10 @@ export async function PATCH(
         title: true,
         expectedStartDate: true,
         expectedFinishDate: true,
+        expectedTotalInitialDays: true,
+        expectedTotalInitialDaysOverridden: true,
+        actualTotalDays: true,
+        actualTotalDaysOverridden: true,
         expenseTypeId: true,
         projectRequestId: true,
         startDate: true,
@@ -170,10 +176,9 @@ export async function PATCH(
 
     const body = await req.json();
     // Merged with the request-origin-only editable fields (Expected
-    // Start/Finish, Expense Type, Budget, Estimated Cost, Actual Cost,
-    // External) — see that schema's own doc comment for why
-    // expectedTotalInitialDays is deliberately never accepted here
-    // (creation-time baseline, immutable). Accepted for ANY Project being
+    // Start/Finish, Expected Total Initial Days override, Expense Type,
+    // External) — expectedTotalInitialDays itself is never accepted raw;
+    // it is resolved below via lib/project-duration.ts. Accepted for ANY Project being
     // edited, not just ones with projectRequestId set — the UI only ever
     // OFFERS this block for request-origin Projects (see
     // app/(main)/projects/[id]/edit/page.tsx), but there's no extra
@@ -243,6 +248,8 @@ export async function PATCH(
       endDate,
       expectedStartDate,
       expectedFinishDate,
+      expectedTotalInitialDaysOverride,
+      actualTotalDaysOverride,
       facilitiesCompany,
       facilitiesLocation,
       facilitiesStartPrecision,
@@ -426,6 +433,53 @@ export async function PATCH(
       }
     }
 
+    // Plain (non-Facilities-resolved) Start/End write: undefined (key
+    // omitted) leaves the column untouched; null/"" (explicitly cleared)
+    // persists NULL; a real value persists the parsed Date.
+    const plainStartDateWrite = startDate === undefined ? undefined : startDate ? new Date(startDate) : null;
+    const plainEndDateWrite = endDate === undefined ? undefined : endDate ? new Date(endDate) : null;
+
+    // Durations — the ONE canonical resolver (lib/project-duration.ts),
+    // in working days. Any other (unrelated) update leaves both the value
+    // and its manual/automatic mode exactly as stored. In automatic mode a
+    // date change recalculates; a manual override is kept until an explicit
+    // reset (override = null). Durations never modify dates. The effective
+    // dates are exactly the values persisted by this same update.
+    const effectiveActualStart = facilitiesWrite ? facilitiesWrite.startDate : plainStartDateWrite !== undefined ? plainStartDateWrite : existing.startDate;
+    const effectiveActualEnd = facilitiesWrite ? facilitiesWrite.endDate : plainEndDateWrite !== undefined ? plainEndDateWrite : existing.endDate;
+    // Re-resolved only when this duration's dates ACTUALLY CHANGE (not merely
+    // re-sent by the full-snapshot edit form), or when its mode is
+    // explicitly switched: a numeric override, or a reset (null) of a
+    // currently MANUAL value. A null for an already-automatic duration with
+    // unchanged dates is a no-op — so an unrelated save never silently
+    // rewrites a stored value (e.g. a historical calendar-day value from
+    // before the working-day rule).
+    const actualDatesChanged = !isSameDateOnly(effectiveActualStart, existing.startDate) || !isSameDateOnly(effectiveActualEnd, existing.endDate);
+    const actualDurationTouched =
+      actualDatesChanged || typeof actualTotalDaysOverride === "number" || (actualTotalDaysOverride === null && existing.actualTotalDaysOverridden);
+    const actualDuration = actualDurationTouched
+      ? resolveProjectDuration({
+          start: effectiveActualStart,
+          finish: effectiveActualEnd,
+          override: actualTotalDaysOverride,
+          current: { value: existing.actualTotalDays, overridden: existing.actualTotalDaysOverridden },
+        })
+      : null;
+    const expectedDatesChanged =
+      !isSameDateOnly(effectiveExpectedStart, existing.expectedStartDate) || !isSameDateOnly(effectiveExpectedFinish, existing.expectedFinishDate);
+    const expectedDurationTouched =
+      expectedDatesChanged ||
+      typeof expectedTotalInitialDaysOverride === "number" ||
+      (expectedTotalInitialDaysOverride === null && existing.expectedTotalInitialDaysOverridden);
+    const expectedDuration = expectedDurationTouched
+      ? resolveProjectDuration({
+          start: effectiveExpectedStart,
+          finish: effectiveExpectedFinish,
+          override: expectedTotalInitialDaysOverride,
+          current: { value: existing.expectedTotalInitialDays, overridden: existing.expectedTotalInitialDaysOverridden },
+        })
+      : null;
+
     // Department changed but no explicit new sub-department was given — the
     // stale one (if any) can no longer be valid, so it's cleared.
     const departmentChanging = data.departmentId !== undefined && data.departmentId !== existing.departmentId;
@@ -454,8 +508,8 @@ export async function PATCH(
               ...facilitiesDirectFields,
             }
           : {
-              startDate: startDate ? new Date(startDate) : undefined,
-              endDate: endDate ? new Date(endDate) : undefined,
+              startDate: plainStartDateWrite,
+              endDate: plainEndDateWrite,
               ...(isFacilitiesWorkspace
                 ? { facilitiesCompany: facilitiesCompany !== undefined ? facilitiesCompany : undefined, facilitiesLocation: facilitiesLocation !== undefined ? facilitiesLocation : undefined }
                 : {}),
@@ -467,6 +521,8 @@ export async function PATCH(
         // finish>=start check, so the two can never disagree.
         expectedStartDate: expectedStartDate === undefined ? undefined : effectiveExpectedStart,
         expectedFinishDate: expectedFinishDate === undefined ? undefined : effectiveExpectedFinish,
+        ...(expectedDuration ? { expectedTotalInitialDays: expectedDuration.value, expectedTotalInitialDaysOverridden: expectedDuration.overridden } : {}),
+        ...(actualDuration ? { actualTotalDays: actualDuration.value, actualTotalDaysOverridden: actualDuration.overridden } : {}),
         members: memberIds
           ? { set: memberIds.map((memberId) => ({ id: memberId })) }
           : undefined,

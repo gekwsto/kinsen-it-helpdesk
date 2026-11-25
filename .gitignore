@@ -48,3 +48,8 @@ storage/uploads/*
 # location; harmless to still ignore even though nothing writes there anymore.
 public/uploads/*
 !public/uploads/.gitkeep
+
+# Build output of `npm run ops:build` (operational CLIs, built in the Docker builder stage)
+/dist/
+# Operational run artifacts (backfill reports, snapshots) written by the ops container
+/ops-output/

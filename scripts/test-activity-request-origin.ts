@@ -47,6 +47,27 @@ async function main() {
     return;
   }
 
+  // Intermediate approvers must be the requester's VERIFIED SQLGeneral
+  // direct manager (see resolveIntermediateApproverCandidates). Mocked the
+  // same way the sibling Project Request tests do, so the fixture request
+  // can actually be submitted.
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralRowsByUsername = new Map<string, any[]>();
+  mock.module("@/lib/sqlgeneral-api-client", {
+    namedExports: {
+      ...realSqlGeneralClient,
+      findSqlGeneralUserByUsername: async (username: string) => {
+        const rows = sqlGeneralRowsByUsername.get(username) ?? [];
+        if (rows.length === 0) return { outcome: "not_found" as const };
+        if (rows.length > 1) return { outcome: "ambiguous" as const, count: rows.length };
+        return { outcome: "unique" as const, user: rows[0] };
+      },
+    },
+  });
+  function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
+    sqlGeneralRowsByUsername.set(username, [{ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null }]);
+  }
+
   const { NextRequest } = await import("next/server");
   const jsonReq = (body?: unknown, method = "POST") =>
     new NextRequest("http://localhost/x", { method, headers: { "content-type": "application/json" }, body: body !== undefined ? JSON.stringify(body) : undefined });
@@ -102,6 +123,13 @@ async function main() {
     await addMembership(viewerNoManage.id, dept.id);
 
     // ══════════════════════ Fixture: one real request-origin Project ══════════════════════
+    const manager = await makeUser(`${TAG}-manager@kinsen.gr`);
+    const MANAGER_USERNAME = `${TAG}-mgr`;
+    const WORKER1_USERNAME = `${TAG}-worker1`;
+    registerSqlGeneralUser(MANAGER_USERNAME, null);
+    registerSqlGeneralUser(WORKER1_USERNAME, MANAGER_USERNAME);
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: MANAGER_USERNAME, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: worker1.id, sqlGeneralUsername: WORKER1_USERNAME, status: "SUCCEEDED" } });
     currentSession = { user: { id: worker1.id, role: Role.USER, customRoleId: null } };
     const submitRes = await requestsPOST(
       jsonReq({
@@ -112,14 +140,18 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [adminUser.id],
+        intermediateApproverIds: [manager.id],
       })
     );
     const submitted = await submitRes.json();
+    if (submitRes.status !== 201) throw new Error(`Fixture setup failed (submit): ${submitRes.status}: ${JSON.stringify(submitted)}`);
     requestIds.push(submitted.id);
+    currentSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
+    const intermediateRes = await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    if (intermediateRes.status !== 200) throw new Error(`Fixture setup failed (intermediate approval): ${intermediateRes.status}`);
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
-    await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
-    await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
+    const approvalRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
+    if (approvalRes.status !== 200) throw new Error(`Fixture setup failed (final approval): ${approvalRes.status}`);
     const setupRes = await setupPOST(
       jsonReq({
         title: `${TAG} request`,
@@ -246,19 +278,28 @@ async function main() {
     check("10. 05 May -> 17 May -> 201", twelveDaysRes.status === 201);
     const twelveDaysActivity = await twelveDaysRes.json();
     activityIds.push(twelveDaysActivity.id);
-    check("10. ...expectedDays === 12", twelveDaysActivity.expectedDays === 12);
+    check("10. ...expectedDays === 9 working days (Tue 05 May -> Sun 17 May spans a weekend)", twelveDaysActivity.expectedDays === 9);
 
     const forgedDaysRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} ForgedDays`, expectedDays: 9999 } as any));
     check("11. A forged client expectedDays is simply ignored — not even a field on the schema", forgedDaysRes.status === 201);
     const forgedDaysActivity = await forgedDaysRes.json();
     activityIds.push(forgedDaysActivity.id);
-    check("...server's own real calculation persists instead (12), never 9999", forgedDaysActivity.expectedDays === 12 && forgedDaysActivity.expectedDays !== 9999);
+    check("...server's own real calculation persists instead (9), never 9999", forgedDaysActivity.expectedDays === 9 && forgedDaysActivity.expectedDays !== 9999);
 
-    // 12: DST/timezone safety — reuses the exact same wholeCalendarDaysBetween
+    // Working-day transition: a historical (pre-transition, calendar-day)
+    // stored expectedDays must NOT be silently rewritten by a full-form
+    // re-save that sends the same dates — only a REAL date change recalculates.
+    await prisma.projectActivity.update({ where: { id: forgedDaysActivity.id }, data: { expectedDays: 12 } });
+    const resaveSameDates = await (await activitiesPATCH(jsonReq({ title: `${TAG} ForgedDays Renamed`, expectedStartDate: "2026-05-05", expectedFinishDate: "2026-05-17" }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
+    check("11b. Re-saving with the SAME Expected dates keeps the stored historical expectedDays (12) — no silent recalculation", resaveSameDates.expectedDays === 12);
+    const realDateChange = await (await activitiesPATCH(jsonReq({ expectedFinishDate: "2026-05-18" }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
+    check("11b. A REAL Expected Finish change recalculates in working days (Tue 05-05 -> Mon 05-18 = 9)", realDateChange.expectedDays === 9);
+
+    // 12: DST/timezone safety — reuses the exact same workingDaysBetween
     // helper already proven DST-safe for Project.expectedTotalInitialDays
     // (UTC-midnight normalization, not local time) — verified structurally.
-    const { wholeCalendarDaysBetween } = await import("@/lib/date-only");
-    check("12. Date math uses the shared UTC-midnight-normalized helper (DST-safe by construction)", wholeCalendarDaysBetween(new Date("2026-03-01"), new Date("2026-03-09")) === 8);
+    const { workingDaysBetween } = await import("@/lib/date-only");
+    check("12. Date math uses the shared UTC-date-only working-day helper (DST-safe by construction): Sun 2026-03-01 -> Mon 2026-03-09 = 5", workingDaysBetween(new Date("2026-03-01"), new Date("2026-03-09")) === 5);
 
     // ══════════════════════ 13-20. Actual Days / completion transition ══════════════════════
     console.log("\n=== 13-20. Actual Days: computed ONLY at the real COMPLETED transition, from Expected Start ===\n");
@@ -432,6 +473,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);
     }
     try {
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     } catch (err) {

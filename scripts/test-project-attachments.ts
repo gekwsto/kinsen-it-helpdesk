@@ -91,7 +91,7 @@ async function main() {
   // write path, added after a real production incident). The ordering
   // guarantee this check cares about — validation happens before any
   // write is attempted — still holds, just against the new call name.
-  check("A5. Upload rejects a disallowed MIME type before ever writing to disk", /isAllowedAttachmentMimeType/.test(listRouteSrc) && listRouteSrc.indexOf("isAllowedAttachmentMimeType") < listRouteSrc.indexOf("writeAttachmentFile"));
+  check("A5. Upload rejects a disallowed file type (shared policy: validateAttachmentUpload — type + email-content checks) before ever writing to disk", /validateAttachmentUpload\(/.test(listRouteSrc) && listRouteSrc.indexOf("validateAttachmentUpload(") < listRouteSrc.indexOf("writeAttachmentFile("));
   check("A6. Upload rejects an oversized file before ever writing to disk", /MAX_ATTACHMENT_SIZE_BYTES/.test(listRouteSrc) && listRouteSrc.indexOf("MAX_ATTACHMENT_SIZE_BYTES") < listRouteSrc.indexOf("writeAttachmentFile"));
   check("A6b. Never active workspace, never hasPermission/hasEffectiveModulePermission, never a hardcoded role name", !/getActiveWorkspace|hasEffectiveModulePermission|"ADMIN"|Role\.ADMIN/.test(listRouteSrc) && !/\bhasPermission\(/.test(listRouteSrc));
 

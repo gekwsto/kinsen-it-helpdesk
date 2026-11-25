@@ -15,7 +15,7 @@ import { getActivityProgressFromStatus, ActivityProgressConfigurationError } fro
 import { recalculateProjectRollup } from "@/lib/projects/progress-rollup";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
-import { wholeCalendarDaysBetween, actualDaysFromCompletion } from "@/lib/date-only";
+import { workingDaysBetween, actualDaysFromCompletion } from "@/lib/date-only";
 import { computeActivityFinancials } from "@/lib/services/project-financials-service";
 import { getAppendSequenceLocked } from "@/lib/services/activity-sequence-service";
 import { ActivityStatus } from "@prisma/client";
@@ -256,7 +256,7 @@ export async function POST(req: NextRequest) {
     // gets a fabricated duration.
     const expectedDays =
       expectedStartDate && expectedFinishDate
-        ? wholeCalendarDaysBetween(new Date(expectedStartDate), new Date(expectedFinishDate))
+        ? workingDaysBetween(new Date(expectedStartDate), new Date(expectedFinishDate))
         : null;
 
     // Computed BEFORE the create, and never caught-and-substituted: a

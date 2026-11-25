@@ -131,7 +131,7 @@
  * independent of startDate/endDate above (those keep their own pre-
  * existing "actual" Gantt/filter semantics; see Project's own doc
  * comment). expectedTotalInitialDays is computed the SAME way
- * createProjectFromApprovedRequest computes it (wholeCalendarDaysBetween)
+ * createProjectFromApprovedRequest computes it (working days, lib/date-only.ts)
  * — but ONLY when BOTH expected dates are actually known; a historical row
  * missing either one simply leaves it null, never estimated from Total
  * Days or any other proxy (see this file's own note on Total Days below).
@@ -152,7 +152,7 @@
 import { prisma } from "@/lib/prisma";
 import { Prisma, type ProjectStatus } from "@prisma/client";
 import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
-import { wholeCalendarDaysBetween } from "@/lib/date-only";
+import { resolveProjectDuration } from "@/lib/project-duration";
 import crypto from "crypto";
 
 // Phase 4.1 — see this file's own "historicalSourceMetadata" doc comment.
@@ -385,8 +385,10 @@ export async function createHistoricalProjectRequest(
   // computed ONLY when both dates are actually known, exactly like
   // createProjectFromApprovedRequest's own calculation; never estimated
   // from Total Days or any other proxy.
-  const expectedTotalInitialDays =
-    input.expectedStartDate && input.expectedFinishDate ? wholeCalendarDaysBetween(input.expectedStartDate, input.expectedFinishDate) : undefined;
+  // Both via the ONE canonical resolver (lib/project-duration.ts) —
+  // automatic mode, null whenever either date is unknown.
+  const expectedTotalInitialDays = resolveProjectDuration({ start: input.expectedStartDate, finish: input.expectedFinishDate, override: undefined }).value ?? undefined;
+  const actualTotalDays = resolveProjectDuration({ start: input.startDate, finish: input.endDate, override: undefined }).value ?? undefined;
 
   const { projectRequestId, projectId } = await prisma.$transaction(async (tx) => {
     const projectRequest = await tx.projectRequest.create({
@@ -437,6 +439,7 @@ export async function createHistoricalProjectRequest(
         expectedStartDate: input.expectedStartDate ?? undefined,
         expectedFinishDate: input.expectedFinishDate ?? undefined,
         expectedTotalInitialDays,
+        actualTotalDays,
         projectRequestId: projectRequest.id,
         ownerId: ownerIds[0],
         // Mirrors the single canonical owner into the authoritative

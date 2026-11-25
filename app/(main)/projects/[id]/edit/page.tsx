@@ -18,7 +18,9 @@ import {
 } from "@/components/ui/select";
 import { ChevronRight, Loader2, Building2, Briefcase } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
-import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
+import { FacilitiesDateField, facilitiesBoundaryPreview } from "@/components/projects/facilities-date-field";
+import { ProjectDurationField, parseDurationOverride } from "@/components/projects/project-duration-field";
+import { calculateProjectDurationDays } from "@/lib/project-duration";
 import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
 
 interface AssignableUser {
@@ -89,7 +91,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   // back on PATCH (see updateProjectRequestOriginFieldsSchema's doc comment
   // in lib/validations.ts). Editing Expected Start/Finish below must never
   // recompute or overwrite this; there is simply no code path that does.
-  const [expectedTotalInitialDays, setExpectedTotalInitialDays] = useState<number | null>(null);
+  // Duration overrides — null = automatic (calculated from the dates), a
+  // string = manual override text. Loaded from the persisted
+  // …Overridden flags; see ProjectDurationField / lib/project-duration.ts.
+  const [expectedDaysManual, setExpectedDaysManual] = useState<string | null>(null);
+  const [actualDaysManual, setActualDaysManual] = useState<string | null>(null);
   const [expectedStartDate, setExpectedStartDate] = useState("");
   const [expectedFinishDate, setExpectedFinishDate] = useState("");
   const [expenseTypeId, setExpenseTypeId] = useState("");
@@ -156,6 +162,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setPriority(String(Math.min(p.priority ?? 2, 3)));
           setStartDate(p.startDate ? p.startDate.split("T")[0] : "");
           setEndDate(p.endDate ? p.endDate.split("T")[0] : "");
+          setActualDaysManual(p.actualTotalDaysOverridden ? String(p.actualTotalDays ?? "") : null);
           setIsFacilitiesServicesWorkspace(p.isFacilitiesServicesWorkspace ?? false);
           setFacilitiesCompany(p.facilitiesCompany ?? "");
           setFacilitiesLocation(p.facilitiesLocation ?? "");
@@ -195,9 +202,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
 
           setProjectRequestId(p.projectRequestId ?? null);
           if (p.projectRequestId) {
-            setExpectedTotalInitialDays(
-              typeof p.expectedTotalInitialDays === "number" ? p.expectedTotalInitialDays : null
-            );
+            setExpectedDaysManual(p.expectedTotalInitialDaysOverridden ? String(p.expectedTotalInitialDays ?? "") : null);
             setExpectedStartDate(p.expectedStartDate ? p.expectedStartDate.split("T")[0] : "");
             setExpectedFinishDate(p.expectedFinishDate ? p.expectedFinishDate.split("T")[0] : "");
             setExpenseTypeId(p.expenseTypeId ?? "");
@@ -329,6 +334,17 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
       toast.error("Expected Finish Date cannot be before Expected Start Date.");
       return;
     }
+    // Duration overrides — a UX convenience only; re-validated server-side.
+    const actualOverride = parseDurationOverride(actualDaysManual);
+    if (!actualOverride.ok) {
+      toast.error("Actual Total Days must be a whole number of days (0 or more).");
+      return;
+    }
+    const expectedOverride = parseDurationOverride(projectRequestId ? expectedDaysManual : null);
+    if (!expectedOverride.ok) {
+      toast.error("Expected Total Initial Days must be a whole number of days (0 or more).");
+      return;
+    }
     // Facilities Services-only — a UX convenience only; the server
     // (resolveFacilitiesWrite) re-validates all of this regardless.
     if (isFacilitiesServicesWorkspace) {
@@ -395,7 +411,12 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 facilitiesEndYear: facEndPrecision === "QUARTER" ? (facEndYear ? parseInt(facEndYear) : null) : null,
                 endDate: facEndPrecision === "EXACT" ? endDate || null : undefined,
               }
-            : { startDate: startDate || undefined, endDate: endDate || undefined }),
+            : // Full-snapshot form: an emptied date is sent as an explicit
+              // null so clearing it actually persists.
+              { startDate: startDate || null, endDate: endDate || null }),
+          // Always sent (full-snapshot form): a number persists a manual
+          // override, null returns to the calculated value.
+          actualTotalDaysOverride: actualOverride.value,
           successTarget: successTarget || undefined,
           memberIds: Array.from(selectedMemberIds),
           audienceIds: Array.from(selectedAudienceIds),
@@ -417,6 +438,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
             ? {
                 expectedStartDate: expectedStartDate || null,
                 expectedFinishDate: expectedFinishDate || null,
+                expectedTotalInitialDaysOverride: expectedOverride.value,
                 expenseTypeId: expenseTypeId || null,
                 // Estimated/Actual Cost are derived server-side and never
                 // part of the editable PATCH payload — see
@@ -610,6 +632,25 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </div>
             )}
 
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <ProjectDurationField
+                id="actualTotalDays"
+                label="Actual Total Days"
+                calculatedValue={
+                  isFacilitiesServicesWorkspace
+                    ? calculateProjectDurationDays(
+                        facilitiesBoundaryPreview("start", facStartPrecision, startDate, facStartQuarter, facStartYear),
+                        facilitiesBoundaryPreview("end", facEndPrecision, endDate, facEndQuarter, facEndYear)
+                      )
+                    : calculateProjectDurationDays(startDate, endDate)
+                }
+                manualText={actualDaysManual}
+                onManualTextChange={setActualDaysManual}
+                sourceLabel="Start/End Date"
+                disabled={saving}
+              />
+            </div>
+
             {isFacilitiesServicesWorkspace && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
@@ -794,9 +835,9 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                   </div>
                 </div>
 
-                {/* Expense Type (editable) paired with the readonly baseline
-                    day count — both single, short fields, grouped the same
-                    way Expected Start/Finish are above. */}
+                {/* Expense Type paired with Expected Total Initial Days —
+                    both single, short fields, grouped the same way Expected
+                    Start/Finish are above. */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label>Expense Type</Label>
@@ -814,26 +855,15 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                       </SelectContent>
                     </Select>
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="expectedTotalInitialDays">Expected Total Initial Days</Label>
-                    {/* readOnly (never `disabled`) — the creation-time baseline.
-                        Editing Expected Start/Finish above never recomputes or
-                        overwrites it; there is no code path here or on the
-                        server that does. Same visual treatment as the
-                        create-flow's own readonly field in project-form.tsx. */}
-                    <Input
-                      id="expectedTotalInitialDays"
-                      type="text"
-                      inputMode="none"
-                      readOnly
-                      aria-readonly="true"
-                      tabIndex={-1}
-                      value={expectedTotalInitialDays !== null ? `${expectedTotalInitialDays} day${expectedTotalInitialDays === 1 ? "" : "s"}` : ""}
-                      placeholder="Not set"
-                      className="cursor-default bg-muted/40"
-                    />
-                    <p className="text-xs text-muted-foreground">Baseline set at Project creation — not editable.</p>
-                  </div>
+                  <ProjectDurationField
+                    id="expectedTotalInitialDays"
+                    label="Expected Total Initial Days"
+                    calculatedValue={calculateProjectDurationDays(expectedStartDate, expectedFinishDate)}
+                    manualText={expectedDaysManual}
+                    onManualTextChange={setExpectedDaysManual}
+                    sourceLabel="Expected Start/Finish Date"
+                    disabled={saving}
+                  />
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">

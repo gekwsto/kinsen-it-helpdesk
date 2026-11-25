@@ -1650,13 +1650,22 @@ model Project {
   // purely additional planning metadata.
   expectedStartDate        DateTime?
   expectedFinishDate       DateTime?
-  // The INITIAL baseline duration (expectedFinishDate - expectedStartDate,
-  // whole calendar days), computed server-side ONCE at creation and never
-  // silently recalculated if Expected Start/Finish are edited later — see
-  // createProjectFromApprovedRequest's own doc comment for the exact
-  // calculation and PATCH /api/projects/[id] for why it's never accepted
-  // as client input on update.
-  expectedTotalInitialDays Int?
+  // Expected Total Initial Days (expectedFinishDate - expectedStartDate,
+  // whole calendar days). Resolved ONLY through lib/project-duration.ts's
+  // resolveProjectDuration: AUTOMATIC (…Overridden = false) recalculates
+  // from Expected Start/Finish whenever they change; MANUAL (…Overridden =
+  // true) keeps the user-entered non-negative value regardless of date
+  // changes until explicitly reset. Never modifies the dates themselves.
+  // Pre-existing baselines that no longer matched their dates were marked
+  // overridden by migration 20261125120000_add_project_duration_overrides
+  // so they are preserved, never silently recalculated.
+  expectedTotalInitialDays           Int?
+  expectedTotalInitialDaysOverridden Boolean @default(false)
+  // Actual Total Days (endDate - startDate, whole calendar days) — same
+  // automatic/manual semantics as expectedTotalInitialDays above, via the
+  // same resolver. Available on every Project (startDate/endDate are).
+  actualTotalDays                    Int?
+  actualTotalDaysOverridden          Boolean @default(false)
   expenseType              ProjectExpenseType? @relation(fields: [expenseTypeId], references: [id])
   expenseTypeId            String?
   // Budget, and the old user-entered Estimated/Actual Cost columns, were
@@ -3260,4 +3269,46 @@ model RelatedLink {
   @@index([projectId, createdAt])
   @@index([activityId, createdAt])
   @@index([createdById])
+}
+
+// ─── Working-day duration backfill ledger ───────────────────────────────────
+// Record-level backup + audit trail for the one-time, approval-gated
+// conversion of stored date-derived durations from the former calendar-day
+// rule to working days (scripts/working-days-backfill/). One run per apply;
+// every changed field gets exactly one DurationBackfillChange row holding
+// its old and new value (and override flag, for Project durations), written
+// in the SAME transaction as the change itself, so a run can be rolled back
+// precisely. Deliberately no foreign keys to the changed records: a record
+// deleted after the run simply has nothing to restore.
+enum DurationBackfillRunStatus {
+  APPLIED
+  ROLLED_BACK
+}
+
+model DurationBackfillRun {
+  id           String                    @id @default(cuid())
+  kind         String
+  status       DurationBackfillRunStatus @default(APPLIED)
+  appliedAt    DateTime                  @default(now())
+  rolledBackAt DateTime?
+  summary      Json
+  changes      DurationBackfillChange[]
+}
+
+model DurationBackfillChange {
+  id            String              @id @default(cuid())
+  run           DurationBackfillRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  runId         String
+  entity        String
+  recordId      String
+  field         String
+  category      String
+  oldValue      Int?
+  newValue      Int?
+  oldOverridden Boolean?
+  newOverridden Boolean?
+  restoredAt    DateTime?
+
+  @@unique([runId, entity, recordId, field])
+  @@index([entity, recordId])
 }

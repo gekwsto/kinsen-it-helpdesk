@@ -1,12 +1,14 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { MentionTextarea } from "@/components/notes/mention-textarea";
 import { extractMentionedUserIdsFromBody } from "@/lib/mentions/mention-tokens";
-import { Loader2, Send, Lock, Paperclip, X } from "lucide-react";
+import { Loader2, Send, Lock, X } from "lucide-react";
+import { AttachmentDropzone, AttachmentFileIcon } from "@/components/attachments/attachment-dropzone";
+import { uploadAttachmentFile } from "@/lib/attachment-upload-client";
 import { cn } from "@/lib/utils";
 import type { ThreadMessage } from "./ticket-thread";
 
@@ -21,7 +23,6 @@ export function TicketReplyForm({
   canInternalNote,
   onMessageSent,
 }: TicketReplyFormProps) {
-  const fileRef = useRef<HTMLInputElement>(null);
   const [body, setBody] = useState("");
   const [isInternal, setIsInternal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -55,19 +56,16 @@ export function TicketReplyForm({
 
       const message: ThreadMessage = await res.json();
 
-      // Upload attachments sequentially
+      // Upload attachments sequentially (shared upload helper, same route).
       if (attachments.length > 0) {
         setUploadingFile(true);
+        const failures: string[] = [];
         for (const file of attachments) {
-          const form = new FormData();
-          form.append("file", file);
-          form.append("messageId", message.id);
-          await fetch(`/api/tickets/${ticketId}/attachments`, {
-            method: "POST",
-            body: form,
-          });
+          const result = await uploadAttachmentFile(`/api/tickets/${ticketId}/attachments`, file, { fields: { messageId: message.id } });
+          if (!result.ok) failures.push(`${file.name}: ${result.error}`);
         }
         setUploadingFile(false);
+        if (failures.length > 0) toast.error(`${failures.length} attachment(s) could not be uploaded: ${failures.join("; ")}`);
       }
 
       // Optimistic append — parent adds the message immediately
@@ -91,11 +89,6 @@ export function TicketReplyForm({
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    setAttachments((prev) => [...prev, ...files]);
-    if (fileRef.current) fileRef.current.value = "";
-  };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-3">
@@ -165,7 +158,7 @@ export function TicketReplyForm({
                 key={i}
                 className="flex items-center gap-1.5 rounded border bg-background px-2 py-1 text-xs"
               >
-                <Paperclip className="h-3 w-3 text-muted-foreground" />
+                <AttachmentFileIcon mimeType={file.type} name={file.name} className="h-3 w-3" />
                 <span className="max-w-[120px] truncate">{file.name}</span>
                 <button
                   type="button"
@@ -173,6 +166,7 @@ export function TicketReplyForm({
                     setAttachments((prev) => prev.filter((_, idx) => idx !== i))
                   }
                   className="text-muted-foreground hover:text-destructive"
+                  aria-label={`Remove ${file.name}`}
                 >
                   <X className="h-3 w-3" />
                 </button>
@@ -181,29 +175,18 @@ export function TicketReplyForm({
           </div>
         )}
 
-        {/* Toolbar */}
-        <div className="flex items-center justify-between px-3 py-2 border-t border-border/40">
-          <div>
-            <input
-              ref={fileRef}
-              type="file"
-              multiple
-              className="hidden"
-              onChange={handleFileChange}
-              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.txt,.zip"
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={() => fileRef.current?.click()}
-              className="h-7 text-muted-foreground"
-            >
-              <Paperclip className="h-3.5 w-3.5 mr-1" />
-              Attach
-            </Button>
-          </div>
+        {/* Attach: shared dropzone (drag & drop or browse) */}
+        <div className="px-3 pt-2 border-t border-border/40">
+          <AttachmentDropzone
+            variant="compact"
+            existing={attachments}
+            disabled={isSubmitting || uploadingFile}
+            onFiles={(added) => setAttachments((prev) => [...prev, ...added])}
+          />
+        </div>
 
+        {/* Toolbar */}
+        <div className="flex items-center justify-end px-3 py-2">
           <Button
             type="submit"
             size="sm"

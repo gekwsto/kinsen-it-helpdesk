@@ -849,6 +849,11 @@ export default async function ProjectDetailPage({
                           facilitiesStartLabel computation above). */}
                       {project.startDate && <p>Start: {facilitiesStartLabel ?? formatDate(project.startDate)}</p>}
                       {project.endDate && <p>End: {facilitiesEndLabel ?? formatDate(project.endDate)}</p>}
+                      {project.actualTotalDays !== null && (
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Actual total: {project.actualTotalDays} working day(s){project.actualTotalDaysOverridden ? " (manually set)" : ""}
+                        </p>
+                      )}
                     </div>
                   )}
                   {project.projectRequest && (project.expectedStartDate || project.expectedFinishDate) && (
@@ -857,7 +862,9 @@ export default async function ProjectDetailPage({
                       {project.expectedStartDate && <p>Start: {formatDate(project.expectedStartDate)}</p>}
                       {project.expectedFinishDate && <p>Finish: {formatDate(project.expectedFinishDate)}</p>}
                       {project.expectedTotalInitialDays !== null && (
-                        <p className="text-xs text-muted-foreground mt-0.5">Initial baseline: {project.expectedTotalInitialDays} day(s)</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          Expected total initial: {project.expectedTotalInitialDays} working day(s){project.expectedTotalInitialDaysOverridden ? " (manually set)" : ""}
+                        </p>
                       )}
                     </div>
                   )}

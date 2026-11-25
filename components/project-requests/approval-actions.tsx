@@ -18,7 +18,7 @@ interface ApprovalActionsProps {
   approver: { id: string; name: string | null; email: string } | null;
   approvedAt: Date | null;
   rejectedAt: Date | null;
-  /** The approver's OWN mandatory justification for the decision — written only at decision time, never the requester's text (see legacyRequesterBusinessAssessment on the detail page for that). */
+  /** The approver's OWN optional justification for the decision — written only at decision time, never the requester's text (see legacyRequesterBusinessAssessment on the detail page for that). */
   businessAssessment: string | null;
   /** The Project created from this request's own request-origin setup flow — null until that's been completed. */
   project: { id: string; title: string } | null;
@@ -28,8 +28,8 @@ interface ApprovalActionsProps {
 
 /**
  * Approve/Reject — clicking never mutates anything by itself; it only opens
- * the shared ProjectRequestDecisionDialog, which requires a Business
- * Assessment and performs the actual API call on confirm. Only offered
+ * the shared ProjectRequestDecisionDialog, which collects an optional
+ * Business Assessment and performs the actual API call on confirm. Only offered
  * while status === PENDING_APPROVAL AND the viewer holds effective
  * projectRequest.approve for this request's department; once APPROVED or
  * REJECTED it renders as a read-only decision summary with the approver's

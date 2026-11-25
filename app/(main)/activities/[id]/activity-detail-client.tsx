@@ -689,11 +689,11 @@ export function ActivityDetailClient({ id, canManageDependencies }: Props) {
                         </div>
                         <div>
                           <p className="text-xs text-muted-foreground mb-1">Expected Days</p>
-                          <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} day(s)` : "Not set"}</p>
+                          <p className="font-medium">{typeof activity.expectedDays === "number" ? `${activity.expectedDays} working day(s)` : "Not set"}</p>
                         </div>
                         <div>
                           <p className="text-xs text-muted-foreground mb-1">Actual Days</p>
-                          <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} day(s)` : "Not set until completion"}</p>
+                          <p className="font-medium">{typeof activity.actualDays === "number" ? `${activity.actualDays} working day(s)` : "Not set until completion"}</p>
                         </div>
                       </>
                     )}

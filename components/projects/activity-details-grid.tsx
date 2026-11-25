@@ -29,10 +29,10 @@ export function ActivityDetailsGrid({ owner, dueDate, expectedStartDate, expecte
   if (dueDate) fields.push({ label: "Due Date", value: formatDate(dueDate) });
   if (expectedStartDate) fields.push({ label: "Expected Start", value: formatDate(expectedStartDate) });
   if (expectedFinishDate) fields.push({ label: "Expected Finish", value: formatDate(expectedFinishDate) });
-  if (typeof expectedDays === "number") fields.push({ label: "Expected Duration", value: `${expectedDays} day(s)` });
+  if (typeof expectedDays === "number") fields.push({ label: "Expected Duration", value: `${expectedDays} working day(s)` });
   if (startDate) fields.push({ label: "Actual Start", value: formatDate(startDate) });
   if (completedAt) fields.push({ label: "Actual Finish", value: formatDate(completedAt) });
-  if (typeof actualDays === "number") fields.push({ label: "Actual Duration", value: `${actualDays} day(s)` });
+  if (typeof actualDays === "number") fields.push({ label: "Actual Duration", value: `${actualDays} working day(s)` });
 
   if (fields.length === 0) return null;
 

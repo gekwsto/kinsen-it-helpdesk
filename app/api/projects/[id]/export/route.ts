@@ -79,6 +79,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     expectedStartDate: project.expectedStartDate,
     expectedFinishDate: project.expectedFinishDate,
     expectedTotalInitialDays: project.expectedTotalInitialDays,
+    actualTotalDays: project.actualTotalDays,
     startDate: project.startDate,
     endDate: project.endDate,
     progress: project.progress,

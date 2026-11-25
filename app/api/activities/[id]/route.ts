@@ -12,7 +12,7 @@ import { getActivityStatusDisplay } from "@/lib/services/activity-status-config"
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
-import { wholeCalendarDaysBetween, actualDaysFromCompletion } from "@/lib/date-only";
+import { workingDaysBetween, actualDaysFromCompletion, isSameDateOnly } from "@/lib/date-only";
 import { computeActivityFinancials } from "@/lib/services/project-financials-service";
 import { getAppendSequenceLocked, normalizeProjectSequenceLocked, isRequestOriginProject } from "@/lib/services/activity-sequence-service";
 import { Role, ActivityStatus } from "@prisma/client";
@@ -378,12 +378,15 @@ export async function PATCH(
         { status: 400 }
       );
     }
-    // Recomputed (NOT an immutable baseline, unlike Project.expectedTotalInitialDays)
-    // only when either date is actually touched by this request — reusing
-    // the same effective values the check above just computed, so the two
-    // can never disagree.
-    const expectedDaysChanging = expectedStartDate !== undefined || expectedFinishDate !== undefined;
-    const newExpectedDays = effectiveExpectedStart && effectiveExpectedFinish ? wholeCalendarDaysBetween(effectiveExpectedStart, effectiveExpectedFinish) : null;
+    // Recomputed (working days, lib/date-only.ts) only when either date
+    // ACTUALLY CHANGES — never merely because the edit form re-sent the same
+    // dates. This keeps an unrelated save from silently rewriting a stored
+    // historical value (and the Estimated Cost derived from it). Reuses the
+    // same effective values the check above just computed.
+    const expectedDaysChanging =
+      (expectedStartDate !== undefined && !isSameDateOnly(effectiveExpectedStart, existing.expectedStartDate)) ||
+      (expectedFinishDate !== undefined && !isSameDateOnly(effectiveExpectedFinish, existing.expectedFinishDate));
+    const newExpectedDays = effectiveExpectedStart && effectiveExpectedFinish ? workingDaysBetween(effectiveExpectedStart, effectiveExpectedFinish) : null;
 
     if (rest.subDepartmentId) {
       const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, effectiveDepartmentId);

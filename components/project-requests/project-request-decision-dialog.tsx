@@ -16,8 +16,8 @@ interface ProjectRequestDecisionDialogProps {
   serverError: string | null;
   onCancel: () => void;
   onConfirm: (data: { businessAssessment: string }) => void;
-  /** false for the intermediate stage (confirmed with the user: no written justification there, decision only) — hides the Business Assessment field entirely rather than merely making it optional, since it's never collected for that stage at all. Defaults to true (the FINAL stage, where it remains mandatory). */
-  assessmentRequired?: boolean;
+  /** false for the intermediate stage (confirmed with the user: no written justification there, decision only) — hides the Business Assessment field entirely, since it's never collected for that stage at all. Defaults to true (the FINAL stage, where it is shown but OPTIONAL for both approve and reject). */
+  showAssessment?: boolean;
 }
 
 /**
@@ -35,26 +35,21 @@ export function ProjectRequestDecisionDialog({
   serverError,
   onCancel,
   onConfirm,
-  assessmentRequired = true,
+  showAssessment = true,
 }: ProjectRequestDecisionDialogProps) {
   const [value, setValue] = useState("");
-  const [touched, setTouched] = useState(false);
 
   // Reset only when the dialog actually closes (decision -> null) — not on
   // every render, so a server error doesn't wipe what the user typed.
   useEffect(() => {
     if (decision === null) {
       setValue("");
-      setTouched(false);
     }
   }, [decision]);
 
-  const isEmpty = value.trim().length === 0;
-  const showEmptyError = assessmentRequired && touched && isEmpty;
-
+  // Optional — an empty value is sent as "" and normalized to null
+  // server-side (see projectRequestApprovalDecisionSchema).
   const handleConfirm = () => {
-    setTouched(true);
-    if (assessmentRequired && isEmpty) return;
     onConfirm({ businessAssessment: value.trim() });
   };
 
@@ -66,10 +61,10 @@ export function ProjectRequestDecisionDialog({
           <DialogDescription>Department approval</DialogDescription>
         </DialogHeader>
 
-        {assessmentRequired && (
+        {showAssessment && (
           <div className="space-y-1.5">
             <label htmlFor="pr-decision-assessment" className="text-sm font-medium">
-              Business Assessment <span className="text-destructive">*</span>
+              Business Assessment <span className="text-xs font-normal text-muted-foreground">(optional)</span>
             </label>
             <p id="pr-decision-assessment-helper" className="text-xs text-muted-foreground">
               Briefly justify this decision.
@@ -80,21 +75,13 @@ export function ProjectRequestDecisionDialog({
               maxLength={MAX_LENGTH}
               value={value}
               onChange={(e) => setValue(e.target.value)}
-              onBlur={() => setTouched(true)}
               disabled={submitting}
-              aria-required="true"
-              aria-invalid={showEmptyError}
-              aria-describedby={showEmptyError ? "pr-decision-assessment-helper pr-decision-assessment-error" : "pr-decision-assessment-helper"}
+              aria-describedby="pr-decision-assessment-helper"
             />
-            {showEmptyError && (
-              <p id="pr-decision-assessment-error" className="text-xs text-destructive">
-                Business Assessment is required.
-              </p>
-            )}
           </div>
         )}
 
-        {assessmentRequired && decision === "approve" && (
+        {showAssessment && decision === "approve" && (
           <p className="text-xs text-muted-foreground">
             After approval, you&apos;ll be taken to set up the Project for this request.
           </p>

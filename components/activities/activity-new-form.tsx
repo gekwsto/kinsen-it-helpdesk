@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { calculateWorkingDays } from "@/lib/date-only";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -38,18 +39,6 @@ interface TaskTypeOption { id: string; name: string }
 // — cost is nullable now; `null` means "no fixed configured cost", never
 // treated as 0.
 interface TaskSubTypeOption { id: string; name: string; cost: number | null }
-
-/** Whole calendar days between two date-only (YYYY-MM-DD) strings — a client-side PREVIEW only, purely for UX; mirrors wholeCalendarDaysBetween in lib/date-only.ts, but the server always recomputes and persists its own authoritative value. Returns null until both dates are present/valid. */
-function previewCalendarDays(startStr: string, finishStr: string): number | null {
-  if (!startStr || !finishStr) return null;
-  const start = new Date(startStr);
-  const finish = new Date(finishStr);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(finish.getTime())) return null;
-  const MS_PER_DAY = 24 * 60 * 60 * 1000;
-  const startUtcMidnight = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
-  const finishUtcMidnight = Date.UTC(finish.getUTCFullYear(), finish.getUTCMonth(), finish.getUTCDate());
-  return Math.round((finishUtcMidnight - startUtcMidnight) / MS_PER_DAY);
-}
 
 export interface CreatedActivity {
   id: string;
@@ -283,7 +272,8 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
   // cost — the one condition that makes the manual Estimated Cost field
   // relevant at all. `false` while nothing is selected yet.
   const taskSubTypeNeedsManualCost = !!selectedTaskSubType && selectedTaskSubType.cost === null;
-  const previewExpectedDays = previewCalendarDays(expectedStartDate, expectedFinishDate);
+  // Working days, same canonical calculation the server persists (lib/date-only.ts).
+  const previewExpectedDays = calculateWorkingDays(expectedStartDate, expectedFinishDate);
   // The effective per-unit cost this Activity would snapshot — the
   // configured cost when one exists, otherwise whatever the user has
   // typed into the manual field so far (parsed defensively; an invalid/
@@ -649,6 +639,7 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
                     placeholder="Select both dates to calculate"
                     className="cursor-default bg-muted/40"
                   />
+                  <p className="text-xs text-muted-foreground">Working days (Mon–Fri) from Expected Start/Finish.</p>
                 </div>
 
                 <div className="space-y-2">

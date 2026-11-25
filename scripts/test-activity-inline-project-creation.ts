@@ -103,9 +103,13 @@ async function main() {
   const projectIds: string[] = [];
   const activityIds: string[] = [];
 
+  let fixtureTaskTypeId: string | null = null;
   try {
     console.log("\n=== Fixtures: Department A + Department B, admin + a limited (activity-view-only) member ===\n");
     const deptA = await createDepartment({ name: `${TAG}-A`, slug: `${TAG}-a` });
+    // Task Type is REQUIRED for every Activity (createActivitySchema) — fixture supplies one.
+    const fixtureTaskType = await prisma.taskType.create({ data: { name: `${TAG}-tasktype` } });
+    fixtureTaskTypeId = fixtureTaskType.id;
     const deptB = await createDepartment({ name: `${TAG}-B`, slug: `${TAG}-b` });
     departmentIds.push(deptA.id, deptB.id);
 
@@ -148,7 +152,7 @@ async function main() {
 
     // ── 1. Standalone (no project) still works ──
     console.log("\n1. Create Activity still allows Standalone ===\n");
-    const standaloneRes = await createActivityPOST(jsonReq("http://localhost/api/activities", { title: `${TAG} Standalone Activity`, departmentId: deptA.id }));
+    const standaloneRes = await createActivityPOST(jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} Standalone Activity`, departmentId: deptA.id }));
     check("POST /api/activities without projectId -> 201", standaloneRes.status === 201);
     const standaloneActivity = await standaloneRes.json();
     if (standaloneActivity?.id) activityIds.push(standaloneActivity.id);
@@ -160,7 +164,7 @@ async function main() {
     const existingProject = await existingProjectRes.json();
     if (existingProject?.id) projectIds.push(existingProject.id);
     const withExistingRes = await createActivityPOST(
-      jsonReq("http://localhost/api/activities", { title: `${TAG} With Existing Project`, departmentId: deptA.id, projectId: existingProject.id })
+      jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} With Existing Project`, departmentId: deptA.id, projectId: existingProject.id })
     );
     check("POST /api/activities with an existing projectId -> 201", withExistingRes.status === 201);
     const withExisting = await withExistingRes.json();
@@ -181,7 +185,7 @@ async function main() {
     const crossProject = await crossProjectRes.json();
     if (crossProject?.id) projectIds.push(crossProject.id);
     const crossLinkAttempt = await createActivityPOST(
-      jsonReq("http://localhost/api/activities", { title: `${TAG} Cross Attempt`, departmentId: deptA.id, projectId: crossProject.id })
+      jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} Cross Attempt`, departmentId: deptA.id, projectId: crossProject.id })
     );
     check("Creating a Department-A activity with a Department-B project -> rejected (not 201)", crossLinkAttempt.status !== 201, `got ${crossLinkAttempt.status}`);
     const crossBody = await crossLinkAttempt.json().catch(() => ({}));
@@ -190,7 +194,7 @@ async function main() {
     // ── 9. Creating the Activity with the newly-created project's id links it ──
     console.log("\n9. Creating Activity with the newly-created project's id links it ===\n");
     const linkedRes = await createActivityPOST(
-      jsonReq("http://localhost/api/activities", { title: `${TAG} Linked To Inline`, departmentId: deptA.id, projectId: inlineProject.id })
+      jsonReq("http://localhost/api/activities", { taskTypeId: fixtureTaskTypeId, title: `${TAG} Linked To Inline`, departmentId: deptA.id, projectId: inlineProject.id })
     );
     check("POST /api/activities with the just-created project's id -> 201", linkedRes.status === 201);
     const linkedActivity = await linkedRes.json();
@@ -276,6 +280,7 @@ async function main() {
     console.log("\nCleaning up test data...\n");
     try {
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
+      if (fixtureTaskTypeId) await prisma.taskType.delete({ where: { id: fixtureTaskTypeId } }).catch(() => {});
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
       await prisma.departmentMembership.deleteMany({ where: { id: { in: membershipIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });

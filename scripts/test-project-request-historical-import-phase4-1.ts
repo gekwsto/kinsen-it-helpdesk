@@ -160,8 +160,8 @@ async function main() {
       check("Project.expectedStartDate is set from the input", createdProject.expectedStartDate?.toISOString() === expStart.toISOString());
       check("Project.expectedFinishDate is set from the input", createdProject.expectedFinishDate?.toISOString() === expFinish.toISOString());
       check(
-        "Project.expectedTotalInitialDays is computed the SAME way createProjectFromApprovedRequest computes it (whole calendar days)",
-        createdProject.expectedTotalInitialDays === 10
+        "Project.expectedTotalInitialDays is computed the SAME way createProjectFromApprovedRequest computes it (working days: Wed 2025-01-01 -> Sat 2025-01-11 = 8)",
+        createdProject.expectedTotalInitialDays === 8
       );
     }
 

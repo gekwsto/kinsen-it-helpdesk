@@ -25,7 +25,9 @@ import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
 import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
-import { FacilitiesDateField } from "@/components/projects/facilities-date-field";
+import { FacilitiesDateField, facilitiesBoundaryPreview } from "@/components/projects/facilities-date-field";
+import { ProjectDurationField, parseDurationOverride } from "@/components/projects/project-duration-field";
+import { calculateProjectDurationDays } from "@/lib/project-duration";
 import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
 
 interface AssignableUser {
@@ -53,18 +55,6 @@ export interface CreatedProject {
   id: string;
   title: string;
   departmentId: string | null;
-}
-
-/** Whole calendar days between two date-only (YYYY-MM-DD) strings — a client-side PREVIEW only, purely for UX; mirrors wholeCalendarDaysBetween in lib/services/project-request-service.ts, but the server always recomputes and persists its own authoritative value, this number is never submitted. Returns null until both dates are present/valid. */
-function previewCalendarDays(startStr: string, finishStr: string): number | null {
-  if (!startStr || !finishStr) return null;
-  const start = new Date(startStr);
-  const finish = new Date(finishStr);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(finish.getTime())) return null;
-  const MS_PER_DAY = 24 * 60 * 60 * 1000;
-  const startUtcMidnight = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
-  const finishUtcMidnight = Date.UTC(finish.getUTCFullYear(), finish.getUTCMonth(), finish.getUTCDate());
-  return Math.round((finishUtcMidnight - startUtcMidnight) / MS_PER_DAY);
 }
 
 interface ProjectFormProps {
@@ -201,7 +191,11 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   // lib/services/project-financials-service.ts. Neither has a state
   // variable here; they're rendered as a fixed readonly €0.00 below.
   const [expenseTypes, setExpenseTypes] = useState<ExpenseTypeOption[]>([]);
-  const previewDays = useMemo(() => previewCalendarDays(expectedStartDate, expectedFinishDate), [expectedStartDate, expectedFinishDate]);
+  // Duration overrides — null = automatic (calculated from the dates),
+  // a string = the user's manual override text. See ProjectDurationField.
+  const [expectedDaysManual, setExpectedDaysManual] = useState<string | null>(null);
+  const [actualDaysManual, setActualDaysManual] = useState<string | null>(null);
+  const calculatedExpectedDays = calculateProjectDurationDays(expectedStartDate, expectedFinishDate);
 
   useEffect(() => {
     if (!fromRequest) return;
@@ -232,11 +226,12 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
       .then((r) => (r.ok ? r.json() : []))
       .then((depts) => setAudienceDepartmentOptions(Array.isArray(depts) ? depts : []))
       .catch(() => {});
+    if (fromRequest) return;
     fetch("/api/business-units")
       .then((r) => (r.ok ? r.json() : []))
       .then((bus) => setAudienceBusinessUnitOptions(Array.isArray(bus) ? bus : []))
       .catch(() => {});
-  }, []);
+  }, [fromRequest]);
 
   const toggleOwner = (userId: string) => {
     setSelectedOwnerIds((prev) => {
@@ -397,6 +392,16 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   const [facEndDate, setFacEndDate] = useState("");
   const [facEndQuarter, setFacEndQuarter] = useState("");
   const [facEndYear, setFacEndYear] = useState("");
+  // Preview of Actual Total Days from whichever Start/End inputs this
+  // workspace uses — same calculation the server persists.
+  const watchedStartDate = watch("startDate");
+  const watchedEndDate = watch("endDate");
+  const calculatedActualDays = isFacilitiesWorkspace
+    ? calculateProjectDurationDays(
+        facilitiesBoundaryPreview("start", facStartPrecision, facStartDate, facStartQuarter, facStartYear),
+        facilitiesBoundaryPreview("end", facEndPrecision, facEndDate, facEndQuarter, facEndYear)
+      )
+    : calculateProjectDurationDays(watchedStartDate, watchedEndDate);
 
   // Recomputed purely from the already-server-resolved `editableDepartmentIds`
   // set whenever the Workspace Select changes — never a fresh permission
@@ -514,28 +519,20 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
       if (!expenseTypeId) return toast.error("Select an Expense Type.");
     }
 
+    // Duration overrides — a UX convenience only; re-validated server-side.
+    const actualOverride = parseDurationOverride(actualDaysManual);
+    if (!actualOverride.ok) return toast.error("Actual Total Days must be a whole number of days (0 or more).");
+    const expectedOverride = parseDurationOverride(fromRequest ? expectedDaysManual : null);
+    if (!expectedOverride.ok) return toast.error("Expected Total Initial Days must be a whole number of days (0 or more).");
+
     // Facilities Services-only fields — a UX convenience only; the server
     // (resolveFacilitiesWrite in lib/services/project-facilities-service.ts)
     // re-validates all of this regardless, and is the real authority.
     if (isFacilitiesWorkspace) {
       if (facStartPrecision === "QUARTER" && (!facStartQuarter || !facStartYear)) return toast.error("Select both a Quarter and a Year for Start.");
       if (facEndPrecision === "QUARTER" && (!facEndQuarter || !facEndYear)) return toast.error("Select both a Quarter and a Year for End.");
-      const startPreview =
-        facStartPrecision === "QUARTER"
-          ? facStartQuarter && facStartYear
-            ? new Date(Date.UTC(parseInt(facStartYear), ["Q1", "Q2", "Q3", "Q4"].indexOf(facStartQuarter) * 3, 1))
-            : null
-          : facStartDate
-          ? new Date(facStartDate)
-          : null;
-      const endPreview =
-        facEndPrecision === "QUARTER"
-          ? facEndQuarter && facEndYear
-            ? new Date(Date.UTC(parseInt(facEndYear), ["Q1", "Q2", "Q3", "Q4"].indexOf(facEndQuarter) * 3 + 3, 0))
-            : null
-          : facEndDate
-          ? new Date(facEndDate)
-          : null;
+      const startPreview = facilitiesBoundaryPreview("start", facStartPrecision, facStartDate, facStartQuarter, facStartYear);
+      const endPreview = facilitiesBoundaryPreview("end", facEndPrecision, facEndDate, facEndQuarter, facEndYear);
       if (startPreview && endPreview && startPreview > endPreview) return toast.error("Start must not be later than End.");
       // Same non-negative/2-decimal-place rule as the server's
       // moneyAmountSchema — a UX convenience only, re-validated
@@ -583,6 +580,13 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             endDate: facEndPrecision === "EXACT" ? facEndDate || null : undefined,
           }
         : {};
+      // Every other workspace: the plain Start/End Date inputs (destructured
+      // out of restData above, so they must be re-added here or they would
+      // never be sent at all).
+      const plainDateFields = isFacilitiesWorkspace ? {} : { startDate: data.startDate || undefined, endDate: data.endDate || undefined };
+      // Business Unit Audience is never part of a request-origin payload
+      // (not offered, rejected server-side) — strip the schema default too.
+      const { audienceBusinessUnitIds: _ignoredAudienceBusinessUnitIds, ...requestOriginRestData } = restData;
       // Two-step architecture: create the Project first (unchanged request/
       // route), THEN — only once it has a real, server-issued id — upload
       // any selected attachments through the existing protected
@@ -592,28 +596,35 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
         const url = fromRequest ? `/api/project-requests/${fromRequestId}/project` : "/api/projects";
         const body = fromRequest
           ? {
-              ...restData,
+              ...requestOriginRestData,
               ...facilitiesFields,
+              ...plainDateFields,
               memberIds: Array.from(selectedMemberIds),
               ownerIds: Array.from(selectedOwnerIds),
               audienceIds: Array.from(selectedAudienceIds),
               audienceDepartmentIds: Array.from(selectedAudienceDepartmentIds),
-              audienceBusinessUnitIds: Array.from(selectedAudienceBusinessUnitIds),
+              // audienceBusinessUnitIds deliberately never sent — not
+              // accepted for request-origin creation.
               responsiblePeopleIds: Array.from(selectedResponsiblePeopleIds),
               expectedStartDate,
               expectedFinishDate,
+              // Omitted while automatic — the server calculates it.
+              ...(expectedOverride.value !== null ? { expectedTotalInitialDaysOverride: expectedOverride.value } : {}),
+              ...(actualOverride.value !== null ? { actualTotalDaysOverride: actualOverride.value } : {}),
               expenseTypeId,
               external,
             }
           : {
               ...restData,
               ...facilitiesFields,
+              ...plainDateFields,
               departmentId: effectiveDepartmentId,
               memberIds: Array.from(selectedMemberIds),
               audienceIds: Array.from(selectedAudienceIds),
               audienceDepartmentIds: Array.from(selectedAudienceDepartmentIds),
               audienceBusinessUnitIds: Array.from(selectedAudienceBusinessUnitIds),
               responsiblePeopleIds: Array.from(selectedResponsiblePeopleIds),
+              ...(actualOverride.value !== null ? { actualTotalDaysOverride: actualOverride.value } : {}),
               // Tells POST /api/projects which Member-eligibility rule to
               // enforce (see createProjectMemberEligibilitySchema's own doc
               // comment in lib/validations.ts) — "workspaceMembership" only
@@ -884,6 +895,18 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             </div>
           )}
 
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <ProjectDurationField
+              id="actual-total-days"
+              label="Actual Total Days"
+              calculatedValue={calculatedActualDays}
+              manualText={actualDaysManual}
+              onManualTextChange={setActualDaysManual}
+              sourceLabel="Start/End Date"
+              disabled={isSubmitting}
+            />
+          </div>
+
           {isFacilitiesWorkspace && (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="space-y-2">
@@ -1095,30 +1118,15 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                   <Input id="expected-finish" type="date" value={expectedFinishDate} onChange={(e) => setExpectedFinishDate(e.target.value)} />
                 </div>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="expected-total-initial-days">Expected Total Initial Days</Label>
-                {/* readOnly (never `disabled`) — deliberately keeps the SAME
-                    visual weight as every other input on this form (no
-                    disabled:opacity-50 greying), because this is a real
-                    Project field, just a server-computed one — not an
-                    unimportant/inactive one. This is a client-side PREVIEW
-                    only (see previewCalendarDays's doc comment); it is never
-                    read from state on submit, never sent to the server, and
-                    the server independently recomputes + persists its own
-                    authoritative value from Expected Start/Finish. */}
-                <Input
-                  id="expected-total-initial-days"
-                  type="text"
-                  inputMode="none"
-                  readOnly
-                  aria-readonly="true"
-                  tabIndex={-1}
-                  value={previewDays !== null ? `${previewDays} day${previewDays === 1 ? "" : "s"}` : ""}
-                  placeholder="Select both dates to calculate"
-                  className="cursor-default bg-muted/40"
-                />
-                <p className="text-xs text-muted-foreground">Calculated automatically from Expected Start/Finish Date — not editable.</p>
-              </div>
+              <ProjectDurationField
+                id="expected-total-initial-days"
+                label="Expected Total Initial Days"
+                calculatedValue={calculatedExpectedDays}
+                manualText={expectedDaysManual}
+                onManualTextChange={setExpectedDaysManual}
+                sourceLabel="Expected Start/Finish Date"
+                disabled={isSubmitting}
+              />
 
               <div className="space-y-2">
                 <Label htmlFor="expense-type">
@@ -1390,6 +1398,10 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             )}
           </div>
 
+          {/* Business Unit Audience is NOT offered when creating a Project
+              from a Project Request — rejected server-side too (see
+              createProjectFromRequestSchema). Standalone/inline unchanged. */}
+          {!fromRequest && (
           <div className="space-y-2">
             <Label htmlFor="project-audience-business-units">Audience — Business Units</Label>
             <p id="project-audience-business-units-helper" className="text-xs text-muted-foreground">
@@ -1418,6 +1430,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
               <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No business units exist.</p>
             )}
           </div>
+          )}
 
           <PendingAttachmentsField
             files={attachments.files}

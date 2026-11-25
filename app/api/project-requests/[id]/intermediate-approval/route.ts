@@ -41,7 +41,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           );
         case "invalid_assessment":
           return NextResponse.json(
-            apiError("invalid_assessment", "Business Assessment is required.", { field: "businessAssessment" }),
+            apiError("invalid_assessment", "Business Assessment must be at most 5000 characters.", { field: "businessAssessment" }),
             { status: 422 }
           );
         default:

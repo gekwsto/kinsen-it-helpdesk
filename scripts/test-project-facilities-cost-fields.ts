@@ -404,6 +404,7 @@ async function main() {
       expectedStartDate: null,
       expectedFinishDate: null,
       expectedTotalInitialDays: null,
+      actualTotalDays: null,
       startDate: null,
       endDate: null,
       progress: 0,

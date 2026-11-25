@@ -27,7 +27,7 @@ import { mock } from "node:test";
 import { prisma } from "@/lib/prisma";
 import { Role, AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
 import { createDepartment } from "@/lib/services/department-service";
-import { actualDaysFromCompletion, wholeCalendarDaysBetween } from "@/lib/date-only";
+import { actualDaysFromCompletion, workingDaysBetween } from "@/lib/date-only";
 
 let passed = 0;
 let failed = 0;
@@ -48,6 +48,15 @@ function printSummaryAndExit() {
 let currentSession: { user: { id: string; role: Role; customRoleId: string | null } } | null = null;
 mock.module("@/lib/auth", { namedExports: { auth: async () => currentSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
 
+/** Independent reference: Mon–Fri UTC days in [start, finish), never negative. */
+function naiveWorkingDays(startIso: string, finishIso: string): number {
+  const s = new Date(startIso.slice(0, 10) + "T00:00:00Z");
+  const f = new Date(finishIso.slice(0, 10) + "T00:00:00Z");
+  let n = 0;
+  for (const d = new Date(s); d < f; d.setUTCDate(d.getUTCDate() + 1)) if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) n++;
+  return n;
+}
+
 /** YYYY-MM-DD, `offsetDays` days from real "now" (negative = past, positive = future). */
 function dateOffset(offsetDays: number): string {
   const d = new Date();
@@ -64,13 +73,13 @@ async function main() {
   const future = new Date("2026-10-10T00:00:00.000Z");
   const earlierCompletion = new Date("2026-10-08T00:00:00.000Z");
   check("1. Expected Start 10 Oct, Completed 08 Oct -> raw would be -2, clamped actualDays = 0", actualDaysFromCompletion(future, earlierCompletion) === 0);
-  check("...confirms the RAW (unclamped) helper really would have been negative, proving this is a genuine floor, not a no-op", wholeCalendarDaysBetween(future, earlierCompletion) === -2);
+  check("...confirms the RAW (unclamped) helper really would have been negative, proving this is a genuine floor, not a no-op", workingDaysBetween(future, earlierCompletion) < 0);
 
   const sameDay = new Date("2026-10-10T00:00:00.000Z");
   check("4. Expected Start === Completed date -> actualDays = 0", actualDaysFromCompletion(future, sameDay) === 0);
 
   const later = new Date("2026-10-13T00:00:00.000Z");
-  check("5. Completed AFTER Expected Start -> normal positive value, unaffected by the clamp", actualDaysFromCompletion(future, later) === 3);
+  check("5. Completed AFTER Expected Start -> normal positive value, unaffected by the clamp (Sat 10-10 -> Tue 10-13 = 1 working day)", actualDaysFromCompletion(future, later) === 1);
 
   try {
     await prisma.$connect();
@@ -79,6 +88,27 @@ async function main() {
     console.log(String(err instanceof Error ? err.message : err));
     printSummaryAndExit();
     return;
+  }
+
+  // Intermediate approvers must be the requester's VERIFIED SQLGeneral
+  // direct manager (see resolveIntermediateApproverCandidates). Mocked the
+  // same way the sibling Project Request tests do, so the fixture request
+  // can actually be submitted.
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralRowsByUsername = new Map<string, any[]>();
+  mock.module("@/lib/sqlgeneral-api-client", {
+    namedExports: {
+      ...realSqlGeneralClient,
+      findSqlGeneralUserByUsername: async (username: string) => {
+        const rows = sqlGeneralRowsByUsername.get(username) ?? [];
+        if (rows.length === 0) return { outcome: "not_found" as const };
+        if (rows.length > 1) return { outcome: "ambiguous" as const, count: rows.length };
+        return { outcome: "unique" as const, user: rows[0] };
+      },
+    },
+  });
+  function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
+    sqlGeneralRowsByUsername.set(username, [{ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null }]);
   }
 
   const { NextRequest } = await import("next/server");
@@ -122,6 +152,11 @@ async function main() {
 
     const adminUser = await prisma.user.findFirstOrThrow({ where: { email: "admin@kinsen.gr" }, select: { id: true } });
     const worker1 = await makeUser(`${TAG}-worker1@kinsen.gr`);
+    const fixtureManager = await makeUser(`${TAG}-manager@kinsen.gr`);
+    registerSqlGeneralUser(`${TAG}-mgr`, null);
+    registerSqlGeneralUser(`${TAG}-worker1`, `${TAG}-mgr`);
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: fixtureManager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: worker1.id, sqlGeneralUsername: `${TAG}-worker1`, status: "SUCCEEDED" } });
     await addMembership(worker1.id, dept.id);
     currentSession = { user: { id: worker1.id, role: Role.USER, customRoleId: null } };
 
@@ -136,13 +171,18 @@ async function main() {
           teamConcerned: "Engineering",
           expectedBenefits: "Benefits text long enough for validation.",
           replacesExisting: false,
-          intermediateApproverIds: [adminUser.id],
+          intermediateApproverIds: [fixtureManager.id],
         })
       );
       const submitted = await submitRes.json();
       requestIds.push(submitted.id);
       currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
-      await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+      {
+        const sessionBeforeIntermediate = currentSession;
+        currentSession = { user: { id: fixtureManager.id, role: Role.USER, customRoleId: null } };
+        await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+        currentSession = sessionBeforeIntermediate;
+      }
       await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
       const setupRes = await setupPOST(
         jsonReq({ title: `${TAG} ${tag} request`, description: "fixture", ownerIds: [adminUser.id], expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-05", expenseTypeId: expenseType.id }),
@@ -197,8 +237,11 @@ async function main() {
     const normalAct = await createActivity(`${TAG} Normal`, dateOffset(-9), dateOffset(3));
     const completeNormalRes = await activitiesPATCH(jsonReq({ isCompleted: true, status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: normalAct.id }) });
     const completedNormal = await completeNormalRes.json();
-    check("5. actualDays = 9 (real positive value, not touched by the fix)", completedNormal.actualDays === 9);
-    check("...Activity Actual Cost = '1350' (150 × 9)", completedNormal.actualCost === "1350");
+    // Dates are relative to "today", so the working-day count depends on the
+    // weekday the test runs — compared against an independent day-by-day count.
+    const normalExpected = naiveWorkingDays(completedNormal.expectedStartDate, completedNormal.completedAt);
+    check(`5. actualDays = ${normalExpected} working days (real positive value, not touched by the fix)`, completedNormal.actualDays === normalExpected && normalExpected > 0);
+    check(`...Activity Actual Cost = 150 × ${normalExpected}`, completedNormal.actualCost === String(150 * normalExpected));
 
     // ══════════════════════ 6-7. Client cannot forge actualDays/actualCost ══════════════════════
     console.log("\n=== 6-7. Client-forged actualDays/actualCost are silently ignored ===\n");
@@ -225,7 +268,8 @@ async function main() {
     await activitiesPATCH(jsonReq({ expectedStartDate: dateOffset(-4), expectedFinishDate: dateOffset(3) }, "PATCH"), { params: Promise.resolve({ id: normalAct.id }) });
     const recompleteLaterRes = await activitiesPATCH(jsonReq({ isCompleted: true, status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: normalAct.id }) });
     const recompletedLater = await recompleteLaterRes.json();
-    check("10. Re-completing AFTER Expected Start produces the correct positive value (4 days)", recompletedLater.actualDays === 4);
+    const laterExpected = naiveWorkingDays(recompletedLater.expectedStartDate, recompletedLater.completedAt);
+    check(`10. Re-completing AFTER Expected Start produces the correct positive working-day value (${laterExpected})`, recompletedLater.actualDays === laterExpected && laterExpected > 0);
 
     // ══════════════════════ 11. Legacy negative-row reconciliation mechanism ══════════════════════
     console.log("\n=== 11. The reconciliation mechanism (migration SQL) correctly fixes a negative row ===\n");
@@ -274,6 +318,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);
     }
     try {
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     } catch (err) {

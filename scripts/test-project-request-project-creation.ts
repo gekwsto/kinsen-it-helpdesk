@@ -130,9 +130,9 @@ async function main() {
   // expectedTotalInitialDays permanently excluded (the creation-time
   // baseline, immutable by PATCH).
   const { updateProjectRequestOriginFieldsSchema } = await import("@/lib/validations");
-  const EDITABLE_REQUEST_ORIGIN_FIELDS = ["expectedStartDate", "expectedFinishDate", "expenseTypeId", "external"];
+  const EDITABLE_REQUEST_ORIGIN_FIELDS = ["expectedStartDate", "expectedFinishDate", "expectedTotalInitialDaysOverride", "expenseTypeId", "external"];
   check(
-    "11. updateProjectRequestOriginFieldsSchema exposes exactly the 4 request-origin fields the edit page offers",
+    "11. updateProjectRequestOriginFieldsSchema exposes exactly the 5 request-origin fields the edit page offers (incl. the duration override)",
     EDITABLE_REQUEST_ORIGIN_FIELDS.every((f) => f in updateProjectRequestOriginFieldsSchema.shape) &&
       Object.keys(updateProjectRequestOriginFieldsSchema.shape).length === EDITABLE_REQUEST_ORIGIN_FIELDS.length
   );
@@ -142,15 +142,15 @@ async function main() {
       !("estimatedCost" in updateProjectRequestOriginFieldsSchema.shape) &&
       !("actualCost" in updateProjectRequestOriginFieldsSchema.shape)
   );
-  check("...expectedTotalInitialDays is NOT one of them — immutable baseline, never PATCH-able", !("expectedTotalInitialDays" in updateProjectRequestOriginFieldsSchema.shape));
+  check("...the RAW expectedTotalInitialDays is NOT one of them — only resolved server-side via the override field", !("expectedTotalInitialDays" in updateProjectRequestOriginFieldsSchema.shape));
 
   const formSrc = await fs.readFile("components/projects/project-form.tsx", "utf8");
   check("15. The request-origin-only fields block is rendered ONLY in fromRequest mode", /\{fromRequest && \(/.test(formSrc));
   check("...and POSTs to the dedicated route, never /api/projects, in that mode", /`\/api\/project-requests\/\$\{fromRequestId\}\/project`/.test(formSrc));
-  check("UI pass: Expected Total Initial Days now renders as a real readOnly input (not a muted <p> aside)", /id="expected-total-initial-days"[\s\S]{0,200}readOnly/.test(formSrc));
+  check("UI pass: Expected Total Initial Days renders as the shared editable ProjectDurationField", /<ProjectDurationField\s+id="expected-total-initial-days"/.test(formSrc));
 
   const editPageSrc = await fs.readFile("app/(main)/projects/[id]/edit/page.tsx", "utf8");
-  check("12. The edit page also shows Expected Total Initial Days as a readOnly input", /id="expectedTotalInitialDays"[\s\S]{0,200}readOnly/.test(editPageSrc));
+  check("12. The edit page also shows Expected Total Initial Days via the shared editable ProjectDurationField", /<ProjectDurationField\s+id="expectedTotalInitialDays"/.test(editPageSrc));
   check("...and never submits it in the PATCH body (no such key anywhere in the fetch payload)", !/expectedTotalInitialDays[,:]/.test(editPageSrc.split("handleSubmit")[1]?.split("};")[0] ?? ""));
 
   // RECONCILED (not weakened): checks 6/8/2/10 below originally asserted an
@@ -551,7 +551,7 @@ async function main() {
 
     // ══════════════════════ 25/26. Expected Total Initial Days — server-computed, immutable baseline ══════════════════════
     console.log("\n=== 25/26. Expected Total Initial Days is computed server-side; a forged client value is ignored ===\n");
-    check("25. 2026-10-01 -> 2026-10-05 = 4 whole calendar days", mappingProject.expectedTotalInitialDays === 4);
+    check("25. Thu 2026-10-01 -> Mon 2026-10-05 = 2 working days (weekend excluded)", mappingProject.expectedTotalInitialDays === 2);
 
     const zeroDaysRequest = await submitThrough(`PR Creation ZeroDays ${RUN_ID}`, "approve", finalApprover);
     currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
@@ -593,10 +593,9 @@ async function main() {
     const unrelatedEditBody = await unrelatedEditRes.json();
     check("...and the inactive Expense Type was NOT cleared or changed by that unrelated save", unrelatedEditBody.expenseType?.id === expenseTypeActiveId && unrelatedEditBody.expenseType?.isActive === false);
 
-    // 13. Editing Expected Start/Finish later must NOT recalculate or
-    // overwrite expectedTotalInitialDays — it stays the creation-time
-    // baseline (4, from check 25 above: 2026-10-01 -> 2026-10-05) no matter
-    // what new dates are PATCHed in.
+    // 13. Editing Expected Start/Finish later RECALCULATES
+    // expectedTotalInitialDays while it is in automatic mode (no manual
+    // override) — see lib/project-duration.ts.
     const baselineBeforeDateEdit = mappingProject.expectedTotalInitialDays;
     const dateEditRes = await projectsPATCH(
       jsonReq({ expectedStartDate: "2026-01-01", expectedFinishDate: "2026-06-01" }, "PATCH"),
@@ -605,8 +604,8 @@ async function main() {
     check("13. PATCHing Expected Start/Finish to very different dates -> 200", dateEditRes.status === 200);
     const dateEditBody = await dateEditRes.json();
     check(
-      "13. ...expectedTotalInitialDays is UNCHANGED (still the creation-time baseline, never recomputed on edit)",
-      dateEditBody.expectedTotalInitialDays === baselineBeforeDateEdit && dateEditBody.expectedTotalInitialDays !== null
+      "13. ...expectedTotalInitialDays (automatic mode) is RECALCULATED from the new dates: 2026-01-01 -> 2026-06-01 = 107 working days",
+      baselineBeforeDateEdit === 2 && dateEditBody.expectedTotalInitialDays === 107 && dateEditBody.expectedTotalInitialDaysOverridden === false
     );
     check("...while the dates themselves DID update — proving this isn't just a no-op PATCH", new Date(dateEditBody.expectedStartDate).toISOString().startsWith("2026-01-01"));
 
@@ -676,8 +675,8 @@ async function main() {
     check("11. ...expectedStartDate really persisted as null, not left at its old value", clearBothDatesBody.expectedStartDate === null);
     check("12. ...and Expected Finish explicitly cleared to null too -> persisted as null", clearBothDatesBody.expectedFinishDate === null);
     check(
-      "25/26. Expected Total Initial Days is STILL the original creation-time baseline after all of the above date edits (including clearing both)",
-      clearBothDatesBody.expectedTotalInitialDays === baselineBeforeDateEdit && clearBothDatesBody.expectedTotalInitialDays !== null
+      "25/26. Expected Total Initial Days (automatic mode) follows the dates — null once both are cleared",
+      clearBothDatesBody.expectedTotalInitialDays === null && clearBothDatesBody.expectedTotalInitialDaysOverridden === false
     );
 
     // 27: PATCH cannot directly alter it even with both dates cleared AND a forged value present.
@@ -687,7 +686,7 @@ async function main() {
     );
     check("27. A forged expectedTotalInitialDays in a PATCH body -> silently ignored (not even a field on the schema)", forgedBaselineRes.status === 200);
     const forgedBaselineBody = await forgedBaselineRes.json();
-    check("...it is STILL the real baseline, not 777", forgedBaselineBody.expectedTotalInitialDays === baselineBeforeDateEdit && forgedBaselineBody.expectedTotalInitialDays !== 777);
+    check("...it is NOT 777 — still the server-resolved value (null: both dates cleared, automatic mode)", forgedBaselineBody.expectedTotalInitialDays === null && forgedBaselineBody.expectedTotalInitialDaysOverridden === false);
 
     // 13/14/15/16/17: Budget no longer exists and Estimated/Actual Cost are
     // now fully derived from this Project's own Activities (none exist on
@@ -802,6 +801,157 @@ async function main() {
 
     const legacyFillInRes = await projectsPATCH(jsonReq({ expectedStartDate: "2026-05-01" }, "PATCH"), { params: Promise.resolve({ id: legacyAutoCreatedProject.id }) });
     check("43. A legacy row can have a previously-null new field filled in LATER via the normal edit route", legacyFillInRes.status === 200 && (await legacyFillInRes.json()).expectedStartDate !== null);
+
+    // ══════════════════════ DUR. Editable Project durations (lib/project-duration.ts) ══════════════════════
+    console.log("\n=== DUR. Expected Total Initial Days / Actual Total Days — automatic + persistent manual overrides ===\n");
+    // The shared fixture Expense Type was deactivated earlier in this file — use a fresh active one.
+    const durExpenseType = await prisma.projectExpenseType.create({ data: { name: `PR Creation ExpenseType Dur ${RUN_ID}` } });
+    expenseTypeIds.push(durExpenseType.id);
+    const durSetupPayload = () => ({ ...validSetupPayload(), expenseTypeId: durExpenseType.id });
+    const durRequest = await submitThrough(`PR Creation Durations ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    const durRes = await setupPOST(
+      jsonReq({ ...durSetupPayload(), title: durRequest.title, startDate: "2026-10-02", endDate: "2026-10-09", expectedTotalInitialDaysOverride: 10, actualTotalDaysOverride: 3 }),
+      { params: Promise.resolve({ id: durRequest.id }) }
+    );
+    check("DUR1. Conversion with both duration overrides -> 201", durRes.status === 201);
+    const durBody = await durRes.json();
+    projectIds.push(durBody.id);
+    const durProject = await prisma.project.findUniqueOrThrow({ where: { id: durBody.id } });
+    check("DUR1. ...Expected Total Initial Days persisted as the manual override (10, overridden)", durProject.expectedTotalInitialDays === 10 && durProject.expectedTotalInitialDaysOverridden === true);
+    check("DUR1. ...Actual Total Days persisted as the manual override (3, overridden)", durProject.actualTotalDays === 3 && durProject.actualTotalDaysOverridden === true);
+    check(
+      "DUR1. ...overriding NEVER changed any date",
+      durProject.expectedStartDate?.toISOString().startsWith("2026-10-01") === true &&
+        durProject.expectedFinishDate?.toISOString().startsWith("2026-10-05") === true &&
+        durProject.startDate?.toISOString().startsWith("2026-10-02") === true &&
+        durProject.endDate?.toISOString().startsWith("2026-10-09") === true
+    );
+
+    const durAutoRequest = await submitThrough(`PR Creation Durations Auto ${RUN_ID}`, "approve", finalApprover);
+    currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+    const durAutoRes = await setupPOST(jsonReq({ ...durSetupPayload(), title: durAutoRequest.title, startDate: "2026-10-02", endDate: "2026-10-09" }), { params: Promise.resolve({ id: durAutoRequest.id }) });
+    const durAutoBody = await durAutoRes.json();
+    projectIds.push(durAutoBody.id);
+    const durAutoProject = await prisma.project.findUniqueOrThrow({ where: { id: durAutoBody.id } });
+    check("DUR2. Conversion without overrides -> both durations automatic, in working days (2 and 5)", durAutoProject.expectedTotalInitialDays === 2 && !durAutoProject.expectedTotalInitialDaysOverridden && durAutoProject.actualTotalDays === 5 && !durAutoProject.actualTotalDaysOverridden);
+
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const durPatch = (body: Record<string, unknown>) => projectsPATCH(jsonReq(body, "PATCH"), { params: Promise.resolve({ id: durProject.id }) });
+
+    const durDateEdit = await (await durPatch({ expectedStartDate: "2026-11-01", expectedFinishDate: "2026-11-30", startDate: "2026-11-03", endDate: "2026-11-20" })).json();
+    check("DUR3. Manual mode: changing dates does NOT overwrite either override (still 10 / 3)", durDateEdit.expectedTotalInitialDays === 10 && durDateEdit.expectedTotalInitialDaysOverridden === true && durDateEdit.actualTotalDays === 3 && durDateEdit.actualTotalDaysOverridden === true);
+    check("DUR3. ...while the dates themselves did update", durDateEdit.expectedStartDate.startsWith("2026-11-01") && durDateEdit.endDate.startsWith("2026-11-20"));
+
+    const durUnrelated = await (await durPatch({ title: `PR Creation Durations Renamed ${RUN_ID}` })).json();
+    check("DUR4. An unrelated update (title) keeps both overrides intact", durUnrelated.expectedTotalInitialDays === 10 && durUnrelated.expectedTotalInitialDaysOverridden === true && durUnrelated.actualTotalDays === 3 && durUnrelated.actualTotalDaysOverridden === true);
+    const durReloaded = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: durProject.id }) })).json();
+    check("DUR4. ...and they survive a reload (GET)", durReloaded.expectedTotalInitialDays === 10 && durReloaded.actualTotalDays === 3 && durReloaded.expectedTotalInitialDaysOverridden && durReloaded.actualTotalDaysOverridden);
+
+    const durOverrideChange = await (await durPatch({ actualTotalDaysOverride: 12 })).json();
+    check("DUR5. Changing one override never touches the other or any date", durOverrideChange.actualTotalDays === 12 && durOverrideChange.expectedTotalInitialDays === 10 && durOverrideChange.startDate.startsWith("2026-11-03") && durOverrideChange.endDate.startsWith("2026-11-20"));
+
+    const durReset = await (await durPatch({ expectedTotalInitialDaysOverride: null })).json();
+    check("DUR6. Reset Expected -> automatic, recalculated from the CURRENT dates (2026-11-01 -> 2026-11-30 = 20 working days)", durReset.expectedTotalInitialDays === 20 && durReset.expectedTotalInitialDaysOverridden === false);
+    check("DUR6. ...Actual override untouched by the Expected reset", durReset.actualTotalDays === 12 && durReset.actualTotalDaysOverridden === true);
+    const durResetActual = await (await durPatch({ actualTotalDaysOverride: null })).json();
+    check("DUR6. Reset Actual -> automatic (2026-11-03 -> 2026-11-20 = 13 working days)", durResetActual.actualTotalDays === 13 && durResetActual.actualTotalDaysOverridden === false);
+    const durAutoDates = await (await durPatch({ expectedFinishDate: "2026-12-01", endDate: "2026-11-23" })).json();
+    check("DUR7. Automatic mode: date changes recalculate both (21 / 14 working days)", durAutoDates.expectedTotalInitialDays === 21 && durAutoDates.actualTotalDays === 14);
+
+    const durNegative = await durPatch({ actualTotalDaysOverride: -1 });
+    check("DUR8. Negative override -> 422", durNegative.status === 422);
+    const durFraction = await durPatch({ expectedTotalInitialDaysOverride: 2.5 });
+    check("DUR8. Fractional override -> 422", durFraction.status === 422);
+    const durAfterInvalid = await prisma.project.findUniqueOrThrow({ where: { id: durProject.id } });
+    check("DUR8. ...rejected attempts changed nothing", durAfterInvalid.actualTotalDays === 14 && durAfterInvalid.expectedTotalInitialDays === 21 && !durAfterInvalid.actualTotalDaysOverridden);
+    const durZero = await (await durPatch({ actualTotalDaysOverride: 0, expectedTotalInitialDaysOverride: 0 })).json();
+    check("DUR8. Zero is a valid manual override for both", durZero.actualTotalDays === 0 && durZero.actualTotalDaysOverridden === true && durZero.expectedTotalInitialDays === 0 && durZero.expectedTotalInitialDaysOverridden === true);
+    const durForgedRaw = await (await durPatch({ actualTotalDays: 999, expectedTotalInitialDays: 999 } as any)).json();
+    check("DUR9. Raw duration columns are never client-writable (forged 999 ignored)", durForgedRaw.actualTotalDays === 0 && durForgedRaw.expectedTotalInitialDays === 0);
+
+    console.log("\n-- DUR10. Standalone Project: Actual Total Days automatic + override --\n");
+    const standaloneAutoRes = await projectsPOST(jsonReq({ title: `PR Creation Standalone Dur ${RUN_ID}`, departmentId: dept.id, startDate: "2026-03-01", endDate: "2026-03-11" }));
+    const standaloneAuto = await standaloneAutoRes.json();
+    projectIds.push(standaloneAuto.id);
+    const standaloneAutoRow = await prisma.project.findUniqueOrThrow({ where: { id: standaloneAuto.id } });
+    check("DUR10. Standalone create, no override -> Actual Total Days calculated (Sun 03-01 -> Wed 03-11 = 7 working days, automatic)", standaloneAutoRes.status === 201 && standaloneAutoRow.actualTotalDays === 7 && !standaloneAutoRow.actualTotalDaysOverridden);
+    const standaloneManualRes = await projectsPOST(jsonReq({ title: `PR Creation Standalone Dur Manual ${RUN_ID}`, departmentId: dept.id, startDate: "2026-03-01", endDate: "2026-03-11", actualTotalDaysOverride: 6 }));
+    const standaloneManual = await standaloneManualRes.json();
+    projectIds.push(standaloneManual.id);
+    const standaloneManualRow = await prisma.project.findUniqueOrThrow({ where: { id: standaloneManual.id } });
+    check("DUR10. Standalone create with override -> 6, overridden; dates unchanged", standaloneManualRes.status === 201 && standaloneManualRow.actualTotalDays === 6 && standaloneManualRow.actualTotalDaysOverridden && standaloneManualRow.endDate?.toISOString().startsWith("2026-03-11") === true);
+
+    console.log("\n-- DUR11. Clearing Start/End on a non-Facilities Project persists; durations follow mode --\n");
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const clearAutoRes = await projectsPATCH(jsonReq({ endDate: null }, "PATCH"), { params: Promise.resolve({ id: standaloneAuto.id }) });
+    const clearAuto = await clearAutoRes.json();
+    check("DUR11. Explicit null endDate -> 200 and End Date is really cleared", clearAutoRes.status === 200 && clearAuto.endDate === null);
+    check("DUR11. ...omitted startDate stays unchanged", typeof clearAuto.startDate === "string" && clearAuto.startDate.startsWith("2026-03-01"));
+    check("DUR11. ...automatic Actual Total Days is cleared with it", clearAuto.actualTotalDays === null && clearAuto.actualTotalDaysOverridden === false);
+    const omitAllRes = await projectsPATCH(jsonReq({ title: `PR Creation Standalone Dur Renamed ${RUN_ID}` }, "PATCH"), { params: Promise.resolve({ id: standaloneAuto.id }) });
+    const omitAll = await omitAllRes.json();
+    check("DUR11. A PATCH omitting both dates leaves them as stored (start kept, end still null)", omitAll.startDate.startsWith("2026-03-01") && omitAll.endDate === null);
+    const refillRes = await projectsPATCH(jsonReq({ endDate: "2026-03-04" }, "PATCH"), { params: Promise.resolve({ id: standaloneAuto.id }) });
+    check("DUR11. Re-entering End Date recalculates automatic duration (Sun 03-01 -> Wed 03-04 = 2 working days)", (await refillRes.json()).actualTotalDays === 2);
+    const clearManualRes = await projectsPATCH(jsonReq({ startDate: null, endDate: null }, "PATCH"), { params: Promise.resolve({ id: standaloneManual.id }) });
+    const clearManual = await clearManualRes.json();
+    check("DUR11. Clearing both dates on a MANUAL duration clears the dates...", clearManualRes.status === 200 && clearManual.startDate === null && clearManual.endDate === null);
+    check("DUR11. ...but preserves the manual Actual Total Days (6)", clearManual.actualTotalDays === 6 && clearManual.actualTotalDaysOverridden === true);
+    const clearExpectedManual = await (await projectsPATCH(jsonReq({ expectedStartDate: null }, "PATCH"), { params: Promise.resolve({ id: durProject.id }) })).json();
+    check("DUR11. Clearing an Expected date with a MANUAL Expected duration keeps it (0)", clearExpectedManual.expectedStartDate === null && clearExpectedManual.expectedTotalInitialDays === 0 && clearExpectedManual.expectedTotalInitialDaysOverridden === true);
+    const editPageSrcAfter = await fs.readFile("app/(main)/projects/[id]/edit/page.tsx", "utf8");
+    check("DUR11. The edit page sends an emptied non-Facilities date as explicit null", /\{ startDate: startDate \|\| null, endDate: endDate \|\| null \}/.test(editPageSrcAfter));
+
+    console.log("\n-- DUR12. Working-day transition: stored historical (calendar-day) automatic values are never silently rewritten --\n");
+    // Simulate a pre-transition row: automatic Actual Total Days stored in
+    // CALENDAR days (2026-03-02 Mon -> 2026-03-16 Mon = 14 calendar / 10 working).
+    const legacyCalendar = await prisma.project.create({
+      data: { title: `PR Creation Legacy Calendar ${RUN_ID}`, departmentId: dept.id, ownerId: adminUser.id, startDate: new Date("2026-03-02"), endDate: new Date("2026-03-16"), actualTotalDays: 14, actualTotalDaysOverridden: false },
+    });
+    projectIds.push(legacyCalendar.id);
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    const legacyFullSnapshot = await (await projectsPATCH(jsonReq({ title: `PR Creation Legacy Calendar Renamed ${RUN_ID}`, startDate: "2026-03-02", endDate: "2026-03-16", actualTotalDaysOverride: null }, "PATCH"), { params: Promise.resolve({ id: legacyCalendar.id }) })).json();
+    check("DUR12. Full-snapshot save (same dates re-sent, override null) leaves the stored historical value untouched (14) and automatic", legacyFullSnapshot.actualTotalDays === 14 && legacyFullSnapshot.actualTotalDaysOverridden === false);
+    const legacyDateChange = await (await projectsPATCH(jsonReq({ endDate: "2026-03-17" }, "PATCH"), { params: Promise.resolve({ id: legacyCalendar.id }) })).json();
+    check("DUR12. A REAL date change recalculates in working days (Mon 03-02 -> Tue 03-17 = 11) and stays automatic (never misclassified as manual)", legacyDateChange.actualTotalDays === 11 && legacyDateChange.actualTotalDaysOverridden === false);
+    const manualKeep = await prisma.project.create({
+      data: { title: `PR Creation Legacy Manual ${RUN_ID}`, departmentId: dept.id, ownerId: adminUser.id, startDate: new Date("2026-03-02"), endDate: new Date("2026-03-16"), actualTotalDays: 14, actualTotalDaysOverridden: true },
+    });
+    projectIds.push(manualKeep.id);
+    const manualKeepRes = await (await projectsPATCH(jsonReq({ endDate: "2026-03-20" }, "PATCH"), { params: Promise.resolve({ id: manualKeep.id }) })).json();
+    check("DUR12. A manual override (14 working days, as entered) is kept exactly when dates change", manualKeepRes.actualTotalDays === 14 && manualKeepRes.actualTotalDaysOverridden === true);
+
+    // ══════════════════════ AUD. Business Unit Audience is not available on Project-from-Request ══════════════════════
+    console.log("\n=== AUD. Business Units cannot be Audience on Project creation from a Request; standalone unchanged ===\n");
+    const audCompany = await prisma.company.create({ data: { name: `PR Creation Co ${RUN_ID}`, normalizedName: `pr-creation-co-${RUN_ID}` } });
+    const audBU = await prisma.businessUnit.create({ data: { name: `PR Creation BU ${RUN_ID}`, companyId: audCompany.id } });
+    try {
+      const audRequest = await submitThrough(`PR Creation AudienceBU ${RUN_ID}`, "approve", finalApprover);
+      currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
+      const audRejectRes = await setupPOST(jsonReq({ ...durSetupPayload(), title: audRequest.title, audienceBusinessUnitIds: [audBU.id] }), { params: Promise.resolve({ id: audRequest.id }) });
+      check("AUD1. Conversion with a (real) Audience Business Unit -> rejected (422)", audRejectRes.status === 422);
+      check("AUD1. ...and NO Project was created for that request", (await prisma.project.count({ where: { projectRequestId: audRequest.id } })) === 0);
+      const audOkRes = await setupPOST(jsonReq({ ...durSetupPayload(), title: audRequest.title, audienceBusinessUnitIds: [], audienceDepartmentIds: [dept.id] }), { params: Promise.resolve({ id: audRequest.id }) });
+      check("AUD2. Same request with an empty BU list + a Department Audience -> 201", audOkRes.status === 201);
+      const audOk = await audOkRes.json();
+      projectIds.push(audOk.id);
+      const audOkRow = await prisma.project.findUniqueOrThrow({ where: { id: audOk.id }, include: { audienceDepartments: true, audienceBusinessUnits: true } });
+      check("AUD2. ...Department Audience still persisted; no Business Unit Audience", audOkRow.audienceDepartments.some((d) => d.id === dept.id) && audOkRow.audienceBusinessUnits.length === 0);
+      check("AUD3. The request-origin form hides the Business Units picker and never sends the field", /\{!fromRequest && \(\s*<div className="space-y-2">\s*<Label htmlFor="project-audience-business-units">/.test(formSrc));
+
+      currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+      const standaloneBURes = await projectsPOST(jsonReq({ title: `PR Creation Standalone BU ${RUN_ID}`, departmentId: dept.id, audienceBusinessUnitIds: [audBU.id] }));
+      const standaloneBU = await standaloneBURes.json();
+      projectIds.push(standaloneBU.id);
+      const standaloneBURow = await prisma.project.findUniqueOrThrow({ where: { id: standaloneBU.id }, include: { audienceBusinessUnits: true } });
+      check("AUD4. Standalone Project creation STILL accepts Audience Business Units (unchanged)", standaloneBURes.status === 201 && standaloneBURow.audienceBusinessUnits.some((b) => b.id === audBU.id));
+      const editBURes = await projectsPATCH(jsonReq({ audienceBusinessUnitIds: [audBU.id] }, "PATCH"), { params: Promise.resolve({ id: audOk.id }) });
+      check("AUD5. Editing (PATCH) Audience is unchanged — shared functionality untouched", editBURes.status === 200);
+    } finally {
+      await prisma.businessUnit.delete({ where: { id: audBU.id } }).catch((e) => console.error("BU cleanup failed", e));
+      await prisma.company.delete({ where: { id: audCompany.id } }).catch((e) => console.error("Company cleanup failed", e));
+    }
 
     // ══════════════════════ UI pass: 4/5/8/9 — detail-page rendering + the pencil's permission gate ══════════════════════
     console.log("\n=== UI pass 4/5/8/9: detail page renders for both provenances; the Edit control's gate is the SAME canEditProject the rest of the page already uses ===\n");

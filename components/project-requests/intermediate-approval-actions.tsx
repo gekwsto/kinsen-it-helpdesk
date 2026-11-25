@@ -30,7 +30,7 @@ interface IntermediateApprovalActionsProps {
  * ends the request immediately), and offers Approve/Reject ONLY to the
  * viewer's own still-PENDING row, reusing the SAME shared
  * ProjectRequestDecisionDialog the final stage uses (with
- * assessmentRequired={false} — unlike the final stage, this stage never
+ * showAssessment={false} — unlike the final stage, this stage never
  * asks for a written justification, confirmed with the user) — never a
  * second/duplicated decision modal. The API independently re-checks both
  * "do you hold projectRequest.intermediateApprove" and "are you genuinely
@@ -117,7 +117,7 @@ export function IntermediateApprovalActions({ requestId, approvers, myRow }: Int
             serverError={serverError}
             onCancel={cancel}
             onConfirm={submit}
-            assessmentRequired={false}
+            showAssessment={false}
           />
         </>
       )}

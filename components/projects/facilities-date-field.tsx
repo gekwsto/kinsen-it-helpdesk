@@ -13,6 +13,25 @@ import { cn } from "@/lib/utils";
 
 const QUARTERS = ["Q1", "Q2", "Q3", "Q4"] as const;
 
+/**
+ * Client-side PREVIEW of the boundary date a Facilities Start/End field
+ * resolves to — first day of the quarter for "start", last day for "end"
+ * (UTC midnight, same convention as quarterStartDate/quarterEndDate in
+ * lib/services/project-facilities-service.ts, which stays authoritative), or
+ * the exact date. Null when incomplete.
+ */
+export function facilitiesBoundaryPreview(edge: "start" | "end", precision: "EXACT" | "QUARTER", exact: string, quarter: string, year: string): Date | null {
+  if (precision === "QUARTER") {
+    const q = (QUARTERS as readonly string[]).indexOf(quarter);
+    const y = parseInt(year);
+    if (q < 0 || !Number.isFinite(y)) return null;
+    return new Date(Date.UTC(y, q * 3 + (edge === "start" ? 0 : 3), edge === "start" ? 1 : 0));
+  }
+  if (!exact) return null;
+  const d = new Date(exact);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 interface FacilitiesDateFieldProps {
   label: string;
   required?: boolean;

@@ -227,7 +227,7 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
 
           <div className="space-y-2">
             <Label htmlFor="teamConcerned">
-              Team concerned <span className="text-destructive">*</span>
+              Team concerned <span className="text-xs font-normal text-muted-foreground">(optional)</span>
             </Label>
             <Input id="teamConcerned" placeholder="Which team(s) this affects" {...register("teamConcerned")} />
             {errors.teamConcerned && <p className="text-xs text-destructive">{errors.teamConcerned.message}</p>}
@@ -235,7 +235,7 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
 
           <div className="space-y-2">
             <Label htmlFor="expectedBenefits">
-              Expected benefits <span className="text-destructive">*</span>
+              Expected benefits <span className="text-xs font-normal text-muted-foreground">(optional)</span>
             </Label>
             <Textarea id="expectedBenefits" rows={3} placeholder="What benefits will this bring" {...register("expectedBenefits")} />
             {errors.expectedBenefits && <p className="text-xs text-destructive">{errors.expectedBenefits.message}</p>}

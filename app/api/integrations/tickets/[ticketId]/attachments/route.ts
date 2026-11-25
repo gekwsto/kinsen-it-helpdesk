@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { apiError, internalErrorResponse } from "@/lib/api-errors";
 import { extractBearerToken, verifyIntegrationKey, IntegrationPepperMissingError } from "@/lib/services/integration-key-service";
-import { MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType } from "@/lib/attachment-policy";
+import { MAX_ATTACHMENT_SIZE_BYTES, validateAttachmentUpload } from "@/lib/attachment-policy";
 import { saveIntegrationTicketAttachment } from "@/lib/services/integration-attachment-service";
 import { checkIntegrationRateLimit } from "@/lib/services/integration-rate-limiter";
 
@@ -23,7 +23,7 @@ function rateLimitedResponse(retryAfterSeconds: number) {
  * integration attach a file to a ticket IT created. Reuses the exact same
  * auth (verifyIntegrationKey), storage (writeAttachmentFile via
  * lib/services/integration-attachment-service.ts), validation
- * (MAX_ATTACHMENT_SIZE_BYTES / isAllowedAttachmentMimeType — the same
+ * (MAX_ATTACHMENT_SIZE_BYTES / validateAttachmentUpload — the same
  * constants the WEB upload route enforces), and audit (TicketHistory
  * ATTACHMENT_ADDED) machinery as every other attachment path in the app.
  *
@@ -93,17 +93,22 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ tic
     if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
       return NextResponse.json(apiError("validation_failed", "File too large (max 10MB).", { field: "file" }), { status: 413 });
     }
-    if (!isAllowedAttachmentMimeType(file.type)) {
-      return NextResponse.json(apiError("validation_failed", "File type not allowed.", { field: "file" }), { status: 422 });
-    }
-
     const buffer = Buffer.from(await file.arrayBuffer());
+    // The SAME upload policy as the web upload routes (lib/attachment-policy.ts):
+    // shared type/size rule + content verification for .msg/.eml; the stored
+    // MIME type is the validated (normalized) one. Same 422 contract as before
+    // for a rejected type; checked BEFORE the idempotency lookup, exactly where
+    // the previous MIME check sat, so the idempotency contract is unchanged.
+    const validation = validateAttachmentUpload(file, buffer);
+    if (!validation.ok) {
+      return NextResponse.json(apiError("validation_failed", `${validation.error.replace(/\.$/, "")}.`, { field: "file" }), { status: 422 });
+    }
 
     const result = await saveIntegrationTicketAttachment({
       ticketId: ticket.id,
       buffer,
       originalName: file.name,
-      mimeType: file.type,
+      mimeType: validation.mimeType,
       externalAttachmentId,
       integrationName: integration.name,
     });

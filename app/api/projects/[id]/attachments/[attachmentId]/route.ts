@@ -85,6 +85,9 @@ export async function GET(
         "Content-Type": attachment.mimeType || "application/octet-stream",
         "Content-Length": String(bytes.length),
         "Content-Disposition": buildContentDispositionHeader(attachment.originalName),
+        // Never sniffed/rendered as a different type by the browser (e.g. an
+        // .eml is text) — every attachment is a download.
+        "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-store",
       },
     });

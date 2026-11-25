@@ -57,6 +57,27 @@ async function main() {
     return;
   }
 
+  // Intermediate approvers must be the requester's VERIFIED SQLGeneral
+  // direct manager (see resolveIntermediateApproverCandidates). Mocked the
+  // same way the sibling Project Request tests do, so the fixture request
+  // can actually be submitted.
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralRowsByUsername = new Map<string, any[]>();
+  mock.module("@/lib/sqlgeneral-api-client", {
+    namedExports: {
+      ...realSqlGeneralClient,
+      findSqlGeneralUserByUsername: async (username: string) => {
+        const rows = sqlGeneralRowsByUsername.get(username) ?? [];
+        if (rows.length === 0) return { outcome: "not_found" as const };
+        if (rows.length > 1) return { outcome: "ambiguous" as const, count: rows.length };
+        return { outcome: "unique" as const, user: rows[0] };
+      },
+    },
+  });
+  function registerSqlGeneralUser(username: string, managerAMAccountName: string | null) {
+    sqlGeneralRowsByUsername.set(username, [{ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null }]);
+  }
+
   const { NextRequest } = await import("next/server");
   const jsonReq = (body?: unknown, method = "POST") =>
     new NextRequest("http://localhost/x", { method, headers: { "content-type": "application/json" }, body: body !== undefined ? JSON.stringify(body) : undefined });
@@ -102,6 +123,11 @@ async function main() {
 
     const adminUser = await prisma.user.findFirstOrThrow({ where: { email: "admin@kinsen.gr" }, select: { id: true } });
     const worker1 = await makeUser(`${TAG}-worker1@kinsen.gr`);
+    const fixtureManager = await makeUser(`${TAG}-manager@kinsen.gr`);
+    registerSqlGeneralUser(`${TAG}-mgr`, null);
+    registerSqlGeneralUser(`${TAG}-worker1`, `${TAG}-mgr`);
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: fixtureManager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: worker1.id, sqlGeneralUsername: `${TAG}-worker1`, status: "SUCCEEDED" } });
     await addMembership(worker1.id, dept.id);
 
     // ══════════════════════ Fixtures: request-origin + manual Projects, two Task Types ══════════════════════
@@ -115,13 +141,18 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [adminUser.id],
+        intermediateApproverIds: [fixtureManager.id],
       })
     );
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
-    await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    {
+      const sessionBeforeIntermediate = currentSession;
+      currentSession = { user: { id: fixtureManager.id, role: Role.USER, customRoleId: null } };
+      await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+      currentSession = sessionBeforeIntermediate;
+    }
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
       jsonReq({
@@ -203,15 +234,15 @@ async function main() {
     check("8. Activity created with TaskTypeA (150/day), 20 Sep -> 02 Oct (12 days) -> 201", act1Res.status === 201);
     const act1 = await act1Res.json();
     activityIds.push(act1.id);
-    check("8. ...expectedDays === 12", act1.expectedDays === 12);
-    check("8. ...estimatedCost === '1800' (150 × 12), exact Decimal, never a float approximation", act1.estimatedCost === "1800");
+    check("8. ...expectedDays === 9 working days (Sun 2026-09-20 -> Fri 2026-10-02 spans two weekends)", act1.expectedDays === 9);
+    check("8. ...estimatedCost === '1350' (150 × 9 working days), exact Decimal, never a float approximation", act1.estimatedCost === "1350");
 
     const act1GetRes = await activitiesGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: act1.id }) });
     const act1Get = await act1GetRes.json();
-    check("9. GET /api/activities/[id] returns the SAME estimatedCost", act1Get.estimatedCost === "1800");
+    check("9. GET /api/activities/[id] returns the SAME estimatedCost", act1Get.estimatedCost === "1350");
 
     let projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("10. Project's derived estimatedCost now reflects this one Activity (1800)", projGet.estimatedCost === "1800");
+    check("10. Project's derived estimatedCost now reflects this one Activity (1350)", projGet.estimatedCost === "1350");
 
     const act2Res = await activitiesPOST(
       jsonReq({
@@ -228,9 +259,9 @@ async function main() {
     );
     const act2 = await act2Res.json();
     activityIds.push(act2.id);
-    check("11. A second Activity (TypeB 200/day × 5 days = 1000) adds to the Project total: 1800 + 1000 = 2800", act2.estimatedCost === "1000");
+    check("11. A second Activity (TypeB 200/day × 4 working days, Sun 11-01 -> Fri 11-06 = 800) adds to the Project total: 1350 + 800 = 2150", act2.estimatedCost === "800");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("...Project estimatedCost === '2800'", projGet.estimatedCost === "2800");
+    check("...Project estimatedCost === '2150'", projGet.estimatedCost === "2150");
 
     const legacyActivity = await prisma.projectActivity.create({
       data: { title: `${TAG} Legacy`, projectId: project.id, departmentId: dept.id, createdById: worker1.id },
@@ -240,13 +271,13 @@ async function main() {
     const legacyGetBody = await legacyGetRes.json();
     check("12. A legacy Activity (null taskTypeId/expectedDays/actualDays) -> estimatedCost '0', never fabricated, never crashes", legacyGetBody.estimatedCost === "0");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("...and contributes NOTHING to the Project total — still '2800', not NaN or crashed", projGet.estimatedCost === "2800");
+    check("...and contributes NOTHING to the Project total — still '2150', not NaN or crashed", projGet.estimatedCost === "2150");
 
     const extendAct2Res = await activitiesPATCH(jsonReq({ expectedFinishDate: "2026-11-11" }, "PATCH"), { params: Promise.resolve({ id: act2.id }) });
     const extendAct2 = await extendAct2Res.json();
-    check("13. Extending Act2's Expected Finish (5 -> 10 days) recalculates ITS OWN estimatedCost (200×10=2000)", extendAct2.estimatedCost === "2000");
+    check("13. Extending Act2's Expected Finish to Wed 11-11 (4 -> 7 working days) recalculates ITS OWN estimatedCost (200×7=1400)", extendAct2.estimatedCost === "1400");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("...and the Project total updates automatically with zero extra bookkeeping: 1800 + 2000 = 3800", projGet.estimatedCost === "3800");
+    check("...and the Project total updates automatically with zero extra bookkeeping: 1350 + 1400 = 2750", projGet.estimatedCost === "2750");
 
     // ══════════════════════ 14-21. ACTIVITY ACTUAL COST ══════════════════════
     console.log("\n=== 14-21. Activity Actual Cost = taskSubTypeCost × actualDays (only while COMPLETED) ===\n");
@@ -281,8 +312,9 @@ async function main() {
         title: `${TAG} Act3 Decimal`,
         projectId: project.id,
         departmentId: dept.id,
-        expectedStartDate: "2026-01-01",
-        expectedFinishDate: "2026-01-04",
+        // Mon -> Thu = exactly 3 working days (no weekend involved).
+        expectedStartDate: "2026-01-05",
+        expectedFinishDate: "2026-01-08",
         taskTypeId: reqType.id,
         taskSubTypeId: taskTypeC.id,
         ownerId: worker1.id,
@@ -297,10 +329,10 @@ async function main() {
     // Start -> completedAt (already exhaustively proven in
     // test-activity-request-origin.ts; this just confirms THIS file's own
     // completed Activities used that same real formula, not a stub).
-    const { wholeCalendarDaysBetween } = await import("@/lib/date-only");
+    const { actualDaysFromCompletion } = await import("@/lib/date-only");
     const act1Row = await prisma.projectActivity.findUniqueOrThrow({ where: { id: act1.id } });
-    const recomputedActualDays = act1Row.completedAt ? wholeCalendarDaysBetween(act1Row.expectedStartDate!, act1Row.completedAt) : null;
-    check("21. Act1's stored actualDays matches wholeCalendarDaysBetween(expectedStartDate, completedAt) exactly — the shared, unaltered helper", act1Row.actualDays === recomputedActualDays);
+    const recomputedActualDays = act1Row.completedAt ? actualDaysFromCompletion(act1Row.expectedStartDate!, act1Row.completedAt) : null;
+    check("21. Act1's stored actualDays matches actualDaysFromCompletion(expectedStartDate, completedAt) exactly — the shared working-day helper", act1Row.actualDays === recomputedActualDays);
 
     // ══════════════════════ 22-32. REOPEN / RE-COMPLETE ══════════════════════
     console.log("\n=== 22-32. Reopen clears cost immediately; re-complete recomputes fresh, never double-counts ===\n");
@@ -315,10 +347,10 @@ async function main() {
     // 23/24: push Expected Start further into the past (so actualDays, once
     // recomputed, is provably DIFFERENT) and re-complete — the new cost must
     // be the fresh calculation alone, never old+new.
-    // Shift BOTH Expected Start/Finish back by exactly one year (same
-    // 12-day span, so expectedDays/estimatedCost stay '1800' — only
-    // actualDays, which depends solely on Expected Start, changes).
-    await activitiesPATCH(jsonReq({ expectedStartDate: "2025-09-20", expectedFinishDate: "2025-10-02" }, "PATCH"), { params: Promise.resolve({ id: act1.id }) });
+    // Shift BOTH Expected Start/Finish back by exactly 52 weeks (same
+    // weekdays, so the same 9 working days and estimatedCost stays '1350' —
+    // only actualDays, which depends solely on Expected Start, changes).
+    await activitiesPATCH(jsonReq({ expectedStartDate: "2025-09-21", expectedFinishDate: "2025-10-03" }, "PATCH"), { params: Promise.resolve({ id: act1.id }) });
     const recompleteAct1Res = await activitiesPATCH(jsonReq({ isCompleted: true, status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: act1.id }) });
     const recompletedAct1 = await recompleteAct1Res.json();
     const newExpectedAct1ActualCost = (150 * recompletedAct1.actualDays).toString();
@@ -359,12 +391,17 @@ async function main() {
     console.log("\n=== 33-44. Project aggregation: exact sum, null-safe, isolated, consistent across endpoints ===\n");
     currentSession = { user: { id: worker1.id, role: Role.USER, customRoleId: null } };
     const emptyReqRes = await requestsPOST(
-      jsonReq({ title: `${TAG} empty request`, description: "Empty Project fixture, long enough description.", importance: 1, projectTypeId: reqType.id, teamConcerned: "Eng", expectedBenefits: "Benefits long enough.", replacesExisting: false, intermediateApproverIds: [adminUser.id] })
+      jsonReq({ title: `${TAG} empty request`, description: "Empty Project fixture, long enough description.", importance: 1, projectTypeId: reqType.id, teamConcerned: "Eng", expectedBenefits: "Benefits long enough.", replacesExisting: false, intermediateApproverIds: [fixtureManager.id] })
     );
     const emptyReqBody = await emptyReqRes.json();
     requestIds.push(emptyReqBody.id);
     currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
-    await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: emptyReqBody.id }) });
+    {
+      const sessionBeforeIntermediate = currentSession;
+      currentSession = { user: { id: fixtureManager.id, role: Role.USER, customRoleId: null } };
+      await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: emptyReqBody.id }) });
+      currentSession = sessionBeforeIntermediate;
+    }
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: emptyReqBody.id }) });
     const emptyProjectRes = await setupPOST(
       jsonReq({ title: `${TAG} empty`, ownerIds: [adminUser.id], expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-02", expenseTypeId: expenseType.id }),
@@ -378,10 +415,10 @@ async function main() {
     const deleteAct2Res = await activitiesDELETE(jsonReq(undefined, "DELETE"), { params: Promise.resolve({ id: act2.id }) });
     check("34. DELETE on Act2 -> 204", deleteAct2Res.status === 204);
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("...Project's estimatedCost immediately excludes the deleted Act2's contribution (2000) — no stale 3800", !projGet.estimatedCost.includes("3800"));
+    check("...Project's estimatedCost immediately excludes the deleted Act2's contribution (1400) — no stale 2750", !projGet.estimatedCost.includes("2750"));
 
-    // 35: exact Decimal sum across remaining Activities (Act1 1800 + Act3 99.99 + legacy 0 = 1899.99).
-    check("35. Exact Decimal sum verified: 1800 + 99.99 + 0 = '1899.99', never a float rounding artifact", projGet.estimatedCost === "1899.99");
+    // 35: exact Decimal sum across remaining Activities (Act1 1350 + Act3 99.99 + legacy 0 = 1449.99).
+    check("35. Exact Decimal sum verified: 1350 + 99.99 + 0 = '1449.99', never a float rounding artifact", projGet.estimatedCost === "1449.99");
 
     // 36: changing an Activity's Task Type re-snapshots taskSubTypeCost, which
     // (since actualCost is always derived from the CURRENT snapshot) changes
@@ -392,13 +429,13 @@ async function main() {
     const changedAct3 = await changeTaskTypeRes.json();
     check("36. Changing Act3's Task Sub Type (C->B) re-snapshots taskSubTypeCost to 200, and its estimatedCost recalculates (200×3=600)", changedAct3.estimatedCost === "600");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("...Project total reflects the new snapshot immediately: 1800 + 600 = 2400", projGet.estimatedCost === "2400");
+    check("...Project total reflects the new snapshot immediately: 1350 + 600 = 1950", projGet.estimatedCost === "1950");
 
     // 37: a MASTER Task Type cost change must NEVER retroactively alter an
     // existing Activity's snapshot or the Project total.
     await prisma.taskSubType.update({ where: { id: taskTypeA.id }, data: { cost: 9999 } });
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("37. Bumping TaskTypeA's MASTER cost to 9999 does NOT change the Project total — still '2400', the frozen snapshot wins", projGet.estimatedCost === "2400");
+    check("37. Bumping TaskTypeA's MASTER cost to 9999 does NOT change the Project total — still '1950', the frozen snapshot wins", projGet.estimatedCost === "1950");
 
     // 38: isolation — the manual Project's own aggregation is untouched by
     // anything happening on the request-origin Project.
@@ -411,8 +448,8 @@ async function main() {
     const onlyDaysRow = await prisma.projectActivity.create({ data: { title: `${TAG} OnlyDays`, projectId: project.id, departmentId: dept.id, createdById: worker1.id, expectedDays: 50 } });
     activityIds.push(onlyDaysRow.id);
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
-    check("39. An Activity with taskSubTypeCost but no expectedDays contributes exactly 0 (never NaN, never cost×0 by coincidence)", projGet.estimatedCost === "2400");
-    check("40. An Activity with expectedDays but no taskSubTypeCost ALSO contributes exactly 0", projGet.estimatedCost === "2400");
+    check("39. An Activity with taskSubTypeCost but no expectedDays contributes exactly 0 (never NaN, never cost×0 by coincidence)", projGet.estimatedCost === "1950");
+    check("40. An Activity with expectedDays but no taskSubTypeCost ALSO contributes exactly 0", projGet.estimatedCost === "1950");
 
     // 41: full mixed-state aggregation already exercised throughout — this
     // confirms it one more time with the final combined state.
@@ -486,8 +523,9 @@ async function main() {
         title: `${TAG} Forged Cost`,
         projectId: project.id,
         departmentId: dept.id,
-        expectedStartDate: "2026-02-01",
-        expectedFinishDate: "2026-02-03",
+        // Mon -> Wed = 2 working days.
+        expectedStartDate: "2026-02-02",
+        expectedFinishDate: "2026-02-04",
         taskTypeId: reqType.id,
         taskSubTypeId: taskTypeA.id,
         ownerId: worker1.id,
@@ -526,6 +564,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);
     }
     try {
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     } catch (err) {

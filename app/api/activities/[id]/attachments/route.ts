@@ -4,7 +4,7 @@ import { requireAuth } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import path from "path";
 import fs from "fs/promises";
-import { MAX_ATTACHMENT_SIZE_BYTES, isAllowedAttachmentMimeType, generateStoredFilename, entityAttachmentDir } from "@/lib/attachment-policy";
+import { MAX_ATTACHMENT_SIZE_BYTES, validateAttachmentUpload, generateStoredFilename, entityAttachmentDir } from "@/lib/attachment-policy";
 import { writeAttachmentFile } from "@/lib/attachment-storage-service";
 
 const attachmentInclude = {
@@ -83,13 +83,16 @@ export async function POST(
       return NextResponse.json({ error: "File too large (max 10MB)" }, { status: 400 });
     }
 
-    if (!isAllowedAttachmentMimeType(file.type)) {
-      return NextResponse.json({ error: "File type not allowed" }, { status: 400 });
-    }
-
     const dir = entityAttachmentDir("activities", id);
     const filename = generateStoredFilename(file.name);
     const buffer = Buffer.from(await file.arrayBuffer());
+    // Shared upload policy (lib/attachment-policy.ts): type/size rule shared
+    // with every client picker, plus content verification for .msg/.eml.
+    // The stored MIME type is the validated (normalized) one.
+    const validation = validateAttachmentUpload(file, buffer);
+    if (!validation.ok) {
+      return NextResponse.json({ error: validation.error }, { status: validation.status });
+    }
 
     const writeResult = await writeAttachmentFile(buffer, dir, filename);
     if (!writeResult.ok) {
@@ -105,7 +108,7 @@ export async function POST(
           uploadedById: session.user.id,
           filename,
           originalName: file.name,
-          mimeType: file.type,
+          mimeType: validation.mimeType,
           size: writeResult.size,
         },
         include: attachmentInclude,

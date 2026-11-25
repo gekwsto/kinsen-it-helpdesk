@@ -289,6 +289,7 @@ export interface ProjectDetailExportData {
   expectedStartDate: Date | null;
   expectedFinishDate: Date | null;
   expectedTotalInitialDays: number | null;
+  actualTotalDays: number | null;
   startDate: Date | null;
   endDate: Date | null;
   progress: number;
@@ -369,6 +370,7 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   if (data.expectedTotalInitialDays !== null) addKeyValueRow(detailsSheet, "Expected Total Days", data.expectedTotalInitialDays);
   addKeyValueRow(detailsSheet, "Start Date", data.startDate);
   addKeyValueRow(detailsSheet, "Due Date", data.endDate);
+  if (data.actualTotalDays !== null) addKeyValueRow(detailsSheet, "Actual Total Days", data.actualTotalDays);
   // Facilities Services only — Start Date/Due Date above already carry the
   // derived boundary date either way; these add the explicit Quarter
   // label (never shown as if it were a user-entered exact date) and the

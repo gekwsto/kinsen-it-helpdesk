@@ -2,8 +2,8 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Paperclip, Loader2, CheckCircle2, XCircle, RotateCcw } from "lucide-react";
-import { formatBytes } from "@/lib/utils";
+import { Paperclip, Loader2, RotateCcw } from "lucide-react";
+import { AttachmentUploadRow } from "@/components/attachments/attachment-dropzone";
 import type { PendingUploadEntry } from "@/hooks/use-create-with-attachments";
 
 interface PostCreateUploadPanelProps {
@@ -48,19 +48,7 @@ export function PostCreateUploadPanel({ entityLabel, entries, uploading, onRetry
 
         <div className="space-y-2">
           {entries.map((entry, index) => (
-            <div key={`${entry.file.name}-${index}`} className="flex items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-xs">
-              {entry.status === "uploading" && <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin text-muted-foreground" />}
-              {entry.status === "success" && <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0 text-green-600" />}
-              {entry.status === "failed" && <XCircle className="h-3.5 w-3.5 flex-shrink-0 text-destructive" />}
-              {entry.status === "pending" && <Paperclip className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />}
-              <div className="min-w-0 flex-1">
-                <p className="font-medium truncate">{entry.file.name}</p>
-                <p className="text-muted-foreground mt-0.5">
-                  {formatBytes(entry.file.size)}
-                  {entry.status === "failed" && entry.error && <span className="text-destructive"> · {entry.error}</span>}
-                </p>
-              </div>
-            </div>
+            <AttachmentUploadRow key={`${entry.file.name}-${index}`} file={entry.file} status={entry.status} progress={entry.progress} error={entry.error} />
           ))}
         </div>
 

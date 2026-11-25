@@ -63,6 +63,11 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             apiError("invalid_audience_business_unit", "One or more selected Audience Business Units do not exist.", { field: "audienceBusinessUnitIds" }),
             { status: 422 }
           );
+        case "audience_business_units_not_allowed":
+          return NextResponse.json(
+            apiError("audience_business_units_not_allowed", "Business Units cannot be selected as Audience when creating a Project from a Project Request.", { field: "audienceBusinessUnitIds" }),
+            { status: 422 }
+          );
         case "invalid_responsible_people":
           return NextResponse.json(
             apiError("invalid_responsible_people", "One or more selected Responsible People are not real, active users.", { field: "responsiblePeopleIds" }),

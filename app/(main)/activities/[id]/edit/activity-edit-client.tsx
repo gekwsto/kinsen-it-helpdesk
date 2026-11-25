@@ -593,7 +593,7 @@ export function ActivityEditClient({ id }: Props) {
                       placeholder="Not set"
                       className="cursor-default bg-muted/40"
                     />
-                    <p className="text-xs text-muted-foreground">Recalculated from Expected Start/Finish on save — not directly editable.</p>
+                    <p className="text-xs text-muted-foreground">Working days (Mon–Fri), recalculated from Expected Start/Finish on save — not directly editable.</p>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="actual-days">Actual Days</Label>
@@ -608,7 +608,7 @@ export function ActivityEditClient({ id }: Props) {
                       placeholder="Not set until completion"
                       className="cursor-default bg-muted/40"
                     />
-                    <p className="text-xs text-muted-foreground">Set automatically when this Activity is completed — not directly editable.</p>
+                    <p className="text-xs text-muted-foreground">Working days (Mon–Fri), set automatically when this Activity is completed — not directly editable.</p>
                   </div>
                 </div>
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MAX_PROJECT_DURATION_DAYS } from "@/lib/project-duration";
 import {
   MessageDirection,
   ProjectStatus,
@@ -181,6 +182,20 @@ export const changeStatusSchema = z.object({
 
 // ─── Project Schemas ───────────────────────────────────────────────────────────
 
+// A Project duration override (Expected Total Initial Days / Actual Total
+// Days — see lib/project-duration.ts, the single canonical resolver).
+// A number = manual override (whole, non-negative); null = reset to the
+// automatically-calculated value; omitted = keep the current mode.
+function projectDurationOverrideSchema(label: string) {
+  return z
+    .number({ invalid_type_error: `${label} must be a number` })
+    .int(`${label} must be a whole number of days`)
+    .nonnegative(`${label} cannot be negative`)
+    .max(MAX_PROJECT_DURATION_DAYS, `${label} is too large`)
+    .nullable()
+    .optional();
+}
+
 export const createProjectSchema = z.object({
   title: z.string().min(3, "Title must be at least 3 characters").max(200),
   description: z.string().optional(),
@@ -197,6 +212,8 @@ export const createProjectSchema = z.object({
   // unchanged" wherever that distinction matters (PATCH).
   startDate: z.string().nullable().optional(),
   endDate: z.string().nullable().optional(),
+  // Actual Total Days (startDate -> endDate) — see projectDurationOverrideSchema.
+  actualTotalDaysOverride: projectDurationOverrideSchema("Actual Total Days"),
   successTarget: z.string().optional(),
   memberIds: z.array(z.string()).default([]),
   isGoal: z.boolean().default(false),
@@ -294,12 +311,22 @@ export const createProjectFromRequestSchema = createProjectSchema
     // without being a Member or an Owner. Same system-wide (never
     // Department-scoped) re-verification as ownerIds above.
     audienceIds: z.array(z.string().trim().min(1)).default([]),
+    // Business Unit Audience is NOT available when creating a Project from
+    // a Project Request — the UI never offers it, and any non-empty value
+    // here is rejected (never silently connected). An omitted key or an
+    // empty array is accepted. Department Audience is unaffected, and
+    // standalone Project creation/editing (createProjectSchema /
+    // updateProjectSchema) keeps Business Unit Audience unchanged.
+    audienceBusinessUnitIds: z
+      .array(z.string())
+      .max(0, "Business Units cannot be selected as Audience when creating a Project from a Project Request.")
+      .optional(),
     expectedStartDate: z.string().min(1, "Expected Start Date is required."),
     expectedFinishDate: z.string().min(1, "Expected Finish Date is required."),
-    // Server-computed only — expectedTotalInitialDays is deliberately NOT a
-    // field on this schema at all, so a client-submitted value (forged or
-    // not) is simply never read; see createProjectFromApprovedRequest's own
-    // doc comment for the authoritative calculation.
+    // expectedTotalInitialDays itself is never accepted — it is always
+    // resolved server-side (lib/project-duration.ts) from Expected
+    // Start/Finish, unless this explicit manual override is supplied.
+    expectedTotalInitialDaysOverride: projectDurationOverrideSchema("Expected Total Initial Days"),
     expenseTypeId: z.string().trim().min(1, "Select an Expense Type."),
     // Budget was REMOVED entirely (no replacement) — see
     // prisma/migrations/20261005090000_remove_project_budget_and_cost_columns.
@@ -319,8 +346,8 @@ export const createProjectFromRequestSchema = createProjectSchema
 
 // The subset of request-origin-only fields a Project may have maintained
 // LATER through the normal edit workflow (PATCH /api/projects/[id]) — never
-// expectedTotalInitialDays (the creation-time baseline, never client-
-// editable) and never projectOwnerId (ownership reassignment, if ever
+// expectedTotalInitialDays directly (only via expectedTotalInitialDaysOverride,
+// resolved server-side) and never projectOwnerId (ownership reassignment, if ever
 // needed, is a separate concern outside this feature's scope). Every field
 // here is optional on its own — a PATCH touching only, say, actualCost must
 // still work without resupplying every other field — so the
@@ -340,6 +367,9 @@ export const createProjectFromRequestSchema = createProjectSchema
 export const updateProjectRequestOriginFieldsSchema = z.object({
   expectedStartDate: z.string().min(1).nullable().optional(),
   expectedFinishDate: z.string().min(1).nullable().optional(),
+  // number = manual override, null = reset to calculated, omitted = keep
+  // current mode (see lib/project-duration.ts).
+  expectedTotalInitialDaysOverride: projectDurationOverrideSchema("Expected Total Initial Days"),
   expenseTypeId: z.string().trim().min(1).nullable().optional(),
   // Budget/Estimated Cost/Actual Cost are no longer editable fields at all
   // — see createProjectFromRequestSchema's own doc comment above. A client
@@ -1075,6 +1105,19 @@ export const changePasswordSchema = z
     path: ["confirmPassword"],
   });
 
+// Optional free text: trimmed; omitted, null, empty and whitespace-only
+// values all normalize to null. When a value IS present it must still
+// satisfy `max` (and `min`, if given).
+function optionalTrimmedText(max: number, min?: { length: number; message: string }) {
+  return z
+    .string()
+    .trim()
+    .max(max)
+    .nullish()
+    .transform((v) => (v ? v : null))
+    .refine((v) => v === null || !min || v.length >= min.length, { message: min?.message });
+}
+
 // ─── Project Request Form Schemas ──────────────────────────────────────────────
 // Client-submittable fields ONLY — requesterId, status, and every
 // approval/audit field (including businessAssessment, now an APPROVER-side
@@ -1098,8 +1141,11 @@ export const createProjectRequestSchema = z
     // has it silently stripped (Zod's default unknown-key behavior), never
     // persisted; ProjectRequest.projectTypeId stays null for every NEW
     // request going forward.
-    teamConcerned: z.string().trim().min(2, "Team concerned must be at least 2 characters").max(200),
-    expectedBenefits: z.string().trim().min(10, "Expected benefits must be at least 10 characters").max(5000),
+    // Both OPTIONAL — an omitted/null/empty/whitespace-only value is
+    // normalized to null (see optionalTrimmedText). A populated value keeps
+    // its original minimum/maximum length rules.
+    teamConcerned: optionalTrimmedText(200, { length: 2, message: "Team concerned must be at least 2 characters" }),
+    expectedBenefits: optionalTrimmedText(5000, { length: 10, message: "Expected benefits must be at least 10 characters" }),
     // businessAssessment is deliberately NOT accepted here — it moved to the
     // approver's decision (see projectRequestApprovalDecisionSchema). Any
     // businessAssessment a client sends in the create payload is discarded
@@ -1145,11 +1191,10 @@ export const createProjectRequestSchema = z
     }
   });
 
-// businessAssessment is MANDATORY for every FINAL decision (both approve and
-// reject) — the approver's own contextual justification, never optional and
-// never the requester's. max(5000) matches every other large Project
-// Request text field. Trimmed here so a whitespace-only value is rejected
-// by min(1), never silently accepted as "blank but technically present".
+// businessAssessment is OPTIONAL for every FINAL decision (both approve and
+// reject) — the approver's own contextual justification, never the
+// requester's. max(5000) matches every other large Project Request text
+// field. Omitted/null/empty/whitespace-only is normalized to null.
 //
 // FINAL approval is responsible ONLY for the approval decision itself —
 // it no longer creates a Project (that moved to a dedicated follow-up step,
@@ -1158,7 +1203,7 @@ export const createProjectRequestSchema = z
 // so this schema no longer accepts/requires a projectOwnerId at all.
 export const projectRequestApprovalDecisionSchema = z.object({
   decision: z.enum(["approve", "reject"]),
-  businessAssessment: z.string().trim().min(1, "Business Assessment is required").max(5000),
+  businessAssessment: optionalTrimmedText(5000),
 });
 
 // The intermediate stage deliberately does NOT require a Business

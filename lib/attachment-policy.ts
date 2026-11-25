@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import path from "path";
-import { MAX_ATTACHMENT_SIZE_BYTES, ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAttachmentMimeType } from "@/lib/attachment-constants";
+import { MAX_ATTACHMENT_SIZE_BYTES, ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAttachmentMimeType, classifyAttachmentFile } from "@/lib/attachment-constants";
 
 /**
  * Shared attachment policy — the single source of truth for what counts as
@@ -24,6 +24,76 @@ import { MAX_ATTACHMENT_SIZE_BYTES, ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAtta
  * from "@/lib/attachment-policy" keeps working exactly as before.
  */
 export { MAX_ATTACHMENT_SIZE_BYTES, ALLOWED_ATTACHMENT_MIME_TYPES, isAllowedAttachmentMimeType };
+
+// ─── Upload validation (web + integration uploads) ──────────────────────────
+
+/** OLE2 / Compound File Binary signature — every Outlook .msg is a CFB file. */
+const OLE2_SIGNATURE = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+/** "__substg1.0_" in UTF-16LE — the stream-name prefix every Outlook message stores its properties under (MS-OXMSG §2.1). Distinguishes a real .msg from any other CFB file (e.g. a legacy .doc/.xls renamed to .msg). */
+const MSG_PROPERTY_STREAM_MARKER = Buffer.from("__substg1.0_", "utf16le");
+const EML_KNOWN_HEADERS = /^(from|to|cc|subject|date|message-id|received|return-path|mime-version|content-type|reply-to|sender|delivered-to|x-[a-z0-9-]+)$/i;
+
+export function isOutlookMsgContent(bytes: Buffer): boolean {
+  return bytes.length >= 512 && bytes.subarray(0, 8).equals(OLE2_SIGNATURE) && bytes.includes(MSG_PROPERTY_STREAM_MARKER);
+}
+
+/**
+ * True when the bytes begin with an RFC 5322/822 header block: text (no NUL
+ * bytes in the first 16 KB), first line a header field (or an mbox "From "
+ * separator), at least two header fields before the first blank line, and at
+ * least one well-known message header among them.
+ */
+export function isRfc822MessageContent(bytes: Buffer): boolean {
+  if (bytes.length === 0) return false;
+  const hasUtf8Bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf;
+  const head = bytes.subarray(hasUtf8Bom ? 3 : 0, 16 * 1024);
+  if (head.includes(0)) return false;
+  const lines = head.toString("latin1").split(/\r?\n/);
+  // When the sample is cut at 16 KB the final line may be a partial header — ignore it.
+  if (bytes.length > (hasUtf8Bom ? 3 : 0) + head.length) lines.pop();
+  let i = 0;
+  if (lines[0]?.startsWith("From ")) i = 1;
+  const field = /^([\x21-\x39\x3b-\x7e]+):/;
+  if (!field.test(lines[i] ?? "")) return false;
+  let fields = 0;
+  let known = false;
+  for (; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === "") break; // end of header block
+    if (/^[ \t]/.test(line)) continue; // folded continuation line
+    const m = field.exec(line);
+    if (!m) return false;
+    fields++;
+    if (EML_KNOWN_HEADERS.test(m[1])) known = true;
+  }
+  return fields >= 2 && known;
+}
+
+export type AttachmentUploadValidation =
+  | { ok: true; mimeType: string }
+  | { ok: false; status: 400; error: string };
+
+/**
+ * THE server-side upload rule for every web upload route (Ticket, Project,
+ * Activity) and the external Ticket Integration attachment API: the shared
+ * name/type/size classification (lib/attachment-constants.ts — the same one
+ * every client picker runs), plus a CONTENT check for email files, whose
+ * browser-reported MIME type is unreliable (often empty/generic). Returns the
+ * MIME type to STORE (normalized for email files). Never modifies the bytes.
+ * MIME/extension validation is never disabled: a generic/empty type is only
+ * accepted for the .msg/.eml extensions AND only when the content matches.
+ */
+export function validateAttachmentUpload(file: { name: string; type: string; size: number }, bytes: Buffer): AttachmentUploadValidation {
+  const classification = classifyAttachmentFile({ name: file.name, type: file.type, size: bytes.length });
+  if (!classification.ok) return { ok: false, status: 400, error: classification.message };
+  if (classification.emailKind === "msg" && !isOutlookMsgContent(bytes)) {
+    return { ok: false, status: 400, error: "File content is not a valid Outlook message (.msg)" };
+  }
+  if (classification.emailKind === "eml" && !isRfc822MessageContent(bytes)) {
+    return { ok: false, status: 400, error: "File content is not a valid email message (.eml)" };
+  }
+  return { ok: true, mimeType: classification.mimeType };
+}
 
 // PRIVATE storage — deliberately NOT under public/. Next.js only ever
 // serves files that live under the project's public/ directory; anything

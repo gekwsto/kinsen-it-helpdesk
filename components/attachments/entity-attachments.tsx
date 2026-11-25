@@ -4,9 +4,18 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Paperclip, Upload, Loader2, Trash2 } from "lucide-react";
+import { Paperclip, Loader2, Trash2, X } from "lucide-react";
 import { formatBytes, formatDateTime } from "@/lib/utils";
-import { ATTACHMENT_MIME_TYPE_LABELS as ALLOWED_TYPES, MAX_ATTACHMENT_SIZE_BYTES as MAX_FILE_SIZE } from "@/lib/attachment-constants";
+import { AttachmentDropzone, AttachmentFileIcon, AttachmentUploadRow, fileSignature, type AttachmentUploadStatus } from "@/components/attachments/attachment-dropzone";
+import { uploadAttachmentFile } from "@/lib/attachment-upload-client";
+
+interface QueuedUpload {
+  key: string;
+  file: File;
+  status: AttachmentUploadStatus;
+  progress: number;
+  error?: string;
+}
 
 interface Attachment {
   id: string;
@@ -46,43 +55,65 @@ interface EntityAttachmentsProps {
  */
 export function EntityAttachments({ apiBasePath, initialAttachments, canManage }: EntityAttachmentsProps) {
   const [attachments, setAttachments] = useState<Attachment[]>(initialAttachments);
-  const [uploading, setUploading] = useState(false);
+  const [queue, setQueue] = useState<QueuedUpload[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  // Mirrors `queue` for the sequential worker (avoids stale closures) and
+  // makes a file that is already queued/uploading impossible to enqueue twice.
+  const queueRef = useRef<QueuedUpload[]>([]);
+  const workingRef = useRef(false);
 
-  const uploadFile = async (file: File) => {
-    if (!ALLOWED_TYPES[file.type]) {
-      toast.error(`${file.name}: unsupported file type`);
-      return;
-    }
-    if (file.size > MAX_FILE_SIZE) {
-      toast.error(`${file.name}: exceeds 10 MB limit`);
-      return;
-    }
-    setUploading(true);
+  const patch = (key: string, changes: Partial<QueuedUpload>) => {
+    queueRef.current = queueRef.current.map((q) => (q.key === key ? { ...q, ...changes } : q));
+    setQueue(queueRef.current);
+  };
+
+  const processQueue = async () => {
+    if (workingRef.current) return;
+    workingRef.current = true;
+    let uploadedCount = 0;
     try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch(`${apiBasePath}/attachments`, { method: "POST", body: fd });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        toast.error(typeof err.error === "string" ? err.error : "Upload failed");
-        return;
+      for (;;) {
+        const next = queueRef.current.find((q) => q.status === "pending");
+        if (!next) break;
+        patch(next.key, { status: "uploading", progress: 0 });
+        const result = await uploadAttachmentFile<Attachment>(`${apiBasePath}/attachments`, next.file, {
+          onProgress: (fraction) => patch(next.key, { progress: fraction }),
+        });
+        if (result.ok) {
+          uploadedCount++;
+          setAttachments((prev) => [result.data, ...prev]);
+          queueRef.current = queueRef.current.filter((q) => q.key !== next.key);
+          setQueue(queueRef.current);
+        } else {
+          patch(next.key, { status: "failed", error: result.error });
+          toast.error(`${next.file.name}: ${result.error}`);
+        }
       }
-      const attachment: Attachment = await res.json();
-      setAttachments((prev) => [attachment, ...prev]);
-      toast.success("Attachment uploaded");
-    } catch {
-      toast.error("Upload failed");
     } finally {
-      setUploading(false);
+      workingRef.current = false;
     }
+    if (uploadedCount > 0) toast.success(uploadedCount === 1 ? "Attachment uploaded" : `${uploadedCount} attachments uploaded`);
   };
 
-  const handleFiles = (files: FileList | null) => {
-    if (!files) return;
-    Array.from(files).forEach((file) => uploadFile(file));
+  const enqueue = (files: File[]) => {
+    const active = new Set(queueRef.current.filter((q) => q.status !== "failed").map((q) => q.key));
+    const added = files
+      .map((file) => ({ key: fileSignature(file), file, status: "pending" as const, progress: 0 }))
+      .filter((q) => !active.has(q.key));
+    if (added.length === 0) return;
+    // A retried file replaces its own failed row.
+    const addedKeys = new Set(added.map((q) => q.key));
+    queueRef.current = [...queueRef.current.filter((q) => !addedKeys.has(q.key)), ...added];
+    setQueue(queueRef.current);
+    void processQueue();
   };
+
+  const dismiss = (key: string) => {
+    queueRef.current = queueRef.current.filter((q) => q.key !== key);
+    setQueue(queueRef.current);
+  };
+
+  const uploading = queue.some((q) => q.status === "pending" || q.status === "uploading");
 
   const deleteAttachment = async (attachmentId: string) => {
     setDeletingId(attachmentId);
@@ -110,38 +141,26 @@ export function EntityAttachments({ apiBasePath, initialAttachments, canManage }
             <Paperclip className="h-4 w-4" />
             Attachments ({attachments.length})
           </CardTitle>
-          {canManage && (
-            <>
-              <input
-                ref={inputRef}
-                type="file"
-                multiple
-                accept={Object.keys(ALLOWED_TYPES).join(",")}
-                className="hidden"
-                onChange={(e) => {
-                  handleFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8"
-                disabled={uploading}
-                onClick={() => inputRef.current?.click()}
-              >
-                {uploading ? (
-                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                ) : (
-                  <Upload className="h-3.5 w-3.5 mr-1.5" />
-                )}
-                Upload
-              </Button>
-            </>
-          )}
         </div>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-3">
+        {canManage && <AttachmentDropzone variant="compact" busy={uploading} onFiles={enqueue} />}
+        {queue.length > 0 && (
+          <div className="space-y-2" aria-live="polite">
+            {queue.map((q) => (
+              <div key={q.key} className="flex items-start gap-1">
+                <div className="min-w-0 flex-1">
+                  <AttachmentUploadRow file={q.file} status={q.status} progress={q.progress} error={q.error} />
+                </div>
+                {q.status === "failed" && (
+                  <Button size="sm" variant="ghost" className="h-6 w-6 p-0 text-muted-foreground shrink-0" onClick={() => dismiss(q.key)} aria-label={`Dismiss ${q.file.name}`}>
+                    <X className="h-3 w-3" />
+                  </Button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         {attachments.length === 0 ? (
           <p className="text-sm text-muted-foreground text-center py-4">
             No attachments yet.
@@ -159,7 +178,7 @@ export function EntityAttachments({ apiBasePath, initialAttachments, canManage }
                   rel="noopener noreferrer"
                   className="flex items-start gap-2 min-w-0 flex-1 hover:opacity-80 transition-opacity"
                 >
-                  <Paperclip className="h-3.5 w-3.5 text-muted-foreground mt-0.5 flex-shrink-0" />
+                  <AttachmentFileIcon mimeType={att.mimeType} name={att.originalName} className="h-3.5 w-3.5 mt-0.5" />
                   <div className="min-w-0 flex-1">
                     <p className="font-medium truncate">{att.originalName}</p>
                     <p className="text-muted-foreground mt-0.5">

@@ -14,6 +14,7 @@ import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { createProjectSchema, createProjectMemberEligibilitySchema, facilitiesProjectFieldsSchema } from "@/lib/validations";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
+import { resolveProjectDuration } from "@/lib/project-duration";
 import {
   getFacilitiesServicesDepartmentId,
   hasFacilitiesFieldsPresent,
@@ -117,6 +118,7 @@ export async function POST(req: NextRequest) {
       memberIds,
       startDate,
       endDate,
+      actualTotalDaysOverride,
       departmentId: _ignoredDepartmentId,
       facilitiesCompany,
       facilitiesLocation,
@@ -245,9 +247,19 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Actual Total Days — the ONE canonical resolver (lib/project-duration.ts),
+    // from the SAME Start/End values persisted below.
+    const actualDuration = resolveProjectDuration({
+      start: facilitiesWrite ? facilitiesWrite.startDate : startDate,
+      finish: facilitiesWrite ? facilitiesWrite.endDate : endDate,
+      override: actualTotalDaysOverride ?? undefined,
+    });
+
     const project = await prisma.project.create({
       data: {
         ...rest,
+        actualTotalDays: actualDuration.value,
+        actualTotalDaysOverridden: actualDuration.overridden,
         departmentId: deptResolution.departmentId,
         ownerId: session.user.id,
         // Mirrors the single canonical owner into the authoritative

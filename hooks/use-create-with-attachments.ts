@@ -1,12 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { uploadAttachmentFile } from "@/lib/attachment-upload-client";
 
 export type PendingUploadStatus = "pending" | "uploading" | "success" | "failed";
 
 export interface PendingUploadEntry {
   file: File;
   status: PendingUploadStatus;
+  /** 0..1 upload progress while uploading. */
+  progress?: number;
   error?: string;
 }
 
@@ -41,20 +44,15 @@ export function useCreateWithAttachments<TCreated extends { id: string }>(upload
   const [createdEntity, setCreatedEntity] = useState<TCreated | null>(null);
   const submittingRef = useRef(false);
 
+  // Shared upload helper (lib/attachment-upload-client.ts) — same route as
+  // before, now with real per-file progress.
   const uploadOne = async (basePath: string, file: File): Promise<{ ok: true } | { ok: false; error: string }> => {
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch(`${basePath}/attachments`, { method: "POST", body: fd });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        return { ok: false, error: typeof err.error === "string" ? err.error : "Upload failed" };
-      }
-      return { ok: true };
-    } catch {
-      return { ok: false, error: "Upload failed" };
-    }
+    const result = await uploadAttachmentFile(`${basePath}/attachments`, file, {
+      onProgress: (fraction) => setEntries((prev) => prev.map((e) => (e.file === file ? { ...e, progress: fraction } : e))),
+    });
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
   };
+
 
   /**
    * Uploads exactly the entries passed in (never re-derives "which are
@@ -71,7 +69,7 @@ export function useCreateWithAttachments<TCreated extends { id: string }>(upload
     setPhase("uploading");
     const finished: PendingUploadEntry[] = [];
     for (const target of targets) {
-      setEntries((prev) => prev.map((e) => (e.file === target.file ? { ...e, status: "uploading" as const } : e)));
+      setEntries((prev) => prev.map((e) => (e.file === target.file ? { ...e, status: "uploading" as const, progress: 0 } : e)));
       const result = await uploadOne(basePath, target.file);
       const updated: PendingUploadEntry = result.ok
         ? { ...target, status: "success", error: undefined }

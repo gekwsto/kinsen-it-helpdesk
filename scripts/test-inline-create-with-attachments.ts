@@ -216,8 +216,12 @@ async function main() {
     return r;
   }
 
+  let fixtureTaskTypeId: string | null = null;
   try {
     const deptA = await createDepartment({ name: `ICWA Dept A ${RUN_ID}`, slug: `icwa-a-${RUN_ID}` });
+    // Task Type is REQUIRED for every Activity (createActivitySchema) — fixture supplies one.
+    const fixtureTaskType = await prisma.taskType.create({ data: { name: `ICWA TaskType ${RUN_ID}` } });
+    fixtureTaskTypeId = fixtureTaskType.id;
     const deptB = await createDepartment({ name: `ICWA Dept B ${RUN_ID}`, slug: `icwa-b-${RUN_ID}` });
     deptIds.push(deptA.id, deptB.id);
 
@@ -294,7 +298,7 @@ async function main() {
     check("3. Attachment is linked to the authoritative created Project id", (await prisma.projectAttachment.findUniqueOrThrow({ where: { id: p1Body.id } })).projectId === inlineProject.id);
     check("...both are recorded against the Project", (await prisma.projectAttachment.count({ where: { projectId: inlineProject.id } })) === 2);
 
-    const inlineActivityRes = await activitiesPOST(jsonReq({ title: `ICWA Inline Activity ${RUN_ID}`, departmentId: deptA.id }));
+    const inlineActivityRes = await activitiesPOST(jsonReq({ taskTypeId: fixtureTaskTypeId, title: `ICWA Inline Activity ${RUN_ID}`, departmentId: deptA.id }));
     const inlineActivity = await inlineActivityRes.json();
     activityIds.push(inlineActivity.id);
     const a1 = await activityAttachPOST(uploadReq(`http://localhost/api/activities/${inlineActivity.id}/attachments`, "act.png", "image/png", [3]), { params: Promise.resolve({ id: inlineActivity.id }) });
@@ -336,6 +340,7 @@ async function main() {
       ["activityAttachments", () => prisma.activityAttachment.deleteMany({ where: { activityId: { in: activityIds } } })],
       ["tickets", () => prisma.ticket.deleteMany({ where: { id: { in: ticketIds } } })],
       ["activities", () => prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } })],
+      ["fixture task type", () => (fixtureTaskTypeId ? prisma.taskType.delete({ where: { id: fixtureTaskTypeId } }) : Promise.resolve())],
       ["projects", () => prisma.project.deleteMany({ where: { id: { in: projectIds } } })],
       ["departmentMemberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["users", () => prisma.user.deleteMany({ where: { id: { in: userIds } } })],

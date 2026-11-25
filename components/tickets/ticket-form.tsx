@@ -20,7 +20,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Check, Loader2, Paperclip, Plus } from "lucide-react";
-import { AttachmentDropzone } from "@/components/tickets/attachment-dropzone";
+import { AttachmentDropzone, StagedAttachmentList } from "@/components/attachments/attachment-dropzone";
+import { uploadAttachmentFile } from "@/lib/attachment-upload-client";
 import { SimpleCommentBox } from "@/components/tickets/simple-comment-box";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
@@ -439,9 +440,8 @@ export function CreateTicketForm({
   }, [selectedDepartmentId]);
 
   const uploadAttachment = async (ticketId: string, file: File) => {
-    const fd = new FormData();
-    fd.append("file", file);
-    await fetch(`/api/tickets/${ticketId}/attachments`, { method: "POST", body: fd });
+    const result = await uploadAttachmentFile(`/api/tickets/${ticketId}/attachments`, file);
+    if (!result.ok) throw new Error(`${file.name}: ${result.error}`);
   };
 
   const postInitialMessage = async (ticketId: string, body: string) => {
@@ -470,7 +470,11 @@ export function CreateTicketForm({
 
       // Upload attachments (best-effort, non-blocking on error)
       if (files.length > 0) {
-        await Promise.allSettled(files.map((f) => uploadAttachment(ticket.id, f)));
+        const results = await Promise.allSettled(files.map((f) => uploadAttachment(ticket.id, f)));
+        const failedUploads = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+        if (failedUploads.length > 0) {
+          toast.error(`${failedUploads.length} attachment(s) could not be uploaded: ${failedUploads.map((r) => (r.reason instanceof Error ? r.reason.message : String(r.reason))).join("; ")}`);
+        }
       }
 
       // Post any saved initial messages
@@ -548,7 +552,10 @@ export function CreateTicketForm({
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <AttachmentDropzone files={files} onFilesChange={setFiles} />
+              <div className="space-y-3">
+                <AttachmentDropzone existing={files} disabled={isSubmitting} onFiles={(added) => setFiles((prev) => [...prev, ...added])} />
+                <StagedAttachmentList files={files} disabled={isSubmitting} onRemove={(i) => setFiles((prev) => prev.filter((_, idx) => idx !== i))} />
+              </div>
             </CardContent>
           </Card>
 

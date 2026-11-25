@@ -5,8 +5,10 @@
  * BEFORE: the requester filled in a required `businessAssessment` field on
  * the Project Request Form itself.
  * AFTER: the requester never fills in any assessment. Instead, whoever
- * decides the request (Approve or Reject) must supply a mandatory Business
- * Assessment in a shared confirmation dialog at decision time. That text is
+ * decides the request (Approve or Reject) may supply an OPTIONAL Business
+ * Assessment in a shared confirmation dialog at decision time (made
+ * optional for both approve and reject — empty/whitespace/omitted persists
+ * as null). That text is
  * stored on `ProjectRequest.businessAssessment` (an approver-side field,
  * null until decided). Any PRE-EXISTING requester-filled value from before
  * this change was preserved, never destroyed, under a new
@@ -106,14 +108,29 @@ async function main() {
   const forgedParse = createProjectRequestSchema.safeParse({ ...minimalPayload, businessAssessment: "forged at create time" });
   check("2/3. A forged businessAssessment key on the create payload is stripped by the schema itself (not an error, not persisted)", forgedParse.success && !("businessAssessment" in (forgedParse as any).data));
 
-  // 6/7. The decision schema requires businessAssessment, rejects empty/whitespace, caps length.
-  check("6/7. projectRequestApprovalDecisionSchema REQUIRES businessAssessment (missing key fails)", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve" }).success);
-  check("7. Empty string businessAssessment fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "" }).success);
-  check("7. Whitespace-only businessAssessment fails (trimmed to empty)", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "   \n\t  " }).success);
-  check("7. Over-length (5001 chars) businessAssessment fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "x".repeat(5001) }).success);
+  // 6/7. The decision schema makes businessAssessment OPTIONAL (normalized to null), still caps length.
+  const missingParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve" });
+  check("6/7. projectRequestApprovalDecisionSchema accepts a MISSING businessAssessment (optional) -> null", missingParse.success && (missingParse as any).data.businessAssessment === null);
+  const emptyParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "" });
+  check("7. Empty string businessAssessment passes and normalizes to null (reject too)", emptyParse.success && (emptyParse as any).data.businessAssessment === null);
+  const wsParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "   \n\t  " });
+  check("7. Whitespace-only businessAssessment passes and normalizes to null", wsParse.success && (wsParse as any).data.businessAssessment === null);
+  const nullParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: null });
+  check("7. Explicit null businessAssessment passes -> null", nullParse.success && (nullParse as any).data.businessAssessment === null);
+  check("7. Over-length (5001 chars) businessAssessment STILL fails", !projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "x".repeat(5001) }).success);
+
+  // Requester-side optional fields: Team Concerned + Expected Benefits.
+  const { teamConcerned: _tc, expectedBenefits: _eb, ...withoutOptional } = minimalPayload;
+  const omittedOptional = createProjectRequestSchema.safeParse(withoutOptional);
+  check("R1. createProjectRequestSchema accepts a payload with Team Concerned and Expected Benefits OMITTED -> both null", omittedOptional.success && (omittedOptional as any).data.teamConcerned === null && (omittedOptional as any).data.expectedBenefits === null);
+  const blankOptional = createProjectRequestSchema.safeParse({ ...minimalPayload, teamConcerned: "  ", expectedBenefits: "" });
+  check("R1. ...and with both BLANK/whitespace -> both normalized to null", blankOptional.success && (blankOptional as any).data.teamConcerned === null && (blankOptional as any).data.expectedBenefits === null);
+  check("R2. A populated Team Concerned still enforces its max length (201 chars fails)", !createProjectRequestSchema.safeParse({ ...minimalPayload, teamConcerned: "x".repeat(201) }).success);
+  check("R2. A populated Expected Benefits still enforces its max length (5001 chars fails)", !createProjectRequestSchema.safeParse({ ...minimalPayload, expectedBenefits: "x".repeat(5001) }).success);
+  check("R3. The requester form shows neither field as required (no asterisk)", !/Team concerned <span className="text-destructive">\*/.test(formSrc) && !/Expected benefits <span className="text-destructive">\*/.test(formSrc));
   const trimParse = projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "  Looks solid.  " });
   check("9. A valid businessAssessment passes and is persisted-ready TRIMMED by the schema itself", trimParse.success && (trimParse as any).data.businessAssessment === "Looks solid.");
-  check("...and 'reject' accepts the exact same mandatory field (never optional for reject)", projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success);
+  check("...and 'reject' accepts the exact same field", projectRequestApprovalDecisionSchema.safeParse({ decision: "reject", businessAssessment: "Not viable." }).success);
   check(
     "...FINAL approval no longer requires (or even accepts a meaningful) projectOwnerId — Project setup moved to a separate follow-up step, see scripts/test-project-request-project-creation.ts",
     projectRequestApprovalDecisionSchema.safeParse({ decision: "approve", businessAssessment: "Looks solid." }).success
@@ -136,15 +153,15 @@ async function main() {
   check("5. The Reject button's onClick ONLY sets pendingDecision state (opens the dialog) — same shared flow as Approve", rejectButtonBlock !== null);
   check("...neither button's onClick handler calls fetch/submit directly", !/onClick=\{\(\) => setPendingDecision\("(approve|reject)"\)\}[^}]*fetch/.test(actionsSrc));
 
-  // 7 (client). Empty/whitespace-only is blocked before onConfirm ever fires
-  // (gated by assessmentRequired, which is true/default for the FINAL
-  // stage this file is about — the intermediate stage passes
-  // assessmentRequired={false} and never shows this field at all, see
-  // scripts/test-project-request-intermediate-approval.ts).
+  // 7 (client). The FINAL-stage dialog still SHOWS Business Assessment
+  // (showAssessment defaults true — the intermediate stage passes false),
+  // but labels it optional and never blocks confirm on an empty value.
   check(
-    "7. The dialog computes isEmpty from the TRIMMED value and blocks confirm when empty (client-side gate, independent of the server's own re-check)",
-    /isEmpty = value\.trim\(\)\.length === 0/.test(dialogSrc) && /if \(assessmentRequired && isEmpty\) return;/.test(dialogSrc)
+    "7. The dialog shows Business Assessment by default, labelled optional, and never blocks confirm when it is empty",
+    /showAssessment = true/.test(dialogSrc) && /\(optional\)/.test(dialogSrc) && !/isEmpty\) return;/.test(dialogSrc) && !/aria-required="true"/.test(dialogSrc)
   );
+  const tableSrc = await fs.readFile("components/project-requests/project-request-table.tsx", "utf8");
+  check("7. The list's inline approve/reject actions reuse the SAME shared dialog (so they get the same optional behavior)", /<ProjectRequestDecisionDialog/.test(tableSrc) && !/showAssessment=\{false\}/.test(tableSrc));
   check("...maxLength={5000} matches every other large Project Request text field", /maxLength=\{MAX_LENGTH\}/.test(dialogSrc) && /MAX_LENGTH = 5000/.test(dialogSrc));
 
   // 8/14. Cancel/Escape closes without mutation; a failed submit keeps the
@@ -321,23 +338,49 @@ async function main() {
     check("3. ...businessAssessment (approver field) is null — the forged create-time value never reached it", forgedCreateRow.businessAssessment === null);
     check("3. ...legacyRequesterBusinessAssessment is also null — the forged value never reached that field either", forgedCreateRow.legacyRequesterBusinessAssessment === null);
 
-    // ══════════════════════ 7 (server). Empty / whitespace-only rejected server-side ══════════════════════
-    console.log("\n=== 7. Empty and whitespace-only businessAssessment are rejected server-side on the real route ===\n");
+    // ══════════════════════ 7 (server). Over-length still rejected server-side ══════════════════════
+    console.log("\n=== 7. An over-length businessAssessment is still rejected server-side on the real route ===\n");
     const { body: mainSubmit } = await submitAndClearIntermediate(
       { ...basePayload, title: `PR BA Main ${RUN_ID}` },
       { id: requester.id, role: Role.USER, customRoleId: null }
     );
 
     currentSession = { user: { id: approverUser.id, role: Role.USER, customRoleId: null } };
-    const missingRes = await approvalPOST(jsonReq("POST", { decision: "approve", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
-    check("7. Missing businessAssessment key -> 422 (zod rejection, never reaches decideApproval)", missingRes.status === 422);
-    const emptyRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
-    check("7. Empty string businessAssessment -> 422", emptyRes.status === 422);
-    const whitespaceRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "   \n\t  ", projectOwnerId: projectOwnerUser.id }), { params: Promise.resolve({ id: mainSubmit.id }) });
-    check("7. Whitespace-only businessAssessment -> 422", whitespaceRes.status === 422);
+    const overLengthRes = await approvalPOST(jsonReq("POST", { decision: "approve", businessAssessment: "x".repeat(5001) }), { params: Promise.resolve({ id: mainSubmit.id }) });
+    check("7. Over-length (5001 chars) businessAssessment -> 422", overLengthRes.status === 422);
     const stillPending = await prisma.projectRequest.findUniqueOrThrow({ where: { id: mainSubmit.id } });
-    check("7. ...none of the three rejected attempts changed the status — still PENDING_APPROVAL", stillPending.status === "PENDING_APPROVAL");
-    check("7. ...and none of them persisted anything into businessAssessment", stillPending.businessAssessment === null);
+    check("7. ...the rejected attempt did not change the status — still PENDING_APPROVAL", stillPending.status === "PENDING_APPROVAL");
+    check("7. ...and persisted nothing into businessAssessment", stillPending.businessAssessment === null);
+
+    // ══════════════════════ 7b. Optional fields end-to-end ══════════════════════
+    console.log("\n=== 7b. Optional requester fields + optional Business Assessment, end-to-end on the real routes ===\n");
+    const { teamConcerned: _tc2, expectedBenefits: _eb2, ...basePayloadWithoutOptional } = basePayload;
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
+    const { res: optApproveCreateRes, body: optApproveSubmit } = await submitAndClearIntermediate(
+      { ...basePayloadWithoutOptional, title: `PR BA Optional Approve ${RUN_ID}` },
+      { id: approverUser.id, role: Role.USER, customRoleId: null }
+    );
+    check("7b. A request submitted with Team Concerned + Expected Benefits OMITTED -> 201", optApproveCreateRes.status === 201);
+    const optApproveRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: optApproveSubmit.id } });
+    check("7b. ...both persisted as null", optApproveRow.teamConcerned === null && optApproveRow.expectedBenefits === null);
+    const optApproveRes = await approvalPOST(jsonReq("POST", { decision: "approve" }), { params: Promise.resolve({ id: optApproveSubmit.id }) });
+    check("7b. FINAL approval with NO businessAssessment -> 200", optApproveRes.status === 200);
+    const optApproved = await prisma.projectRequest.findUniqueOrThrow({ where: { id: optApproveSubmit.id } });
+    check("7b. ...status APPROVED, approver + timestamp recorded, businessAssessment null", optApproved.status === "APPROVED" && optApproved.approverId === approverUser.id && optApproved.approvedAt !== null && optApproved.businessAssessment === null);
+    check("7b. ...the requester was notified of the approval", (await prisma.notification.count({ where: { userId: requester.id, link: `/project-requests/${optApproveSubmit.id}`, title: "Project Request approved" } })) === 1);
+
+    currentSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
+    const { res: optRejectCreateRes, body: optRejectSubmit } = await submitAndClearIntermediate(
+      { ...basePayload, teamConcerned: "", expectedBenefits: "   ", title: `PR BA Optional Reject ${RUN_ID}` },
+      { id: approverUser.id, role: Role.USER, customRoleId: null }
+    );
+    check("7b. A request submitted with Team Concerned + Expected Benefits BLANK -> 201", optRejectCreateRes.status === 201);
+    const optRejectRow = await prisma.projectRequest.findUniqueOrThrow({ where: { id: optRejectSubmit.id } });
+    check("7b. ...both normalized to null", optRejectRow.teamConcerned === null && optRejectRow.expectedBenefits === null);
+    const optRejectRes = await approvalPOST(jsonReq("POST", { decision: "reject", businessAssessment: "   " }), { params: Promise.resolve({ id: optRejectSubmit.id }) });
+    check("7b. FINAL rejection with a whitespace-only businessAssessment -> 200", optRejectRes.status === 200);
+    const optRejected = await prisma.projectRequest.findUniqueOrThrow({ where: { id: optRejectSubmit.id } });
+    check("7b. ...status REJECTED, rejectedAt recorded, businessAssessment null", optRejected.status === "REJECTED" && optRejected.rejectedAt !== null && optRejected.businessAssessment === null);
 
     // ══════════════════════ 11. Unauthorized / terminal action -> no assessment, no notification ══════════════════════
     console.log("\n=== 11. Unauthorized decision attempt persists no assessment and sends no notification ===\n");

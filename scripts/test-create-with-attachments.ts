@@ -61,7 +61,11 @@ async function main() {
   check("A1. A synchronous (non-state) guard rejects a second submit() while one is already in flight or already succeeded", /if \(submittingRef\.current \|\| createdEntity\)/.test(hookSrc));
   check("A2. retryFailed() only ever re-uploads entries currently marked \"failed\" — a success is never re-sent", /const failed = entries\.filter\(\(e\) => e\.status === "failed"\)/.test(hookSrc));
   check("A3. Each upload targets the REAL server-issued entity id, never a client-generated one (uploadBasePath(created.id), called only after createFn() resolved)", /uploadBasePath\(created\.id\)/.test(hookSrc) && hookSrc.indexOf("created = await createFn()") < hookSrc.indexOf("uploadBasePath(created.id)"));
-  check("A4. Files are uploaded via FormData POST to `${basePath}/attachments` — the EXISTING protected route, not a new endpoint", /fetch\(`\$\{basePath\}\/attachments`, \{ method: "POST", body: fd \}\)/.test(hookSrc));
+  const uploadClientSrc = await fs.readFile("lib/attachment-upload-client.ts", "utf8");
+  check(
+    "A4. Files are uploaded via FormData POST to `${basePath}/attachments` — the EXISTING protected route, not a new endpoint (through the shared upload helper)",
+    /uploadAttachmentFile\(`\$\{basePath\}\/attachments`, file/.test(hookSrc) && /fd\.append\("file", file\)/.test(uploadClientSrc) && /xhr\.open\("POST", url\)/.test(uploadClientSrc)
+  );
   check("A5. No entity is ever deleted from this file (a failed attachment never rolls back the created entity)", !/\.delete\(/.test(hookSrc) && !/method: "DELETE"/.test(hookSrc));
 
   const panelSrc = await fs.readFile("components/attachments/post-create-upload-panel.tsx", "utf8");
@@ -160,8 +164,12 @@ async function main() {
     return r;
   }
 
+  let fixtureTaskTypeId: string | null = null;
   try {
     const deptA = await createDepartment({ name: `CWA Dept A ${RUN_ID}`, slug: `cwa-a-${RUN_ID}` });
+    // Task Type is REQUIRED for every Activity (createActivitySchema) — fixture supplies one.
+    const fixtureTaskType = await prisma.taskType.create({ data: { name: `CWA TaskType ${RUN_ID}` } });
+    fixtureTaskTypeId = fixtureTaskType.id;
     deptIds.push(deptA.id);
 
     const noopGlobalRole = await makeCustomRole("NOOP_GLOBAL", RoleScope.GLOBAL, []);
@@ -216,7 +224,7 @@ async function main() {
 
     // ── 2. Activity created with one and multiple attachments ──
     console.log("\n-- 2. Activity created with attachments, same two-step flow --\n");
-    const activityRes = await activitiesPOST(jsonReq({ title: `CWA Activity ${RUN_ID}`, departmentId: deptA.id }));
+    const activityRes = await activitiesPOST(jsonReq({ taskTypeId: fixtureTaskTypeId, title: `CWA Activity ${RUN_ID}`, departmentId: deptA.id }));
     const activityResBody = await activityRes.clone().json().catch(() => ({}));
     check("Activity create -> 201", activityRes.status === 201, `status=${activityRes.status} body=${JSON.stringify(activityResBody)}`);
     const activity = await activityRes.json();
@@ -276,7 +284,7 @@ async function main() {
     check("7b. ...but the post-create upload is REJECTED with 403 — create never implies edit, and the server (not the client) enforces this", createOnlyUploadAttempt.status === 403);
     check("7c. No row was created by the rejected upload", (await prisma.projectAttachment.count({ where: { projectId: createOnlyProject.id } })) === 0);
 
-    const createOnlyActivityRes = await activitiesPOST(jsonReq({ title: `CWA CreateOnly Activity ${RUN_ID}`, departmentId: deptA.id }));
+    const createOnlyActivityRes = await activitiesPOST(jsonReq({ taskTypeId: fixtureTaskTypeId, title: `CWA CreateOnly Activity ${RUN_ID}`, departmentId: deptA.id }));
     const createOnlyActivity = await createOnlyActivityRes.json();
     activityIds.push(createOnlyActivity.id);
     const createOnlyActivityUpload = await activityAttachPOST(uploadReq(`http://localhost/api/activities/${createOnlyActivity.id}/attachments`, "sneaky2.pdf", "application/pdf", [1]), { params: Promise.resolve({ id: createOnlyActivity.id }) });
@@ -309,6 +317,7 @@ async function main() {
       ["projectAttachments", () => prisma.projectAttachment.deleteMany({ where: { projectId: { in: projectIds } } })],
       ["activityAttachments", () => prisma.activityAttachment.deleteMany({ where: { activityId: { in: activityIds } } })],
       ["activities", () => prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } })],
+      ["fixture task type", () => (fixtureTaskTypeId ? prisma.taskType.delete({ where: { id: fixtureTaskTypeId } }) : Promise.resolve())],
       ["projects", () => prisma.project.deleteMany({ where: { id: { in: projectIds } } })],
       ["departmentMemberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } })],
       ["users", () => prisma.user.deleteMany({ where: { id: { in: userIds } } })],
