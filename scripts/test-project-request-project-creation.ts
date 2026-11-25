@@ -946,8 +946,46 @@ async function main() {
       projectIds.push(standaloneBU.id);
       const standaloneBURow = await prisma.project.findUniqueOrThrow({ where: { id: standaloneBU.id }, include: { audienceBusinessUnits: true } });
       check("AUD4. Standalone Project creation STILL accepts Audience Business Units (unchanged)", standaloneBURes.status === 201 && standaloneBURow.audienceBusinessUnits.some((b) => b.id === audBU.id));
-      const editBURes = await projectsPATCH(jsonReq({ audienceBusinessUnitIds: [audBU.id] }, "PATCH"), { params: Promise.resolve({ id: audOk.id }) });
-      check("AUD5. Editing (PATCH) Audience is unchanged — shared functionality untouched", editBURes.status === 200);
+      const audBU2 = await prisma.businessUnit.create({ data: { name: `PR Creation BU2 ${RUN_ID}`, companyId: audCompany.id } });
+      try {
+        const busOf = async (pid: string) => (await prisma.project.findUniqueOrThrow({ where: { id: pid }, include: { audienceBusinessUnits: true, audienceDepartments: true } }));
+        const patch = (pid: string, body: Record<string, unknown>) => projectsPATCH(jsonReq(body, "PATCH"), { params: Promise.resolve({ id: pid }) });
+
+        // Newly created Request-origin Project (audOk) and an EXISTING one created earlier in this run (mappingProject).
+        for (const [label, pid] of [["new request-origin", audOk.id], ["existing request-origin", mappingProject.id]] as const) {
+          const addRes = await patch(pid, { audienceBusinessUnitIds: [audBU.id] });
+          const addBody = await addRes.json();
+          check(`AUD5. ${label}: PATCH adding an Audience Business Unit -> 422 audience_business_units_not_allowed`, addRes.status === 422 && addBody.code === "audience_business_units_not_allowed", `${addRes.status} ${JSON.stringify(addBody)}`);
+          check(`AUD5. ${label}: ...and no Business Unit association was created`, (await busOf(pid)).audienceBusinessUnits.length === 0);
+          const deptRes = await patch(pid, { audienceIds: [], audienceDepartmentIds: [dept.id] });
+          check(`AUD6. ${label}: Users/Departments Audience still editable (200, Department saved)`, deptRes.status === 200 && (await busOf(pid)).audienceDepartments.some((d) => d.id === dept.id));
+        }
+
+        // A Request-origin Project WITH a historical Business Unit association (e.g. pre-existing data).
+        await prisma.project.update({ where: { id: mappingProject.id }, data: { audienceBusinessUnits: { connect: [{ id: audBU.id }] } } });
+        const keepRes = await patch(mappingProject.id, { title: `PR Creation Mapping Keep BU ${RUN_ID}` });
+        check("AUD7. Historical BU association is NOT removed by an unrelated edit (field omitted)", keepRes.status === 200 && (await busOf(mappingProject.id)).audienceBusinessUnits.map((b) => b.id).join() === audBU.id);
+        const sameRes = await patch(mappingProject.id, { audienceBusinessUnitIds: [audBU.id] });
+        check("AUD7. Re-sending the SAME historical BU is allowed (no new association) -> 200, kept", sameRes.status === 200 && (await busOf(mappingProject.id)).audienceBusinessUnits.length === 1);
+        const addSecond = await patch(mappingProject.id, { audienceBusinessUnitIds: [audBU.id, audBU2.id] });
+        check("AUD7. Adding a SECOND BU to it -> 422, still only the historical one", addSecond.status === 422 && (await busOf(mappingProject.id)).audienceBusinessUnits.length === 1);
+        const removeRes = await patch(mappingProject.id, { audienceBusinessUnitIds: [] });
+        check("AUD7. Explicitly removing the historical BU through the API is still possible (never automatic) -> 200", removeRes.status === 200 && (await busOf(mappingProject.id)).audienceBusinessUnits.length === 0);
+
+        // Standalone Projects keep full Business Unit editing.
+        const saAdd = await patch(standaloneBU.id, { audienceBusinessUnitIds: [audBU.id, audBU2.id] });
+        check("AUD8. Standalone Project: PATCH adding Business Units still works (200, both saved)", saAdd.status === 200 && (await busOf(standaloneBU.id)).audienceBusinessUnits.length === 2);
+        const saRemove = await patch(standaloneBU.id, { audienceBusinessUnitIds: [audBU2.id] });
+        check("AUD8. Standalone Project: removing one still works", saRemove.status === 200 && (await busOf(standaloneBU.id)).audienceBusinessUnits.map((b) => b.id).join() === audBU2.id);
+
+        const editSrc = await fs.readFile("app/(main)/projects/[id]/edit/page.tsx", "utf8");
+        check("AUD9. Edit page hides the Business Units selector for Request-origin Projects (gated on the persisted projectRequestId)", /\{!projectRequestId && \(\s*<div className="space-y-2">\s*<Label htmlFor="project-audience-business-units">/.test(editSrc));
+        check("AUD9. ...and never sends audienceBusinessUnitIds for them (so historical associations are never cleared by a save)", /\.\.\.\(projectRequestId \? \{\} : \{ audienceBusinessUnitIds: Array\.from\(selectedAudienceBusinessUnitIds\) \}\)/.test(editSrc));
+      } finally {
+        await prisma.project.update({ where: { id: mappingProject.id }, data: { audienceBusinessUnits: { set: [] } } }).catch(() => {});
+        await prisma.project.update({ where: { id: standaloneBU.id }, data: { audienceBusinessUnits: { set: [] } } }).catch(() => {});
+        await prisma.businessUnit.delete({ where: { id: audBU2.id } }).catch((e) => console.error("BU2 cleanup failed", e));
+      }
     } finally {
       await prisma.businessUnit.delete({ where: { id: audBU.id } }).catch((e) => console.error("BU cleanup failed", e));
       await prisma.company.delete({ where: { id: audCompany.id } }).catch((e) => console.error("Company cleanup failed", e));

@@ -282,6 +282,23 @@ export async function PATCH(
     // and Business Unit audience are independently omittable — resolving
     // BOTH together only when both are actually present would otherwise
     // wrongly treat an omitted one as "clear it".
+    // Business Unit Audience is not available for Projects created from a
+    // Project Request (persisted origin: projectRequestId), matching
+    // createProjectFromRequestSchema at creation time. A PATCH may keep or
+    // remove existing (historical) Business Unit associations but may never
+    // ADD one — and since the edit page doesn't send this field for such a
+    // Project, historical associations are never removed automatically.
+    if (existing.projectRequestId && audienceBusinessUnitIds !== undefined) {
+      const current = await prisma.project.findUnique({ where: { id }, select: { audienceBusinessUnits: { select: { id: true } } } });
+      const currentIds = new Set((current?.audienceBusinessUnits ?? []).map((b) => b.id));
+      if (audienceBusinessUnitIds.some((buId) => !currentIds.has(buId))) {
+        return NextResponse.json(
+          { error: "Business Units cannot be added to the Audience of a Project created from a Project Request.", code: "audience_business_units_not_allowed" },
+          { status: 422 }
+        );
+      }
+    }
+
     let resolvedAudienceDepartmentIds: string[] | undefined;
     let resolvedAudienceBusinessUnitIds: string[] | undefined;
     if (audienceDepartmentIds !== undefined || audienceBusinessUnitIds !== undefined) {

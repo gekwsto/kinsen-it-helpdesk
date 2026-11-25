@@ -421,7 +421,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           memberIds: Array.from(selectedMemberIds),
           audienceIds: Array.from(selectedAudienceIds),
           audienceDepartmentIds: Array.from(selectedAudienceDepartmentIds),
-          audienceBusinessUnitIds: Array.from(selectedAudienceBusinessUnitIds),
+          // Not sent for a Request-origin Project (Business Unit Audience is
+          // unavailable there; omitting the key keeps any historical
+          // associations untouched — see PATCH /api/projects/[id]).
+          ...(projectRequestId ? {} : { audienceBusinessUnitIds: Array.from(selectedAudienceBusinessUnitIds) }),
           responsiblePeopleIds: Array.from(selectedResponsiblePeopleIds),
           isGoal,
           subDepartmentId: subDepartmentId || null,
@@ -1044,6 +1047,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               )}
             </div>
 
+            {/* Business Unit Audience is not available for a Project created
+                from a Project Request (persisted origin) — enforced
+                server-side too. Standalone Projects unchanged. */}
+            {!projectRequestId && (
             <div className="space-y-2">
               <Label htmlFor="project-audience-business-units">Audience — Business Units</Label>
               <p className="text-xs text-muted-foreground">Optional — every active member of any Department under the selected Business Unit(s) can view this Project, dynamically.</p>
@@ -1065,6 +1072,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No business units exist.</p>
               )}
             </div>
+            )}
 
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>
