@@ -18,6 +18,12 @@ import {
 } from "@/lib/services/assignment-eligibility-service";
 import { comparePriorityDesc } from "@/lib/activity-priority";
 import { getActivityStatusDisplayConfigsForDepartments, resolveActivityStatusDisplay } from "@/lib/services/activity-status-config";
+import {
+  DEFAULT_TIMELINE_MODE,
+  activityTimelineFields,
+  resolveResourcePlanningActivityDates,
+  type TimelineMode,
+} from "@/lib/timeline-mode";
 
 export interface ResourcePlanningResource extends AssignableUserSummary {
   /** Which assignability check(s) this resource qualified through — shown as a badge only when it's not both. */
@@ -41,7 +47,10 @@ export interface ResourceEvent {
   isFallbackDate: boolean;
   assignedUserIds: string[];
   /** Why this landed in `unscheduled` instead of `events` — null for anything in `events`. Two genuinely different reasons ("no dates" vs "no assignee") share the one Unscheduled bucket (see getResourcePlanningEvents) so the panel can still show accurate copy per item instead of a blanket message that's wrong for half of them. */
-  unscheduledReason: "no-dates" | "no-assignee" | null;
+  /** "no-expected-dates" only ever occurs in Expected timeline mode: Expected Start and/or Expected Finish is missing (no Actual fallback — see lib/timeline-mode.ts). */
+  unscheduledReason: "no-dates" | "no-expected-dates" | "no-assignee" | null;
+  /** Record version (updatedAt ISO) — lets the timeline tell a stale refresh from a newer committed drag (lib/timeline-reconcile.ts). */
+  updatedAt?: string;
 }
 
 /**
@@ -118,6 +127,8 @@ export interface ResourcePlanningEventFilters {
   priority?: ActivityPriority | null;
   rangeStart: Date;
   rangeEnd: Date;
+  /** Which date fields place, range-filter and lane events — defaults to "actual" (the pre-existing behaviour). */
+  timelineMode?: TimelineMode;
 }
 
 export interface ResourcePlanningEventsResult {
@@ -171,6 +182,7 @@ export async function getResourcePlanningEvents(
   filters: ResourcePlanningEventFilters
 ): Promise<ResourcePlanningEventsResult> {
   const { departmentId, subDepartmentId, projectId, status, priority, rangeStart, rangeEnd } = filters;
+  const timelineMode = filters.timelineMode ?? DEFAULT_TIMELINE_MODE;
 
   // ProjectActivity.departmentId is nullable — rows predating department
   // scoping (or created by a path that never set it, e.g. seed/import data)
@@ -201,7 +213,7 @@ export async function getResourcePlanningEvents(
       assignedUsers: { select: { id: true } },
       project: { select: { id: true, title: true } },
     },
-    orderBy: [{ priority: "desc" }, { startDate: "asc" }],
+    orderBy: [{ priority: "desc" }, { [activityTimelineFields(timelineMode).start]: "asc" }],
   });
 
   const events: ResourceEvent[] = [];
@@ -216,8 +228,12 @@ export async function getResourcePlanningEvents(
   const statusDisplayConfigs = await getActivityStatusDisplayConfigsForDepartments([departmentId]);
 
   for (const a of activities) {
-    const start = a.startDate ?? a.dueDate;
-    const end = a.dueDate ?? a.startDate;
+    // Mode-resolved dates (lib/timeline-mode.ts): Actual keeps the
+    // single-side fallback exactly as before; Expected requires BOTH
+    // Expected dates and never falls back to Actual. Everything below —
+    // unscheduled bucketing, the range-overlap filter, sorting, and
+    // (client-side) lanes/overlaps/utilization — reads only these.
+    const { start, end, isFallbackDate } = resolveResourcePlanningActivityDates(a, timelineMode);
     const activityAssignedUserIds = a.assignedUsers.map((u) => u.id);
     for (const id of activityAssignedUserIds) assignedUserIds.add(id);
     const statusDisplay = resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status);
@@ -231,6 +247,7 @@ export async function getResourcePlanningEvents(
       statusColor: statusDisplay.color,
       priority: a.priority,
       assignedUserIds: activityAssignedUserIds,
+      updatedAt: a.updatedAt.toISOString(),
     };
 
     // No assignee at all -> there is no resource row it could ever render
@@ -243,7 +260,7 @@ export async function getResourcePlanningEvents(
     }
 
     if (!start || !end) {
-      unscheduled.push({ ...base, start: null, end: null, isFallbackDate: false, unscheduledReason: "no-dates" });
+      unscheduled.push({ ...base, start: null, end: null, isFallbackDate: false, unscheduledReason: timelineMode === "expected" ? "no-expected-dates" : "no-dates" });
       continue;
     }
 
@@ -254,8 +271,9 @@ export async function getResourcePlanningEvents(
       start: start.toISOString(),
       end: end.toISOString(),
       // True when only one of startDate/dueDate was actually set — the
-      // other side is a single-day fallback, not a real range.
-      isFallbackDate: !a.startDate || !a.dueDate,
+      // other side is a single-day fallback, not a real range. Always
+      // false in Expected mode (no fallback exists there).
+      isFallbackDate,
       unscheduledReason: null,
     });
   }
@@ -284,6 +302,7 @@ export interface ResourcePlanningDataFilters {
   priority?: ActivityPriority | null;
   rangeStart: Date;
   rangeEnd: Date;
+  timelineMode?: TimelineMode;
 }
 
 export type ResourcePlanningDataResult =
@@ -315,6 +334,7 @@ export async function getResourcePlanningData(
     priority: filters.priority,
     rangeStart: filters.rangeStart,
     rangeEnd: filters.rangeEnd,
+    timelineMode: filters.timelineMode,
   });
 
   const resources = await getResourcePlanningResources(filters.departmentId, filters.subDepartmentId, assignedUserIds);

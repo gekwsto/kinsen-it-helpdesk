@@ -41,6 +41,9 @@ const PROJECT_LIST_RELEVANT_FIELDS = [
   "subDepartmentId",
   "startDate",
   "endDate",
+  // Shown on the Project list; written by an Expected-mode timeline drag.
+  "expectedStartDate",
+  "expectedFinishDate",
   "memberIds",
 ] as const;
 

@@ -49,9 +49,23 @@ async function login(page: Page) {
 async function dragBar(
   page: Page,
   bar: ReturnType<Page["getByText"]>,
-  opts: { dxPx?: number; dyPx?: number; steps?: number; stepPauseMs?: number; releaseOutside?: boolean }
+  opts: { dxPx?: number; dyPx?: number; steps?: number; stepPauseMs?: number; releaseOutside?: boolean; expect?: "patch" | "none" | "navigate" | "async" }
 ) {
-  const { dxPx = 0, dyPx = 0, steps = 10, stepPauseMs = 0, releaseOutside = false } = opts;
+  const { dxPx = 0, dyPx = 0, steps = 10, stepPauseMs = 0, releaseOutside = false, expect = "patch" } = opts;
+  // Completion is awaited on the event this gesture should produce (no fixed
+  // sleep): the PATCH response, the click's navigation, or — for gestures
+  // that must NOT write — a bounded window in which any PATCH would be seen.
+  const isPatch = (r: { url(): string; request(): { method(): string } }) => r.url().includes("/api/activities/") && r.request().method() === "PATCH";
+  const completion =
+    expect === "patch" ? page.waitForResponse(isPatch, { timeout: 15000 }).then(() => undefined).catch(() => undefined)
+    : expect === "none" ? page.waitForResponse(isPatch, { timeout: 1500 }).then(() => undefined).catch(() => undefined)
+    : expect === "navigate" ? page.waitForURL(/\/activities\//, { timeout: 15000 }).catch(() => undefined)
+    : Promise.resolve();
+  // Every assignable global admin gets a row too, so on a populated database
+  // this fixture's agent rows can sit below the fold — mouse events at
+  // off-screen coordinates hit nothing. Centre the bar first (vertical
+  // deltas between rows are relative, so they're unaffected).
+  await bar.first().evaluate((el) => el.scrollIntoView({ block: "center", inline: "nearest" }));
   const box = await bar.first().boundingBox();
   if (!box) throw new Error("bar not found for drag");
   const startX = box.x + box.width / 2;
@@ -67,7 +81,7 @@ async function dragBar(
     await page.mouse.move(startX + dxPx + 2000, startY + dyPx);
   }
   await page.mouse.up();
-  await page.waitForTimeout(350);
+  await completion;
 }
 
 async function main() {
@@ -105,11 +119,13 @@ async function main() {
       data: { title: `RP Verify Project ${RUN_ID}`, ownerId: agent1.id, departmentId: dept.id, status: ProjectStatus.IN_PROGRESS },
     });
 
-    const monday = new Date();
-    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7));
-    monday.setHours(0, 0, 0, 0);
-    const wed = new Date(monday);
-    wed.setDate(wed.getDate() + 2);
+    // Canonical date-only values (UTC midnight, lib/date-only.ts) — the
+    // convention the board's week range and every drag write use — for this
+    // UTC week's Monday and Wednesday.
+    const nowUtc = new Date();
+    const todayUtc = Date.UTC(nowUtc.getUTCFullYear(), nowUtc.getUTCMonth(), nowUtc.getUTCDate());
+    const monday = new Date(todayUtc - ((nowUtc.getUTCDay() + 6) % 7) * 86400000);
+    const wed = new Date(monday.getTime() + 2 * 86400000);
 
     async function makeActivity(title: string, agentId: string, start: Date, end: Date) {
       const a = await prisma.projectActivity.create({
@@ -163,8 +179,15 @@ async function main() {
     const boardUrl = `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}`;
     async function gotoBoard() {
       await page.goto(boardUrl);
-      await page.waitForLoadState("networkidle");
+      // Deterministic readiness (networkidle never settles: the header keeps
+      // a persistent realtime EventSource open) — the board has rendered the
+      // fixture's bar.
       await page.getByText("SameRow", { exact: false }).first().waitFor({ state: "visible", timeout: 10000 });
+      // ...and has hydrated: the today-column highlight is applied only in the
+      // browser after hydration (ResourceTimeline's client-only `today`), and
+      // this board always shows the current week. A gesture started before
+      // hydration would be ignored.
+      await page.locator("div.font-semibold.bg-primary\\/5").first().waitFor({ state: "attached", timeout: 10000 });
     }
 
     // ── 1. Repeated same-row drags (REPEAT_COUNT reps, per-run isolated by resetting dates) ──
@@ -223,6 +246,8 @@ async function main() {
     await prisma.projectActivity.update({ where: { id: crossRowActivity.id }, data: { startDate: monday, dueDate: wed, assignedUsers: { set: [{ id: agent1.id }] } } });
     await gotoBoard();
     {
+      // Same below-the-fold concern as dragBar: centre the bar before measuring.
+      await page.getByText("CrossRow", { exact: false }).first().evaluate((el) => el.scrollIntoView({ block: "center", inline: "nearest" }));
       const row1 = await page.locator("text=Verify Agent One").first().boundingBox();
       const row2 = await page.locator("text=Verify Agent Two").first().boundingBox();
       const dy = row1 && row2 ? row2.y - row1.y : 90;
@@ -239,7 +264,7 @@ async function main() {
           }
         }
         await page.mouse.up();
-        await page.waitForTimeout(350);
+        await page.waitForResponse((r) => r.url().includes("/api/activities/") && r.request().method() === "PATCH", { timeout: 15000 }).catch(() => undefined);
       }
     }
     {
@@ -253,7 +278,7 @@ async function main() {
     await prisma.projectActivity.update({ where: { id: sameRowActivity.id }, data: { startDate: monday, dueDate: wed } });
     await gotoBoard();
     before = patchLog.length;
-    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 2, steps: 2 });
+    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 2, steps: 2, expect: "navigate" });
     check("A <5px movement navigated to the activity detail page (click, not drag)", page.url().includes(`/activities/${sameRowActivity.id}`));
     check("...and did NOT fire a PATCH", patchLog.length - before === 0);
 
@@ -265,7 +290,7 @@ async function main() {
     await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: -30, steps: 6 });
     // second drag should move it back to the original position: net PATCH count is 2, both valid moves — instead verify a genuine zero-delta drop fires nothing:
     const zeroBefore = patchLog.length;
-    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 4, dyPx: 0, steps: 3 });
+    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 4, dyPx: 0, steps: 3, expect: "none" });
     check("A drop with sub-day horizontal movement and no row change fires no PATCH", patchLog.length === zeroBefore);
     void before;
 
@@ -274,9 +299,22 @@ async function main() {
     await prisma.projectActivity.update({ where: { id: sameRowActivity.id }, data: { startDate: monday, dueDate: wed } });
     await gotoBoard();
     before = patchLog.length;
-    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 60, steps: 4 });
-    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 60, steps: 4 });
-    await page.waitForTimeout(500);
+    // Second gesture starts right after the first drop, without waiting for
+    // its PATCH; then wait for both PATCH responses (event-driven).
+    const bothPatches = new Promise<void>((resolve) => {
+      let seen = 0;
+      const onResponse = (r: { url(): string; request(): { method(): string } }) => {
+        if (r.url().includes("/api/activities/") && r.request().method() === "PATCH" && ++seen === 2) {
+          page.off("response", onResponse);
+          resolve();
+        }
+      };
+      page.on("response", onResponse);
+      setTimeout(() => { page.off("response", onResponse); resolve(); }, 15000); // upper bound only — resolves as soon as both arrive
+    });
+    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 60, steps: 4, expect: "async" });
+    await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 60, steps: 4, expect: "async" });
+    await bothPatches;
     const rapidPatches = patchLog.slice(before);
     check("Two rapid consecutive drags each fire their own PATCH (2 total)", rapidPatches.length === 2);
     check("Both rapid-drag PATCHes succeeded", rapidPatches.every((p) => p.status === 200));
@@ -305,7 +343,7 @@ async function main() {
     check("Assignee unchanged after the injected failure", dbAfterFailure?.assignedUsers.some((u) => u.id === agent1!.id) === true);
     // reload and confirm the UI shows the reverted (original) position, not the failed optimistic one
     await page.reload();
-    await page.waitForLoadState("networkidle");
+    await page.getByText("CrossRow", { exact: false }).first().waitFor({ state: "visible", timeout: 10000 });
     const barStillOnAgent1 = await page.locator("text=Verify Agent One").locator("xpath=ancestor::div[contains(@class,'flex border-b')]").getByText("CrossRow", { exact: false }).count();
     check("After reload, the activity is still shown under its original agent (UI rollback held)", barStillOnAgent1 > 0);
 
@@ -316,7 +354,7 @@ async function main() {
     await dragBar(page, page.getByText("SameRow", { exact: false }), { dxPx: 60, steps: 8 });
     const dbAfterDrag = await prisma.projectActivity.findUnique({ where: { id: sameRowActivity.id }, select: { startDate: true } });
     await page.reload();
-    await page.waitForLoadState("networkidle");
+    await page.getByText("SameRow", { exact: false }).first().waitFor({ state: "visible", timeout: 10000 });
     const dbAfterReload = await prisma.projectActivity.findUnique({ where: { id: sameRowActivity.id }, select: { startDate: true } });
     check("Date persisted in the DB survives an independent page refresh (no client-only illusion)", dbAfterDrag?.startDate?.getTime() === dbAfterReload?.startDate?.getTime());
 

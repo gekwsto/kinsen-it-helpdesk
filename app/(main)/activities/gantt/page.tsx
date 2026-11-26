@@ -119,6 +119,7 @@ export default async function ActivityGanttPage({
           departmentId: true,
           startDate: true,
           endDate: true,
+          updatedAt: true,
           progress: true,
           owner: { select: { id: true, name: true, image: true } },
           facilitiesStartQuarter: true,
@@ -172,6 +173,8 @@ export default async function ActivityGanttPage({
       assigneeName: a.assignedUsers[0]?.name ?? null,
       assigneeImage: a.assignedUsers[0]?.image ?? null,
       type: (a.isMilestone ? "milestone" : "activity") as "milestone" | "activity",
+      // Record version — lets the chart tell a stale refresh from a newer committed drag.
+      updatedAt: a.updatedAt.toISOString(),
     };
 
     if (!a.project) {
@@ -186,6 +189,7 @@ export default async function ActivityGanttPage({
           status: a.project.status,
           startDate: a.project.startDate?.toISOString() ?? null,
           endDate: a.project.endDate?.toISOString() ?? null,
+          updatedAt: a.project.updatedAt.toISOString(),
           facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(a.project.facilitiesStartQuarter, a.project.facilitiesStartYear) : null,
           facilitiesEndLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(a.project.facilitiesEndQuarter, a.project.facilitiesEndYear) : null,
           progress: a.project.progress,

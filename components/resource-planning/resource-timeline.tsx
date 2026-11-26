@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { addDays, differenceInCalendarDays, format, isSameDay } from "date-fns";
+import { format, isSameDay } from "date-fns";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -25,8 +25,11 @@ import { getClippedBarMetrics } from "@/lib/resource-planning-bar-metrics";
 import { computePxPerDay } from "@/lib/resource-planning-column-sizing";
 import { computeResourceRowHeights } from "@/lib/resource-planning-row-heights";
 import { shiftActivityDate } from "@/lib/resource-planning-date-math";
+import { calendarDaysBetween, dateOnlyAsLocalDate, shiftDateOnly } from "@/lib/date-only";
+import { shouldKeepLocal, recordConfirmedWrite } from "@/lib/timeline-reconcile";
 import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
 import { STATUS_BAR, STATUS_LABEL, PRIORITY_CLS } from "@/components/gantt/status-colors";
+import { buildSchedulingPatch, DEFAULT_TIMELINE_MODE, type TimelineMode } from "@/lib/timeline-mode";
 
 export interface ResourceRow extends ResourcePlanningResource {
   roleLabel: string;
@@ -41,6 +44,8 @@ interface ResourceTimelineProps {
   view: ResourcePlanningView;
   /** Server-computed via the same canActOnEntity(..., "activity.edit") the PATCH route itself re-checks — resourcePlanning.view alone never implies this. */
   canEdit: boolean;
+  /** Events' start/end are already resolved server-side for this mode; a drag writes only this mode's own date fields (buildSchedulingPatch). Omitted = Actual. */
+  timelineMode?: TimelineMode;
 }
 
 // Drag mechanics below are standalone (this component groups by agent, not
@@ -114,7 +119,8 @@ function applyMove(events: ResourceEvent[], id: string, newStart: string, newEnd
  * row's overflow-hidden would clip it if it did), the target row is
  * indicated with an outline instead, snapped on drop.
  */
-export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view, canEdit }: ResourceTimelineProps) {
+export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view, canEdit, timelineMode }: ResourceTimelineProps) {
+  const isExpectedMode = timelineMode === "expected";
   const router = useRouter();
   const [search, setSearch] = useState("");
 
@@ -163,17 +169,43 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (pendingSaves.current.size === 0) {
-      setLocalEvents(events);
+  // id → committed updatedAt from our own successful PATCH (lib/timeline-reconcile.ts).
+  const confirmedSaves = useRef(new Map<string, string>());
+  // A server snapshot that arrived DURING an active drag — applied once the
+  // gesture ends or is cancelled, so a refresh never moves rows/lanes under
+  // the pointer (the row bounds snapshotted at drag start stay valid).
+  const deferredEvents = useRef<ResourceEvent[] | null>(null);
+
+  // Server snapshot → local state: keeps the local copy only for an
+  // activity still in flight, or one whose snapshot predates our own
+  // committed write (older updatedAt) — see lib/timeline-reconcile.ts.
+  function reconcileWithServer(server: ResourceEvent[]) {
+    const state = { pending: pendingSaves.current, confirmed: confirmedSaves.current };
+    const keep = new Set(server.filter((e) => shouldKeepLocal(e.id, e.updatedAt, state)).map((e) => e.id));
+    if (keep.size === 0) {
+      setLocalEvents(server);
       return;
     }
-    setLocalEvents((prev) =>
-      events.map((serverEvent) =>
-        pendingSaves.current.has(serverEvent.id) ? prev.find((e) => e.id === serverEvent.id) ?? serverEvent : serverEvent
-      )
-    );
+    setLocalEvents((prev) => server.map((serverEvent) => (keep.has(serverEvent.id) ? prev.find((e) => e.id === serverEvent.id) ?? serverEvent : serverEvent)));
+  }
+
+  useEffect(() => {
+    if (dragRef.current) {
+      deferredEvents.current = events;
+      return;
+    }
+    deferredEvents.current = null;
+    reconcileWithServer(events);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [events]);
+
+  /** Applies a snapshot deferred during the gesture that just ended/was cancelled. */
+  function flushDeferredSnapshot() {
+    const server = deferredEvents.current;
+    if (!server) return;
+    deferredEvents.current = null;
+    reconcileWithServer(server);
+  }
 
   // Keyed by barKey (`${resourceId}:${eventId}`), NOT the bare activity id —
   // an activity assigned to multiple agents renders one bar per agent row,
@@ -196,9 +228,24 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
   const highlightedRowElRef = useRef<HTMLDivElement | null>(null);
 
   const days = useMemo(() => {
-    const totalDays = differenceInCalendarDays(rangeEnd, rangeStart) + 1;
-    return Array.from({ length: totalDays }, (_, i) => addDays(rangeStart, i));
+    // Counted on UTC calendar dates (the range is computed that way server-
+    // side), so the column count never gains/loses a day to the browser's
+    // time zone or DST.
+    const totalDays = calendarDaysBetween(rangeStart, rangeEnd) + 1;
+    // Each column is the stored UTC calendar day, bridged to local noon
+    // (lib/date-only.ts) so its label/weekday is identical in every time
+    // zone and the server render matches the client hydration.
+    return Array.from({ length: totalDays }, (_, i) => dateOnlyAsLocalDate(shiftDateOnly(rangeStart, i)));
   }, [rangeStart, rangeEnd]);
+  // Same bridge for the visible range edges used by bar geometry below.
+  const visibleStart = useMemo(() => dateOnlyAsLocalDate(rangeStart), [rangeStart]);
+  const visibleEnd = useMemo(() => dateOnlyAsLocalDate(rangeEnd), [rangeEnd]);
+  // The viewer's local "today" is browser-only (the server's day can differ):
+  // null for the server and hydration renders, set before first paint.
+  const [today, setToday] = useState<Date | null>(null);
+  useLayoutEffect(() => {
+    setToday(new Date());
+  }, []);
 
   // Measures the scroll container's own box (not affected by its scrollable
   // inner content) so day-column width can fill the real available space
@@ -436,6 +483,9 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     const d = dragRef.current;
     if (!d || d.barKey !== barKey) return;
     dragRef.current = null;
+    // Any snapshot that arrived mid-gesture is applied now, BEFORE this
+    // drop's optimistic update (queued after it, so the drop wins).
+    flushDeferredSnapshot();
     clearRowHighlight();
     window.removeEventListener("scroll", stableScrollListener, { capture: true });
 
@@ -465,9 +515,11 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
     // in that case already, and 0 when this is a pure reassignment with no
     // horizontal movement), same as Gantt's milestone drag always sending
     // both fields equal — no need to know which raw field was originally set.
-    // shiftActivityDate (lib/resource-planning-date-math.ts) is what makes
-    // this correct across a month/year boundary, every month length, leap
-    // years, and DST — see that module for why.
+    // shiftActivityDate (lib/resource-planning-date-math.ts) delegates to
+    // the canonical UTC date-only shift in lib/date-only.ts — the same one
+    // Project Gantt uses — so the stored value is the intended calendar day
+    // at UTC midnight in every time zone, across month/year boundaries,
+    // leap years and DST.
     const newStart = shiftActivityDate(d.start, daysDelta);
     const newEnd = shiftActivityDate(d.end, daysDelta);
     const newAssignedUserIds = reassigning ? [targetResourceId!] : undefined;
@@ -497,8 +549,10 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          startDate: newStart,
-          dueDate: newEnd,
+          // Mode-aware (lib/timeline-mode.ts): Actual → startDate/dueDate
+          // exactly as before; Expected → expectedStartDate/expectedFinishDate
+          // only. Reassignment (assignedUserIds) is identical in both modes.
+          ...buildSchedulingPatch("activity", timelineMode ?? DEFAULT_TIMELINE_MODE, newStart, newEnd),
           ...(newAssignedUserIds && { assignedUserIds: newAssignedUserIds }),
         }),
         signal: abortController.signal,
@@ -513,10 +567,15 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
       const isStale = activityRequestSeq.current.get(id) !== mySeq;
       if (isStale || !isMountedRef.current) return;
       if (res.ok) {
+        // Committed version of this write — an older snapshot (a slow refresh
+        // rendered before it) can no longer overwrite it.
+        const saved = await res.json().catch(() => null);
+        if (activityRequestSeq.current.get(id) !== mySeq || !isMountedRef.current) return; // superseded while reading the body
+        recordConfirmedWrite({ pending: pendingSaves.current, confirmed: confirmedSaves.current }, id, saved);
         toast.success(
           reassigning
             ? `Reassigned to ${targetName ?? "new agent"}${daysDelta !== 0 ? ` — dates shifted ${daysDelta > 0 ? "+" : ""}${daysDelta}d` : ""}`
-            : `Dates shifted ${daysDelta > 0 ? "+" : ""}${daysDelta}d`
+            : `${isExpectedMode ? "Expected dates" : "Dates"} shifted ${daysDelta > 0 ? "+" : ""}${daysDelta}d`
         );
         pendingSaves.current.delete(id);
         router.refresh();
@@ -537,6 +596,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
 
   function cancelDrag(barKey: string) {
     if (dragRef.current?.barKey === barKey) dragRef.current = null;
+    flushDeferredSnapshot();
     clearRowHighlight();
     window.removeEventListener("scroll", stableScrollListener, { capture: true });
     const el = barElRefs.current.get(barKey);
@@ -578,7 +638,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                     key={d.toISOString()}
                     className={cn(
                       "flex-shrink-0 border-r px-1.5 py-2 text-center text-[11px] text-muted-foreground",
-                      isSameDay(d, new Date()) && "bg-primary/5 font-semibold text-foreground"
+                      !!today && isSameDay(d, today) && "bg-primary/5 font-semibold text-foreground"
                     )}
                     style={{ width: pxPerDay }}
                   >
@@ -634,16 +694,16 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                     {days.map((d, i) => (
                       <div
                         key={i}
-                        className={cn("absolute top-0 bottom-0 border-r", isSameDay(d, new Date()) && "bg-primary/5")}
+                        className={cn("absolute top-0 bottom-0 border-r", !!today && isSameDay(d, today) && "bg-primary/5")}
                         style={{ left: i * pxPerDay, width: pxPerDay }}
                       />
                     ))}
                     {rowEvents.map((e) => {
                       const metrics = getClippedBarMetrics(
-                        new Date(e.start!),
-                        new Date(e.end!),
-                        rangeStart,
-                        rangeEnd,
+                        dateOnlyAsLocalDate(e.start!),
+                        dateOnlyAsLocalDate(e.end!),
+                        visibleStart,
+                        visibleEnd,
                         pxPerDay,
                         totalWidth
                       );
@@ -745,7 +805,9 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                               </p>
                             )}
                             <p className="text-[10px] text-muted-foreground border-t pt-1.5 mt-1">
-                              {canDrag ? "Drag to move dates" : "You do not have permission to update this activity."}
+                              {canDrag
+                                ? isExpectedMode ? "Drag to move Expected dates" : "Drag to move dates"
+                                : "You do not have permission to update this activity."}
                             </p>
                           </TooltipContent>
                         </Tooltip>
@@ -771,7 +833,7 @@ export function ResourceTimeline({ resources, events, rangeStart, rangeEnd, view
                 {days.map((d, i) => (
                   <div
                     key={i}
-                    className={cn("absolute top-0 bottom-0 border-r", isSameDay(d, new Date()) && "bg-primary/5")}
+                    className={cn("absolute top-0 bottom-0 border-r", !!today && isSameDay(d, today) && "bg-primary/5")}
                     style={{ left: i * pxPerDay, width: pxPerDay }}
                   />
                 ))}

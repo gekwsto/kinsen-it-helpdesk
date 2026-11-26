@@ -7,7 +7,7 @@ import { DEPARTMENT_ROLE_LABELS, GLOBAL_ROLE_LABELS } from "@/lib/services/depar
 import { redirect } from "next/navigation";
 import { CalendarRange, ShieldOff, Building2 } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
-import { addDays, addWeeks, addMonths, startOfWeek, startOfMonth, endOfMonth, format } from "date-fns";
+import { shiftDateOnly, toDateOnlyIso } from "@/lib/date-only";
 import { ResourcePlanningFilters } from "@/components/resource-planning/resource-planning-filters";
 import { getActivityPriorityConfigsForDepartments, buildPriorityFilterOptions } from "@/lib/priority-config";
 import { ResourcePlanningToolbar, type ResourcePlanningView } from "@/components/resource-planning/resource-planning-toolbar";
@@ -15,6 +15,7 @@ import { ResourceTimeline, type ResourceRow } from "@/components/resource-planni
 import { UnscheduledPanel } from "@/components/resource-planning/unscheduled-panel";
 import { StatusLegend } from "@/components/gantt/status-legend";
 import { getDepartmentActivityStatusRows } from "@/lib/services/activity-status-config";
+import { parseTimelineMode } from "@/lib/timeline-mode";
 
 interface SearchParams {
   departmentId?: string;
@@ -24,6 +25,8 @@ interface SearchParams {
   priority?: string;
   view?: string;
   from?: string;
+  /** Actual (default) / Expected timeline — see lib/timeline-mode.ts. */
+  timeline?: string;
 }
 
 /** v1, count-based (no hours/estimate field exists on ProjectActivity — see the architecture plan). Thresholds are approximate and labeled as such in the UI, never shown as fake precision. */
@@ -98,16 +101,34 @@ export default async function ResourcePlanningPage({
   // Today/view-toggle in ResourcePlanningToolbar all push `view`/`from` and
   // land back here, causing a fresh server-side range computation + fetch.
   const view: ResourcePlanningView = params.view === "month" ? "month" : "week";
-  const anchor = params.from ? new Date(params.from) : new Date();
-  const rangeStart = view === "week" ? startOfWeek(anchor, { weekStartsOn: 1 }) : startOfMonth(anchor);
-  const rangeEnd = view === "week" ? addDays(rangeStart, 6) : endOfMonth(rangeStart);
+  // Which activity dates place, range-filter, lane and count events (server
+  // side, in getResourcePlanningEvents). Actual = pre-existing behaviour.
+  const timelineMode = parseTimelineMode(params.timeline);
+  // Computed on UTC calendar dates (lib/date-only.ts — how every scheduling
+  // date is stored), so the selected week/month, and therefore which events
+  // are placed, lane-stacked and counted, never depends on the server's
+  // time zone or DST. Same shapes as before: week = Monday 00:00 … Sunday
+  // 00:00; month = 1st 00:00 … last day 23:59:59.999.
+  const parsedFrom = params.from ? new Date(params.from) : null;
+  const anchor = new Date(toDateOnlyIso(parsedFrom && !Number.isNaN(parsedFrom.getTime()) ? parsedFrom : new Date()));
+  const rangeStart =
+    view === "week"
+      ? new Date(shiftDateOnly(anchor, -((anchor.getUTCDay() + 6) % 7)))
+      : new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), 1));
+  const rangeEnd =
+    view === "week"
+      ? new Date(shiftDateOnly(rangeStart, 6))
+      : new Date(Date.UTC(rangeStart.getUTCFullYear(), rangeStart.getUTCMonth() + 1, 1) - 1);
+  const utcLabel = (d: Date, opts: Intl.DateTimeFormatOptions) => new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", ...opts }).format(d);
   const rangeLabel =
-    view === "week" ? `${format(rangeStart, "d MMM")} – ${format(rangeEnd, "d MMM yyyy")}` : format(rangeStart, "MMMM yyyy");
+    view === "week"
+      ? `${utcLabel(rangeStart, { day: "numeric", month: "short" })} – ${utcLabel(rangeEnd, { day: "numeric", month: "short", year: "numeric" })}`
+      : utcLabel(rangeStart, { month: "long", year: "numeric" });
 
   const [result, projects, canEdit, priorityConfigs] = await Promise.all([
     getResourcePlanningData(
       { userId: session.user.id, role: session.user.role, customRoleId: session.user.customRoleId },
-      { departmentId, subDepartmentId, projectId, status, priority, rangeStart, rangeEnd }
+      { departmentId, subDepartmentId, projectId, status, priority, rangeStart, rangeEnd, timelineMode }
     ),
     prisma.project.findMany({ where: { departmentId }, select: { id: true, title: true }, orderBy: { title: "asc" } }),
     // resourcePlanning.view never implies edit — this is the same
@@ -198,10 +219,11 @@ export default async function ResourcePlanningPage({
           statusOptions={enabledStatusOptions}
           unscheduled={unscheduled}
           resources={resources}
+          timelineMode={timelineMode}
         />
 
-        <div className="flex-1 min-w-0 space-y-3">
-          <ResourcePlanningToolbar view={view} rangeStart={format(rangeStart, "yyyy-MM-dd")} rangeLabel={rangeLabel} />
+        <div className="flex-1 min-w-0 w-full space-y-3">
+          <ResourcePlanningToolbar view={view} rangeStart={rangeStart.toISOString().slice(0, 10)} rangeLabel={rangeLabel} timelineMode={timelineMode} />
 
           <StatusLegend entries={statusLegendEntries} />
 
@@ -214,13 +236,23 @@ export default async function ResourcePlanningPage({
               </p>
             </div>
           ) : (
-            <ResourceTimeline resources={resourceRows} events={rangeEvents} rangeStart={rangeStart} rangeEnd={rangeEnd} view={view} canEdit={canEdit} />
+            <ResourceTimeline
+              resources={resourceRows}
+              events={rangeEvents}
+              rangeStart={rangeStart}
+              rangeEnd={rangeEnd}
+              view={view}
+              // Same activity.edit check in both modes; a drag writes only the
+              // selected mode's own date fields (buildSchedulingPatch).
+              canEdit={canEdit}
+              timelineMode={timelineMode}
+            />
           )}
 
           {/* Below lg, Unscheduled isn't part of the (hidden) rail — shown
               here instead, stacked below the timeline. */}
           <div className="lg:hidden">
-            <UnscheduledPanel unscheduled={unscheduled} resources={resources} />
+            <UnscheduledPanel unscheduled={unscheduled} resources={resources} timelineMode={timelineMode} />
           </div>
         </div>
       </div>

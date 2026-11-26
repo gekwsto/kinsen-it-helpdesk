@@ -1,46 +1,33 @@
-import { addDays, differenceInCalendarDays } from "date-fns";
+import { shiftDateOnly, calendarDaysBetween } from "@/lib/date-only";
 
 /**
- * Central date-only arithmetic for Resource Planning's drag-and-drop date
- * shift (and anywhere else that needs the same guarantee). Two operations:
- * shifting a stored activity date by a whole number of days, and measuring
- * the calendar-day duration between two stored dates.
+ * Resource Planning's drag-and-drop date arithmetic — thin, named wrappers
+ * over the app's canonical UTC date-only mechanism in lib/date-only.ts, the
+ * SAME one Project Gantt uses, so both timelines (Actual and Expected
+ * modes alike) persist identical values for the same move.
  *
- * WHY this is safe across month/year boundaries, every month length,
- * leap years, and DST: it's built on date-fns's addDays/
- * differenceInCalendarDays, which operate on the JS Date's LOCAL calendar
- * fields (year/month/date) — never a raw millisecond offset divided by
- * 86400000, and never getDate()/setDate() called directly with hand-rolled
- * carry logic. JS's own Date.setDate() (which addDays is built on) natively
- * rolls over month/year boundaries per the actual Gregorian calendar (e.g.
- * Jan 31 + 1 day => Feb 1, unconditionally correct for every month length
- * and every leap year) and is DST-aware by construction (the browser/Node
- * runtime resolves local wall-clock fields correctly across a DST
- * transition). This is not an assumption — see
- * scripts/test-resource-planning-date-math.ts, which checks this exact
- * behavior against real Date objects for: a simple month crossing, a year
- * crossing, every month-length boundary (28/29/30/31), a leap-year and a
- * non-leap-year February 28th, and both the spring-forward and fall-back
- * DST transition dates.
+ * Dates are date-only values stored at UTC midnight and read by their UTC
+ * calendar date (lib/date-only.ts). Shifting therefore operates on that UTC
+ * calendar date and always serializes back to exact UTC midnight:
+ *   - the intended calendar day is preserved in every browser/server time
+ *     zone and across DST transitions (no local wall-clock arithmetic);
+ *   - month/year boundaries, every month length and leap years roll over
+ *     via Date.UTC;
+ *   - shifting a start and finish by the same delta preserves the duration;
+ *   - a legacy value carrying a time-of-day keeps its UTC calendar date and
+ *     is normalized to midnight only when it is actually moved (stored
+ *     records are never rewritten otherwise).
  *
- * Re-normalizing the shifted result to local midnight (rather than
- * preserving whatever time-of-day component the input happened to carry)
- * exists purely to prevent drift: without it, repeated drags on the same
- * activity could each carry forward a few minutes/hours of time-of-day
- * noise (e.g. from a value that was never exactly midnight to begin with),
- * which given enough repetitions could eventually push the stored instant
- * across a local-midnight boundary and silently read back as the wrong
- * calendar day. Normalizing on every shift makes that structurally
- * impossible — the output is always exactly local midnight of the intended
- * calendar day.
+ * Previously this module normalized to LOCAL midnight, which stored a
+ * different instant per browser time zone (e.g. 22:00Z the previous UTC day
+ * from Athens) and disagreed with the server's own UTC date-only duration
+ * calculation — see scripts/test-resource-planning-date-math.ts.
  */
 export function shiftActivityDate(iso: string, days: number): string {
-  const shifted = addDays(new Date(iso), days);
-  shifted.setHours(0, 0, 0, 0);
-  return shifted.toISOString();
+  return shiftDateOnly(iso, days);
 }
 
-/** Calendar-day duration between two stored activity dates (local calendar days — see shiftActivityDate for why this is DST/month/year-safe). */
+/** Calendar-day duration between two stored activity dates, on their UTC calendar dates. */
 export function calendarDurationDays(startIso: string, endIso: string): number {
-  return differenceInCalendarDays(new Date(endIso), new Date(startIso));
+  return calendarDaysBetween(startIso, endIso);
 }

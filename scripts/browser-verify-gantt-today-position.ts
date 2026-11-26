@@ -51,6 +51,12 @@ async function readScrollState(page: Page): Promise<{ scrollLeft: number; client
   });
 }
 
+/** Gantt chart mounted: today marker rendered and the horizontal scroll container laid out (non-zero width). */
+async function waitForGanttReady(page: Page) {
+  await page.locator("thead div.bg-red-500").first().waitFor({ state: "attached", timeout: 15000 });
+  await page.waitForFunction(() => ((document.querySelector("div.overflow-x-auto") as HTMLElement | null)?.clientWidth ?? 0) > 0, undefined, { timeout: 15000 });
+}
+
 async function login(page: Page) {
   await page.goto(`${BASE_URL}/login`);
   await page.fill("#credentials-email", ADMIN_EMAIL);
@@ -128,7 +134,10 @@ async function main() {
     console.log(`\n1. Open /projects/gantt -> today is immediately in the visible viewport (no click) ===\n`);
     await page.goto(`${BASE_URL}/projects/gantt?departmentId=${dept.id}`);
     await page.waitForSelector('button:has-text("Today")', { timeout: 15000 });
-    await page.waitForLoadState("networkidle");
+    // Deterministic readiness (networkidle never settles: the header keeps a
+    // persistent realtime EventSource open): the chart has rendered its
+    // today marker inside a laid-out scroll container.
+    await waitForGanttReady(page);
     // Give the useLayoutEffect + any requestAnimationFrame fallback a moment
     // in real browser scheduling terms, though it should already be applied
     // before the first paint in the common case.
@@ -175,7 +184,7 @@ async function main() {
     const page2 = await context.newPage();
     await page2.goto(`${BASE_URL}/activities/gantt?departmentId=${dept.id}`);
     await page2.waitForSelector('button:has-text("Today")', { timeout: 15000 });
-    await page2.waitForLoadState("networkidle");
+    await waitForGanttReady(page2);
     await page2.waitForTimeout(200);
     const activitiesState = await readScrollState(page2);
     check(

@@ -1,4 +1,4 @@
-import { formatDate } from "@/lib/utils";
+import { formatDate, formatDateOnly } from "@/lib/utils";
 
 export interface ActivityDetailsGridFields {
   owner?: { id: string; name: string | null; image: string | null } | null;
@@ -26,11 +26,11 @@ export interface ActivityDetailsGridFields {
 export function ActivityDetailsGrid({ owner, dueDate, expectedStartDate, expectedFinishDate, expectedDays, startDate, completedAt, actualDays }: ActivityDetailsGridFields) {
   const fields: { label: string; value: string }[] = [];
   if (owner) fields.push({ label: "Owner", value: owner.name ?? "—" });
-  if (dueDate) fields.push({ label: "Due Date", value: formatDate(dueDate) });
-  if (expectedStartDate) fields.push({ label: "Expected Start", value: formatDate(expectedStartDate) });
-  if (expectedFinishDate) fields.push({ label: "Expected Finish", value: formatDate(expectedFinishDate) });
+  if (dueDate) fields.push({ label: "Due Date", value: formatDateOnly(dueDate) });
+  if (expectedStartDate) fields.push({ label: "Expected Start", value: formatDateOnly(expectedStartDate) });
+  if (expectedFinishDate) fields.push({ label: "Expected Finish", value: formatDateOnly(expectedFinishDate) });
   if (typeof expectedDays === "number") fields.push({ label: "Expected Duration", value: `${expectedDays} working day(s)` });
-  if (startDate) fields.push({ label: "Actual Start", value: formatDate(startDate) });
+  if (startDate) fields.push({ label: "Actual Start", value: formatDateOnly(startDate) });
   if (completedAt) fields.push({ label: "Actual Finish", value: formatDate(completedAt) });
   if (typeof actualDays === "number") fields.push({ label: "Actual Duration", value: `${actualDays} working day(s)` });
 

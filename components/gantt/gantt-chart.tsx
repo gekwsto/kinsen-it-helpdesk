@@ -10,7 +10,7 @@ import {
   addMonths,
   startOfMonth,
   endOfMonth,
-  differenceInDays,
+  differenceInCalendarDays,
   getDay,
   isSameDay,
 } from "date-fns";
@@ -49,6 +49,10 @@ import { ACTIVITY_PRIORITY_LABEL } from "@/lib/activity-priority";
 import { ActivityPriority } from "@prisma/client";
 import { filterGanttGroups } from "@/lib/gantt-filters";
 import type { PriorityFilterOption } from "@/lib/priority-config";
+import { buildSchedulingPatch, DEFAULT_TIMELINE_MODE, type TimelineMode } from "@/lib/timeline-mode";
+import { shiftDateOnly, dateOnlyAsLocalDate } from "@/lib/date-only";
+import { shouldKeepLocal, recordConfirmedWrite } from "@/lib/timeline-reconcile";
+import { TimelineModeToggle } from "@/components/timeline/timeline-mode-toggle";
 
 // Fallback ONLY for callers that don't pass priorityOptions (e.g. an "All
 // Workspaces" view spanning several departments with no single department's
@@ -92,6 +96,8 @@ export interface GanttItem {
   assigneeName?: string | null;
   assigneeImage?: string | null;
   type: "activity" | "milestone";
+  /** Record version (updatedAt ISO) of this snapshot — lets a stale refresh be told apart from a newer committed drag (lib/timeline-reconcile.ts). Optional: without it the server snapshot always wins, as before. */
+  updatedAt?: string | null;
   /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
   overdue?: boolean;
   /**
@@ -103,6 +109,13 @@ export interface GanttItem {
    * flags a scheduling inconsistency worth a human's attention.
    */
   extendsPastProject?: boolean;
+  /**
+   * Expected-mode milestones only: the milestone's stored Expected Start
+   * (null when it has none). The milestone is still drawn as a point at
+   * Expected Finish; a move shifts this by the same calendar-day delta when
+   * present and never creates it (see buildSchedulingPatch).
+   */
+  expectedMilestoneStartDate?: string | null;
 }
 
 export interface GanttGroup {
@@ -119,6 +132,8 @@ export interface GanttGroup {
   ownerImage?: string | null;
   type: "project" | "standalone";
   children: GanttItem[];
+  /** Record version (updatedAt ISO) — see GanttItem.updatedAt. */
+  updatedAt?: string | null;
   /** Derived server-side via lib/overdue.ts — never a stored/stale flag. */
   overdue?: boolean;
   /**
@@ -150,6 +165,15 @@ interface GanttChartProps {
   priorityOptions?: PriorityFilterOption[];
   /** Department-scoped Activity Status legend entries (label/color — see lib/services/activity-status-config.ts) — same "only resolvable for a single specific department" limitation as priorityOptions; falls back to the legacy static legend in "All Workspaces" (no single department). */
   activityStatusLegendEntries?: { key: string; label: string; color: string }[];
+  /**
+   * Actual / Expected timeline mode (lib/timeline-mode.ts) the caller has
+   * ALREADY resolved every item's startDate/endDate for. When provided, the
+   * Actual / Expected toggle is shown in the toolbar; omitted (e.g. the
+   * standalone Activity Gantt) the chart is exactly as before, no toggle.
+   * Drag-to-reschedule writes ONLY this mode's own date fields (see
+   * buildSchedulingPatch) — omitted means Actual, exactly as before.
+   */
+  timelineMode?: TimelineMode;
 }
 
 const STUB = 12;
@@ -166,12 +190,21 @@ type DragMeta = {
   isMilestone: boolean;
   startDate: string;
   endDate: string;
+  /** Expected-mode milestone's existing Expected Start (null when none) — see GanttItem.expectedMilestoneStartDate. */
+  milestoneStartDate: string | null;
   href: string;
   startX: number;
 };
 
+/**
+ * Date-only values (UTC-midnight ISO) → the rendering bridge from
+ * lib/date-only.ts: local noon on the stored UTC calendar date, so every
+ * local-time calendar helper below (differenceInCalendarDays, format,
+ * isSameDay, startOfMonth, getDay) sees the stored day in any time zone and
+ * server render === client hydration.
+ */
 function parseDate(d: string | null): Date | null {
-  return d ? new Date(d) : null;
+  return d ? dateOnlyAsLocalDate(d) : null;
 }
 
 function applyDateChange(
@@ -180,6 +213,7 @@ function applyDateChange(
   isGroup: boolean,
   newStart: string,
   newEnd: string,
+  milestoneStart?: string | null,
 ): GanttGroup[] {
   if (isGroup) {
     return current.map(g =>
@@ -189,43 +223,77 @@ function applyDateChange(
   return current.map(g => ({
     ...g,
     children: g.children.map(c =>
-      c.id === id ? { ...c, startDate: newStart, endDate: newEnd } : c,
+      c.id === id
+        ? { ...c, startDate: newStart, endDate: newEnd, ...(milestoneStart !== undefined && c.expectedMilestoneStartDate !== undefined ? { expectedMilestoneStartDate: milestoneStart } : {}) }
+        : c,
     ),
   }));
 }
 
-export function GanttChart({ groups, canEdit = false, dependencies, priorityOptions = CANONICAL_PRIORITY_OPTIONS, activityStatusLegendEntries }: GanttChartProps) {
+export function GanttChart({ groups, canEdit = false, dependencies, priorityOptions = CANONICAL_PRIORITY_OPTIONS, activityStatusLegendEntries, timelineMode }: GanttChartProps) {
   const router = useRouter();
+  const isExpectedMode = timelineMode === "expected";
 
   // ── Optimistic local state ─────────────────────────────────────────────────
   // Updated immediately on drop → zero flicker. Synced back from server after
   // router.refresh() completes, skipping IDs that are still in-flight.
   const [localGroups, setLocalGroups] = useState<GanttGroup[]>(groups);
   const pendingSaves = useRef(new Set<string>());
+  // id → committed updatedAt from our own successful PATCH (lib/timeline-reconcile.ts).
+  const confirmedSaves = useRef(new Map<string, string>());
+  // A server snapshot that arrived DURING an active drag — applied once the
+  // gesture ends or is cancelled, so a refresh never re-lays-out (or jumps)
+  // the chart under the pointer.
+  const deferredGroups = useRef<GanttGroup[] | null>(null);
 
-  useEffect(() => {
-    if (pendingSaves.current.size === 0) {
-      setLocalGroups(groups);
+  // Server snapshot → local state. Keeps the local copy only where the
+  // snapshot isn't authoritative yet: a mutation still in flight, or a
+  // snapshot rendered before our own committed write (older updatedAt).
+  function reconcileWithServer(server: GanttGroup[]) {
+    const state = { pending: pendingSaves.current, confirmed: confirmedSaves.current };
+    const keep = new Set<string>();
+    for (const g of server) {
+      if (shouldKeepLocal(g.id, g.updatedAt, state)) keep.add(g.id);
+      for (const c of g.children) if (shouldKeepLocal(c.id, c.updatedAt, state)) keep.add(c.id);
+    }
+    if (keep.size === 0) {
+      setLocalGroups(server);
       return;
     }
     setLocalGroups(prev =>
-      groups.map(serverGroup => {
-        if (pendingSaves.current.has(serverGroup.id)) {
-          return prev.find(g => g.id === serverGroup.id) ?? serverGroup;
-        }
+      server.map(serverGroup => {
+        const prevGroup = prev.find(g => g.id === serverGroup.id);
+        const base = keep.has(serverGroup.id) && prevGroup
+          ? { ...serverGroup, startDate: prevGroup.startDate, endDate: prevGroup.endDate }
+          : serverGroup;
         return {
-          ...serverGroup,
+          ...base,
           children: serverGroup.children.map(serverChild => {
-            if (pendingSaves.current.has(serverChild.id)) {
-              const prevGroup = prev.find(g => g.id === serverGroup.id);
-              return prevGroup?.children.find(c => c.id === serverChild.id) ?? serverChild;
-            }
-            return serverChild;
+            if (!keep.has(serverChild.id)) return serverChild;
+            return prevGroup?.children.find(c => c.id === serverChild.id) ?? serverChild;
           }),
         };
       }),
     );
+  }
+
+  useEffect(() => {
+    if (dragRef.current) {
+      deferredGroups.current = groups;
+      return;
+    }
+    deferredGroups.current = null;
+    reconcileWithServer(groups);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groups]);
+
+  /** Applies a snapshot deferred during the gesture that just ended/was cancelled. */
+  function flushDeferredSnapshot() {
+    const server = deferredGroups.current;
+    if (!server) return;
+    deferredGroups.current = null;
+    reconcileWithServer(server);
+  }
 
   const [viewMode, setViewMode] = useState<ViewMode>("week");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -238,7 +306,15 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
   const barElRefs = useRef(new Map<string, HTMLDivElement>());
   const dragRef   = useRef<DragMeta | null>(null);
 
-  const today = useMemo(() => new Date(), []);
+  // "Today" is the VIEWER's local day, which the server cannot know (its own
+  // zone/day may differ). Resolved in the browser only — null for the server
+  // render and the hydration render, so both agree — and set in a layout
+  // effect, so it is applied before the first paint (the auto-scroll below
+  // waits for it).
+  const [today, setToday] = useState<Date | null>(null);
+  useLayoutEffect(() => {
+    setToday(new Date());
+  }, []);
 
   // ── Client-side filtering (uses localGroups) ───────────────────────────────
   // Search + Status + Priority combined filtering — see lib/gantt-filters.ts
@@ -283,15 +359,18 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
 
   // ── Timeline bounds (always includes today) ────────────────────────────────
   const { viewStart, viewEnd } = useMemo(() => {
-    const dates: number[] = [today.getTime()];
+    const dates: number[] = today ? [today.getTime()] : [];
     for (const g of scheduledGroups) {
-      if (g.startDate) dates.push(new Date(g.startDate).getTime());
-      if (g.endDate)   dates.push(new Date(g.endDate).getTime());
+      if (g.startDate) dates.push(dateOnlyAsLocalDate(g.startDate).getTime());
+      if (g.endDate)   dates.push(dateOnlyAsLocalDate(g.endDate).getTime());
       for (const c of g.children) {
-        if (c.startDate) dates.push(new Date(c.startDate).getTime());
-        if (c.endDate)   dates.push(new Date(c.endDate).getTime());
+        if (c.startDate) dates.push(dateOnlyAsLocalDate(c.startDate).getTime());
+        if (c.endDate)   dates.push(dateOnlyAsLocalDate(c.endDate).getTime());
       }
     }
+    // Pre-hydration with no dated items: a fixed placeholder (identical on
+    // server and client) until `today` resolves in the browser.
+    if (dates.length === 0) dates.push(new Date(2000, 0, 1, 12).getTime());
     return {
       viewStart: addDays(new Date(Math.min(...dates)), -14),
       viewEnd:   addDays(new Date(Math.max(...dates)), 14),
@@ -299,11 +378,11 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
   }, [scheduledGroups, today]);
 
   const pxPerDay    = PX_PER_DAY[viewMode];
-  const totalDays   = Math.max(differenceInDays(viewEnd, viewStart), 1);
+  const totalDays   = Math.max(differenceInCalendarDays(viewEnd, viewStart), 1);
   const totalWidth  = totalDays * pxPerDay;
-  const todayOffset = differenceInDays(today, viewStart);
+  const todayOffset = today ? differenceInCalendarDays(today, viewStart) : -1;
   const todayPx     = todayOffset * pxPerDay;
-  const showToday   = todayOffset >= 0 && todayOffset <= totalDays;
+  const showToday   = !!today && todayOffset >= 0 && todayOffset <= totalDays;
 
   function scrollToToday() {
     const el = scrollRef.current;
@@ -330,7 +409,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
   // first layout pass.
   const hasAutoScrolledRef = useRef(false);
   useLayoutEffect(() => {
-    if (hasAutoScrolledRef.current) return;
+    if (hasAutoScrolledRef.current || !today) return;
     const el = scrollRef.current;
     if (!el) return;
 
@@ -345,12 +424,14 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
 
     scrollToToday();
     hasAutoScrolledRef.current = true;
-    // Deliberately mount-only: re-running this on every filter/drag/refresh
-    // re-render (which would happen if todayPx/scrollToToday were listed as
-    // deps) is exactly the "keeps forcing the user back to today" behavior
-    // this must NOT do — the ref guard above is the actual one-time gate.
+    // Runs once, as soon as the browser's `today` is known (the layout
+    // effect above sets it before first paint): re-running this on every
+    // filter/drag/refresh re-render (which would happen if todayPx/
+    // scrollToToday were listed as deps) is exactly the "keeps forcing the
+    // user back to today" behavior this must NOT do — the ref guard above is
+    // the actual one-time gate.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [today]);
 
   // ── Header cells ──────────────────────────────────────────────────────────
   const { topCells, btmCells } = useMemo(() => {
@@ -364,7 +445,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
         const mEnd = endOfMonth(cur);
         const s    = cur < viewStart ? viewStart : cur;
         const e    = mEnd > viewEnd  ? viewEnd  : mEnd;
-        top.push({ label: format(cur, "MMMM yyyy"), left: differenceInDays(s, viewStart) * pxPerDay, width: (differenceInDays(e, s) + 1) * pxPerDay });
+        top.push({ label: format(cur, "MMMM yyyy"), left: differenceInCalendarDays(s, viewStart) * pxPerDay, width: (differenceInCalendarDays(e, s) + 1) * pxPerDay });
         cur = addMonths(cur, 1);
       }
     } else {
@@ -373,7 +454,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
         const ye = new Date(y, 11, 31);
         const s  = ys < viewStart ? viewStart : ys;
         const e  = ye > viewEnd   ? viewEnd   : ye;
-        top.push({ label: String(y), left: differenceInDays(s, viewStart) * pxPerDay, width: (differenceInDays(e, s) + 1) * pxPerDay });
+        top.push({ label: String(y), left: differenceInCalendarDays(s, viewStart) * pxPerDay, width: (differenceInCalendarDays(e, s) + 1) * pxPerDay });
         y++;
       }
     }
@@ -381,14 +462,14 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     if (viewMode === "day") {
       let d = new Date(viewStart);
       while (d <= viewEnd) {
-        btm.push({ label: format(d, "d"), left: differenceInDays(d, viewStart) * pxPerDay, width: pxPerDay, highlight: isSameDay(d, today) });
+        btm.push({ label: format(d, "d"), left: differenceInCalendarDays(d, viewStart) * pxPerDay, width: pxPerDay, highlight: !!today && isSameDay(d, today) });
         d = addDays(d, 1);
       }
     } else if (viewMode === "week") {
       let d = new Date(viewStart);
       while (d <= viewEnd) {
-        const wOff = differenceInDays(d, viewStart);
-        btm.push({ label: format(d, "MMM d"), left: wOff * pxPerDay, width: 7 * pxPerDay, highlight: todayOffset >= wOff && todayOffset < wOff + 7 });
+        const wOff = differenceInCalendarDays(d, viewStart);
+        btm.push({ label: format(d, "MMM d"), left: wOff * pxPerDay, width: 7 * pxPerDay, highlight: !!today && todayOffset >= wOff && todayOffset < wOff + 7 });
         d = addDays(d, 7);
       }
     } else {
@@ -397,7 +478,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
         const mEnd = endOfMonth(cur);
         const s    = cur < viewStart ? viewStart : cur;
         const e    = mEnd > viewEnd  ? viewEnd  : mEnd;
-        btm.push({ label: format(cur, "MMM"), left: differenceInDays(s, viewStart) * pxPerDay, width: (differenceInDays(e, s) + 1) * pxPerDay, highlight: cur.getMonth() === today.getMonth() && cur.getFullYear() === today.getFullYear() });
+        btm.push({ label: format(cur, "MMM"), left: differenceInCalendarDays(s, viewStart) * pxPerDay, width: (differenceInCalendarDays(e, s) + 1) * pxPerDay, highlight: !!today && cur.getMonth() === today.getMonth() && cur.getFullYear() === today.getFullYear() });
         cur = addMonths(cur, 1);
       }
     }
@@ -412,7 +493,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     let d = new Date(viewStart);
     while (d <= viewEnd) {
       const dow = getDay(d);
-      if (dow === 0 || dow === 6) s.push({ left: differenceInDays(d, viewStart) * pxPerDay, width: pxPerDay });
+      if (dow === 0 || dow === 6) s.push({ left: differenceInCalendarDays(d, viewStart) * pxPerDay, width: pxPerDay });
       d = addDays(d, 1);
     }
     return s;
@@ -423,8 +504,8 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     const s = parseDate(startDate);
     if (!s) return null;
     const e    = parseDate(endDate) ?? s;
-    const left = Math.max(0, differenceInDays(s, viewStart)) * pxPerDay;
-    const end  = Math.min(totalWidth, (differenceInDays(e, viewStart) + 1) * pxPerDay);
+    const left = Math.max(0, differenceInCalendarDays(s, viewStart)) * pxPerDay;
+    const end  = Math.min(totalWidth, (differenceInCalendarDays(e, viewStart) + 1) * pxPerDay);
     return { left, width: Math.max(end - left, 8) };
   }
 
@@ -469,19 +550,19 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     const map = new Map<string, { leftX: number; rightX: number }>();
     for (const g of scheduledGroups) {
       if (g.startDate && g.endDate) {
-        const left = Math.max(0, differenceInDays(new Date(g.startDate), viewStart)) * pxPerDay;
-        const end  = Math.min(totalWidth, (differenceInDays(new Date(g.endDate), viewStart) + 1) * pxPerDay);
+        const left = Math.max(0, differenceInCalendarDays(dateOnlyAsLocalDate(g.startDate), viewStart)) * pxPerDay;
+        const end  = Math.min(totalWidth, (differenceInCalendarDays(dateOnlyAsLocalDate(g.endDate), viewStart) + 1) * pxPerDay);
         map.set(g.id, { leftX: LEFT_W + left, rightX: LEFT_W + Math.max(end, left + 8) });
       }
       for (const c of g.children) {
         if (c.type === "milestone" && c.endDate) {
-          const dayOffset = differenceInDays(new Date(c.endDate), viewStart);
+          const dayOffset = differenceInCalendarDays(dateOnlyAsLocalDate(c.endDate), viewStart);
           const centerX = LEFT_W + dayOffset * pxPerDay + pxPerDay * 0.5;
           const size    = Math.round(ROW_H * 0.45);
           map.set(c.id, { leftX: centerX - size / 2, rightX: centerX + size / 2 });
         } else if (c.startDate && c.endDate) {
-          const left = Math.max(0, differenceInDays(new Date(c.startDate), viewStart)) * pxPerDay;
-          const end  = Math.min(totalWidth, (differenceInDays(new Date(c.endDate), viewStart) + 1) * pxPerDay);
+          const left = Math.max(0, differenceInCalendarDays(dateOnlyAsLocalDate(c.startDate), viewStart)) * pxPerDay;
+          const end  = Math.min(totalWidth, (differenceInCalendarDays(dateOnlyAsLocalDate(c.endDate), viewStart) + 1) * pxPerDay);
           map.set(c.id, { leftX: LEFT_W + left, rightX: LEFT_W + Math.max(end, left + 8) });
         }
       }
@@ -545,10 +626,11 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     e: React.PointerEvent<HTMLDivElement>,
     id: string, isGroup: boolean, isMilestone: boolean,
     startDate: string, endDate: string, href: string,
+    milestoneStartDate: string | null = null,
   ) {
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
-    dragRef.current = { id, isGroup, isMilestone, startDate, endDate, href, startX: e.clientX };
+    dragRef.current = { id, isGroup, isMilestone, startDate, endDate, milestoneStartDate, href, startX: e.clientX };
   }
 
   function moveDrag(e: React.PointerEvent<HTMLDivElement>, id: string) {
@@ -563,6 +645,9 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     const d = dragRef.current;
     if (!d || d.id !== id) return;
     dragRef.current = null;
+    // Any snapshot that arrived mid-gesture is applied now, BEFORE this
+    // drop's optimistic update (queued after it, so the drop wins).
+    flushDeferredSnapshot();
 
     const delta = e.clientX - d.startX;
     const el = barElRefs.current.get(id);
@@ -576,25 +661,38 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     const days = Math.round(delta / pxPerDay);
     if (days === 0) return;
 
+    // Canonical, time-zone-independent calendar-day shift (lib/date-only.ts)
+    // — the same one Resource Planning uses; both dates move by the same
+    // delta, so duration is preserved and the stored value is always the
+    // intended day at UTC midnight, whatever the browser's zone or DST.
     let newStart: string;
     let newEnd: string;
     if (d.isMilestone) {
-      const newDate = addDays(new Date(d.endDate), days).toISOString();
+      const newDate = shiftDateOnly(d.endDate, days);
       newStart = newDate;
       newEnd   = newDate;
     } else {
-      newStart = addDays(new Date(d.startDate), days).toISOString();
-      newEnd   = addDays(new Date(d.endDate),   days).toISOString();
+      newStart = shiftDateOnly(d.startDate, days);
+      newEnd   = shiftDateOnly(d.endDate,   days);
     }
+    // Expected milestone: its existing Expected Start moves with it; a
+    // missing one stays missing (never created).
+    const newMilestoneStart = d.isMilestone && d.milestoneStartDate ? shiftDateOnly(d.milestoneStartDate, days) : null;
 
     // Optimistic: snap bar to new position immediately, no post-drop flicker
     pendingSaves.current.add(id);
-    setLocalGroups(prev => applyDateChange(prev, id, d.isGroup, newStart, newEnd));
+    setLocalGroups(prev => applyDateChange(prev, id, d.isGroup, newStart, newEnd, newMilestoneStart));
 
     const url  = d.isGroup ? `/api/projects/${id}` : `/api/activities/${id}`;
-    const body = d.isGroup
-      ? { startDate: newStart, endDate: newEnd }
-      : { startDate: newStart, dueDate: newEnd };
+    // Mode-aware field mapping (lib/timeline-mode.ts): Actual writes
+    // startDate/endDate|dueDate exactly as before; Expected writes only
+    // expectedStartDate/expectedFinishDate (a milestone: expectedFinishDate).
+    const body = buildSchedulingPatch(
+      d.isGroup ? "project" : d.isMilestone ? "milestone" : "activity",
+      timelineMode ?? DEFAULT_TIMELINE_MODE,
+      d.isMilestone ? newMilestoneStart : newStart,
+      newEnd,
+    );
 
     try {
       const res = await fetch(url, {
@@ -603,19 +701,22 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
         body: JSON.stringify(body),
       });
       if (res.ok) {
-        toast.success(`Dates shifted ${days > 0 ? "+" : ""}${days}d`);
+        // Committed version of this write — an older snapshot (a slow refresh
+        // rendered before it) can no longer overwrite it.
+        recordConfirmedWrite({ pending: pendingSaves.current, confirmed: confirmedSaves.current }, id, await res.json().catch(() => null));
+        toast.success(`${isExpectedMode ? "Expected dates" : "Dates"} shifted ${days > 0 ? "+" : ""}${days}d`);
         pendingSaves.current.delete(id);
         router.refresh();
       } else {
         const err = await res.json().catch(() => ({}));
         toast.error(err.error ?? "Failed to update dates");
         pendingSaves.current.delete(id);
-        setLocalGroups(prev => applyDateChange(prev, id, d.isGroup, d.startDate, d.endDate));
+        setLocalGroups(prev => applyDateChange(prev, id, d.isGroup, d.startDate, d.endDate, d.milestoneStartDate));
       }
     } catch {
       toast.error("Failed to update dates");
       pendingSaves.current.delete(id);
-      setLocalGroups(prev => applyDateChange(prev, id, d.isGroup, d.startDate, d.endDate));
+      setLocalGroups(prev => applyDateChange(prev, id, d.isGroup, d.startDate, d.endDate, d.milestoneStartDate));
     }
   }
 
@@ -623,6 +724,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     if (dragRef.current?.id === id) dragRef.current = null;
     const el = barElRefs.current.get(id);
     if (el) el.style.transform = "";
+    flushDeferredSnapshot();
   }
 
   // ── Bar (activities and project rows) ─────────────────────────────────────
@@ -764,8 +866,8 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                 were a user-entered exact date. startDate/endDate
                 themselves are untouched either way; they're what
                 positioned/sized this bar in the first place. */}
-            {item.startDate && <p><span className="text-muted-foreground">Start:</span>{" "}{item.facilitiesStartLabel ?? format(new Date(item.startDate), "MMM d, yyyy")}</p>}
-            {item.endDate   && <p><span className="text-muted-foreground">End:</span>{" "}{item.facilitiesEndLabel ?? format(new Date(item.endDate),   "MMM d, yyyy")}</p>}
+            {item.startDate && <p><span className="text-muted-foreground">{isExpectedMode ? "Expected start:" : "Start:"}</span>{" "}{item.facilitiesStartLabel ?? format(dateOnlyAsLocalDate(item.startDate), "MMM d, yyyy")}</p>}
+            {item.endDate   && <p><span className="text-muted-foreground">{isExpectedMode ? "Expected finish:" : "End:"}</span>{" "}{item.facilitiesEndLabel ?? format(dateOnlyAsLocalDate(item.endDate),   "MMM d, yyyy")}</p>}
           </div>
           {item.progress != null && item.progress > 0 && (
             <div className="space-y-1">
@@ -791,7 +893,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             </div>
           )}
           {isDraggable && (
-            <p className="text-[10px] text-muted-foreground border-t pt-1.5">Drag to move dates</p>
+            <p className="text-[10px] text-muted-foreground border-t pt-1.5">{isExpectedMode ? "Drag to move Expected dates" : "Drag to move dates"}</p>
           )}
         </TooltipContent>
       </Tooltip>
@@ -803,7 +905,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
     const d = parseDate(item.endDate);
     if (!d) return null;
 
-    const dayOffset   = differenceInDays(d, viewStart);
+    const dayOffset   = differenceInCalendarDays(d, viewStart);
     const centerX     = dayOffset * pxPerDay + pxPerDay * 0.5;
     const size        = Math.round(ROW_H * 0.45);
     const left        = centerX - size / 2;
@@ -826,7 +928,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
         )}
         style={{ left, top, width: size, height: size, touchAction: "none" }}
         onPointerDown={isDraggable
-          ? (e) => startDrag(e, item.id, false, true, item.endDate!, item.endDate!, item.href)
+          ? (e) => startDrag(e, item.id, false, true, item.endDate!, item.endDate!, item.href, item.expectedMilestoneStartDate ?? null)
           : undefined}
         onPointerMove={isDraggable ? (e) => moveDrag(e, item.id) : undefined}
         onPointerUp={isDraggable ? (e) => endDrag(e, item.id) : undefined}
@@ -871,12 +973,12 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
           </div>
           {item.endDate && (
             <p className="text-xs">
-              <span className="text-muted-foreground">Date:</span>{" "}
-              {format(new Date(item.endDate), "MMM d, yyyy")}
+              <span className="text-muted-foreground">{isExpectedMode ? "Expected date:" : "Date:"}</span>{" "}
+              {format(dateOnlyAsLocalDate(item.endDate), "MMM d, yyyy")}
             </p>
           )}
           {isDraggable && (
-            <p className="text-[10px] text-muted-foreground border-t pt-1.5">Drag to move date</p>
+            <p className="text-[10px] text-muted-foreground border-t pt-1.5">{isExpectedMode ? (item.expectedMilestoneStartDate ? "Drag to move Expected Start / Finish together" : "Drag to move Expected Finish") : "Drag to move date"}</p>
           )}
         </TooltipContent>
       </Tooltip>
@@ -898,6 +1000,8 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             ))}
           </div>
 
+          {timelineMode && <TimelineModeToggle mode={timelineMode} />}
+
           <Button variant="outline" size="sm" className="h-9 gap-1.5 text-xs" onClick={scrollToToday}>
             <CalendarDays className="h-3.5 w-3.5" />
             Today
@@ -914,9 +1018,13 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             </Button>
           </div>
 
-          <div className="ml-auto flex items-center gap-2">
+          {/* Below sm the filters take the full row (two selects side by
+              side, search full width) instead of overflowing the viewport;
+              from sm up every class resolves to the original desktop layout
+              (ml-auto, 150px selects, w-44 search). */}
+          <div className="flex w-full flex-wrap items-center gap-2 sm:ml-auto sm:w-auto sm:flex-nowrap">
             <Select value={statusFilter} onValueChange={setStatusFilter}>
-              <SelectTrigger className="h-9 w-[150px] text-xs">
+              <SelectTrigger className="h-9 w-[calc(50%-0.25rem)] sm:w-[150px] text-xs">
                 <SelectValue placeholder="All statuses" />
               </SelectTrigger>
               <SelectContent>
@@ -928,7 +1036,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             </Select>
 
             <Select value={priorityFilter} onValueChange={setPriorityFilter}>
-              <SelectTrigger className="h-9 w-[150px] text-xs">
+              <SelectTrigger className="h-9 w-[calc(50%-0.25rem)] sm:w-[150px] text-xs">
                 <SelectValue placeholder="All priorities" />
               </SelectTrigger>
               <SelectContent>
@@ -939,9 +1047,9 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
               </SelectContent>
             </Select>
 
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground pointer-events-none" />
-              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="h-9 pl-8 pr-8 w-44 text-xs" />
+              <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..." className="h-9 pl-8 pr-8 w-full sm:w-44 text-xs" />
               {search && (
                 <button onClick={() => setSearch("")} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground" aria-label="Clear search">
                   <X className="h-3.5 w-3.5" />
@@ -950,6 +1058,12 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
             </div>
           </div>
         </div>
+
+        {isExpectedMode && (
+          <p className="text-xs text-muted-foreground" data-testid="timeline-expected-note">
+            Showing <span className="font-medium text-foreground">Expected</span> Start / Finish dates. Dragging changes Expected dates only — Actual dates are never modified.
+          </p>
+        )}
 
         {/* Legend */}
         <StatusLegend entries={activityStatusLegendEntries} />
@@ -1007,7 +1121,9 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                 {scheduledGroups.length === 0 && unscheduledItems.length === 0 ? (
                   <tr>
                     <td colSpan={2} className="text-center text-muted-foreground py-20 text-sm">
-                      No items to display. Add dates to projects and activities to see them here.
+                      {isExpectedMode
+                        ? "No items to display. Add Expected Start / Finish dates to projects and activities to see them here."
+                        : "No items to display. Add dates to projects and activities to see them here."}
                     </td>
                   </tr>
                 ) : (
@@ -1051,11 +1167,17 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                               {showToday && (
                                 <div className="absolute inset-y-0 w-0.5 bg-red-500/70 pointer-events-none z-10" style={{ left: todayPx }} />
                               )}
-                              <Bar
-                                item={{ id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue, facilitiesStartLabel: group.facilitiesStartLabel, facilitiesEndLabel: group.facilitiesEndLabel }}
-                                barH={24}
-                                isGroup
-                              />
+                              {/* Called as a function, NOT mounted as <Bar/>: Bar is
+                                  declared inside GanttChart, so as a component its
+                                  identity changed every render and React re-mounted
+                                  the bar — a refresh landing mid-drag then lost the
+                                  pointer capture. As a call, the returned elements
+                                  keep a stable identity across re-renders. */}
+                              {Bar({
+                                item: { id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue, facilitiesStartLabel: group.facilitiesStartLabel, facilitiesEndLabel: group.facilitiesEndLabel },
+                                barH: 24,
+                                isGroup: true,
+                              })}
                             </td>
                           </tr>
 
@@ -1118,8 +1240,8 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                   <div className="absolute inset-y-0 w-0.5 bg-red-500/70 pointer-events-none z-10" style={{ left: todayPx }} />
                                 )}
                                 {child.type === "milestone"
-                                  ? <MilestoneMarker item={{ ...child, extendsPastProject }} />
-                                  : <Bar item={{ ...child, extendsPastProject }} barH={16} isGroup={false} />
+                                  ? MilestoneMarker({ item: { ...child, extendsPastProject } })
+                                  : Bar({ item: { ...child, extendsPastProject }, barH: 16, isGroup: false })
                                 }
                               </td>
                             </tr>
@@ -1135,7 +1257,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                         <tr>
                           <td colSpan={2} className="bg-muted/40 border-y px-4 py-1.5">
                             <span className="text-xs font-medium text-muted-foreground">
-                              Unscheduled — {unscheduledItems.length} item{unscheduledItems.length !== 1 ? "s" : ""} without dates
+                              Unscheduled — {unscheduledItems.length} item{unscheduledItems.length !== 1 ? "s" : ""} without {isExpectedMode ? "Expected dates" : "dates"}
                             </span>
                           </td>
                         </tr>
@@ -1164,7 +1286,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                 <div className="absolute inset-y-0 w-0.5 bg-red-500/70 pointer-events-none z-10" style={{ left: todayPx }} />
                               )}
                               <div className="absolute inset-0 flex items-center pl-3">
-                                <span className="text-[11px] text-muted-foreground/50 italic select-none">No dates set</span>
+                                <span className="text-[11px] text-muted-foreground/50 italic select-none">{isExpectedMode ? "No Expected dates set" : "No dates set"}</span>
                               </div>
                             </td>
                           </tr>

@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { SubDepartmentFilter } from "@/components/workspace/sub-department-filter";
 import { UnscheduledPanel } from "@/components/resource-planning/unscheduled-panel";
+import type { TimelineMode } from "@/lib/timeline-mode";
 import { SlidersHorizontal, RotateCcw } from "lucide-react";
 import type { ResourceEvent, ResourcePlanningResource } from "@/lib/services/resource-planning-service";
 import { ActivityPriority } from "@prisma/client";
@@ -57,6 +58,8 @@ interface ResourcePlanningFiltersProps {
   /** Rendered directly under the filter fields at lg+ — see the module doc comment below. */
   unscheduled: ResourceEvent[];
   resources: ResourcePlanningResource[];
+  /** Passed through to the embedded UnscheduledPanel (mode-specific copy only). */
+  timelineMode?: TimelineMode;
 }
 
 /**
@@ -88,6 +91,7 @@ export function ResourcePlanningFilters({
   statusOptions = STATUS_OPTIONS,
   unscheduled,
   resources,
+  timelineMode,
 }: ResourcePlanningFiltersProps) {
   const router = useRouter();
   const pathname = usePathname();
@@ -196,7 +200,7 @@ export function ResourcePlanningFilters({
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Filters</p>
           {fields}
         </div>
-        <UnscheduledPanel unscheduled={unscheduled} resources={resources} />
+        <UnscheduledPanel unscheduled={unscheduled} resources={resources} timelineMode={timelineMode} />
       </aside>
 
       {/* Below lg: filters live behind a button instead of a permanent rail/row. */}

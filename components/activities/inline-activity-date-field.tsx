@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Input } from "@/components/ui/input";
-import { formatDate } from "@/lib/utils";
+import { formatDateOnly } from "@/lib/utils";
 import { Pencil, Loader2 } from "lucide-react";
 
 interface InlineActivityDateFieldProps {
@@ -63,7 +63,7 @@ export function InlineActivityDateField({ value, canEdit, disabled, isSaving, on
   }, [editing]);
 
   if (!canEdit) {
-    return <p className="font-medium">{value ? formatDate(value) : "Not set"}</p>;
+    return <p className="font-medium">{value ? formatDateOnly(value) : "Not set"}</p>;
   }
 
   if (!editing) {
@@ -75,7 +75,7 @@ export function InlineActivityDateField({ value, canEdit, disabled, isSaving, on
         className="group inline-flex items-center gap-1 text-left disabled:cursor-not-allowed disabled:opacity-60"
       >
         <span className={value ? "font-medium" : "font-medium text-muted-foreground italic"}>
-          {value ? formatDate(value) : "Not set"}
+          {value ? formatDateOnly(value) : "Not set"}
         </span>
         <Pencil className="h-3 w-3 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
       </button>

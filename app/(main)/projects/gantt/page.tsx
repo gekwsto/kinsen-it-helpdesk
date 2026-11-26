@@ -16,6 +16,14 @@ import { projectPriorityKey } from "@/lib/project-priority";
 import { getActivityPriorityConfigsForDepartments, buildPriorityFilterOptions } from "@/lib/priority-config";
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 import { buildProjectOwnedByWhere } from "@/lib/services/project-query-service";
+import {
+  parseTimelineMode,
+  resolveProjectTimelineDates,
+  resolveGanttActivityDates,
+  buildProjectTimelineRangeWhere,
+  projectTimelineFields,
+  activityTimelineFields,
+} from "@/lib/timeline-mode";
 
 interface SearchParams {
   status?: string;
@@ -24,6 +32,8 @@ interface SearchParams {
   departmentId?: string;
   from?: string;
   to?: string;
+  /** Actual (default) / Expected timeline — see lib/timeline-mode.ts. */
+  timeline?: string;
 }
 
 export default async function ProjectGanttPage({
@@ -51,6 +61,12 @@ export default async function ProjectGanttPage({
   if (!canViewGantt || !canViewProjects) redirect("/dashboard");
 
   const params = await searchParams;
+  // Which date fields this whole page reads (bars, ordering, ?from=/?to=
+  // range filter) — lib/timeline-mode.ts. Actual is the default and is the
+  // pre-existing behaviour exactly.
+  const timelineMode = parseTimelineMode(params.timeline);
+  const projectFields = projectTimelineFields(timelineMode);
+  const activityFields = activityTimelineFields(timelineMode);
 
   // Active workspace is the default scope (Phase 2B); an explicit
   // ?departmentId= is still honored as a one-off "explicit scoped view" but
@@ -91,33 +107,24 @@ export default async function ProjectGanttPage({
   if (params.status) andConditions.push({ status: params.status });
   // Owner filter: primary owner or co-owner (see buildProjectOwnedByWhere).
   if (params.userId) andConditions.push(buildProjectOwnedByWhere(params.userId));
-  if (params.from || params.to) {
-    andConditions.push({
-      OR: [
-        {
-          startDate: {
-            ...(params.from ? { gte: new Date(params.from) } : {}),
-            ...(params.to ? { lte: new Date(params.to) } : {}),
-          },
-        },
-        {
-          endDate: {
-            ...(params.from ? { gte: new Date(params.from) } : {}),
-            ...(params.to ? { lte: new Date(params.to) } : {}),
-          },
-        },
-      ],
-    });
-  }
+  // Interval overlap (start <= to AND end >= from) on the selected mode's
+  // own Project date fields — see buildProjectTimelineRangeWhere. Expected
+  // never matches on Actual dates.
+  const rangeWhere = buildProjectTimelineRangeWhere(
+    timelineMode,
+    params.from ? new Date(params.from) : null,
+    params.to ? new Date(params.to) : null
+  );
+  if (rangeWhere) andConditions.push(rangeWhere);
   const where: any = { AND: andConditions };
 
   const projects = await prisma.project.findMany({
     where,
-    orderBy: { startDate: "asc" },
+    orderBy: { [projectFields.start]: "asc" },
     include: {
       owner: { select: { id: true, name: true, image: true } },
       activities: {
-        orderBy: { startDate: "asc" },
+        orderBy: { [activityFields.start]: "asc" },
         include: {
           assignedUsers: { select: { id: true, name: true, image: true } },
         },
@@ -197,40 +204,53 @@ export default async function ProjectGanttPage({
   const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
 
   const groups: GanttGroup[] = projects.map((p) => {
-    const isFacilitiesServicesWorkspace = !!facilitiesServicesDepartmentId && p.departmentId === facilitiesServicesDepartmentId;
+    // Facilities Quarter labels describe the ACTUAL start/end boundaries
+    // only — never shown against Expected dates.
+    const isFacilitiesServicesWorkspace = timelineMode === "actual" && !!facilitiesServicesDepartmentId && p.departmentId === facilitiesServicesDepartmentId;
+    const projectDates = resolveProjectTimelineDates(p, timelineMode);
     return {
       id: p.id,
       title: p.title,
       href: `/projects/${p.id}`,
       status: p.status,
       priority: projectPriorityKey(p.priority),
-      startDate: p.startDate?.toISOString() ?? null,
+      startDate: projectDates.start?.toISOString() ?? null,
       facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesStartQuarter, p.facilitiesStartYear) : null,
       facilitiesEndLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesEndQuarter, p.facilitiesEndYear) : null,
-      endDate: p.endDate?.toISOString() ?? null,
+      endDate: projectDates.end?.toISOString() ?? null,
+      // Record version — lets the chart tell a stale refresh from a newer committed drag.
+      updatedAt: p.updatedAt.toISOString(),
       progress: p.progress,
       ownerName: p.owner.name,
       ownerImage: p.owner.image,
       type: "project" as const,
       overdue: isProjectOverdue(p.endDate, resolveProjectTerminal(projectTerminalConfigs, p.departmentId, p.status), now),
-      children: p.activities.map((a) => ({
+      children: p.activities.map((a) => {
+        const activityDates = resolveGanttActivityDates(a, timelineMode);
+        return {
         id: a.id,
         title: a.title,
         status: a.status,
         statusLabel: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).label,
         statusColor: resolveActivityStatusDisplay(statusDisplayConfigs, a.departmentId, a.status).color,
-        startDate: a.isMilestone
-          ? (a.dueDate?.toISOString() ?? null)
-          : (a.startDate?.toISOString() ?? null),
-        endDate: a.dueDate?.toISOString() ?? null,
+        // Actual: milestone = dueDate point, activity = startDate→dueDate
+        // (unchanged). Expected: the same shapes on expectedFinishDate /
+        // expectedStartDate→expectedFinishDate, never mixed with Actual.
+        startDate: activityDates.start?.toISOString() ?? null,
+        endDate: activityDates.end?.toISOString() ?? null,
+        // Expected milestone: its stored Expected Start (if any) moves with
+        // the Expected Finish on drag — never created when missing.
+        ...(timelineMode === "expected" && a.isMilestone ? { expectedMilestoneStartDate: a.expectedStartDate?.toISOString() ?? null } : {}),
         progress: resolveProgressPercentOrNull(progressConfigs, a.departmentId, a.status),
         href: `/activities/${a.id}`,
+        updatedAt: a.updatedAt.toISOString(),
         priority: a.priority,
         assigneeName: a.assignedUsers[0]?.name ?? null,
         assigneeImage: a.assignedUsers[0]?.image ?? null,
         type: (a.isMilestone ? "milestone" : "activity") as "milestone" | "activity",
         overdue: isActivityOverdue(a.dueDate, resolveActivityTerminal(activityTerminalConfigs, a.departmentId, a.status), now),
-      })),
+        };
+      }),
     };
   });
 
@@ -258,7 +278,11 @@ export default async function ProjectGanttPage({
 
       <GanttChart
         groups={groups}
+        // Same project.edit hint in both modes; a drag writes only the
+        // selected mode's own date fields (buildSchedulingPatch), and the
+        // PATCH routes re-check permission + date validity server-side.
         canEdit={canEditProjects}
+        timelineMode={timelineMode}
         dependencies={dependencies}
         priorityOptions={priorityOptions}
         activityStatusLegendEntries={

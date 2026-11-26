@@ -185,6 +185,8 @@ async function main() {
   const userIds: string[] = [];
   const projectIds: string[] = [];
   const activityIds: string[] = [];
+  const taskTypeIds: string[] = [];
+  const roleKeys: string[] = [];
 
   const jsonReq = (method: string, body?: unknown) => new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
@@ -194,6 +196,10 @@ async function main() {
     const admin = await prisma.user.create({ data: { email: `rt-inv-admin-${RUN_ID}@kinsen.gr`, role: Role.ADMIN, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
     const agent = await prisma.user.create({ data: { email: `rt-inv-agent-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
     userIds.push(admin.id, agent.id);
+    // Task Type is required for every NEW Activity (createActivitySchema /
+    // POST /api/activities) — fixture only, so the creates below are valid.
+    const taskType = await prisma.taskType.create({ data: { name: `RT Inv Task Type ${RUN_ID}` } });
+    taskTypeIds.push(taskType.id);
     currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
 
     console.log("\n=== 2. Project CREATE -> Project list refresh ===\n");
@@ -246,7 +252,7 @@ async function main() {
     console.log("\n=== 3. Activity CREATE (standalone) -> Activity list refresh only, never Project ===\n");
     const waitActCreate = waitForNotification(activityListener, 3_000);
     const waitNoProjectOnStandaloneCreate = waitForNotification(projectListener, 1_500);
-    const standaloneActRes = await activitiesRoute.POST(jsonReq("POST", { title: `RT Inv Standalone Activity ${RUN_ID}`, departmentId: dept.id, status: "TODO", priority: "MEDIUM" }));
+    const standaloneActRes = await activitiesRoute.POST(jsonReq("POST", { title: `RT Inv Standalone Activity ${RUN_ID}`, departmentId: dept.id, status: "TODO", priority: "MEDIUM", taskTypeId: taskType.id }));
     check("POST /api/activities (standalone) -> 201", standaloneActRes.status === 201);
     const standaloneAct = await standaloneActRes.json();
     activityIds.push(standaloneAct.id);
@@ -256,7 +262,7 @@ async function main() {
     console.log("\n=== 6. Activity CREATE (linked to a Project) -> BOTH Activity and Project lists refresh (count) ===\n");
     const waitActCreate2 = waitForNotification(activityListener, 3_000);
     const waitProjCreate2 = waitForNotification(projectListener, 3_000);
-    const linkedActRes = await activitiesRoute.POST(jsonReq("POST", { title: `RT Inv Linked Activity ${RUN_ID}`, projectId: createdProject.id, departmentId: dept.id, status: "TODO", priority: "MEDIUM" }));
+    const linkedActRes = await activitiesRoute.POST(jsonReq("POST", { title: `RT Inv Linked Activity ${RUN_ID}`, projectId: createdProject.id, departmentId: dept.id, status: "TODO", priority: "MEDIUM", taskTypeId: taskType.id }));
     check("POST /api/activities (projectId set) -> 201", linkedActRes.status === 201);
     const linkedAct = await linkedActRes.json();
     activityIds.push(linkedAct.id);
@@ -283,6 +289,62 @@ async function main() {
     const descRes = await activityRoute.PATCH(jsonReq("PATCH", { description: "Not rendered by any real list page" }), { params: Promise.resolve({ id: linkedAct.id }) });
     check("PATCH activity {description} -> 200", descRes.status === 200);
     check("...publishes NOTHING (description isn't rendered by any real Activity list page)", (await waitDescNoop) === null);
+
+    console.log("\n=== Expected-date mutations (Expected-mode timeline drag bodies) ===\n");
+    const { buildSchedulingPatch } = await import("@/lib/timeline-mode");
+    const { shiftDateOnly } = await import("@/lib/date-only");
+    {
+      const waitP = waitForNotification(projectListener, 3_000);
+      const waitNoA = waitForNotification(activityListener, 1_500);
+      const body = buildSchedulingPatch("project", "expected", shiftDateOnly("2027-02-01", 0), shiftDateOnly("2027-02-20", 0));
+      const res = await projectRoute.PATCH(jsonReq("PATCH", body), { params: Promise.resolve({ id: createdProject.id }) });
+      check("Expected Project drag PATCH {expectedStartDate, expectedFinishDate} -> 200", res.status === 200 && JSON.stringify(Object.keys(body).sort()) === JSON.stringify(["expectedFinishDate", "expectedStartDate"]));
+      check("...publishes a Project-channel NOTIFY (Project list shows Expected dates)", (await waitP) !== null);
+      check("...does NOT publish to the Activity channel (no Activity-list-visible change)", (await waitNoA) === null);
+    }
+    for (const [label, body] of [
+      ["Expected Activity drag {expectedStartDate, expectedFinishDate}", buildSchedulingPatch("activity", "expected", "2027-02-02T00:00:00.000Z", "2027-02-04T00:00:00.000Z")],
+      ["Expected milestone drag {expectedFinishDate} only", buildSchedulingPatch("milestone", "expected", null, "2027-02-05T00:00:00.000Z")],
+    ] as const) {
+      const waitA = waitForNotification(activityListener, 3_000);
+      const waitNoP = waitForNotification(projectListener, 1_500);
+      const res = await activityRoute.PATCH(jsonReq("PATCH", body), { params: Promise.resolve({ id: linkedAct.id }) });
+      check(`${label} -> 200`, res.status === 200);
+      check("...publishes an Activity-channel NOTIFY (Activity list shows Expected dates)", (await waitA) !== null);
+      check("...does NOT publish to the Project channel (no count/progress rollup change)", (await waitNoP) === null);
+    }
+    {
+      // Authorization: no edit permission anywhere -> 403, nothing persisted, nothing published.
+      currentSession = { user: { id: agent.id, role: Role.USER, customRoleId: null } };
+      const before = await prisma.projectActivity.findUniqueOrThrow({ where: { id: linkedAct.id }, select: { expectedStartDate: true } });
+      const waitNone = waitForNotification(activityListener, 1_500);
+      const waitNoneP = waitForNotification(projectListener, 1_500);
+      const resA = await activityRoute.PATCH(jsonReq("PATCH", buildSchedulingPatch("activity", "expected", "2027-04-01T00:00:00.000Z", "2027-04-02T00:00:00.000Z")), { params: Promise.resolve({ id: linkedAct.id }) });
+      const resP = await projectRoute.PATCH(jsonReq("PATCH", buildSchedulingPatch("project", "expected", "2027-04-01T00:00:00.000Z", "2027-04-20T00:00:00.000Z")), { params: Promise.resolve({ id: createdProject.id }) });
+      const after = await prisma.projectActivity.findUniqueOrThrow({ where: { id: linkedAct.id }, select: { expectedStartDate: true } });
+      check("Unauthorized Expected Activity/Project PATCH -> 403 / 403, nothing persisted", resA.status === 403 && resP.status === 403 && after.expectedStartDate?.getTime() === before.expectedStartDate?.getTime());
+      check("...publishes NOTHING on either channel", (await waitNone) === null && (await waitNoneP) === null);
+
+      // Department scoping: holds project.edit + activity.edit, but only in ANOTHER department.
+      const scopedDept = await createDepartment({ name: `RT Inventory Scoped ${RUN_ID}`, slug: `rt-inventory-scoped-${RUN_ID}` });
+      deptIds.push(scopedDept.id);
+      const editRole = await prisma.customRole.create({ data: { key: `RT_INV_EDIT_${RUN_ID}`, name: `RT Inv Edit ${RUN_ID}`, isBuiltIn: false, scope: "DEPARTMENT", isActive: true } });
+      roleKeys.push(editRole.key);
+      for (const key of ["project.view", "project.edit", "activity.view", "activity.edit"]) {
+        await prisma.rolePermission.create({ data: { roleKey: editRole.key, permissionId: (await prisma.permission.findUniqueOrThrow({ where: { key } })).id } });
+      }
+      const scopedEditor = await prisma.user.create({ data: { email: `rt-inv-expected-editor-${RUN_ID}@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+      userIds.push(scopedEditor.id);
+      await prisma.departmentMembership.create({ data: { userId: scopedEditor.id, departmentId: scopedDept.id, role: "VIEWER", customRoleId: editRole.id, source: "MANUAL", isPrimary: true, isActive: true } });
+      currentSession = { user: { id: scopedEditor.id, role: Role.USER, customRoleId: null } };
+      const waitScoped = waitForNotification(activityListener, 1_500);
+      const waitScopedP = waitForNotification(projectListener, 1_500);
+      const sA = await activityRoute.PATCH(jsonReq("PATCH", buildSchedulingPatch("activity", "expected", "2027-04-01T00:00:00.000Z", "2027-04-02T00:00:00.000Z")), { params: Promise.resolve({ id: linkedAct.id }) });
+      const sP = await projectRoute.PATCH(jsonReq("PATCH", buildSchedulingPatch("project", "expected", "2027-04-01T00:00:00.000Z", "2027-04-20T00:00:00.000Z")), { params: Promise.resolve({ id: createdProject.id }) });
+      check("Editor scoped to a DIFFERENT department -> 403 / 403 on Expected Activity/Project PATCH", sA.status === 403 && sP.status === 403);
+      check("...publishes NOTHING on either channel", (await waitScoped) === null && (await waitScopedP) === null);
+      currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    }
 
     console.log("\n=== 8. Completion/status change on a project-linked activity -> BOTH lists refresh (rollup) ===\n");
     const waitActComplete = waitForNotification(activityListener, 3_000);
@@ -448,7 +510,11 @@ async function main() {
     try {
       await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
       await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
+      await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
+      await prisma.taskType.deleteMany({ where: { id: { in: taskTypeIds } } });
+      await prisma.rolePermission.deleteMany({ where: { roleKey: { in: roleKeys } } });
+      await prisma.customRole.deleteMany({ where: { key: { in: roleKeys } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });

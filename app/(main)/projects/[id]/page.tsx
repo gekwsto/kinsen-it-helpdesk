@@ -9,7 +9,7 @@ import Link from "next/link";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { formatDate, formatDateTime, getInitials } from "@/lib/utils";
+import { formatDateOnly, formatDateTime, getInitials } from "@/lib/utils";
 import { ChevronRight, Calendar, Users, Target } from "lucide-react";
 import { GoalStatus } from "@prisma/client";
 import { ProjectActivitiesCard } from "@/components/projects/project-activities-card";
@@ -864,8 +864,8 @@ export default async function ProjectDetailPage({
                           real user-entered exact date (see this Project's
                           own isFacilitiesServicesWorkspace/
                           facilitiesStartLabel computation above). */}
-                      {project.startDate && <p>Start: {facilitiesStartLabel ?? formatDate(project.startDate)}</p>}
-                      {project.endDate && <p>End: {facilitiesEndLabel ?? formatDate(project.endDate)}</p>}
+                      {project.startDate && <p>Start: {facilitiesStartLabel ?? formatDateOnly(project.startDate)}</p>}
+                      {project.endDate && <p>End: {facilitiesEndLabel ?? formatDateOnly(project.endDate)}</p>}
                       {project.actualTotalDays !== null && (
                         <p className="text-xs text-muted-foreground mt-0.5">
                           Actual total: {project.actualTotalDays} working day(s){project.actualTotalDaysOverridden ? " (manually set)" : ""}
@@ -876,8 +876,8 @@ export default async function ProjectDetailPage({
                   {project.projectRequest && (project.expectedStartDate || project.expectedFinishDate) && (
                     <div>
                       <p className="text-xs text-muted-foreground mb-1">Expected Timeline</p>
-                      {project.expectedStartDate && <p>Start: {formatDate(project.expectedStartDate)}</p>}
-                      {project.expectedFinishDate && <p>Finish: {formatDate(project.expectedFinishDate)}</p>}
+                      {project.expectedStartDate && <p>Start: {formatDateOnly(project.expectedStartDate)}</p>}
+                      {project.expectedFinishDate && <p>Finish: {formatDateOnly(project.expectedFinishDate)}</p>}
                       {project.expectedTotalInitialDays !== null && (
                         <p className="text-xs text-muted-foreground mt-0.5">
                           Expected total initial: {project.expectedTotalInitialDays} working day(s){project.expectedTotalInitialDaysOverridden ? " (manually set)" : ""}

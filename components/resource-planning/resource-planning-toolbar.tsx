@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
-import { addDays, addWeeks, addMonths, format } from "date-fns";
+import { shiftDateOnly } from "@/lib/date-only";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -11,6 +11,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { TimelineModeToggle } from "@/components/timeline/timeline-mode-toggle";
+import type { TimelineMode } from "@/lib/timeline-mode";
 
 export type ResourcePlanningView = "week" | "month";
 
@@ -19,6 +21,8 @@ interface ResourcePlanningToolbarProps {
   /** Start of the currently visible range — ISO date, used both to render the label and to compute prev/next. */
   rangeStart: string;
   rangeLabel: string;
+  /** Actual / Expected — the toggle carries every other URL param (view, from, filters) over unchanged. */
+  timelineMode?: TimelineMode;
 }
 
 /**
@@ -29,7 +33,7 @@ interface ResourcePlanningToolbarProps {
  * plan's Decision #2) so the visible range is shareable/bookmarkable and the
  * server — not the browser — is what "applies filters."
  */
-export function ResourcePlanningToolbar({ view, rangeStart, rangeLabel }: ResourcePlanningToolbarProps) {
+export function ResourcePlanningToolbar({ view, rangeStart, rangeLabel, timelineMode }: ResourcePlanningToolbarProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -44,9 +48,15 @@ export function ResourcePlanningToolbar({ view, rangeStart, rangeLabel }: Resour
   };
 
   const navigate = (direction: -1 | 1) => {
-    const start = new Date(rangeStart);
-    const next = view === "week" ? addWeeks(start, direction) : addMonths(start, direction);
-    push({ from: format(next, "yyyy-MM-dd") });
+    // UTC calendar-date arithmetic on the "yyyy-MM-dd" range start — the
+    // same date-only convention the page and the stored dates use, so
+    // Prev/Next land on the right week/month in every browser time zone.
+    const start = new Date(`${rangeStart}T00:00:00.000Z`);
+    const next =
+      view === "week"
+        ? shiftDateOnly(start, 7 * direction)
+        : new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + direction, 1)).toISOString();
+    push({ from: next.slice(0, 10) });
   };
 
   return (
@@ -74,6 +84,13 @@ export function ResourcePlanningToolbar({ view, rangeStart, rangeLabel }: Resour
           <SelectItem value="month">Month</SelectItem>
         </SelectContent>
       </Select>
+
+      {timelineMode && <TimelineModeToggle mode={timelineMode} />}
+      {timelineMode === "expected" && (
+        <span className="text-xs text-muted-foreground" data-testid="timeline-expected-note">
+          Expected dates · drag edits Expected only
+        </span>
+      )}
     </div>
   );
 }

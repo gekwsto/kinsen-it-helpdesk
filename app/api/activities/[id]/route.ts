@@ -37,6 +37,11 @@ const ACTIVITY_LIST_RELEVANT_FIELDS = [
   "assignedUserIds",
   "startDate",
   "dueDate",
+  // Expected Start/Finish are shown on the Activity list too, and are what
+  // an Expected-mode timeline drag writes — they refresh viewers exactly
+  // like an Actual-date change does.
+  "expectedStartDate",
+  "expectedFinishDate",
   "isCompleted",
 ] as const;
 

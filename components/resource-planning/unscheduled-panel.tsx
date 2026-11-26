@@ -4,10 +4,12 @@ import { useState } from "react";
 import Link from "next/link";
 import { CalendarClock, ChevronDown, ChevronUp } from "lucide-react";
 import type { ResourceEvent, ResourcePlanningResource } from "@/lib/services/resource-planning-service";
+import type { TimelineMode } from "@/lib/timeline-mode";
 
 interface UnscheduledPanelProps {
   unscheduled: ResourceEvent[];
   resources: ResourcePlanningResource[];
+  timelineMode?: TimelineMode;
 }
 
 /**
@@ -22,7 +24,7 @@ interface UnscheduledPanelProps {
  * beside the timeline as its own right-hand column anymore, so it never
  * competes with the timeline for horizontal room.
  */
-export function UnscheduledPanel({ unscheduled, resources }: UnscheduledPanelProps) {
+export function UnscheduledPanel({ unscheduled, resources, timelineMode }: UnscheduledPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
   const nameById = new Map(resources.map((r) => [r.id, r.name ?? r.email]));
 
@@ -40,7 +42,9 @@ export function UnscheduledPanel({ unscheduled, resources }: UnscheduledPanelPro
           </p>
           {!collapsed && (
             <p className="text-xs text-muted-foreground mt-0.5">
-              No dates or no assignee yet — can&apos;t be placed on the timeline.
+              {timelineMode === "expected"
+                ? "No Expected Start / Finish or no assignee yet — can't be placed on the Expected timeline."
+                : "No dates or no assignee yet — can't be placed on the timeline."}
             </p>
           )}
         </div>
@@ -81,7 +85,11 @@ export function UnscheduledPanel({ unscheduled, resources }: UnscheduledPanelPro
                         out per item so the blanket panel subtitle above isn't
                         wrong for half of them. */}
                     <p className="text-[10px] text-muted-foreground/70 italic mt-0.5">
-                      {e.unscheduledReason === "no-assignee" ? "No assignee" : "No start or due date"}
+                      {e.unscheduledReason === "no-assignee"
+                        ? "No assignee"
+                        : e.unscheduledReason === "no-expected-dates"
+                        ? "Missing Expected Start or Expected Finish"
+                        : "No start or due date"}
                     </p>
                   </Link>
                 );

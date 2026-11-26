@@ -29,19 +29,25 @@ function check(label: string, condition: boolean) {
   }
 }
 
-function localMidnight(y: number, m: number, d: number): Date {
-  const dt = new Date();
-  dt.setFullYear(y, m - 1, d);
-  dt.setHours(0, 0, 0, 0);
-  return dt;
+/** Canonical date-only value (UTC midnight — lib/date-only.ts), the convention every drag writes. */
+function utcMidnight(y: number, m: number, d: number): Date {
+  return new Date(Date.UTC(y, m - 1, d));
 }
+/** UTC calendar date of a stored value (how the app reads date-only values). */
 function ymd(d: Date | null | undefined): string {
   if (!d) return "null";
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return d.toISOString().slice(0, 10);
+}
+
+/** Navigate and wait deterministically for the fixture bar (a network-idle wait never settles: the header keeps a persistent realtime EventSource open). */
+async function gotoBoard(page: Page, url: string, readyText: string) {
+  await page.goto(url);
+  await page.getByText(readyText, { exact: false }).first().waitFor({ state: "attached", timeout: 15000 });
 }
 
 async function login(page: Page) {
-  await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE_URL}/login`);
+  await page.locator("#credentials-email").waitFor({ state: "visible", timeout: 15000 });
   await page.fill("#credentials-email", "admin@kinsen.gr");
   await page.fill("#credentials-password", "Kinsen123!");
   await page.click('button:has-text("Sign in as Admin")');
@@ -60,13 +66,19 @@ async function dragBarByText(page: Page, text: string, dxPx: number, steps = 10)
   if (!box) throw new Error(`bar "${text}" not found`);
   const startX = box.x + box.width / 2;
   const startY = box.y + box.height / 2;
+  // Every drag in this script expects a PATCH — completion is that response
+  // (event-driven, no fixed sleep); bounded so a missing PATCH fails the
+  // check instead of hanging.
+  const patched = page
+    .waitForResponse((r) => r.url().includes("/api/activities/") && r.request().method() === "PATCH", { timeout: 15000 })
+    .catch(() => undefined);
   await page.mouse.move(startX, startY);
   await page.mouse.down();
   for (let i = 1; i <= steps; i++) {
     await page.mouse.move(startX + (dxPx * i) / steps, startY);
   }
   await page.mouse.up();
-  await page.waitForTimeout(350);
+  await patched;
 }
 
 async function main() {
@@ -135,8 +147,8 @@ async function main() {
 
     // ── 1. The exact reported case: 28/07 -> 05/08, month view (July side) ──
     console.log("\n=== 28/07 -> 05/08 is draggable in July month view ===\n");
-    const a1 = await makeActivity(`XMBug ${RUN_ID}`, localMidnight(2026, 7, 28), localMidnight(2026, 8, 5));
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-07-15`, { waitUntil: "networkidle" });
+    const a1 = await makeActivity(`XMBug ${RUN_ID}`, utcMidnight(2026, 7, 28), utcMidnight(2026, 8, 5));
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-07-15`, "XMBug");
     const tagJuly = await page.evaluate(() => {
       const span = Array.from(document.querySelectorAll("span")).find((s) => s.textContent?.includes("XMBug"));
       return span?.closest("a, div.absolute")?.tagName;
@@ -160,13 +172,13 @@ async function main() {
       const durationBefore = 8; // 28/07 -> 05/08
       const durationAfter = db!.dueDate!.getTime() - db!.startDate!.getTime();
       check("Duration preserved after drag (still exactly 8 days)", Math.round(durationAfter / 86400000) === durationBefore);
-      check("Activity actually moved earlier (startDate before 28/07)", db!.startDate!.getTime() < localMidnight(2026, 7, 28).getTime());
+      check("Activity actually moved earlier (startDate before 28/07)", db!.startDate!.getTime() < utcMidnight(2026, 7, 28).getTime());
     }
 
     // ── 2. Same bar visible in August month view (continuesBefore side) ──
     console.log("\n=== The same activity is draggable in August month view (continuesBefore side) ===\n");
-    await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: localMidnight(2026, 7, 28), dueDate: localMidnight(2026, 8, 5) } });
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, { waitUntil: "networkidle" });
+    await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: utcMidnight(2026, 7, 28), dueDate: utcMidnight(2026, 8, 5) } });
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, "XMBug");
     const tagAug = await page.evaluate(() => {
       const span = Array.from(document.querySelectorAll("span")).find((s) => s.textContent?.includes("XMBug"));
       return span?.closest("a, div.absolute")?.tagName;
@@ -178,11 +190,11 @@ async function main() {
 
     // ── 3. Exact date-shift correctness: +3 days should give 31/07 -> 08/08 ──
     console.log("\n=== Exact +3 day shift: 28/07->05/08 becomes 31/07->08/08 ===\n");
-    await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: localMidnight(2026, 7, 28), dueDate: localMidnight(2026, 8, 5) } });
+    await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: utcMidnight(2026, 7, 28), dueDate: utcMidnight(2026, 8, 5) } });
     // August month view: this bar is left-clipped only (continuesBefore),
     // so it has full room to move RIGHTWARD (later) — the direction this
     // +3-day test needs.
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, { waitUntil: "networkidle" });
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, "XMBug");
     // Measure real pxPerDay from the day header cells to drag exactly 3 days.
     const pxPerDay = await page.evaluate(() => {
       const cells = Array.from(document.querySelectorAll(".sticky.top-0 .flex > div")).filter((el) => (el as HTMLElement).style.width);
@@ -198,8 +210,8 @@ async function main() {
 
     // ── 4. Year boundary: 28/12 -> 05/01 ──
     console.log("\n=== Year-boundary activity (28/12 -> 05/01) is draggable and shifts correctly ===\n");
-    const a2 = await makeActivity(`XMYear ${RUN_ID}`, localMidnight(2026, 12, 28), localMidnight(2027, 1, 5));
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-12-15`, { waitUntil: "networkidle" });
+    const a2 = await makeActivity(`XMYear ${RUN_ID}`, utcMidnight(2026, 12, 28), utcMidnight(2027, 1, 5));
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-12-15`, "XMYear");
     const tagDec = await page.evaluate(() => {
       const span = Array.from(document.querySelectorAll("span")).find((s) => s.textContent?.includes("XMYear"));
       return span?.closest("a, div.absolute")?.tagName;
@@ -214,28 +226,28 @@ async function main() {
     check("Year-boundary drag (leftward, where there's clamp room) fires exactly one successful PATCH", patchLog.length - before === 1 && patchLog[patchLog.length - 1]?.status === 200);
     {
       const db = await prisma.projectActivity.findUnique({ where: { id: a2.id }, select: { startDate: true, dueDate: true } });
-      check("Year rolled BACK correctly (startDate still in 2026, before 28/12)", db!.startDate!.getTime() < localMidnight(2026, 12, 28).getTime());
+      check("Year rolled BACK correctly (startDate still in 2026, before 28/12)", db!.startDate!.getTime() < utcMidnight(2026, 12, 28).getTime());
       const dur = Math.round((db!.dueDate!.getTime() - db!.startDate!.getTime()) / 86400000);
       check("Duration preserved across the year boundary (still 8 days)", dur === 8);
     }
 
     // ── 4b. Same activity, now dragged FORWARD across the year boundary from January's view ──
     console.log("\n=== Year-boundary activity dragged forward, viewed from January (2027) ===\n");
-    await prisma.projectActivity.update({ where: { id: a2.id }, data: { startDate: localMidnight(2026, 12, 28), dueDate: localMidnight(2027, 1, 5) } });
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2027-01-15`, { waitUntil: "networkidle" });
+    await prisma.projectActivity.update({ where: { id: a2.id }, data: { startDate: utcMidnight(2026, 12, 28), dueDate: utcMidnight(2027, 1, 5) } });
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2027-01-15`, "XMYear");
     before = patchLog.length;
     await dragBarByText(page, "XMYear", 60);
     check("Forward drag from January's (left-clipped) view fires exactly one successful PATCH", patchLog.length - before === 1 && patchLog[patchLog.length - 1]?.status === 200);
     {
       const db = await prisma.projectActivity.findUnique({ where: { id: a2.id }, select: { startDate: true, dueDate: true } });
-      check("Activity moved further into January (dueDate later than original 05/01/2027)", db!.dueDate!.getTime() > localMidnight(2027, 1, 5).getTime());
+      check("Activity moved further into January (dueDate later than original 05/01/2027)", db!.dueDate!.getTime() > utcMidnight(2027, 1, 5).getTime());
       const dur = Math.round((db!.dueDate!.getTime() - db!.startDate!.getTime()) / 86400000);
       check("Duration still preserved (still 8 days)", dur === 8);
     }
 
     // ── 5. Activity fully outside visible range at one edge (starts before range) ──
     console.log("\n=== Activity starting before the visible range is draggable from its visible part ===\n");
-    const a3 = await makeActivity(`XMBefore ${RUN_ID}`, localMidnight(2026, 6, 1), localMidnight(2026, 7, 20));
+    const a3 = await makeActivity(`XMBefore ${RUN_ID}`, utcMidnight(2026, 6, 1), utcMidnight(2026, 7, 20));
     // Deliberately a 49-day activity, deliberately viewed in MONTH (not
     // week) view: in a 7-day week view this would be clipped on BOTH ends
     // at once (its visible fragment would already span the entire 7-day
@@ -245,7 +257,7 @@ async function main() {
     // whatever date range is currently loaded). In July's month view this
     // same activity is clipped on the LEFT only (ends the 20th, well
     // before July's end), giving real room to drag right.
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-07-15`, { waitUntil: "networkidle" });
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-07-15`, "XMonth Agent"); // the agent row (same server render as its bars) — the bar's own presence is asserted just below
     const foundBefore = await page.getByText("XMBefore", { exact: false }).first().isVisible().catch(() => false);
     check("Activity starting before the visible range is still shown (clipped)", foundBefore);
     if (foundBefore) {
@@ -259,9 +271,9 @@ async function main() {
     console.log(`\n=== Repeating the 28/07 -> 05/08 drag ${CROSSMONTH_REPEAT_COUNT}x to rule out intermittency ===\n`);
     let okCount = 0;
     for (let i = 0; i < CROSSMONTH_REPEAT_COUNT; i++) {
-      await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: localMidnight(2026, 7, 28), dueDate: localMidnight(2026, 8, 5) } });
+      await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: utcMidnight(2026, 7, 28), dueDate: utcMidnight(2026, 8, 5) } });
       // August view: left-clipped only, so rightward drag has real room.
-      await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, { waitUntil: "networkidle" });
+      await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, "XMBug");
       const beforeRep = patchLog.length;
       await dragBarByText(page, "XMBug", 50);
       const newPatches = patchLog.slice(beforeRep);
@@ -273,11 +285,12 @@ async function main() {
 
     // ── 7. Persistence after full refresh ──
     console.log("\n=== Persistence after full page refresh ===\n");
-    await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: localMidnight(2026, 7, 28), dueDate: localMidnight(2026, 8, 5) } });
-    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, { waitUntil: "networkidle" });
+    await prisma.projectActivity.update({ where: { id: a1.id }, data: { startDate: utcMidnight(2026, 7, 28), dueDate: utcMidnight(2026, 8, 5) } });
+    await gotoBoard(page, `${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-08-15`, "XMBug");
     await dragBarByText(page, "XMBug", 60);
     const dbBeforeReload = await prisma.projectActivity.findUnique({ where: { id: a1.id }, select: { startDate: true, dueDate: true } });
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload();
+    await page.getByText("XMBug", { exact: false }).first().waitFor({ state: "attached", timeout: 15000 });
     const dbAfterReload = await prisma.projectActivity.findUnique({ where: { id: a1.id }, select: { startDate: true, dueDate: true } });
     check("startDate identical before/after reload", dbBeforeReload?.startDate?.getTime() === dbAfterReload?.startDate?.getTime());
     check("dueDate identical before/after reload", dbBeforeReload?.dueDate?.getTime() === dbAfterReload?.dueDate?.getTime());
