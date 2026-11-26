@@ -46,6 +46,9 @@ const PROJECT_LIST_RELEVANT_FIELDS = [
 
 const PROJECT_INCLUDE = {
   owner: { select: { id: true, name: true, email: true, image: true } },
+  // The full Owner set — needed by the Edit page's Owner(s) picker for a
+  // Request-origin Project.
+  owners: { select: { id: true, name: true, email: true, image: true } },
   department: { select: { id: true, name: true } },
   businessUnit: { select: { id: true, name: true } },
   members: { select: { id: true, name: true, email: true, image: true } },
@@ -149,6 +152,7 @@ export async function PATCH(
         departmentId: true,
         status: true,
         title: true,
+        ownerId: true,
         expectedStartDate: true,
         expectedFinishDate: true,
         expectedTotalInitialDays: true,
@@ -250,6 +254,7 @@ export async function PATCH(
       expectedFinishDate,
       expectedTotalInitialDaysOverride,
       actualTotalDaysOverride,
+      ownerIds,
       facilitiesCompany,
       facilitiesLocation,
       facilitiesStartPrecision,
@@ -312,6 +317,25 @@ export async function PATCH(
       }
       if (audienceDepartmentIds !== undefined) resolvedAudienceDepartmentIds = resolution.departmentIds;
       if (audienceBusinessUnitIds !== undefined) resolvedAudienceBusinessUnitIds = resolution.businessUnitIds;
+    }
+
+    // Owner(s) — Request-origin Projects only, same eligibility as Project
+    // setup (resolveSystemWideActiveUserIds: real, active users,
+    // system-wide; at least one). Authorization is this route's existing
+    // project.edit gate above. The primary owner (ownerId) is kept when
+    // still selected, otherwise the first selected owner becomes primary.
+    // Ownership-derived access (hasProjectViewAccess, "My Projects") is
+    // computed live from these relations, so it follows the change. The
+    // Project Request (requester, approvals) and related Activities/Tickets
+    // are never touched. A standalone Project ignores ownerIds (unchanged).
+    let ownerWrite: { ownerId: string; owners: { set: { id: string }[] } } | undefined;
+    if (existing.projectRequestId && ownerIds !== undefined) {
+      const resolvedOwners = await resolveSystemWideActiveUserIds(ownerIds);
+      if (!resolvedOwners || resolvedOwners.length === 0) {
+        return NextResponse.json({ error: "Select at least one Owner — every Owner must be a real, active user.", code: "invalid_project_owner" }, { status: 400 });
+      }
+      const primary = resolvedOwners.includes(existing.ownerId) ? existing.ownerId : resolvedOwners[0];
+      ownerWrite = { ownerId: primary, owners: { set: resolvedOwners.map((oid) => ({ id: oid })) } };
     }
 
     // Individual Audience — available on every Project as of Phase 1.1,
@@ -547,6 +571,7 @@ export async function PATCH(
         audienceDepartments: resolvedAudienceDepartmentIds !== undefined ? { set: resolvedAudienceDepartmentIds.map((id) => ({ id })) } : undefined,
         audienceBusinessUnits: resolvedAudienceBusinessUnitIds !== undefined ? { set: resolvedAudienceBusinessUnitIds.map((id) => ({ id })) } : undefined,
         responsiblePeople: resolvedResponsiblePeopleIds !== undefined ? { set: resolvedResponsiblePeopleIds.map((id) => ({ id })) } : undefined,
+        ...(ownerWrite ?? {}),
       },
       include: PROJECT_INCLUDE,
     });

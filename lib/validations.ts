@@ -370,6 +370,11 @@ export const updateProjectRequestOriginFieldsSchema = z.object({
   // number = manual override, null = reset to calculated, omitted = keep
   // current mode (see lib/project-duration.ts).
   expectedTotalInitialDaysOverride: projectDurationOverrideSchema("Expected Total Initial Days"),
+  // Owner(s) — editable for a Request-origin Project with the SAME rule as
+  // Project setup (createProjectFromRequestSchema.ownerIds): one or more
+  // real, active users, system-wide. Omitted = unchanged. Ignored for a
+  // standalone Project (its single owner is still its creator — unchanged).
+  ownerIds: z.array(z.string().trim().min(1)).min(1, "Select at least one Owner.").optional(),
   expenseTypeId: z.string().trim().min(1).nullable().optional(),
   // Budget/Estimated Cost/Actual Cost are no longer editable fields at all
   // — see createProjectFromRequestSchema's own doc comment above. A client
@@ -1180,6 +1185,16 @@ export const createProjectRequestSchema = z
     intermediateApproverIds: z
       .array(z.string().min(1))
       .refine((ids) => new Set(ids).size === ids.length, "The same approver was selected more than once"),
+    // Explicit opt-out of Intermediate Approval — available to EVERY
+    // requester (no permission). When true, no manager selection or
+    // SQLGeneral resolution happens and intermediateApproverIds is ignored.
+    // Off by default.
+    skipIntermediateApproval: z.boolean().default(false),
+    // Skip Final Approval — honoured ONLY when the requester holds the
+    // effective projectRequest.skipFinalApproval for the request's resolved
+    // department (re-checked server-side; an unauthorized attempt is
+    // rejected, never silently ignored). Off by default.
+    skipFinalApproval: z.boolean().default(false),
   })
   .superRefine((data, ctx) => {
     if (data.replacesExisting && !data.replacementDescription) {

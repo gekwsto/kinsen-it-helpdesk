@@ -16,8 +16,8 @@
  * established browser-verify-*.ts convention). Local/dev database only:
  * every fixture is created here and removed in the cleanup block.
  *
- * The fixture user holds ONE department with a custom role granting
- * projectRequest.skipIntermediateApproval, so the request skips the
+ * The fixture user holds ONE department and ticks "Skip Intermediate
+ * Approval" (available to every requester), so the request skips the
  * SQLGeneral-manager intermediate stage deterministically (no live
  * SQLGeneral dependency) and goes straight to FINAL approval.
  *
@@ -83,7 +83,7 @@ async function main() {
     expenseTypeId = expenseType.id;
 
     const baseKeys = (await prisma.rolePermission.findMany({ where: { roleKey: "DEPARTMENT_ADMIN" }, select: { permission: { select: { key: true } } } })).map((r) => r.permission.key);
-    const keys = Array.from(new Set([...baseKeys, "projectRequest.approve", "projectRequest.skipIntermediateApproval"]));
+    const keys = Array.from(new Set([...baseKeys, "projectRequest.approve"]));
     const role = await prisma.customRole.create({ data: { key: `BV_DUR_${RUN_ID}`, name: `BV Dur ${RUN_ID}`, isBuiltIn: false, scope: "DEPARTMENT" as any, isActive: true } });
     roleKey = role.key;
     roleId = role.id;
@@ -120,6 +120,7 @@ async function main() {
       await page.waitForSelector("#title", { timeout: 30000 });
       await page.fill("#title", title);
       await page.fill("#description", "A description that is definitely long enough for validation.");
+      await page.check("#skipIntermediateApproval");
       const [res] = await Promise.all([
         page.waitForResponse((r) => r.url().endsWith("/api/project-requests") && r.request().method() === "POST", { timeout: 20000 }),
         page.getByRole("button", { name: "Submit Request" }).click(),
@@ -142,7 +143,7 @@ async function main() {
     check("Second submission (reject target) -> 201", pr2.status === 201);
     const pr1Row = await prisma.projectRequest.findUniqueOrThrow({ where: { id: pr1.id } });
     check("...Team Concerned and Expected Benefits persisted as null", pr1Row.teamConcerned === null && pr1Row.expectedBenefits === null);
-    check("...request is awaiting FINAL approval (intermediate stage skipped by permission)", pr1Row.status === "PENDING_APPROVAL");
+    check("...request is awaiting FINAL approval (intermediate stage skipped by the requester)", pr1Row.status === "PENDING_APPROVAL" && pr1Row.intermediateApprovalSkipReason === "REQUESTER_OPTED_OUT");
 
     // ══════════════════════ 2. Final approval (detail) + rejection (list) without Business Assessment ══════════════════════
     console.log("\n=== 2. Final approval from the detail page and rejection from the list — no Business Assessment ===\n");

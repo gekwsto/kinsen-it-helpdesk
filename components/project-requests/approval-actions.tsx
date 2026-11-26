@@ -9,6 +9,7 @@ import { Loader2, Check, X, FolderKanban, Wrench } from "lucide-react";
 import type { ProjectRequestStatus } from "@prisma/client";
 import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
 import { formatDateTime } from "@/lib/utils";
+import { SkippedFinalStage } from "@/components/project-requests/skipped-stage";
 
 interface ApprovalActionsProps {
   requestId: string;
@@ -24,6 +25,10 @@ interface ApprovalActionsProps {
   project: { id: string; title: string } | null;
   /** True when the CURRENT viewer currently holds effective projectRequest.approve for this request's own department — anyone with that authority may complete (or resume) its Project setup, not only whoever originally clicked Approve. Same permission canDecideNow is built from; see createProjectFromApprovedRequest's own doc comment. */
   canCompleteSetup: boolean;
+  /** Final Approval was skipped at submission — shown as "Skipped", never as an approval. */
+  finalApprovalSkipped?: boolean;
+  finalApprovalSkippedBy?: { name: string | null; email: string } | null;
+  finalApprovalSkippedAt?: Date | string | null;
 }
 
 /**
@@ -47,7 +52,7 @@ interface ApprovalActionsProps {
  * Setup" to anyone who currently holds that same approval authority for
  * this department — see canCompleteSetup.
  */
-export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, project, canCompleteSetup }: ApprovalActionsProps) {
+export function ApprovalActions({ requestId, status, canDecideNow, approver, approvedAt, rejectedAt, businessAssessment, project, canCompleteSetup, finalApprovalSkipped = false, finalApprovalSkippedBy = null, finalApprovalSkippedAt = null }: ApprovalActionsProps) {
   const router = useRouter();
   const [pendingDecision, setPendingDecision] = useState<"approve" | "reject" | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -94,6 +99,30 @@ export function ApprovalActions({ requestId, status, canDecideNow, approver, app
     setPendingDecision(null);
     setServerError(null);
   };
+
+  if (finalApprovalSkipped) {
+    return (
+      <div className="text-sm">
+        <SkippedFinalStage skippedBy={finalApprovalSkippedBy} skippedAt={finalApprovalSkippedAt} />
+        {status === "APPROVED" &&
+          (project ? (
+            <Link href={`/projects/${project.id}`} className="inline-flex items-center gap-1.5 mt-2 text-primary hover:underline">
+              <FolderKanban className="h-3.5 w-3.5" />
+              View Project
+            </Link>
+          ) : canCompleteSetup ? (
+            <Button size="sm" className="mt-2" asChild>
+              <Link href={`/projects/new?projectRequestId=${requestId}`}>
+                <Wrench className="h-3.5 w-3.5 mr-1.5" />
+                Complete Project Setup
+              </Link>
+            </Button>
+          ) : (
+            <p className="text-xs text-muted-foreground mt-2">Project setup is still pending, from someone with final-approval rights in this department.</p>
+          ))}
+      </div>
+    );
+  }
 
   if (status === "APPROVED" && approver) {
     return (

@@ -1,4 +1,5 @@
 import { auth } from "@/lib/auth";
+import { SkippedIntermediateStage, SkippedFinalStage } from "@/components/project-requests/skipped-stage";
 import { prisma } from "@/lib/prisma";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { hasProjectViewAccess } from "@/lib/services/project-access-service";
@@ -89,6 +90,10 @@ export default async function ProjectDetailPage({
           submittedAt: true,
           source: true,
           status: true,
+          intermediateApprovalSkipReason: true,
+          finalApprovalSkipped: true,
+          finalApprovalSkippedAt: true,
+          finalApprovalSkippedBy: { select: { name: true, email: true } },
           requester: { select: { id: true, name: true, email: true, image: true } },
           // Snapshot of the requester's OWN department at submission —
           // never the request's target department (`project.department`
@@ -507,6 +512,18 @@ export default async function ProjectDetailPage({
                     the final stage below. Empty for a request that skipped
                     this stage entirely (intermediateApprovalSkipReason) —
                     nothing to show, not an error. */}
+                {project.projectRequest.intermediateApprovalSkipReason && (
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">Intermediate Approval</p>
+                    <SkippedIntermediateStage reason={project.projectRequest.intermediateApprovalSkipReason} className="text-xs rounded-md border px-3 py-2" />
+                  </div>
+                )}
+                {project.projectRequest.finalApprovalSkipped && (
+                  <div className="space-y-1.5">
+                    <p className="text-xs text-muted-foreground">Final Approval</p>
+                    <SkippedFinalStage skippedBy={project.projectRequest.finalApprovalSkippedBy} skippedAt={project.projectRequest.finalApprovalSkippedAt} className="text-xs rounded-md border px-3 py-2" />
+                  </div>
+                )}
                 {project.projectRequest.intermediateApprovers.length > 0 && (
                   <div className="space-y-1.5">
                     <p className="text-xs text-muted-foreground">Intermediate Approval</p>

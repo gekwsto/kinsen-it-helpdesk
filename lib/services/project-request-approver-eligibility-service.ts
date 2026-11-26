@@ -18,21 +18,27 @@ import { Role, DepartmentRole } from "@prisma/client";
 export const APPROVE_PERMISSION_KEY = "projectRequest.approve";
 
 /**
- * Lets a REQUESTER'S OWN submission skip the entire intermediate-approval
- * stage (SQLGeneral identity/manager-chain validation and intermediate-
- * approver selection), going straight to Final Approval — see
- * resolveIntermediateApprovers in project-request-service.ts, and this
- * key's own seed.ts doc comment for the full reasoning. Checked via
- * hasExplicitSkipIntermediateApprovalGrant below — NEVER via
- * hasEffectiveEntityPermission/hasPermission, which would silently
- * auto-grant this to Role.ADMIN (hasPermission's own unconditional
- * shortcut) and every canViewAllDepartments role such as DIRECTOR
- * (canActOnEntity's own shortcut) — exactly what REQUIRED #1 forbids
- * ("do not hardcode Director roles or grant it automatically").
+ * RETIRED. Intermediate Approval can now be skipped by EVERY requester at
+ * submission (an explicit opt-out checkbox — see resolveIntermediateApprovers
+ * in project-request-service.ts), so this permission is no longer enforced
+ * anywhere. The key, its Permission row and any existing role grants are
+ * kept (non-destructive); historical requests skipped through it keep their
+ * PERMISSION_BYPASS skip reason.
  */
 export const SKIP_INTERMEDIATE_APPROVAL_PERMISSION_KEY = "projectRequest.skipIntermediateApproval";
 
-/** Bypass-free global check — the SAME RolePermission/CustomRole lookup hasPermission (lib/permissions.ts) uses internally, but WITHOUT its `role === Role.ADMIN -> true` shortcut. Private — only hasExplicitSkipIntermediateApprovalGrant and the page-level ambiguous-multi-department check below need this, and only ever for SKIP_INTERMEDIATE_APPROVAL_PERMISSION_KEY. */
+/**
+ * Lets a requester skip the FINAL approval stage of their own submission
+ * for the request's target department. Evaluated with
+ * hasExplicitProjectRequestGrant below — never hasEffectiveEntityPermission
+ * /hasPermission, which would silently auto-grant it to Role.ADMIN and every
+ * canViewAllDepartments role (DIRECTOR). The permission is granted to no
+ * role by default; administrators assign it explicitly (Global or
+ * Department scope). Fully independent of APPROVE_PERMISSION_KEY.
+ */
+export const SKIP_FINAL_APPROVAL_PERMISSION_KEY = "projectRequest.skipFinalApproval";
+
+/** Bypass-free global check — the SAME RolePermission/CustomRole lookup hasPermission (lib/permissions.ts) uses internally, but WITHOUT its `role === Role.ADMIN -> true` shortcut. */
 async function hasExplicitGlobalGrant(role: Role, customRoleId: string | null | undefined, permissionKey: string): Promise<boolean> {
   if (customRoleId) {
     const customRole = await prisma.customRole.findUnique({ where: { id: customRoleId } });
@@ -46,34 +52,33 @@ async function hasExplicitGlobalGrant(role: Role, customRoleId: string | null | 
 }
 
 /**
- * Whether this user explicitly holds `projectRequest.skipIntermediateApproval`
- * for `departmentId` — either a GLOBAL grant (their own Role/CustomRole
- * directly) or a DEPARTMENT-scoped one (their real, active
- * DepartmentMembership in `departmentId`) — same union
- * APPROVE_PERMISSION_KEY's own shape uses. Deliberately bypass-free on
- * BOTH sides: the global half skips hasPermission's ADMIN shortcut
- * (hasExplicitGlobalGrant above); the department half calls
- * hasDepartmentPermission directly against a real membership row instead
- * of canActOnEntity, which would otherwise shortcut true for ANY
- * canViewAllDepartments role (ADMIN, DIRECTOR) regardless of membership.
- * This is the ONLY permission check in this codebase that behaves this
- * way — see this key's own seed.ts doc comment for why.
+ * Whether this user EXPLICITLY holds `permissionKey` for `departmentId` —
+ * either a GLOBAL grant (their own Role/CustomRole directly) or a
+ * DEPARTMENT-scoped one (their real, active DepartmentMembership in
+ * `departmentId`). Deliberately bypass-free on BOTH sides: the global half
+ * skips hasPermission's ADMIN shortcut; the department half calls
+ * hasDepartmentPermission directly against a real membership row instead of
+ * canActOnEntity (which would shortcut true for ANY canViewAllDepartments
+ * role). Used for requester-side Project Request privileges that must never
+ * be implied (SKIP_FINAL_APPROVAL_PERMISSION_KEY) — the same evaluation the
+ * retired skip-intermediate permission used.
  */
-export async function hasExplicitSkipIntermediateApprovalGrant(
+export async function hasExplicitProjectRequestGrant(
   userId: string,
   role: Role,
   customRoleId: string | null | undefined,
-  departmentId: string
+  departmentId: string,
+  permissionKey: string
 ): Promise<boolean> {
-  if (await hasExplicitGlobalGrant(role, customRoleId, SKIP_INTERMEDIATE_APPROVAL_PERMISSION_KEY)) return true;
+  if (await hasExplicitGlobalGrant(role, customRoleId, permissionKey)) return true;
   const membership = await getMembership(userId, departmentId);
   if (!membership) return false;
-  return hasDepartmentPermission(membership.role, SKIP_INTERMEDIATE_APPROVAL_PERMISSION_KEY, membership.customRoleId);
+  return hasDepartmentPermission(membership.role, permissionKey, membership.customRoleId);
 }
 
-/** Global-only half of the check above (no department context) — used by the page-level pre-check for an ambiguous multi-department requester (see app/(main)/project-requests/new/page.tsx), where picking any ONE of their departments to check against would be arbitrary. */
-export async function hasExplicitGlobalSkipIntermediateApprovalGrant(role: Role, customRoleId: string | null | undefined): Promise<boolean> {
-  return hasExplicitGlobalGrant(role, customRoleId, SKIP_INTERMEDIATE_APPROVAL_PERMISSION_KEY);
+/** Convenience: effective Skip Final Approval for this department (see SKIP_FINAL_APPROVAL_PERMISSION_KEY). */
+export function canSkipFinalApproval(userId: string, role: Role, customRoleId: string | null | undefined, departmentId: string): Promise<boolean> {
+  return hasExplicitProjectRequestGrant(userId, role, customRoleId, departmentId, SKIP_FINAL_APPROVAL_PERMISSION_KEY);
 }
 
 /** Every roleKey (DepartmentRole strings, global Role enum values, or custom-role keys) currently granting `projectRequest.approve` — a real RolePermission catalogue lookup, never the runtime ADMIN bypass (so this also correctly reflects ADMIN's own explicit, migrated grant row). */

@@ -23,6 +23,7 @@ import {
 import { Check, FileText, X, Eye, FolderKanban, Wrench } from "lucide-react";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
 import { ProjectRequestDecisionDialog } from "@/components/project-requests/project-request-decision-dialog";
+import { SkippedIntermediateStage, SkippedFinalStage, type IntermediateSkipReason } from "@/components/project-requests/skipped-stage";
 import { PreviewField } from "@/components/shared/preview-field";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { formatDate, formatDateTime } from "@/lib/utils";
@@ -58,12 +59,17 @@ export interface ProjectRequestRow {
   requester: { name: string | null; email: string } | null;
   submittedAt: Date | null;
   approver: { name: string | null; email: string } | null;
+  /** Skipped stages (set at submission) — shown as "Skipped", never as approvals. */
+  intermediateApprovalSkipReason: IntermediateSkipReason | null;
+  finalApprovalSkipped: boolean;
+  finalApprovalSkippedBy: { name: string | null; email: string } | null;
+  finalApprovalSkippedAt: Date | null;
   approvedAt: Date | null;
   rejectedAt: Date | null;
   businessAssessment: string | null;
   legacyRequesterBusinessAssessment: string | null;
   /** Every requester-selected intermediate approver for this request and their individual decision — read-only informational display in Preview; the actual decision UI lives on the detail page. */
-  intermediateApprovers: { id: string; status: IntermediateApprovalStatus; approver: { name: string | null; email: string } }[];
+  intermediateApprovers: { id: string; status: IntermediateApprovalStatus; decidedAt: Date | null; businessAssessment: string | null; approver: { name: string | null; email: string } }[];
   /** The Project created from this request's own request-origin setup flow (see createProjectFromApprovedRequest) — null until that's been completed. */
   project: { id: string; title: string } | null;
   /**
@@ -103,6 +109,11 @@ type Decision = "approve" | "reject";
  * ApprovalActions uses — never a second/duplicated approval modal or a
  * second copy of the decision logic.
  */
+/** The persisted intermediate decision that rejected this request, if it was rejected during Intermediate Approval. */
+function intermediateRejection(r: { intermediateApprovers: ProjectRequestRow["intermediateApprovers"] }) {
+  return r.intermediateApprovers.find((row) => row.status === "REJECTED") ?? null;
+}
+
 export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTableProps) {
   const router = useRouter();
 
@@ -311,6 +322,18 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                 {previewTarget.replacesExisting && previewTarget.replacementDescription && (
                   <PreviewField label="Solution/project to be replaced" value={previewTarget.replacementDescription} multiline />
                 )}
+                {previewTarget.intermediateApprovalSkipReason && (
+                  <div className="px-4 py-3">
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Intermediate Approval</p>
+                    <SkippedIntermediateStage reason={previewTarget.intermediateApprovalSkipReason} />
+                  </div>
+                )}
+                {previewTarget.finalApprovalSkipped && (
+                  <div className="px-4 py-3">
+                    <p className="text-xs font-medium text-muted-foreground mb-1">Final Approval</p>
+                    <SkippedFinalStage skippedBy={previewTarget.finalApprovalSkippedBy} skippedAt={previewTarget.finalApprovalSkippedAt} />
+                  </div>
+                )}
                 {previewTarget.intermediateApprovers.length > 0 && (
                   <div className="px-4 py-3">
                     <p className="text-xs font-medium text-muted-foreground mb-1.5">Intermediate Approval</p>
@@ -334,7 +357,30 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                     </div>
                   </div>
                 )}
-                {(previewTarget.status === "APPROVED" || previewTarget.status === "REJECTED" || previewTarget.status === "IMPORTED") && (
+                {/* Approver summary — only for an ACTUAL final decision (or an
+                    import). A request whose Final Approval was skipped has no
+                    final approver; its Project setup controls render below
+                    the "Skipped" block instead. */}
+                {previewTarget.finalApprovalSkipped && previewTarget.status === "APPROVED" && (
+                  <div className="px-4 pb-3">
+                    {previewTarget.project ? (
+                      <Link href={`/projects/${previewTarget.project.id}`} className="inline-flex items-center gap-1.5 text-sm text-primary hover:underline">
+                        <FolderKanban className="h-3.5 w-3.5" />
+                        View Project
+                      </Link>
+                    ) : previewTarget.canCompleteSetup ? (
+                      <Button size="sm" asChild>
+                        <Link href={`/projects/new?projectRequestId=${previewTarget.id}`}>
+                          <Wrench className="h-3.5 w-3.5 mr-1.5" />
+                          Complete Project Setup
+                        </Link>
+                      </Button>
+                    ) : (
+                      <p className="text-xs text-muted-foreground">Project setup is still pending, from someone with final-approval rights in this department.</p>
+                    )}
+                  </div>
+                )}
+                {!previewTarget.finalApprovalSkipped && (previewTarget.status === "APPROVED" || previewTarget.status === "REJECTED" || previewTarget.status === "IMPORTED") && (
                   <div className="px-4 py-3">
                     <p className="text-xs font-medium text-muted-foreground mb-1">
                       {previewTarget.status === "APPROVED" ? "Approved by" : previewTarget.status === "REJECTED" ? "Rejected by" : "Imported"}
@@ -346,7 +392,26 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                         link/setup status below is deliberately OUTSIDE
                         this null-check, so it's never hidden just because
                         the approver is unknown. */}
-                    {previewTarget.approver ? (
+                    {/* A request rejected during INTERMEDIATE approval has no
+                        final approver — the rejecting user is on their own
+                        persisted intermediate decision row. The historical
+                        fallback is used only for an import whose source
+                        data genuinely didn't record one. */}
+                    {previewTarget.status === "REJECTED" && !previewTarget.approver && intermediateRejection(previewTarget) ? (
+                      (() => {
+                        const row = intermediateRejection(previewTarget)!;
+                        return (
+                          <>
+                            <p className="text-sm">
+                              {row.approver.name ?? row.approver.email}
+                              <span className="text-muted-foreground"> · Intermediate Approver</span>
+                            </p>
+                            {row.decidedAt && <p className="text-xs text-muted-foreground mt-0.5">{formatDateTime(row.decidedAt)}</p>}
+                            {row.businessAssessment && <p className="text-sm whitespace-pre-wrap mt-2">{row.businessAssessment}</p>}
+                          </>
+                        );
+                      })()
+                    ) : previewTarget.approver ? (
                       <>
                         <p className="text-sm">
                           {previewTarget.status === "IMPORTED" && "Approved by "}
@@ -362,7 +427,7 @@ export function ProjectRequestTable({ requests, emptyMessage }: ProjectRequestTa
                         )}
                       </>
                     ) : (
-                      <p className="text-sm text-muted-foreground">Not recorded (historical import)</p>
+                      <p className="text-sm text-muted-foreground">{previewTarget.source === "HISTORICAL_IMPORT" ? "Not recorded (historical import)" : "Not recorded"}</p>
                     )}
                     {previewTarget.project ? (
                       <Link

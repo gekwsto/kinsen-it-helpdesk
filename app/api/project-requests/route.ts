@@ -3,8 +3,9 @@ import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
 import { createProjectRequestSchema } from "@/lib/validations";
 import { apiError, zodErrorResponse, unauthorizedResponse, internalErrorResponse } from "@/lib/api-errors";
-import { resolveDepartmentForRequest, resolveIntermediateApprovers, notifyIntermediateApprovers, notifyEligibleApproversOfSubmission } from "@/lib/services/project-request-service";
-import { hasExplicitSkipIntermediateApprovalGrant } from "@/lib/services/project-request-approver-eligibility-service";
+import { resolveDepartmentForRequest, resolveIntermediateApprovers, notifyIntermediateApprovers, notifyEligibleApproversOfSubmission, notifyEligibleApproversReadyForProjectCreation, nextProjectRequestStatus } from "@/lib/services/project-request-service";
+import { canSkipFinalApproval } from "@/lib/services/project-request-approver-eligibility-service";
+import { scheduleSetupReminderInTx } from "@/lib/services/project-request-setup-reminder-service";
 
 // POST — submit a new Project Request. Every trust-sensitive field
 // (requesterId, department membership, status) is resolved/verified
@@ -58,31 +59,22 @@ export async function POST(req: NextRequest) {
     // string.
     const replacementDescription = data.replacesExisting ? data.replacementDescription! : null;
 
-    // Skip-intermediate-approval permission: checked SERVER-SIDE, fresh,
-    // against the department THIS submission just resolved above — never
-    // trusted from any client-supplied bypass flag (REQUIRED #4; there is
-    // no such flag anywhere in createProjectRequestSchema). Deliberately
-    // the bypass-FREE check (never auto-grants ADMIN/DIRECTOR) — see
-    // hasExplicitSkipIntermediateApprovalGrant's own doc comment.
-    const hasSkipPermission = await hasExplicitSkipIntermediateApprovalGrant(
-      session.user.id,
-      session.user.role,
-      session.user.customRoleId,
-      departmentResolution.departmentId
-    );
+    // Skip Final Approval — only with the requester's EFFECTIVE
+    // projectRequest.skipFinalApproval for the RESOLVED target department
+    // (Global or Department scope). An unauthorized attempt is rejected,
+    // never silently downgraded to a normal submission.
+    if (data.skipFinalApproval) {
+      const allowed = await canSkipFinalApproval(session.user.id, session.user.role, session.user.customRoleId, departmentResolution.departmentId);
+      if (!allowed) {
+        return NextResponse.json(
+          apiError("skip_final_approval_not_allowed", "You are not allowed to skip Final Approval for this department.", { field: "skipFinalApproval" }),
+          { status: 403 }
+        );
+      }
+    }
 
-    // Intermediate approvers: the requester's OWN selection among their
-    // verified SQLGeneral direct manager(s), re-verified here fresh — a
-    // single forged/stale id fails the WHOLE submission (fail closed),
-    // never silently dropped. "unresolved" (the requester's or manager's
-    // SQLGeneral identity can't be verified right now, or the SQLGeneral
-    // API itself failed) ALSO fails the whole submission — never treated as
-    // "no manager" and never silently skips the stage. A requester whose
-    // own SQLGeneral record VERIFIES they have no manager at all, OR who
-    // holds the skip permission above, skips straight to PENDING_APPROVAL
-    // below instead — the latter bypasses the SQLGeneral lookup entirely
-    // (REQUIRED #2).
-    const intermediateResolution = await resolveIntermediateApprovers(session.user.id, data.intermediateApproverIds, hasSkipPermission);
+    // Intermediate Approval opt-out is available to every requester.
+    const intermediateResolution = await resolveIntermediateApprovers(session.user.id, data.intermediateApproverIds, data.skipIntermediateApproval);
     if (!intermediateResolution.ok) {
       const message =
         intermediateResolution.reason === "no_approvers_selected"
@@ -116,6 +108,12 @@ export async function POST(req: NextRequest) {
     // The ProjectRequest row and (when the intermediate stage isn't being
     // skipped) its full set of ProjectRequestIntermediateApprover rows are
     // created atomically.
+    const initialStatus = nextProjectRequestStatus("submitted", {
+      intermediateRequired: !intermediateResolution.skipIntermediateStage,
+      finalRequired: !data.skipFinalApproval,
+    });
+    const submittedAt = new Date();
+
     const created = await prisma.$transaction(async (tx) => {
       const request = await tx.projectRequest.create({
         data: {
@@ -142,12 +140,21 @@ export async function POST(req: NextRequest) {
           // intermediateApprovalSkipReason records WHICH of the two it was,
           // for audit — null whenever the normal unanimous flow applies
           // (REQUIRED #4).
-          ...(intermediateResolution.skipIntermediateStage
-            ? { status: "PENDING_APPROVAL" as const, intermediateApprovalSkipReason: intermediateResolution.skipReason }
-            : {}),
+          // Initial status from the canonical stage machine
+          // (nextProjectRequestStatus). Both skip decisions are persisted;
+          // a skipped stage never records an approver or approval time.
+          status: initialStatus,
+          intermediateApprovalSkipReason: intermediateResolution.skipIntermediateStage ? intermediateResolution.skipReason : null,
+          ...(data.skipFinalApproval ? { finalApprovalSkipped: true, finalApprovalSkippedById: session.user.id, finalApprovalSkippedAt: submittedAt } : {}),
+          submittedAt,
         },
         select: { id: true, title: true },
       });
+      // Both stages skipped: APPROVED at submission (no decision fabricated) —
+      // the same Project-setup reminder an ordinary final approval schedules.
+      if (initialStatus === "APPROVED") {
+        await scheduleSetupReminderInTx(tx, request.id, submittedAt);
+      }
       if (intermediateResolution.approverIds.length > 0) {
         await tx.projectRequestIntermediateApprover.createMany({
           data: intermediateResolution.approverIds.map((approverId) => ({ projectRequestId: request.id, approverId })),
@@ -159,19 +166,17 @@ export async function POST(req: NextRequest) {
     // Best-effort, AFTER the rows have genuinely committed above — a
     // notification failure must never turn an already-successful submission
     // into an error response.
-    if (intermediateResolution.skipIntermediateStage) {
-      // No intermediate stage at all — the final stage's eligible
-      // approvers are actionable immediately, so notify them now (the SAME
-      // notification decideIntermediateApproval fires once intermediate
-      // approval completes unanimously for a request that DID have one).
-      await notifyEligibleApproversOfSubmission(departmentResolution.departmentId, created.id, created.title);
-    } else {
-      // Only the SELECTED intermediate approver(s) are notified now; the
-      // final stage's own eligible approvers are deliberately notified
-      // later, only once intermediate approval is unanimously complete
-      // (see decideIntermediateApproval) — never at submission time.
+    // Notify only the stage that is actually next. Nobody is asked to act on a
+    // skipped stage; a request approved at submission notifies no approver.
+    if (initialStatus === "PENDING_INTERMEDIATE_APPROVAL") {
       await notifyIntermediateApprovers(created.id, created.title, intermediateResolution.approverIds);
+    } else if (initialStatus === "PENDING_APPROVAL") {
+      await notifyEligibleApproversOfSubmission(departmentResolution.departmentId, created.id, created.title);
+    } else if (initialStatus === "APPROVED") {
+      // Both stages skipped: approved at submission — ready for Project Creation.
+      await notifyEligibleApproversReadyForProjectCreation(departmentResolution.departmentId, created.id, created.title);
     }
+
 
     return NextResponse.json({ id: created.id }, { status: 201 });
   } catch (error: any) {

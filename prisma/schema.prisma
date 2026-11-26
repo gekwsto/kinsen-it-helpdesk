@@ -1059,6 +1059,7 @@ model User {
   responsibleForProjects              Project[]                            @relation("ProjectResponsiblePeople")
   projectRequestsSubmitted            ProjectRequest[]                     @relation("ProjectRequestRequester")
   projectRequestsApproved             ProjectRequest[]                     @relation("ProjectRequestApprover")
+  projectRequestsFinalApprovalSkipped  ProjectRequest[]                     @relation("ProjectRequestFinalApprovalSkippedBy")
   submittedProjectFeedback            ProjectFeedback[]                    @relation("ProjectFeedbackSubmitter")
   projectRequestIntermediateApprovals ProjectRequestIntermediateApprover[] @relation("ProjectRequestIntermediateApprover")
   assignedActivities                  ProjectActivity[]                    @relation("ActivityAssignee")
@@ -2306,7 +2307,12 @@ enum IntermediateApprovalStatus {
 // See ProjectRequest.intermediateApprovalSkipReason's own doc comment.
 enum IntermediateApprovalSkipReason {
   NO_MANAGER
+  // Historical only: the retired projectRequest.skipIntermediateApproval
+  // permission. Never written for new requests; kept for audit.
   PERMISSION_BYPASS
+  // The requester explicitly ticked "Skip Intermediate Approval" at
+  // submission (available to every requester, no permission needed).
+  REQUESTER_OPTED_OUT
 }
 
 // Phase 3 — distinguishes a normal user-submitted request (the complete
@@ -2483,6 +2489,17 @@ model ProjectRequest {
   // decideApproval's own status guard already enforces for free (a request
   // still at PENDING_INTERMEDIATE_APPROVAL simply isn't PENDING_APPROVAL
   // yet — no separate "is intermediate done" check needed anywhere).
+  // Final Approval skipped at submission (requires the requester's
+  // effective projectRequest.skipFinalApproval for this department,
+  // re-checked server-side). A skipped stage is NEVER an approval:
+  // approver/approvedAt below stay null for it — the request reaches
+  // APPROVED directly once every ENABLED stage is complete. Who requested
+  // the skip and when are recorded here for audit.
+  finalApprovalSkipped     Boolean   @default(false)
+  finalApprovalSkippedBy   User?     @relation("ProjectRequestFinalApprovalSkippedBy", fields: [finalApprovalSkippedById], references: [id])
+  finalApprovalSkippedById String?
+  finalApprovalSkippedAt   DateTime?
+
   approver           User?     @relation("ProjectRequestApprover", fields: [approverId], references: [id])
   approverId         String?
   approvedAt         DateTime?

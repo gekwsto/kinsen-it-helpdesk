@@ -26,6 +26,7 @@ import { PendingAttachmentsField } from "@/components/attachments/pending-attach
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
 import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
 import { FacilitiesDateField, facilitiesBoundaryPreview } from "@/components/projects/facilities-date-field";
+import { ProjectOwnersPicker } from "@/components/projects/project-owners-picker";
 import { ProjectDurationField, parseDurationOverride } from "@/components/projects/project-duration-field";
 import { calculateProjectDurationDays } from "@/lib/project-duration";
 import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
@@ -172,7 +173,6 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   const [audienceBusinessUnitSearch, setAudienceBusinessUnitSearch] = useState("");
   const [selectedOwnerIds, setSelectedOwnerIds] = useState<Set<string>>(new Set());
   const [selectedAudienceIds, setSelectedAudienceIds] = useState<Set<string>>(new Set());
-  const [ownerSearch, setOwnerSearch] = useState("");
   const [audienceSearch, setAudienceSearch] = useState("");
   // Responsible People (Phase 2) — own independent relation, never
   // Audience. Same system-wide eligibility, available in EVERY mode, same
@@ -249,11 +249,6 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
       return next;
     });
   };
-  const ownerSearchResults = useMemo(() => {
-    const q = ownerSearch.trim().toLowerCase();
-    if (!q) return systemWideUsers;
-    return systemWideUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
-  }, [systemWideUsers, ownerSearch]);
   const audienceSearchResults = useMemo(() => {
     const q = audienceSearch.trim().toLowerCase();
     if (!q) return systemWideUsers;
@@ -1061,48 +1056,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
                 <p className="text-xs text-muted-foreground mt-0.5">Required for Projects created from an approved Project Request.</p>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="project-owners">
-                  Owner(s) <span className="text-destructive">*</span>
-                </Label>
-                <p id="project-owners-helper" className="text-xs text-muted-foreground">
-                  Any active user in the system — not limited to this department. At least one is required.
-                </p>
-                <Input
-                  placeholder="Search by name or email…"
-                  value={ownerSearch}
-                  onChange={(e) => setOwnerSearch(e.target.value)}
-                  className="h-8 text-sm"
-                />
-                {systemWideUsers.length > 0 ? (
-                  <div
-                    id="project-owners"
-                    role="group"
-                    aria-describedby="project-owners-helper"
-                    className="border rounded-md divide-y max-h-48 overflow-y-auto"
-                  >
-                    {ownerSearchResults.map((u) => (
-                      <label
-                        key={u.id}
-                        className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
-                      >
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 rounded"
-                          checked={selectedOwnerIds.has(u.id)}
-                          onChange={() => toggleOwner(u.id)}
-                        />
-                        <span className="text-sm">{u.name ?? u.email}</span>
-                      </label>
-                    ))}
-                    {ownerSearchResults.length === 0 && (
-                      <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{ownerSearch}&quot;.</p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-xs text-destructive border rounded-md px-3 py-2">No active users exist. Contact an administrator.</p>
-                )}
-              </div>
+              <ProjectOwnersPicker users={systemWideUsers} selected={selectedOwnerIds} onToggle={toggleOwner} />
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">

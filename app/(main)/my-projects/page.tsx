@@ -46,8 +46,11 @@ export default async function MyProjectsPage() {
 
   const projects = await prisma.project.findMany({
     where: {
+      // Every Project this user owns — as primary owner OR co-owner (the
+      // canonical Project.owners relation) — or is a member of.
       OR: [
         { ownerId: userId },
+        { owners: { some: { id: userId } } },
         { members: { some: { id: userId } } },
       ],
     },

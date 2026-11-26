@@ -2,9 +2,9 @@ import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 import { getActiveWorkspace } from "@/lib/services/workspace-service";
 import { resolveIntermediateApproverCandidates } from "@/lib/services/project-request-service";
-import { hasExplicitSkipIntermediateApprovalGrant, hasExplicitGlobalSkipIntermediateApprovalGrant } from "@/lib/services/project-request-approver-eligibility-service";
+import { canSkipFinalApproval } from "@/lib/services/project-request-approver-eligibility-service";
 import { ProjectRequestForm } from "@/components/project-requests/project-request-form";
-import { FileText, AlertTriangle } from "lucide-react";
+import { FileText } from "lucide-react";
 
 // Shown instead of any technical SQLGeneral/manager-chain detail (REQUIRED
 // #6) — the underlying reason (API failure, unmatched/ambiguous identity,
@@ -46,36 +46,26 @@ export default async function NewProjectRequestPage() {
   // multi-department case (global-scope roles only) checks the GLOBAL
   // grant only — the submission route is always the real, authoritative,
   // per-submission check (REQUIRED #4) regardless of what this page shows.
-  const hasSkipPermission =
-    departments.length === 1
-      ? await hasExplicitSkipIntermediateApprovalGrant(session.user.id, session.user.role, session.user.customRoleId, departments[0].id)
-      : await hasExplicitGlobalSkipIntermediateApprovalGrant(session.user.role, session.user.customRoleId);
-
-  // The requester's OWN verified SQLGeneral manager CHAIN (direct manager,
-  // that manager's own manager, and so on) — never Company/Department,
-  // never a permission-holder pool. Three outcomes:
-  //   - "has_candidates": every eligible manager in the chain, each
-  //     carrying its own real hierarchy `level` (1 = direct manager), for
-  //     explicit selection — exactly like the prior single-manager picker,
-  //     just extended to the full chain.
-  //   - "no_manager": a VERIFIED fact — either the requester has no
-  //     manager at all, or the whole chain was walked to a genuine root
-  //     with zero eligible candidates found — the form renders with zero
-  //     intermediate-approver UI, and submits straight to Final Approval.
-  //   - "unresolved": the chain's own STRUCTURE couldn't be fully, honestly
-  //     verified (API failure, unmatched/ambiguous identity, self-
-  //     reference, cycle) — submission is blocked entirely. Never treated
-  //     as "no manager".
-  // null when hasSkipPermission is true — never resolved at all.
-  const candidateResolution = hasSkipPermission ? null : await resolveIntermediateApproverCandidates(session.user.id);
+  // Intermediate Approval can be skipped by every requester (explicit
+  // opt-out in the form), so the manager chain is resolved only to OFFER the
+  // normal path; an unresolved chain no longer blocks the page — the
+  // requester can opt out instead (the server re-checks on submit).
+  const candidateResolution = await resolveIntermediateApproverCandidates(session.user.id);
+  // Departments (of the ones offered) where this user EFFECTIVELY holds
+  // projectRequest.skipFinalApproval — a UI hint only; the checkbox is shown
+  // just for these and re-evaluated whenever the selected department
+  // changes. POST /api/project-requests re-checks it authoritatively.
+  const skipFinalDepartmentIds = (
+    await Promise.all(departments.map(async (d) => ((await canSkipFinalApproval(session.user.id, session.user.role, session.user.customRoleId, d.id)) ? d.id : null)))
+  ).filter((id): id is string => id !== null);
 
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h1 className="text-2xl font-bold">Project Request Form</h1>
         <p className="text-muted-foreground mt-1">
-          Submit a request for a new Project — your verified SQLGeneral manager must intermediate-approve it before
-          it goes to final approval.
+          Submit a request for a new Project. By default it is intermediate-approved by your verified manager and then
+          goes to final approval.
         </p>
       </div>
 
@@ -87,17 +77,14 @@ export default async function NewProjectRequestPage() {
             administrator.
           </p>
         </div>
-      ) : candidateResolution?.status === "unresolved" ? (
-        <div className="text-center py-20 border rounded-lg">
-          <AlertTriangle className="h-12 w-12 text-muted-foreground mx-auto mb-4" />
-          <p className="text-muted-foreground">{SQLGENERAL_IDENTITY_UNAVAILABLE_MESSAGE}</p>
-        </div>
       ) : (
         <ProjectRequestForm
           departments={departments}
           defaultDepartmentId={defaultDepartmentId}
-          intermediateApproverOptions={candidateResolution?.status === "has_candidates" ? candidateResolution.candidates : []}
-          canSkipIntermediateApproval={hasSkipPermission}
+          intermediateApproverOptions={candidateResolution.status === "has_candidates" ? candidateResolution.candidates : []}
+          managerStatus={candidateResolution.status}
+          managerUnavailableMessage={candidateResolution.status === "unresolved" ? SQLGENERAL_IDENTITY_UNAVAILABLE_MESSAGE : undefined}
+          skipFinalDepartmentIds={skipFinalDepartmentIds}
         />
       )}
     </div>

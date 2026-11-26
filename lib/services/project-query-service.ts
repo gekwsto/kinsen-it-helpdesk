@@ -57,9 +57,20 @@ export interface PersonFilterOption {
  * inactive users remain filterable if still attached to a visible entity"
  * is a requirement, not an oversight.
  */
+/**
+ * Project ownership match for one user: the PRIMARY owner (Project.ownerId)
+ * OR any assigned owner (the canonical Project.owners relation — co-owners
+ * of a Request-origin Project). Both sides are needed: some older Projects'
+ * `owners` set doesn't include their primary owner.
+ */
+export function buildProjectOwnedByWhere(userId: string): Record<string, unknown> {
+  return { OR: [{ ownerId: userId }, { owners: { some: { id: userId } } }] };
+}
+
 export async function getProjectOwnerOptions(scopeWhere: Record<string, unknown>): Promise<PersonFilterOption[]> {
   return prisma.user.findMany({
-    where: { ownedProjects: { some: scopeWhere as any } },
+    // Primary owners AND co-owners (see buildProjectOwnedByWhere).
+    where: { OR: [{ ownedProjects: { some: scopeWhere as any } }, { projectOwnerships: { some: scopeWhere as any } }] },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
   });
@@ -277,7 +288,8 @@ export async function buildProjectListQuery(
   const priority = parseStrictIntIn(params.priority, [1, 2, 3]);
   if (priority !== undefined) andConditions.push({ priority });
 
-  if (params.ownerId) andConditions.push({ ownerId: params.ownerId });
+  // "Owner" filter matches primary owners AND co-owners.
+  if (params.ownerId) andConditions.push(buildProjectOwnedByWhere(params.ownerId));
   if (params.memberId) andConditions.push({ members: { some: { id: params.memberId } } });
 
   // Origin — canonical source of truth is Project.projectRequestId, never

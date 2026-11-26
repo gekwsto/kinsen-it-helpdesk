@@ -123,13 +123,9 @@ export async function getProjectsDashboardData(
     prisma.project.groupBy({ by: ["departmentId", "status"], where: projectWhere, _count: { _all: true } }),
     prisma.project.groupBy({ by: ["status"], where: projectWhere, _count: { _all: true } }),
     prisma.project.groupBy({ by: ["priority"], where: projectWhere, _count: { _all: true } }),
-    prisma.project.groupBy({
-      by: ["ownerId"],
-      where: projectWhere,
-      _count: { _all: true },
-      orderBy: { _count: { ownerId: "desc" } },
-      take: 8,
-    }),
+    // Ownership per project: primary owner + every co-owner (canonical
+    // Project.owners) — tallied below so a co-owner counts too.
+    prisma.project.findMany({ where: projectWhere, select: { ownerId: true, owners: { select: { id: true } } } }),
     prisma.project.groupBy({
       by: ["departmentId", "status"],
       where: { ...projectWhere, endDate: { not: null, lt: todayStartUtc } },
@@ -193,14 +189,21 @@ export async function getProjectsDashboardData(
       color: PROJECT_PRIORITY_COLOR[g.priority] ?? "#94a3b8",
     }));
 
-  const ownerIds = ownerChartGroups.map((g) => g.ownerId);
+  // "Projects by Owner": each Project counts once for EACH of its owners
+  // (primary or co-owner, de-duplicated per project). Top 8, as before.
+  const ownerTally = new Map<string, number>();
+  for (const p of ownerChartGroups) {
+    for (const id of new Set([p.ownerId, ...p.owners.map((o) => o.id)])) ownerTally.set(id, (ownerTally.get(id) ?? 0) + 1);
+  }
+  const ownerCounts = Array.from(ownerTally, ([ownerId, count]) => ({ ownerId, count })).sort((a, b) => b.count - a.count || a.ownerId.localeCompare(b.ownerId)).slice(0, 8);
+  const ownerIds = ownerCounts.map((g) => g.ownerId);
   const owners = ownerIds.length > 0
     ? await prisma.user.findMany({ where: { id: { in: ownerIds } }, select: { id: true, name: true, email: true } })
     : [];
   const ownerNameById = new Map(owners.map((o) => [o.id, o.name ?? o.email]));
-  const byOwner = ownerChartGroups.map((g) => ({
+  const byOwner = ownerCounts.map((g) => ({
     name: ownerNameById.get(g.ownerId) ?? "Unknown",
-    count: g._count._all,
+    count: g.count,
     color: OWNER_BAR_COLOR,
   }));
 

@@ -10,12 +10,10 @@
  * scripts/test-project-request-approvals-display.ts, which already builds
  * the Project/ProjectRequest fixtures directly and renders that page.
  *
- * Uses the `projectRequest.skipIntermediateApproval` permission grant to
- * bypass the intermediate-approval stage's SQLGeneral manager-chain lookup
- * entirely (same mechanism, same established test shortcut as other
- * Project Request submission tests that aren't themselves about that
- * stage) — this file's subject is the requester-department snapshot, not
- * intermediate approval.
+ * Submits with the requester's explicit "Skip Intermediate Approval" opt-out
+ * (available to every requester) so the stage's SQLGeneral manager-chain
+ * lookup is bypassed entirely — this file's subject is the
+ * requester-department snapshot, not intermediate approval.
  *
  * Must run with --experimental-test-module-mocks.
  * Usage: node --require ./scripts/test-support-server-only-stub.cjs --experimental-test-module-mocks --import tsx scripts/test-project-request-requester-department.ts
@@ -124,6 +122,7 @@ async function main() {
         expectedBenefits: "Benefits text long enough.",
         departmentId: targetDept.id,
         intermediateApproverIds: [],
+        skipIntermediateApproval: true,
       })
     );
     check("POST -> 201", res1.status === 201, JSON.stringify(await res1.clone().json()));
@@ -146,6 +145,7 @@ async function main() {
         departmentId: targetDept.id,
         requesterDepartmentId: otherDept.id, // forged — not a real schema field at all
         intermediateApproverIds: [],
+        skipIntermediateApproval: true,
       })
     );
     check("POST -> 201 (unknown key silently stripped, not rejected)", res2.status === 201);
@@ -173,6 +173,7 @@ async function main() {
         expectedBenefits: "Benefits text long enough.",
         departmentId: targetDept.id,
         intermediateApproverIds: [],
+        skipIntermediateApproval: true,
       })
     );
     check("Post-transfer submission -> 201", res3.status === 201);
@@ -196,6 +197,7 @@ async function main() {
         expectedBenefits: "Benefits text long enough.",
         departmentId: targetDept.id,
         intermediateApproverIds: [],
+        skipIntermediateApproval: true,
       })
     );
     check("POST -> 201 even with no primary department", res4.status === 201);

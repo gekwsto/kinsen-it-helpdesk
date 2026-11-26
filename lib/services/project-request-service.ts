@@ -82,6 +82,32 @@ export async function notifyEligibleApproversOfSubmission(departmentId: string, 
   );
 }
 
+/**
+ * A request reached APPROVED with Final Approval SKIPPED (either when its
+ * last intermediate approval completed, or at submission when both stages
+ * were skipped) — tell everyone who can create its Project (effective
+ * projectRequest.approve for the request's department, the same audience
+ * and permission createProjectFromApprovedRequest requires) that it is
+ * approved and ready for Project Creation. Not an approval request.
+ * Called exactly once per transition, only from the code path that actually
+ * performed it (the status write is conditional / the row was just
+ * created), and each user is notified once. The delayed setup reminder is
+ * scheduled separately and unchanged; nothing is created automatically.
+ */
+export async function notifyEligibleApproversReadyForProjectCreation(departmentId: string, requestId: string, title: string): Promise<void> {
+  const approverIds = Array.from(new Set(await getEligibleApproverUserIds(departmentId)));
+  await Promise.all(
+    approverIds.map((userId) =>
+      createInAppNotification({
+        userId,
+        title: "Project Request approved — ready for Project Creation",
+        body: `The Project Request "${title}" is approved (Final Approval was skipped) and is ready for you to create its Project.`,
+        link: `/project-requests/${requestId}`,
+      })
+    )
+  );
+}
+
 // ─── Intermediate stage: requester-selected, unanimous, multi-approver ─────
 
 export interface IntermediateApproverCandidate {
@@ -272,33 +298,28 @@ export type IntermediateApproverResolution =
  * trusted as-is. Re-derives the candidate pool fresh from
  * resolveIntermediateApproverCandidates (never a stale/client-supplied
  * pool):
- *   - `hasSkipPermission` true (the requester holds projectRequest.
- *     skipIntermediateApproval, checked by the CALLER against the
- *     request's own resolved department — this function has no opinion on
- *     scope, it only trusts the boolean it's handed) bypasses the ENTIRE
- *     stage, including this call's own fresh SQLGeneral identity/manager-
- *     chain lookup below — resolveIntermediateApproverCandidates is never
- *     even invoked. Any selectedIds a (possibly stale) client still sent
- *     are simply ignored, never validated — this requester is routing
- *     straight to Final Approval regardless (REQUIRED #2, #4).
+ *   - `requesterOptedOut` true (the requester ticked "Skip Intermediate
+ *     Approval" — available to every requester, no permission) skips the
+ *     ENTIRE stage, including the SQLGeneral identity/manager-chain lookup
+ *     (never invoked). Any selectedIds still sent are ignored. Recorded as
+ *     REQUESTER_OPTED_OUT.
  *   - "unresolved" fails the WHOLE submission — never silently skips the
- *     stage and never silently requires an empty selection either.
+ *     stage (the requester may explicitly opt out instead).
  *   - "no_manager" requires an EMPTY selection (a non-empty one here is a
  *     forged/stale submission, rejected as invalid_approver) and signals
- *     the stage should be skipped entirely.
+ *     the stage should be skipped entirely (unchanged behaviour).
  *   - "has_candidates" requires at least one real candidate id selected
- *     (REQUIRED #4 — explicit selection, never auto-selected), and every
- *     selected id must be exactly one of the verified candidates — a
- *     single forged/stale id fails the WHOLE submission, never silently
- *     dropped and never substituted.
+ *     (explicit selection, never auto-selected), and every selected id must
+ *     be exactly one of the verified candidates — a single forged/stale id
+ *     fails the WHOLE submission, never silently dropped or substituted.
  */
 export async function resolveIntermediateApprovers(
   requesterId: string,
   selectedIds: string[],
-  hasSkipPermission: boolean = false
+  requesterOptedOut: boolean = false
 ): Promise<IntermediateApproverResolution> {
-  if (hasSkipPermission) {
-    return { ok: true, approverIds: [], skipIntermediateStage: true, skipReason: "PERMISSION_BYPASS" };
+  if (requesterOptedOut) {
+    return { ok: true, approverIds: [], skipIntermediateStage: true, skipReason: "REQUESTER_OPTED_OUT" };
   }
 
   const candidateResolution = await resolveIntermediateApproverCandidates(requesterId);
@@ -447,6 +468,34 @@ export async function canViewProjectRequest(
   return intermediateRow !== null;
 }
 
+// ─── Canonical stage machine ────────────────────────────────────────────────
+
+/**
+ * THE canonical Project Request stage machine — the only place that decides
+ * which status a STANDARD request moves to. Each request carries two
+ * requirements fixed at submission: Intermediate Approval (required unless
+ * the requester opted out / has no manager — intermediateApprovalSkipReason)
+ * and Final Approval (required unless finalApprovalSkipped). A skipped stage
+ * is simply never entered — it is NOT an approval: no approver, decision or
+ * timestamp is ever recorded for it.
+ *
+ *   Intermediate | Final    | Path
+ *   required     | required | PENDING_INTERMEDIATE_APPROVAL -> PENDING_APPROVAL -> APPROVED
+ *   skipped      | required | PENDING_APPROVAL -> APPROVED
+ *   required     | skipped  | PENDING_INTERMEDIATE_APPROVAL -> APPROVED
+ *   skipped      | skipped  | APPROVED (at submission)
+ *
+ * Rejection at any ENABLED stage is terminal (REJECTED) — unchanged, handled
+ * by decideIntermediateApproval / decideApproval.
+ */
+export function nextProjectRequestStatus(
+  event: "submitted" | "intermediate_completed",
+  requirements: { intermediateRequired: boolean; finalRequired: boolean }
+): ProjectRequestStatus {
+  if (event === "submitted" && requirements.intermediateRequired) return "PENDING_INTERMEDIATE_APPROVAL";
+  return requirements.finalRequired ? "PENDING_APPROVAL" : "APPROVED";
+}
+
 // ─── Approval transition ────────────────────────────────────────────────────
 
 export type ApprovalActionError =
@@ -511,7 +560,7 @@ export async function decideApproval(
 
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, status: true, departmentId: true, requesterId: true, source: true },
+    select: { id: true, title: true, status: true, departmentId: true, requesterId: true, source: true, finalApprovalSkipped: true },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
   // Explicit invariant: this entire normal-workflow action is reserved for
@@ -521,6 +570,10 @@ export async function decideApproval(
   // comment on this code.
   if (existing.source !== "STANDARD") return { ok: false, error: { code: "not_standard_request" } };
   if (existing.status !== "PENDING_APPROVAL") return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
+  // Defense in depth: a request whose Final Approval was skipped never enters
+  // PENDING_APPROVAL (see nextProjectRequestStatus) and must never get a
+  // final decision recorded.
+  if (existing.finalApprovalSkipped) return { ok: false, error: { code: "invalid_status", currentStatus: existing.status } };
   // A STANDARD request always has a real requester, set from the
   // authenticated session at submission (POST /api/project-requests) and
   // never cleared afterward — this is never actually null in practice; a
@@ -930,7 +983,7 @@ export async function decideIntermediateApproval(
 
   const existing = await prisma.projectRequest.findUnique({
     where: { id: requestId },
-    select: { id: true, title: true, status: true, departmentId: true, requesterId: true, source: true },
+    select: { id: true, title: true, status: true, departmentId: true, requesterId: true, source: true, finalApprovalSkipped: true },
   });
   if (!existing) return { ok: false, error: { code: "not_found" } };
   // Explicit invariant — see decideApproval's identical check and
@@ -978,6 +1031,8 @@ export async function decideIntermediateApproval(
   let myDecisionRecorded = false;
   let rejectNotificationRow: { id: string; userId: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date } | null = null;
   let justCompletedUnanimously = false;
+  let approvedWithoutFinalStage = false;
+  let approvedNotificationRow: { id: string; userId: string; title: string; body: string; link: string | null; isRead: boolean; createdAt: Date } | null = null;
 
   await prisma.$transaction(async (tx) => {
     // See this function's own doc comment — serializes every concurrent
@@ -1024,11 +1079,29 @@ export async function decideIntermediateApproval(
       where: { projectRequestId: requestId, status: "PENDING" },
     });
     if (stillPending === 0) {
+      // Canonical stage machine: Final Approval next, or — when it was
+      // skipped at submission — APPROVED directly (no final decision is
+      // fabricated: approverId/approvedAt stay null).
+      const nextStatus = nextProjectRequestStatus("intermediate_completed", { intermediateRequired: true, finalRequired: !existing.finalApprovalSkipped });
       const parentUpdate = await tx.projectRequest.updateMany({
         where: { id: requestId, status: "PENDING_INTERMEDIATE_APPROVAL" },
-        data: { status: "PENDING_APPROVAL" },
+        data: { status: nextStatus },
       });
-      if (parentUpdate.count > 0) justCompletedUnanimously = true;
+      if (parentUpdate.count > 0) {
+        justCompletedUnanimously = true;
+        if (nextStatus === "APPROVED") {
+          approvedWithoutFinalStage = true;
+          await scheduleSetupReminderInTx(tx, requestId, now);
+          approvedNotificationRow = await tx.notification.create({
+            data: {
+              userId: requesterId,
+              title: "Project Request approved",
+              body: `Your Project Request "${existing.title}" was approved (Final Approval was skipped at submission).`,
+              link: `/project-requests/${requestId}`,
+            },
+          });
+        }
+      }
     }
   });
 
@@ -1048,8 +1121,18 @@ export async function decideIntermediateApproval(
   // misleading "ready for final approval" notification before this point
   // is structurally impossible: this call site is the ONLY place that
   // fires it, gated by justCompletedUnanimously.
-  if (justCompletedUnanimously) {
+  if (approvedNotificationRow) {
+    await dispatchCreatedNotification(approvedNotificationRow);
+  }
+  // Final approvers are asked to act ONLY when Final Approval is actually
+  // the next stage — never for a skipped one.
+  if (justCompletedUnanimously && !approvedWithoutFinalStage) {
     await notifyEligibleApproversOfSubmission(existing.departmentId, requestId, existing.title);
+  }
+  // Final Approval was skipped: the request is APPROVED now — tell the users
+  // who can create its Project (exactly once, from this transition only).
+  if (approvedWithoutFinalStage) {
+    await notifyEligibleApproversReadyForProjectCreation(existing.departmentId, requestId, existing.title);
   }
 
   return { ok: true };

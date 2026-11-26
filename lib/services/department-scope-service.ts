@@ -788,7 +788,11 @@ export function buildCreatedByMeWhere(userId: string, requestedDepartmentId?: st
 export async function buildProjectListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {
   const scoped = await buildEntityListWhere(userId, role, "project.view", requestedDepartmentId);
   if (canViewAllDepartments(role) || requestedDepartmentId || "denied" in scoped) return scoped;
-  return { OR: [scoped, buildProjectAudienceWhere(userId)] };
+  // Owners of a Request-origin Project (the canonical Project.owners
+  // relation, co-owners included) — the SAME rule hasProjectViewAccess
+  // already applies at record level, so the list never hides a Project its
+  // owner can open. Grants nothing beyond that existing record-level access.
+  return { OR: [scoped, buildProjectAudienceWhere(userId), { projectRequestId: { not: null }, owners: { some: { id: userId } } }] };
 }
 
 export async function buildActivityListWhere(userId: string, role: Role, requestedDepartmentId?: string | null) {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -41,34 +41,33 @@ interface ProjectRequestFormProps {
   defaultDepartmentId?: string;
   /**
    * Every eligible manager in the requester's OWN verified SQLGeneral
-   * manager chain (direct manager, that manager's own manager, and so
-   * on) — never Company/Department, never a permission-holder pool,
-   * already in ascending hierarchy order. Empty specifically means the
-   * page already verified this requester has NO manager at all, or that
-   * nobody anywhere in their chain is eligible (never that resolution
-   * failed — the page renders a blocking error state instead of this
-   * form in that case) — this form renders without any
-   * intermediate-approver section at all when empty, and submits
-   * straight to Final Approval.
+   * manager chain (direct manager, that manager's own manager, and so on),
+   * already in ascending hierarchy order. Only non-empty when
+   * managerStatus === "has_candidates".
    */
   intermediateApproverOptions: IntermediateApproverOption[];
   /**
-   * True when the server-rendering page already determined this requester
-   * holds `projectRequest.skipIntermediateApproval` (a UI hint only — see
-   * app/(main)/project-requests/new/page.tsx's own comment on why this can
-   * legitimately disagree with the submission route's own, authoritative,
-   * per-submission check for an ambiguous multi-department requester).
-   * Purely cosmetic here: `intermediateApproverOptions` is already empty
-   * whenever this is true (the page never resolved candidates in that
-   * case), so this prop only changes WHICH explanatory message is shown —
-   * it never changes form behavior or what gets submitted.
+   * The page's own resolution of the requester's manager chain:
+   * "has_candidates" (normal Intermediate Approval offered), "no_manager"
+   * (verified: no manager — the stage is skipped automatically, unchanged
+   * behaviour) or "unresolved" (the chain couldn't be verified — the
+   * requester must tick Skip Intermediate Approval to submit).
    */
-  canSkipIntermediateApproval?: boolean;
+  managerStatus: "has_candidates" | "no_manager" | "unresolved";
+  /** Shown in place of the manager picker when managerStatus is "unresolved". */
+  managerUnavailableMessage?: string;
+  /**
+   * Departments where the requester EFFECTIVELY holds
+   * projectRequest.skipFinalApproval (server-computed UI hint). The Skip
+   * Final Approval checkbox is shown only while the selected department is
+   * one of these; POST /api/project-requests re-checks it authoritatively.
+   */
+  skipFinalDepartmentIds: string[];
 }
 
 const IMPORTANCE_LEVELS = [1, 2, 3] as const;
 
-export function ProjectRequestForm({ departments, defaultDepartmentId, intermediateApproverOptions, canSkipIntermediateApproval = false }: ProjectRequestFormProps) {
+export function ProjectRequestForm({ departments, defaultDepartmentId, intermediateApproverOptions, managerStatus, managerUnavailableMessage, skipFinalDepartmentIds }: ProjectRequestFormProps) {
   const router = useRouter();
   const [submitting, setSubmitting] = useState(false);
 
@@ -87,6 +86,8 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
       replacesExisting: false,
       departmentId: departments.length === 1 ? departments[0].id : defaultDepartmentId,
       intermediateApproverIds: [],
+      skipIntermediateApproval: false,
+      skipFinalApproval: false,
     },
   });
 
@@ -94,6 +95,19 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
   const departmentId = watch("departmentId");
   const replacesExisting = watch("replacesExisting");
   const intermediateApproverIds = watch("intermediateApproverIds") ?? [];
+  const skipIntermediateApproval = !!watch("skipIntermediateApproval");
+  const skipFinalApproval = !!watch("skipFinalApproval");
+  // Skip Final Approval eligibility follows the SELECTED department — re-
+  // evaluated on every department change; an ineligible selection clears it.
+  const canSkipFinalHere = !!departmentId && skipFinalDepartmentIds.includes(departmentId);
+  useEffect(() => {
+    if (!canSkipFinalHere && skipFinalApproval) setValue("skipFinalApproval", false);
+  }, [canSkipFinalHere, skipFinalApproval, setValue]);
+  // A verified "no manager" requester skips Intermediate Approval
+  // automatically (unchanged behaviour).
+  const intermediateRequired = managerStatus !== "no_manager" && !skipIntermediateApproval;
+  const finalRequired = !skipFinalApproval;
+  const workflowSummary = [intermediateRequired ? "Intermediate Approval" : null, finalRequired ? "Final Approval" : null, "Approved"].filter(Boolean).join(" → ");
 
   const toggleIntermediateApprover = (userId: string, checked: boolean) => {
     const current = intermediateApproverIds;
@@ -121,10 +135,16 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
     // regardless): when a verified manager candidate exists, explicit
     // selection is required — never auto-selected, never skippable just
     // because there's only one option to pick.
-    if (intermediateApproverOptions.length > 0 && data.intermediateApproverIds.length === 0) {
-      setError("intermediateApproverIds", { type: "manual", message: "Select your manager as the intermediate approver." });
+    if (!data.skipIntermediateApproval && managerStatus === "has_candidates" && data.intermediateApproverIds.length === 0) {
+      setError("intermediateApproverIds", { type: "manual", message: "Select your manager as the intermediate approver, or tick Skip Intermediate Approval." });
       return;
     }
+    if (!data.skipIntermediateApproval && managerStatus === "unresolved") {
+      setError("intermediateApproverIds", { type: "manual", message: "Your manager could not be verified — tick Skip Intermediate Approval to submit this request." });
+      return;
+    }
+    if (data.skipIntermediateApproval) data = { ...data, intermediateApproverIds: [] };
+    if (!canSkipFinalHere) data = { ...data, skipFinalApproval: false };
     setSubmitting(true);
     try {
       const res = await fetch("/api/project-requests", {
@@ -241,7 +261,30 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
             {errors.expectedBenefits && <p className="text-xs text-destructive">{errors.expectedBenefits.message}</p>}
           </div>
 
-          {intermediateApproverOptions.length > 0 ? (
+          <div className="space-y-3 rounded-md border p-3" id="approval-workflow">
+            <p className="text-sm font-medium">Approval</p>
+            {managerStatus === "no_manager" ? (
+              <p className="text-xs text-muted-foreground">You have no manager on record — Intermediate Approval is skipped for this request.</p>
+            ) : (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  id="skipIntermediateApproval"
+                  className="h-4 w-4 mt-0.5 rounded border-input"
+                  checked={skipIntermediateApproval}
+                  onChange={(e) => {
+                    setValue("skipIntermediateApproval", e.target.checked);
+                    clearErrors("intermediateApproverIds");
+                  }}
+                />
+                <span>
+                  Skip Intermediate Approval
+                  <span className="block text-xs text-muted-foreground">Send this request on without your manager&apos;s approval.</span>
+                </span>
+              </label>
+            )}
+
+            {managerStatus === "has_candidates" && !skipIntermediateApproval && (
             <div className="space-y-2">
               <Label htmlFor="intermediateApproverIds">
                 Intermediate Approver(s) <span className="text-destructive">*</span>
@@ -285,13 +328,39 @@ export function ProjectRequestForm({ departments, defaultDepartmentId, intermedi
                 </p>
               )}
             </div>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              {canSkipIntermediateApproval
-                ? "Your role allows this request to skip intermediate approval — it will go straight to final approval."
-                : "You have no manager on record — this request will go straight to final approval."}
+            )}
+            {managerStatus === "unresolved" && !skipIntermediateApproval && (
+              <div className="space-y-1">
+                <p className="text-xs text-muted-foreground">{managerUnavailableMessage}</p>
+                <p className="text-xs text-muted-foreground">To submit now, tick Skip Intermediate Approval.</p>
+                {errors.intermediateApproverIds && (
+                  <p id="intermediateApproverIds-error" className="text-xs text-destructive">
+                    {errors.intermediateApproverIds.message as string}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {canSkipFinalHere && (
+              <label className="flex items-start gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  id="skipFinalApproval"
+                  className="h-4 w-4 mt-0.5 rounded border-input"
+                  checked={skipFinalApproval}
+                  onChange={(e) => setValue("skipFinalApproval", e.target.checked)}
+                />
+                <span>
+                  Skip Final Approval
+                  <span className="block text-xs text-muted-foreground">Your role allows this request to bypass the final approval stage for this department.</span>
+                </span>
+              </label>
+            )}
+
+            <p className="text-xs text-muted-foreground" data-testid="approval-workflow-summary">
+              Workflow: {workflowSummary}
             </p>
-          )}
+          </div>
 
           <label className="flex items-center gap-2 text-sm">
             <input

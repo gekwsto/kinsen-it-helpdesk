@@ -19,6 +19,7 @@ import {
 import { ChevronRight, Loader2, Building2, Briefcase } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 import { FacilitiesDateField, facilitiesBoundaryPreview } from "@/components/projects/facilities-date-field";
+import { ProjectOwnersPicker } from "@/components/projects/project-owners-picker";
 import { ProjectDurationField, parseDurationOverride } from "@/components/projects/project-duration-field";
 import { calculateProjectDurationDays } from "@/lib/project-duration";
 import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
@@ -54,6 +55,13 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   // components/projects/project-form.tsx's own systemWideUsers already uses.
   const [systemWideUsers, setSystemWideUsers] = useState<AssignableUser[]>([]);
   const [selectedAudienceIds, setSelectedAudienceIds] = useState<Set<string>>(new Set());
+  // Owner(s) — Request-origin Projects only (same picker + rules as Project
+  // setup; enforced server-side by PATCH /api/projects/[id]).
+  const [selectedOwnerIds, setSelectedOwnerIds] = useState<Set<string>>(new Set());
+  // Current owners as loaded — any that are no longer in the active-user
+  // list (e.g. deactivated) are still shown so they can be removed; the
+  // server rejects keeping an inactive owner.
+  const [loadedOwners, setLoadedOwners] = useState<AssignableUser[]>([]);
   const [audienceSearch, setAudienceSearch] = useState("");
   // Responsible People (Phase 2) — own independent relation, never
   // Audience. Same system-wide eligibility, reuses the SAME
@@ -201,6 +209,8 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setSelectedAudienceBusinessUnitIds(new Set((p.audienceBusinessUnits ?? []).map((b: { id: string }) => b.id)));
 
           setProjectRequestId(p.projectRequestId ?? null);
+          setSelectedOwnerIds(new Set((p.owners ?? []).map((o: { id: string }) => o.id)));
+          setLoadedOwners((p.owners ?? []).map((o: AssignableUser) => ({ id: o.id, name: o.name, email: o.email })));
           if (p.projectRequestId) {
             setExpectedDaysManual(p.expectedTotalInitialDaysOverridden ? String(p.expectedTotalInitialDays ?? "") : null);
             setExpectedStartDate(p.expectedStartDate ? p.expectedStartDate.split("T")[0] : "");
@@ -330,6 +340,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
       toast.error("Title is required");
       return;
     }
+    if (projectRequestId && selectedOwnerIds.size === 0) {
+      toast.error("Select at least one Owner for this Project.");
+      return;
+    }
     if (projectRequestId && expectedStartDate && expectedFinishDate && new Date(expectedFinishDate) < new Date(expectedStartDate)) {
       toast.error("Expected Finish Date cannot be before Expected Start Date.");
       return;
@@ -442,6 +456,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 expectedStartDate: expectedStartDate || null,
                 expectedFinishDate: expectedFinishDate || null,
                 expectedTotalInitialDaysOverride: expectedOverride.value,
+                ownerIds: Array.from(selectedOwnerIds),
                 expenseTypeId: expenseTypeId || null,
                 // Estimated/Actual Cost are derived server-side and never
                 // part of the editable PATCH payload — see
@@ -826,6 +841,19 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                   <h3 className="text-sm font-semibold">Project Request Setup</h3>
                   <p className="text-xs text-muted-foreground mt-0.5">Metadata from this Project's originating Project Request.</p>
                 </div>
+
+                <ProjectOwnersPicker
+                  users={systemWideUsers.length === 0 ? loadedOwners : [...systemWideUsers, ...loadedOwners.filter((o) => !systemWideUsers.some((u) => u.id === o.id)).map((o) => ({ ...o, name: `${o.name ?? o.email} (inactive)` }))]}
+                  selected={selectedOwnerIds}
+                  onToggle={(userId) =>
+                    setSelectedOwnerIds((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(userId)) next.delete(userId);
+                      else next.add(userId);
+                      return next;
+                    })
+                  }
+                />
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">

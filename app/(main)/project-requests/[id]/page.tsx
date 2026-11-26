@@ -9,6 +9,7 @@ import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
 import { ProjectRequestStatusBadge } from "@/components/project-requests/project-request-status-badge";
 import { ApprovalActions } from "@/components/project-requests/approval-actions";
 import { IntermediateApprovalActions } from "@/components/project-requests/intermediate-approval-actions";
+import { SkippedIntermediateStage } from "@/components/project-requests/skipped-stage";
 
 export default async function ProjectRequestDetailPage({
   params,
@@ -27,6 +28,7 @@ export default async function ProjectRequestDetailPage({
       requester: { select: { id: true, name: true, email: true } },
       requesterDepartment: { select: { id: true, name: true } },
       approver: { select: { id: true, name: true, email: true } },
+      finalApprovalSkippedBy: { select: { id: true, name: true, email: true } },
       intermediateApprovers: {
         include: { approver: { select: { id: true, name: true, email: true } } },
         orderBy: { createdAt: "asc" },
@@ -62,6 +64,9 @@ export default async function ProjectRequestDetailPage({
   // THIS viewer's own intermediate-approver row, only if the requester
   // explicitly selected them for THIS request — never derived any other way.
   const myIntermediateRow = request.intermediateApprovers.find((r) => r.approver.id === session.user.id) ?? null;
+  // The persisted intermediate decision that rejected this request (if it was
+  // rejected during Intermediate Approval — there is then no final approver).
+  const intermediateRejectionRow = request.intermediateApprovers.find((r) => r.status === "REJECTED") ?? null;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -140,16 +145,31 @@ export default async function ProjectRequestDetailPage({
       <div className="rounded-lg border">
         <div className="px-4 py-3">
           <h2 className="text-sm font-semibold mb-2">Intermediate Approval</h2>
-          <p className="text-xs text-muted-foreground mb-2">Every selected approver below must approve — any one rejecting ends the request.</p>
-          <IntermediateApprovalActions requestId={request.id} approvers={request.intermediateApprovers} myRow={myIntermediateRow} />
+          {request.intermediateApprovalSkipReason ? (
+            <SkippedIntermediateStage reason={request.intermediateApprovalSkipReason} />
+          ) : (
+            <>
+              <p className="text-xs text-muted-foreground mb-2">Every selected approver below must approve — any one rejecting ends the request.</p>
+              <IntermediateApprovalActions requestId={request.id} approvers={request.intermediateApprovers} myRow={myIntermediateRow} />
+            </>
+          )}
         </div>
       </div>
 
       <div className="rounded-lg border">
         <div className="px-4 py-3">
           <h2 className="text-sm font-semibold mb-2">Final Approval</h2>
-          {request.status === "PENDING_INTERMEDIATE_APPROVAL" ? (
+          {request.status === "PENDING_INTERMEDIATE_APPROVAL" && !request.finalApprovalSkipped ? (
             <p className="text-sm text-muted-foreground">Waiting for intermediate approval before final approval can begin.</p>
+          ) : request.status === "REJECTED" && !request.approver && intermediateRejectionRow ? (
+            // Rejected during INTERMEDIATE approval — the final stage was
+            // never reached; the rejecting user/time/comment are shown in the
+            // Intermediate Approval section above (their persisted decision).
+            <p className="text-sm text-muted-foreground" data-testid="final-not-reached">
+              Not reached — rejected during Intermediate Approval by{" "}
+              <span className="font-medium text-foreground">{intermediateRejectionRow.approver.name ?? intermediateRejectionRow.approver.email}</span>
+              {intermediateRejectionRow.decidedAt ? ` on ${intermediateRejectionRow.decidedAt.toLocaleString()}` : ""}.
+            </p>
           ) : (
             <ApprovalActions
               requestId={request.id}
@@ -161,6 +181,9 @@ export default async function ProjectRequestDetailPage({
               businessAssessment={request.businessAssessment}
               project={request.project}
               canCompleteSetup={hasApprovePermission}
+              finalApprovalSkipped={request.finalApprovalSkipped}
+              finalApprovalSkippedBy={request.finalApprovalSkippedBy}
+              finalApprovalSkippedAt={request.finalApprovalSkippedAt}
             />
           )}
         </div>

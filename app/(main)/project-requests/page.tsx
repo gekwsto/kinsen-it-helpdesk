@@ -70,6 +70,7 @@ export default async function ProjectRequestsPage({
         department: { select: { id: true, name: true } },
         requester: { select: { id: true, name: true, email: true } },
         approver: { select: { id: true, name: true, email: true } },
+        finalApprovalSkippedBy: { select: { id: true, name: true, email: true } },
         intermediateApprovers: {
           include: { approver: { select: { id: true, name: true, email: true } } },
           orderBy: { createdAt: "asc" },

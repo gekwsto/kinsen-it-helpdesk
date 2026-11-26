@@ -15,6 +15,7 @@ import { isProjectOverdue, isActivityOverdue } from "@/lib/overdue";
 import { projectPriorityKey } from "@/lib/project-priority";
 import { getActivityPriorityConfigsForDepartments, buildPriorityFilterOptions } from "@/lib/priority-config";
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
+import { buildProjectOwnedByWhere } from "@/lib/services/project-query-service";
 
 interface SearchParams {
   status?: string;
@@ -88,7 +89,8 @@ export default async function ProjectGanttPage({
 
   const andConditions: any[] = [scope];
   if (params.status) andConditions.push({ status: params.status });
-  if (params.userId) andConditions.push({ ownerId: params.userId });
+  // Owner filter: primary owner or co-owner (see buildProjectOwnedByWhere).
+  if (params.userId) andConditions.push(buildProjectOwnedByWhere(params.userId));
   if (params.from || params.to) {
     andConditions.push({
       OR: [

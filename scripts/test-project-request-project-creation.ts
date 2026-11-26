@@ -130,9 +130,9 @@ async function main() {
   // expectedTotalInitialDays permanently excluded (the creation-time
   // baseline, immutable by PATCH).
   const { updateProjectRequestOriginFieldsSchema } = await import("@/lib/validations");
-  const EDITABLE_REQUEST_ORIGIN_FIELDS = ["expectedStartDate", "expectedFinishDate", "expectedTotalInitialDaysOverride", "expenseTypeId", "external"];
+  const EDITABLE_REQUEST_ORIGIN_FIELDS = ["expectedStartDate", "expectedFinishDate", "expectedTotalInitialDaysOverride", "ownerIds", "expenseTypeId", "external"];
   check(
-    "11. updateProjectRequestOriginFieldsSchema exposes exactly the 5 request-origin fields the edit page offers (incl. the duration override)",
+    "11. updateProjectRequestOriginFieldsSchema exposes exactly the 6 request-origin fields the edit page offers (incl. the duration override and Owner(s))",
     EDITABLE_REQUEST_ORIGIN_FIELDS.every((f) => f in updateProjectRequestOriginFieldsSchema.shape) &&
       Object.keys(updateProjectRequestOriginFieldsSchema.shape).length === EDITABLE_REQUEST_ORIGIN_FIELDS.length
   );

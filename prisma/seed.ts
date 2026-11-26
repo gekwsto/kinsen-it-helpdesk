@@ -116,7 +116,14 @@ const PERMISSIONS = [
   // the request goes straight to PENDING_APPROVAL (Final Approval), with
   // ProjectRequest.intermediateApprovalSkipReason recorded as
   // PERMISSION_BYPASS for audit.
-  { key: "projectRequest.skipIntermediateApproval", description: "Skip intermediate approval on your own Project Request submissions, going straight to Final Approval", module: "projectRequests" },
+  // RETIRED (migration 20261127090000): every requester may now opt out of
+  // Intermediate Approval at submission, so this permission is no longer
+  // enforced. Kept (never deleted) for existing grants/audit.
+  { key: "projectRequest.skipIntermediateApproval", description: "Retired — no longer enforced. Every requester can now choose to skip Intermediate Approval when submitting a Project Request.", module: "projectRequests" },
+  // Skip Final Approval at submission, evaluated for the request's target
+  // department (Global or Department scope). Registered only — never granted
+  // to any role by default; administrators assign it explicitly.
+  { key: "projectRequest.skipFinalApproval", description: "Skip Final Approval — Allows users to bypass the final approval stage when creating a Project Request.", module: "projectRequests" },
   // Phase 3 — the privileged Historical Import mechanism (see
   // createHistoricalProjectRequest in lib/services/project-request-
   // historical-import-service.ts and POST /api/admin/project-requests/
