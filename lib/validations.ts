@@ -300,6 +300,13 @@ function moneyAmountSchema(label: string) {
 export const createProjectFromRequestSchema = createProjectSchema
   .omit({ departmentId: true })
   .extend({
+    // Destination Workspace for the new Project — optional; omitted means
+    // the Project Request's own department (the previous, unchanged
+    // behaviour). Lets the person completing setup correct a request
+    // submitted under the wrong department. Authorized server-side in
+    // createProjectFromApprovedRequest; the Project Request itself (its
+    // department, approvals, requester) is never modified.
+    departmentId: z.string().trim().min(1).optional(),
     // The approver's own explicit choice of who should own the new
     // Project — one or more, re-verified server-side (every id must be a
     // real, active user — system-wide, NEVER Department-scoped, see
@@ -668,7 +675,15 @@ export const createActivitySchema = z.object({
   manualEstimatedCost: moneyAmountSchema("Estimated Cost").optional(),
 });
 
-export const updateActivitySchema = createActivitySchema.partial();
+export const updateActivitySchema = createActivitySchema.partial().extend({
+  // Explicit manual Expected Days edit — request-origin Activities only
+  // (enforced in PATCH /api/activities/[id]). Same contract as the
+  // Project-level expectedTotalInitialDaysOverride: a number sets it, null
+  // resets it to the value derived from the current Expected dates, omitted
+  // leaves it untouched (Expected date changes alone never alter it). See
+  // resolveActivityExpectedDays in lib/project-duration.ts.
+  expectedDaysOverride: projectDurationOverrideSchema("Expected Days"),
+});
 
 // The exact set of request-origin-only fields required at INITIAL Activity
 // creation when the parent Project itself originates from a Project Request

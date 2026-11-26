@@ -64,7 +64,18 @@ export default async function NewProjectPage({
       redirect(`/projects/${request.project.id}`);
     }
 
-    const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
+    // Destination Workspace options: the request's own department (always
+    // allowed — the previous behaviour) plus every Workspace where the user
+    // may create Projects (same source as the New Project picker). The same
+    // rule is re-enforced server-side in createProjectFromApprovedRequest.
+    const [facilitiesServicesDepartmentId, creatableDepartments] = await Promise.all([
+      getFacilitiesServicesDepartmentId(),
+      getAccessibleDepartmentSummaries(session.user.id, session.user.role, "project.create"),
+    ]);
+    const setupDepartments = [
+      { id: request.department.id, name: request.department.name },
+      ...creatableDepartments.filter((d) => d.id !== request.department.id).map((d) => ({ id: d.id, name: d.name })),
+    ];
 
     return (
       // No max-width cap (previously max-w-2xl, then max-w-4xl) — a fixed
@@ -94,7 +105,7 @@ export default async function NewProjectPage({
             the exact same column default Project.priority itself falls
             back to, never a fabricated historical fact. */}
         <ProjectForm
-          departments={[]}
+          departments={setupDepartments}
           editableDepartmentIds={[]}
           mode="fromRequest"
           fromRequestId={request.id}

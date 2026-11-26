@@ -20,6 +20,8 @@ import { ChevronRight, Loader2, Plus } from "lucide-react";
 import { ActivityStatus, ActivityPriority } from "@prisma/client";
 import { ActivityDeleteButton } from "@/components/activities/activity-delete-button";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
+import { parseDurationOverride } from "@/components/projects/project-duration-field";
+import { calculateWorkingDays } from "@/lib/date-only";
 
 interface Project { id: string; title: string; projectRequestId: string | null; endDate?: string | null }
 interface AssignableUser { id: string; name: string | null; email: string }
@@ -141,8 +143,13 @@ export function ActivityEditClient({ id }: Props) {
   // user switches Task Sub Type in this form, so a stale value never
   // silently carries over to a different subtype.
   const [manualEstimatedCost, setManualEstimatedCost] = useState("");
-  // Server-derived, read-only display values — never sent back on PATCH.
+  // Expected Days — a MANUAL estimate for request-origin Activities (same
+  // semantics as the Project-level Expected Total Initial Days): the stored
+  // value is shown and editable here, Expected date changes never alter it,
+  // and it's sent (as expectedDaysOverride) ONLY when the user changed it.
   const [expectedDays, setExpectedDays] = useState<number | null>(null);
+  const [expectedDaysText, setExpectedDaysText] = useState("");
+  // Server-derived, read-only display values — never sent back on PATCH.
   const [actualDays, setActualDays] = useState<number | null>(null);
   const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
   const [actualCost, setActualCost] = useState<number | null>(null);
@@ -173,6 +180,7 @@ export function ActivityEditClient({ id }: Props) {
           setTaskTypeId(activity.taskTypeId ?? "");
           setTaskSubTypeId(activity.taskSubTypeId ?? "");
           setExpectedDays(typeof activity.expectedDays === "number" ? activity.expectedDays : null);
+          setExpectedDaysText(typeof activity.expectedDays === "number" ? String(activity.expectedDays) : "");
           setActualDays(typeof activity.actualDays === "number" ? activity.actualDays : null);
           setEstimatedCost(activity.estimatedCost !== null && activity.estimatedCost !== undefined ? Number(activity.estimatedCost) : null);
           setActualCost(activity.actualCost !== null && activity.actualCost !== undefined ? Number(activity.actualCost) : null);
@@ -311,6 +319,12 @@ export function ActivityEditClient({ id }: Props) {
       toast.error("Expected Finish cannot be before Expected Start.");
       return;
     }
+    const expectedDaysEdited = isRequestOrigin && expectedDaysText.trim() !== (expectedDays !== null ? String(expectedDays) : "");
+    const expectedDaysParsed = parseDurationOverride(expectedDaysText);
+    if (expectedDaysEdited && (!expectedDaysText.trim() || !expectedDaysParsed.ok)) {
+      toast.error("Expected Days must be a whole, non-negative number of days.");
+      return;
+    }
     if (taskSubTypeNeedsManualCost) {
       const parsed = Number(manualEstimatedCost);
       if (!manualEstimatedCost.trim() || !Number.isFinite(parsed) || parsed < 0) {
@@ -370,6 +384,10 @@ export function ActivityEditClient({ id }: Props) {
                 // convention as taskSubTypeId above; the server's own
                 // re-snapshot is idempotent when the value hasn't moved.
                 ...(taskSubTypeNeedsManualCost ? { manualEstimatedCost: Number(manualEstimatedCost) } : {}),
+                // Explicit manual Expected Days edit only — omitted otherwise,
+                // so the stored estimate is never touched by a save that only
+                // changed dates or other fields.
+                ...(expectedDaysEdited && expectedDaysParsed.ok ? { expectedDaysOverride: expectedDaysParsed.value } : {}),
               }
             : {}),
         }),
@@ -581,19 +599,34 @@ export function ActivityEditClient({ id }: Props) {
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <Label htmlFor="expected-days">Expected Days</Label>
-                    <Input
-                      id="expected-days"
-                      type="text"
-                      inputMode="none"
-                      readOnly
-                      aria-readonly="true"
-                      tabIndex={-1}
-                      value={expectedDays !== null ? `${expectedDays} day${expectedDays === 1 ? "" : "s"}` : ""}
-                      placeholder="Not set"
-                      className="cursor-default bg-muted/40"
-                    />
-                    <p className="text-xs text-muted-foreground">Working days (Mon–Fri), recalculated from Expected Start/Finish on save — not directly editable.</p>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label htmlFor="expected-days">Expected Days</Label>
+                      {calculateWorkingDays(expectedStartDate || null, expectedFinishDate || null) !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setExpectedDaysText(String(calculateWorkingDays(expectedStartDate, expectedFinishDate)))}
+                          className="text-xs text-muted-foreground hover:text-foreground"
+                        >
+                          Recalculate from Expected dates
+                        </button>
+                      )}
+                    </div>
+                    <div className="relative">
+                      <Input
+                        id="expected-days"
+                        type="number"
+                        inputMode="numeric"
+                        min={0}
+                        step={1}
+                        value={expectedDaysText}
+                        onChange={(e) => setExpectedDaysText(e.target.value)}
+                        placeholder="Not set"
+                        aria-describedby="expected-days-helper"
+                        className="pr-14"
+                      />
+                      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">days</span>
+                    </div>
+                    <p id="expected-days-helper" className="text-xs text-muted-foreground">Manual estimate used for the Estimated Cost. Changing Expected Start/Finish never changes it.</p>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="actual-days">Actual Days</Label>

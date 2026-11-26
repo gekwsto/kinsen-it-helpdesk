@@ -12,7 +12,8 @@ import { getActivityStatusDisplay } from "@/lib/services/activity-status-config"
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-invalidation";
 import { publishProjectListInvalidation } from "@/lib/realtime/project-list-invalidation";
-import { workingDaysBetween, actualDaysFromCompletion, isSameDateOnly } from "@/lib/date-only";
+import { actualDaysFromCompletion, isSameDateOnly } from "@/lib/date-only";
+import { resolveActivityExpectedDays } from "@/lib/project-duration";
 import { computeActivityFinancials } from "@/lib/services/project-financials-service";
 import { getAppendSequenceLocked, normalizeProjectSequenceLocked, isRequestOriginProject } from "@/lib/services/activity-sequence-service";
 import { Role, ActivityStatus } from "@prisma/client";
@@ -37,6 +38,9 @@ const ACTIVITY_LIST_RELEVANT_FIELDS = [
   "assignedUserIds",
   "startDate",
   "dueDate",
+  // Explicit Expected Days edit — the Activity list shows Expected Days and
+  // the Estimated Cost derived from it.
+  "expectedDaysOverride",
   // Expected Start/Finish are shown on the Activity list too, and are what
   // an Expected-mode timeline drag writes — they refresh viewers exactly
   // like an Actual-date change does.
@@ -156,6 +160,7 @@ export async function PATCH(
         projectId: true,
         expectedStartDate: true,
         expectedFinishDate: true,
+        expectedDays: true,
         ownerId: true,
         taskSubTypeId: true,
       },
@@ -217,6 +222,7 @@ export async function PATCH(
       assignedUserIds,
       expectedStartDate,
       expectedFinishDate,
+      expectedDaysOverride,
       ownerId,
       taskTypeId,
       taskSubTypeId,
@@ -290,7 +296,16 @@ export async function PATCH(
     }
 
     if (assignedUserIds && assignedUserIds.length > 0) {
-      for (const userId of Array.from(new Set(assignedUserIds))) {
+      // Assignability is enforced for NEWLY added assignees only (against the
+      // Activity's effective department). Existing assignees are preserved
+      // as-is — e.g. after a Project Workspace transfer moved this Activity,
+      // or a user's role changed — never silently removed and never granted
+      // anything new; Resource Planning already keeps rows for such
+      // assignees without offering them as new targets.
+      const currentAssigneeIds = new Set(
+        (await prisma.projectActivity.findUnique({ where: { id }, select: { assignedUsers: { select: { id: true } } } }))?.assignedUsers.map((u) => u.id) ?? []
+      );
+      for (const userId of Array.from(new Set(assignedUserIds)).filter((u) => !currentAssigneeIds.has(u))) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "activity", effectiveDepartmentId);
         if (!assignable) {
           return NextResponse.json(
@@ -388,10 +403,34 @@ export async function PATCH(
     // dates. This keeps an unrelated save from silently rewriting a stored
     // historical value (and the Estimated Cost derived from it). Reuses the
     // same effective values the check above just computed.
-    const expectedDaysChanging =
+    const expectedDatesChanging =
       (expectedStartDate !== undefined && !isSameDateOnly(effectiveExpectedStart, existing.expectedStartDate)) ||
       (expectedFinishDate !== undefined && !isSameDateOnly(effectiveExpectedFinish, existing.expectedFinishDate));
-    const newExpectedDays = effectiveExpectedStart && effectiveExpectedFinish ? workingDaysBetween(effectiveExpectedStart, effectiveExpectedFinish) : null;
+    // Expected Days — THE single backend rule for every caller (edit form,
+    // inline date edit, Project Gantt / Resource Planning drag, API):
+    // request-origin Activities keep their manual Expected Days across any
+    // Expected date change, changing only on an explicit expectedDaysOverride;
+    // other Activities keep the previous recalc-on-date-change behaviour.
+    // Origin is the Activity's EFFECTIVE Project after this request (a
+    // project move in the same PATCH is honoured), resolved server-side.
+    const effectiveProjectId = data.projectId !== undefined ? data.projectId : existing.projectId;
+    const effectiveProjectIsRequestOrigin = effectiveProjectId
+      ? !!(await prisma.project.findUnique({ where: { id: effectiveProjectId }, select: { projectRequestId: true } }))?.projectRequestId
+      : false;
+    if (expectedDaysOverride !== undefined && !effectiveProjectIsRequestOrigin) {
+      return NextResponse.json(
+        { error: "Expected Days can only be edited for Activities of a Project created from a Project Request.", code: "expected_days_not_editable" },
+        { status: 400 }
+      );
+    }
+    const expectedDaysResolution = resolveActivityExpectedDays({
+      requestOrigin: effectiveProjectIsRequestOrigin,
+      override: expectedDaysOverride,
+      expectedDatesChanged: expectedDatesChanging,
+      start: effectiveExpectedStart,
+      finish: effectiveExpectedFinish,
+      currentValue: existing.expectedDays,
+    });
 
     if (rest.subDepartmentId) {
       const valid = await validateSubDepartmentInDepartment(rest.subDepartmentId, effectiveDepartmentId);
@@ -502,7 +541,7 @@ export async function PATCH(
           taskSubTypeCost: taskSubTypeId === null ? null : costResolutionNeeded ? newTaskSubTypeCost : undefined,
           expectedStartDate: expectedStartDate !== undefined ? effectiveExpectedStart : undefined,
           expectedFinishDate: expectedFinishDate !== undefined ? effectiveExpectedFinish : undefined,
-          expectedDays: expectedDaysChanging ? newExpectedDays : undefined,
+          expectedDays: expectedDaysResolution ? expectedDaysResolution.value : undefined,
           sequence: appendSequence ?? newSequence,
           ...(assignedUserIds !== undefined && {
             assignedUsers: { set: Array.from(new Set(assignedUserIds)).map((uid) => ({ id: uid })) },

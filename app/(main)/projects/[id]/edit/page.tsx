@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState, useEffect } from "react";
+import { use, useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -20,6 +20,8 @@ import { ChevronRight, Loader2, Building2, Briefcase } from "lucide-react";
 import { ProjectStatus } from "@prisma/client";
 import { FacilitiesDateField, facilitiesBoundaryPreview } from "@/components/projects/facilities-date-field";
 import { ProjectOwnersPicker } from "@/components/projects/project-owners-picker";
+import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ProjectDurationField, parseDurationOverride } from "@/components/projects/project-duration-field";
 import { calculateProjectDurationDays } from "@/lib/project-duration";
 import { PROJECT_IMPORTANCE_OPTIONS, PROJECT_SCORE_OPTIONS, getImportanceScoreFraction, formatScorePercent } from "@/lib/project-scoring-shared";
@@ -46,6 +48,20 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [assignableUsers, setAssignableUsers] = useState<AssignableUser[]>([]);
+  // ─── Workspace (canonical Project department) — editable; a change is a
+  // Workspace TRANSFER of the Project and all its Activities (see
+  // lib/services/project-workspace-transfer-service.ts), confirmed first.
+  const [persistedDepartmentId, setPersistedDepartmentId] = useState("");
+  const [selectedDepartmentId, setSelectedDepartmentId] = useState("");
+  const [workspaceOptions, setWorkspaceOptions] = useState<{ id: string; name: string }[]>([]);
+  const [transferCounts, setTransferCounts] = useState<{ activityCount: number; linkedTicketCount: number }>({ activityCount: 0, linkedTicketCount: 0 });
+  const [existingMembers, setExistingMembers] = useState<AssignableUser[]>([]);
+  const [originalSubDepartmentId, setOriginalSubDepartmentId] = useState("");
+  const [confirmTransferOpen, setConfirmTransferOpen] = useState(false);
+  const transferConfirmedRef = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const workspaceChanged = !!selectedDepartmentId && !!persistedDepartmentId && selectedDepartmentId !== persistedDepartmentId;
+  const workspaceName = (deptId: string) => workspaceOptions.find((w) => w.id === deptId)?.name ?? "this Workspace";
   const [selectedMemberIds, setSelectedMemberIds] = useState<Set<string>>(new Set());
   // Audience — Users: system-wide (never Department-scoped), same
   // eligibility rule Owner(s) always used — editable here for EVERY
@@ -124,6 +140,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   // a stale value from before the switch can never be sent alongside the
   // new one.
   const [isFacilitiesServicesWorkspace, setIsFacilitiesServicesWorkspace] = useState(false);
+  // Facilities Services fields/date mode apply to the persisted Workspace;
+  // while a transfer is pending they're neither shown nor sent (the server
+  // keeps historical Facilities metadata untouched either way).
+  const facilitiesActive = isFacilitiesServicesWorkspace && !(!!selectedDepartmentId && !!persistedDepartmentId && selectedDepartmentId !== persistedDepartmentId);
   const [facilitiesCompany, setFacilitiesCompany] = useState("");
   const [facilitiesLocation, setFacilitiesLocation] = useState("");
   const [facilitiesCategory, setFacilitiesCategory] = useState("");
@@ -172,6 +192,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setEndDate(p.endDate ? p.endDate.split("T")[0] : "");
           setActualDaysManual(p.actualTotalDaysOverridden ? String(p.actualTotalDays ?? "") : null);
           setIsFacilitiesServicesWorkspace(p.isFacilitiesServicesWorkspace ?? false);
+          setPersistedDepartmentId(p.departmentId ?? "");
+          setSelectedDepartmentId(p.departmentId ?? "");
+          setWorkspaceOptions(p.workspaceTransfer?.options ?? (p.department ? [{ id: p.department.id, name: p.department.name }] : []));
+          setTransferCounts({ activityCount: p.workspaceTransfer?.activityCount ?? 0, linkedTicketCount: p.workspaceTransfer?.linkedTicketCount ?? 0 });
+          setExistingMembers((p.members ?? []).map((m: AssignableUser) => ({ id: m.id, name: m.name ?? null, email: m.email })));
           setFacilitiesCompany(p.facilitiesCompany ?? "");
           setFacilitiesLocation(p.facilitiesLocation ?? "");
           setFacilitiesCategory(p.facilitiesCategory ?? "");
@@ -198,6 +223,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setSuccessTarget(p.successTarget ?? "");
           setIsGoal(p.isGoal ?? false);
           setSubDepartmentId(p.subDepartmentId ?? "");
+          setOriginalSubDepartmentId(p.subDepartmentId ?? "");
           // Pre-select existing members
           const existingIds = new Set<string>(
             (p.members ?? []).map((m: { id: string }) => m.id)
@@ -236,8 +262,9 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           }
 
           // Eligible members/sub-departments depend on the project's own
-          // department (fixed — this form doesn't let you move departments)
-          // — fetched once we know it, not in parallel with the project itself.
+          // department — fetched once we know it (and re-fetched for the
+          // destination when the Workspace selector changes, see
+          // handleWorkspaceChange).
           if (p.departmentId) {
             fetch(`/api/users?assignableFor=project&departmentId=${p.departmentId}`)
               .then((r) => (r.ok ? r.json() : []))
@@ -334,6 +361,26 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
     });
   };
 
+  // Workspace selector change: destination-scoped options only. Existing
+  // Members stay selected (and listed) — they're preserved by the transfer;
+  // only NEWLY added Members must be assignable in the destination. The
+  // Project's sub-department belongs to its Workspace, so it resets (and is
+  // restored if the original Workspace is re-selected).
+  const handleWorkspaceChange = (deptId: string) => {
+    setSelectedDepartmentId(deptId);
+    setSubDepartmentId(deptId === persistedDepartmentId ? originalSubDepartmentId : "");
+    fetch(`/api/departments/${deptId}/sub-departments`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((options) => setSubDepartments(Array.isArray(options) ? options : []));
+    fetch(`/api/users?assignableFor=project&departmentId=${deptId}`)
+      .then((r) => (r.ok ? r.json() : []))
+      .then((users: AssignableUser[]) => {
+        const list = Array.isArray(users) ? users : [];
+        const missingExisting = existingMembers.filter((m) => !list.some((u) => u.id === m.id));
+        setAssignableUsers([...missingExisting, ...list]);
+      });
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) {
@@ -361,7 +408,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
     }
     // Facilities Services-only — a UX convenience only; the server
     // (resolveFacilitiesWrite) re-validates all of this regardless.
-    if (isFacilitiesServicesWorkspace) {
+    if (facilitiesActive) {
       if (facStartPrecision === "QUARTER" && (!facStartQuarter || !facStartYear)) {
         toast.error("Select both a Quarter and a Year for Start.");
         return;
@@ -386,6 +433,13 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
         }
       }
     }
+    // A Workspace change transfers the Project and all its Activities —
+    // confirmed explicitly first (the dialog re-submits this same form).
+    if (workspaceChanged && !transferConfirmedRef.current) {
+      setConfirmTransferOpen(true);
+      return;
+    }
+    transferConfirmedRef.current = false;
     setSaving(true);
     try {
       const res = await fetch(`/api/projects/${id}`, {
@@ -394,6 +448,9 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
         body: JSON.stringify({
           title,
           description: description || undefined,
+          // Only sent when it actually changes — an unchanged Workspace
+          // keeps the exact previous PATCH payload.
+          ...(workspaceChanged ? { departmentId: selectedDepartmentId } : {}),
           status,
           priority: parseInt(priority),
           // Facilities Services: Start/End are driven by the precision
@@ -403,7 +460,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           // server's own resolveFacilitiesWrite derives the boundary,
           // never a stale value from before a precision switch). Every
           // other workspace: the exact, unmodified pre-existing behavior.
-          ...(isFacilitiesServicesWorkspace
+          ...(facilitiesActive
             ? {
                 facilitiesCompany: facilitiesCompany.trim() || null,
                 facilitiesLocation: facilitiesLocation.trim() || null,
@@ -510,7 +567,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           <CardTitle>Edit Project</CardTitle>
         </CardHeader>
         <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
+          <form ref={formRef} onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
               <Label htmlFor="title">Title *</Label>
               <Input
@@ -531,6 +588,16 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 onChange={(e) => setDescription(e.target.value)}
                 rows={3}
               />
+            </div>
+
+            <div className="space-y-2" data-testid="project-workspace-field">
+              <Label>Workspace</Label>
+              <WorkspaceCombobox workspaces={workspaceOptions} value={selectedDepartmentId} onChange={handleWorkspaceChange} disabled={saving || workspaceOptions.length <= 1} />
+              <p className="text-xs text-muted-foreground">
+                {workspaceChanged
+                  ? `Moving from ${workspaceName(persistedDepartmentId)} — the Project and its ${transferCounts.activityCount} Activit${transferCounts.activityCount === 1 ? "y" : "ies"} will be transferred on save.`
+                  : "The Workspace this Project belongs to. Changing it transfers the Project and all its Activities."}
+              </p>
             </div>
 
             {/* Sub-Department (when this department has any configured)
@@ -592,7 +659,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </div>
             </div>
 
-            {isFacilitiesServicesWorkspace ? (
+            {facilitiesActive ? (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <FacilitiesDateField
                   label="Start"
@@ -655,7 +722,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
                 id="actualTotalDays"
                 label="Actual Total Days"
                 calculatedValue={
-                  isFacilitiesServicesWorkspace
+                  facilitiesActive
                     ? calculateProjectDurationDays(
                         facilitiesBoundaryPreview("start", facStartPrecision, startDate, facStartQuarter, facStartYear),
                         facilitiesBoundaryPreview("end", facEndPrecision, endDate, facEndQuarter, facEndYear)
@@ -669,7 +736,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               />
             </div>
 
-            {isFacilitiesServicesWorkspace && (
+            {facilitiesActive && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="facilitiesCompany">Company</Label>
@@ -721,7 +788,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </div>
             )}
 
-            {isFacilitiesServicesWorkspace && (
+            {facilitiesActive && (
               <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
                 <div>
                   <h3 className="text-sm font-semibold">Facilities Costs</h3>
@@ -778,7 +845,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               </div>
             )}
 
-            {isFacilitiesServicesWorkspace && (
+            {facilitiesActive && (
               <div className="space-y-4 rounded-lg border p-4 bg-muted/20">
                 <div>
                   <h3 className="text-sm font-semibold">Project Scoring</h3>
@@ -1022,32 +1089,6 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               )}
             </div>
 
-            {/* Responsible People (Phase 2) — a PERMANENT, independent
-                relationship, deliberately separate from Owner(s)/Members/
-                Audience above (never written into any of those). Same
-                system-wide eligibility, same read-only visibility as
-                Audience (buildProjectAudienceWhere). */}
-            <div className="space-y-2">
-              <Label htmlFor="project-responsible-people">Responsible People</Label>
-              <p className="text-xs text-muted-foreground">Optional — users responsible for this Project, independent of Owner(s), Members and Audience. Any active user in the system.</p>
-              <Input placeholder="Search by name or email…" value={responsiblePeopleSearch} onChange={(e) => setResponsiblePeopleSearch(e.target.value)} className="h-8 text-sm" />
-              {systemWideUsers.length > 0 ? (
-                <div id="project-responsible-people" className="border rounded-md divide-y max-h-48 overflow-y-auto">
-                  {responsiblePeopleSearchResults.map((u) => (
-                    <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
-                      <input type="checkbox" className="h-4 w-4 rounded" checked={selectedResponsiblePeopleIds.has(u.id)} onChange={() => toggleResponsiblePerson(u.id)} />
-                      <span className="text-sm">{u.name ?? u.email}</span>
-                    </label>
-                  ))}
-                  {responsiblePeopleSearchResults.length === 0 && (
-                    <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{responsiblePeopleSearch}&quot;.</p>
-                  )}
-                </div>
-              ) : (
-                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
-              )}
-            </div>
-
             {/* Organizational Audience (Phase 1) — available on every
                 Project, same as Audience — Users above. Selecting a
                 Department/Business Unit grants dynamic, live-resolved read
@@ -1102,6 +1143,32 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
             </div>
             )}
 
+            {/* Responsible People (Phase 2) — a PERMANENT, independent
+                relationship, deliberately separate from Owner(s)/Members/
+                Audience above (never written into any of those). Same
+                system-wide eligibility, same read-only visibility as
+                Audience (buildProjectAudienceWhere). */}
+            <div className="space-y-2">
+              <Label htmlFor="project-responsible-people">Responsible People</Label>
+              <p className="text-xs text-muted-foreground">Optional — users responsible for this Project, independent of Owner(s), Members and Audience. Any active user in the system.</p>
+              <Input placeholder="Search by name or email…" value={responsiblePeopleSearch} onChange={(e) => setResponsiblePeopleSearch(e.target.value)} className="h-8 text-sm" />
+              {systemWideUsers.length > 0 ? (
+                <div id="project-responsible-people" className="border rounded-md divide-y max-h-48 overflow-y-auto">
+                  {responsiblePeopleSearchResults.map((u) => (
+                    <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" className="h-4 w-4 rounded" checked={selectedResponsiblePeopleIds.has(u.id)} onChange={() => toggleResponsiblePerson(u.id)} />
+                      <span className="text-sm">{u.name ?? u.email}</span>
+                    </label>
+                  ))}
+                  {responsiblePeopleSearchResults.length === 0 && (
+                    <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{responsiblePeopleSearch}&quot;.</p>
+                  )}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
+              )}
+            </div>
+
             <div className="flex gap-3 pt-2">
               <Button type="submit" disabled={saving}>
                 {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
@@ -1114,6 +1181,47 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           </form>
         </CardContent>
       </Card>
+
+      {/* Workspace transfer confirmation — shown before any save that
+          changes the Workspace; "Transfer and save" re-submits the form
+          (same validation path), Cancel leaves everything as it was. */}
+      <Dialog open={confirmTransferOpen} onOpenChange={setConfirmTransferOpen}>
+        <DialogContent data-testid="workspace-transfer-dialog">
+          <DialogHeader>
+            <DialogTitle>Transfer Project to another Workspace?</DialogTitle>
+            <DialogDescription>
+              The Project and all of its Activities move together. Owners, Members, Responsible People, Activity assignees and Audience selections are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+            <dt className="text-muted-foreground">From</dt>
+            <dd className="font-medium" data-testid="transfer-source">{workspaceName(persistedDepartmentId)}</dd>
+            <dt className="text-muted-foreground">To</dt>
+            <dd className="font-medium" data-testid="transfer-destination">{workspaceName(selectedDepartmentId)}</dd>
+            <dt className="text-muted-foreground">Activities transferred</dt>
+            <dd className="font-medium" data-testid="transfer-activity-count">{transferCounts.activityCount}</dd>
+            <dt className="text-muted-foreground">Linked Tickets</dt>
+            <dd className="font-medium" data-testid="transfer-ticket-count">
+              {transferCounts.linkedTicketCount} — stay in their current Workspaces, links kept
+            </dd>
+          </dl>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setConfirmTransferOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                transferConfirmedRef.current = true;
+                setConfirmTransferOpen(false);
+                formRef.current?.requestSubmit();
+              }}
+            >
+              Transfer and save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

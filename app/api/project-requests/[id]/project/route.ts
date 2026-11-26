@@ -33,6 +33,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           return NextResponse.json(apiError("item_not_found", "This Project Request no longer exists."), { status: 404 });
         case "forbidden":
           return forbiddenResponse("You need final-approval rights for this department to complete this Project Request's setup.");
+        case "forbidden_destination":
+          return forbiddenResponse("You can't create a Project in the selected Workspace. Choose the request's Workspace or one where you're allowed to create Projects.");
         case "invalid_status":
           return NextResponse.json(
             apiError("invalid_status", "This Project Request must be APPROVED before its Project can be set up.", { field: "status" }),

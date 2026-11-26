@@ -16,6 +16,7 @@ import { chromium, type Page } from "playwright";
 import { prisma } from "@/lib/prisma";
 import { Role, AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
 import { createDepartment } from "@/lib/services/department-service";
+import { calculateWorkingDays } from "@/lib/date-only";
 
 let fixtureSession: { user: { id: string; role: Role; customRoleId: string | null } } | null = null;
 mock.module("@/lib/auth", { namedExports: { auth: async () => fixtureSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
@@ -84,6 +85,30 @@ async function main() {
       });
     });
 
+    // Isolated, valid SQLGeneral identity fixture (no identity validation is
+    // bypassed): a dedicated requester whose captured SQLGeneral username
+    // resolves — through a stub of ONLY the SQLGeneral API client, for ONLY
+    // these two fixture usernames — to a manager chain ending at a dedicated
+    // fixture manager, who is therefore a genuine intermediate-approver
+    // candidate. The shared admin account is never used as the requester.
+    const realSql = await import("@/lib/sqlgeneral-api-client");
+    const sqlRows = new Map<string, Record<string, unknown>>();
+    const sqlRow = (username: string, manager: string | null) => ({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName: manager, manager2AMAccountName: null, manager3AMAccountName: null });
+    mock.module("@/lib/sqlgeneral-api-client", {
+      namedExports: {
+        ...realSql,
+        findSqlGeneralUserByUsername: async (u: string) => (sqlRows.has(u) ? { outcome: "unique" as const, user: sqlRows.get(u) } : realSql.findSqlGeneralUserByUsername(u)),
+      },
+    });
+    const requester = await prisma.user.create({ data: { email: `${TAG}-requester@kinsen.gr`, name: `${TAG} Requester`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    const manager = await prisma.user.create({ data: { email: `${TAG}-manager@kinsen.gr`, name: `${TAG} Manager`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    userIds.push(requester.id, manager.id);
+    await prisma.departmentMembership.create({ data: { userId: requester.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true } });
+    sqlRows.set(`${TAG}-mgr`, sqlRow(`${TAG}-mgr`, null));
+    sqlRows.set(`${TAG}-req`, sqlRow(`${TAG}-req`, `${TAG}-mgr`));
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester.id, sqlGeneralUsername: `${TAG}-req`, status: "SUCCEEDED" } });
+
     const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
     const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
     const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
@@ -91,7 +116,7 @@ async function main() {
     const { NextRequest } = await import("next/server");
     const jsonReq = (body: unknown) => new NextRequest("http://localhost/x", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
-    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    fixtureSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
     const submitRes = await requestsPOST(
       jsonReq({
         title: `${TAG} request`,
@@ -101,17 +126,17 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [admin.id],
-        // Admin is global-scope (sees every department) — disambiguate
-        // explicitly, same as every other fixture in this repo's test
-        // suite that submits as an admin/global-scope user.
+        intermediateApproverIds: [manager.id],
         departmentId: dept.id,
       })
     );
     if (submitRes.status !== 201) throw new Error(`Fixture submit failed: ${submitRes.status}: ${JSON.stringify(await submitRes.json())}`);
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
-    await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    fixtureSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
+    const intermediateRes = await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    if (intermediateRes.status !== 200) throw new Error(`Fixture intermediate approval failed: ${intermediateRes.status}: ${JSON.stringify(await intermediateRes.json())}`);
+    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
       jsonReq({
@@ -184,7 +209,11 @@ async function main() {
     await page.fill("#expected-start", "2026-06-02");
     await page.fill("#expected-finish", "2026-06-09");
     const expectedDaysValue = await page.locator("#expected-days").inputValue();
-    check("Expected Days preview shows the real calculated value (7 days)", expectedDaysValue === "7 days");
+    // Canonical working days (lib/date-only.ts): Tue 06-02 -> Tue 06-09 = 5
+    // (the old expectation, 7, was the calendar-day count from before the
+    // working-days rule).
+    const canonicalPreviewDays = calculateWorkingDays("2026-06-02", "2026-06-09");
+    check(`Expected Days preview shows the canonical working-day value (${canonicalPreviewDays} days)`, expectedDaysValue === `${canonicalPreviewDays} days`, expectedDaysValue);
 
     await page.locator("#task-sub-type").click();
     await page.getByRole("option", { name: `${TAG}-tasktype` }).click();
@@ -224,8 +253,12 @@ async function main() {
     // ══════════════════════ 3. Completion -> Actual Days on the detail page ══════════════════════
     console.log("\n=== Activity detail page after completion ===\n");
     await page.goto(`${BASE_URL}/activities/${newActivityId}`, { waitUntil: "load" });
-    await page.waitForTimeout(800);
-    check("Project Request Setup card appears on the detail page for a request-origin Activity", (await page.getByText("Project Request Setup", { exact: true }).count()) > 0);
+    // Deterministic readiness: the detail page loads its data client-side —
+    // wait for its real content (the status control) instead of a fixed delay.
+    await page.getByRole("button", { name: /change activity status/i }).first().waitFor({ state: "visible", timeout: 30000 });
+    // The former "Project Request Setup" card is now the "Financial
+    // Information" section, with the same request-origin-only gating.
+    check("Request-origin-only Financial Information section appears on the detail page for a request-origin Activity", (await page.getByText("Financial Information", { exact: true }).count()) > 0);
     check("Actual Days shows 'Not set until completion' before completion", (await page.getByText(/Not set until completion/).count()) > 0);
 
     // Complete it via the quick-status dropdown (the same real UI control a
@@ -238,9 +271,13 @@ async function main() {
     const statusControl = page.getByRole("button", { name: /change activity status/i });
     check("(sanity) The quick-status dropdown trigger is found on the detail page", (await statusControl.count()) > 0);
     await statusControl.click();
-    await page.waitForTimeout(200);
-    await page.getByRole("menuitem", { name: /completed/i }).first().click();
-    await page.waitForTimeout(800);
+    const completedItem = page.getByRole("menuitem", { name: /completed/i }).first();
+    await completedItem.waitFor({ state: "visible", timeout: 10000 });
+    await Promise.all([
+      page.waitForResponse((r) => r.url().includes(`/api/activities/${newActivityId}`) && r.request().method() === "PATCH", { timeout: 15000 }),
+      completedItem.click(),
+    ]);
+    await page.getByText(/Not set until completion/).first().waitFor({ state: "detached", timeout: 15000 }).catch(() => undefined);
     check("After marking COMPLETED via the real quick-status control, Actual Days shows a real calculated value", !(await page.getByText(/Not set until completion/).count()));
   } finally {
     await browser.close();
@@ -254,6 +291,9 @@ async function main() {
       await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
+      await prisma.notification.deleteMany({ where: { userId: { in: userIds } } }).catch(() => {});
+      await prisma.user.deleteMany({ where: { id: { in: userIds } } }).catch((e) => console.warn("user cleanup:", e instanceof Error ? e.message.split("\n")[0] : e));
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: deptIds } } });

@@ -110,6 +110,17 @@ async function main() {
   const jsonReq = (body?: unknown, method = "POST") =>
     new NextRequest("http://localhost/x", { method, headers: body ? { "content-type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
 
+  // Isolated, valid SQLGeneral identity fixture (same approach as
+  // scripts/browser-verify-activity-request-origin-ui.ts — no identity
+  // validation bypassed): only the SQLGeneral API client is stubbed, and only
+  // for this run's two fixture usernames (requester → manager chain).
+  const realSql = await import("@/lib/sqlgeneral-api-client");
+  const sqlRows = new Map<string, Record<string, unknown>>();
+  const sqlRow = (username: string, manager: string | null) => ({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName: manager, manager2AMAccountName: null, manager3AMAccountName: null });
+  mock.module("@/lib/sqlgeneral-api-client", {
+    namedExports: { ...realSql, findSqlGeneralUserByUsername: async (u: string) => (sqlRows.has(u) ? { outcome: "unique" as const, user: sqlRows.get(u) } : realSql.findSqlGeneralUserByUsername(u)) },
+  });
+
   const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
   const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
   const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
@@ -145,6 +156,12 @@ async function main() {
 
     const adminUser = await prisma.user.findFirstOrThrow({ where: { email: "admin@kinsen.gr" }, select: { id: true, email: true, name: true } });
     const requester = await makeUser(`${TAG}-requester@kinsen.gr`);
+    // The requester's verified manager — the genuine intermediate approver.
+    const manager = await makeUser(`${TAG}-manager@kinsen.gr`);
+    sqlRows.set(`${TAG}-mgr`, sqlRow(`${TAG}-mgr`, null));
+    sqlRows.set(`${TAG}-req`, sqlRow(`${TAG}-req`, `${TAG}-mgr`));
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester.id, sqlGeneralUsername: `${TAG}-req`, status: "SUCCEEDED" } });
     await addMembership(requester.id, dept.id);
 
     async function makeRequestOriginProject(tag: string): Promise<string> {
@@ -158,13 +175,16 @@ async function main() {
           teamConcerned: "Engineering",
           expectedBenefits: "Benefits text long enough for validation.",
           replacesExisting: false,
-          intermediateApproverIds: [adminUser.id],
+          intermediateApproverIds: [manager.id],
         })
       );
+      if (submitRes.status !== 201) throw new Error(`Fixture submit failed: ${submitRes.status}: ${JSON.stringify(await submitRes.json())}`);
       const submitted = await submitRes.json();
       requestIds.push(submitted.id);
+      currentSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
+      const intermediateRes = await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+      if (intermediateRes.status !== 200) throw new Error(`Fixture intermediate approval failed: ${intermediateRes.status}: ${JSON.stringify(await intermediateRes.json())}`);
       currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
-      await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
       await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
       const setupRes = await setupPOST(
         jsonReq({
@@ -307,6 +327,7 @@ async function main() {
     }
     try {
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     } catch (err) {
       console.warn("Cleanup step failed (non-fatal): users", err instanceof Error ? err.message : err);

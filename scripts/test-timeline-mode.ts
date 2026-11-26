@@ -383,6 +383,47 @@ async function main() {
     check("No project.edit → 403 on an Expected project move; nothing persisted", rForbP.status === 403 && same((await getP(p1.id)).expectedStartDate, p1Actual.expectedStartDate));
     currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
 
+    // Request-origin Activity: manual Expected Days survive every date-only mutation path.
+    {
+      const pr = await prisma.projectRequest.create({ data: { title: `TL RO Request ${RUN_ID}`, departmentId: dept.id, requesterId: admin.id, status: "APPROVED", source: "STANDARD" } });
+      const roProject = await prisma.project.create({ data: { title: `TL RO Project ${RUN_ID}`, ownerId: admin.id, departmentId: dept.id, status: ProjectStatus.IN_PROGRESS, projectRequestId: pr.id } });
+      ids.projects.push(roProject.id);
+      const ro = await prisma.projectActivity.create({ data: { title: `TL RO Activity ${RUN_ID}`, projectId: roProject.id, departmentId: dept.id, status: ActivityStatus.IN_PROGRESS, priority: ActivityPriority.MEDIUM, assignedUsers: { connect: [{ id: agent.id }] }, startDate: D("2027-01-04"), dueDate: D("2027-01-08"), expectedStartDate: D("2027-03-01"), expectedFinishDate: D("2027-03-05"), expectedDays: 4, taskSubTypeCost: "250.00", actualDays: null } });
+      ids.activities.push(ro.id);
+      // The user's manual estimate (differs from the 4 working days the dates imply).
+      const manual = await patchActivity(ro.id, { expectedDaysOverride: 11 });
+      const roCost = async () => Number((await (await activityRoute.GET(new NextRequest("http://localhost/x"), { params: Promise.resolve({ id: ro.id }) })).json()).estimatedCost);
+      const roProjectCost = async () => Number((await (await projectRoute.GET(new NextRequest("http://localhost/x"), { params: Promise.resolve({ id: roProject.id }) })).json()).estimatedCost);
+      check("Request-origin: explicit Expected Days edit (11) → Estimated Cost 250 × 11 = 2750, Project rollup 2750", manual.status === 200 && (await getA(ro.id)).expectedDays === 11 && (await roCost()) === 2750 && (await roProjectCost()) === 2750);
+      const paths: [string, Record<string, unknown>][] = [
+        ["inline Expected Start edit", { expectedStartDate: "2027-03-02" }],
+        ["inline Expected Finish edit", { expectedFinishDate: "2027-03-12" }],
+        // (the real form also resends the current Task Sub Type; this fixture has none, so it's omitted rather than sent as an explicit clear)
+        ["edit-form save (title + both dates, no override)", { title: `TL RO Activity ${RUN_ID}`, expectedStartDate: "2027-03-03", expectedFinishDate: "2027-03-15" }],
+        ["Project Gantt Expected drag", tm.buildSchedulingPatch("activity", "expected", shiftDateOnly(D("2027-03-03"), 4), shiftDateOnly(D("2027-03-15"), 4))],
+        ["Resource Planning Expected drag + reassignment", { ...tm.buildSchedulingPatch("activity", "expected", shiftDateOnly(D("2027-03-07"), -2), shiftDateOnly(D("2027-03-19"), -2)), assignedUserIds: [admin.id] }],
+      ];
+      for (const [label, body] of paths) {
+        const before = await getA(ro.id);
+        const r = await patchActivity(ro.id, body);
+        const after = await getA(ro.id);
+        check(`Request-origin, ${label}: 200, Expected Days stays 11, Estimated Cost stays 2750, Actual Days/dates untouched`, r.status === 200 && after.expectedDays === 11 && (await roCost()) === 2750 && after.actualDays === before.actualDays && same(after.startDate, before.startDate) && same(after.dueDate, before.dueDate), `${r.status} days=${after.expectedDays}`);
+      }
+      const finalRow = await getA(ro.id);
+      check("...the Expected dates themselves did move (Mar 5 – Mar 17), independent of Expected Days", finalRow.expectedStartDate!.toISOString() === iso("2027-03-05") && finalRow.expectedFinishDate!.toISOString() === iso("2027-03-17"));
+      check("...Project rollup unchanged by all date-only changes (2750)", (await roProjectCost()) === 2750);
+      const edit2 = await patchActivity(ro.id, { expectedDaysOverride: 6 });
+      check("Explicit Expected Days edit (6) recalculates Estimated Cost (1500) and the Project rollup (1500)", edit2.status === 200 && (await getA(ro.id)).expectedDays === 6 && (await roCost()) === 1500 && (await roProjectCost()) === 1500);
+      currentSession = { user: { id: agent.id, role: Role.USER, customRoleId: null } };
+      const forbidden = await patchActivity(ro.id, { expectedDaysOverride: 99 });
+      currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+      check("Expected Days edit without activity.edit → 403, value unchanged (6)", forbidden.status === 403 && (await getA(ro.id)).expectedDays === 6);
+      check("Original approved Project Request untouched", JSON.stringify(await prisma.projectRequest.findUniqueOrThrow({ where: { id: pr.id }, select: { title: true, status: true } })) === JSON.stringify({ title: `TL RO Request ${RUN_ID}`, status: "APPROVED" }));
+      await prisma.projectActivity.delete({ where: { id: ro.id } });
+      await prisma.project.delete({ where: { id: roProject.id } });
+      await prisma.projectRequest.delete({ where: { id: pr.id } });
+    }
+
     // Consistency across views.
     const geAfter = await gantt({ timeline: "expected" });
     const g1After = geAfter.groups.find((g: any) => g.id === p1.id);

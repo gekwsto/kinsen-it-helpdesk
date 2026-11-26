@@ -64,3 +64,44 @@ export function resolveProjectDuration(params: {
   if (override === undefined && current?.overridden) return { value: current.value, overridden: true };
   return { value: calculateProjectDurationDays(start, finish), overridden: false };
 }
+
+/**
+ * Activity Expected Days — the SAME manual-estimation semantics as the
+ * Project-level Expected Total Initial Days (resolveProjectDuration above),
+ * applied per Activity origin:
+ *
+ *  - Request-origin Activity (its Project has projectRequestId): Expected
+ *    Days is a MANUAL estimate once the Activity exists. Its initial value
+ *    is fixed at creation; afterwards only an explicit user edit changes it.
+ *    Expected Start / Finish are independent scheduling fields — moving
+ *    them (edit form, inline date edit, Project Gantt or Resource Planning
+ *    drag) never recalculates or overwrites it.
+ *      override number    → that value (explicit manual edit)
+ *      override null      → explicit reset: recomputed once from the current
+ *                           Expected dates (same as the Project-level reset)
+ *      override undefined → unchanged, whatever happened to the dates
+ *    Implemented by treating the stored value as MANUAL (`overridden: true`)
+ *    in resolveProjectDuration — no separate flag/column needed.
+ *
+ *  - Any other Activity: unchanged behaviour — recomputed from the Expected
+ *    dates whenever either date actually changes (working days,
+ *    lib/date-only.ts); never manually editable (callers reject an override).
+ *
+ * Returns null when Expected Days must be left exactly as stored.
+ */
+export function resolveActivityExpectedDays(params: {
+  requestOrigin: boolean;
+  override: number | null | undefined;
+  expectedDatesChanged: boolean;
+  start: DateInput;
+  finish: DateInput;
+  currentValue: number | null;
+}): { value: number | null } | null {
+  const { requestOrigin, override, expectedDatesChanged, start, finish, currentValue } = params;
+  if (requestOrigin) {
+    if (override === undefined) return null;
+    return { value: resolveProjectDuration({ start, finish, override, current: { value: currentValue, overridden: true } }).value };
+  }
+  if (!expectedDatesChanged) return null;
+  return { value: calculateProjectDurationDays(start, finish) };
+}

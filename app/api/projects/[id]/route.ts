@@ -1,9 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { requireAuth, hasDepartmentPermission } from "@/lib/permissions";
+import { requireAuth } from "@/lib/permissions";
 import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
 import { hasProjectViewAccess } from "@/lib/services/project-access-service";
-import { getMembership } from "@/lib/services/department-membership-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { updateProjectSchema, updateProjectRequestOriginFieldsSchema, facilitiesProjectFieldsSchema } from "@/lib/validations";
@@ -22,7 +21,12 @@ import {
 } from "@/lib/services/project-facilities-service";
 import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
 import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
-import { Role } from "@prisma/client";
+import {
+  canTransferProjectToDepartment,
+  getProjectWorkspaceOptions,
+  getProjectWorkspaceTransferPreview,
+  transferProjectActivitiesInTransaction,
+} from "@/lib/services/project-workspace-transfer-service";
 
 // Every field the Project List (table) or Grid (card) view actually
 // renders, or that any real Project-list page's filters/sorting/scope
@@ -135,7 +139,16 @@ export async function GET(
       ? computeFacilitiesScorePercent(project.facilitiesProjectImportanceOverall, project.facilitiesProjectScore, await getFacilitiesImportanceGroupCounts())
       : null;
 
-    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace, facilitiesScorePercent });
+    // Project Edit's Workspace picker + transfer confirmation — editors only.
+    const canEditProject = await hasEffectiveEntityPermission(session.user.id, session.user.role, session.user.customRoleId, project.departmentId, "project.edit");
+    const workspaceTransfer = canEditProject
+      ? {
+          options: await getProjectWorkspaceOptions(session.user.id, session.user.role, project.department ? { id: project.department.id, name: project.department.name } : null),
+          ...(await getProjectWorkspaceTransferPreview(project.id)),
+        }
+      : null;
+
+    return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace, facilitiesScorePercent, workspaceTransfer });
   } catch {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
@@ -236,16 +249,14 @@ export async function PATCH(
       }
     }
 
-    // Moving a project into a different department requires standing there too.
+    // Workspace transfer — destination authorization (the source's
+    // project.edit was checked above). The previous department-move rule:
+    // ADMIN exception, otherwise an active destination membership granting
+    // project.create — see canTransferProjectToDepartment in
+    // lib/services/project-workspace-transfer-service.ts.
     if (data.departmentId !== undefined && data.departmentId !== null && data.departmentId !== existing.departmentId) {
-      if (session.user.role !== Role.ADMIN) {
-        const targetMembership = await getMembership(session.user.id, data.departmentId);
-        const allowed = targetMembership
-          ? await hasDepartmentPermission(targetMembership.role, "project.create", targetMembership.customRoleId)
-          : false;
-        if (!allowed) {
-          return NextResponse.json({ error: "You don't have access to the target department" }, { status: 403 });
-        }
+      if (!(await canTransferProjectToDepartment(session.user.id, session.user.role, data.departmentId))) {
+        return NextResponse.json({ error: "You don't have access to the target department", code: "forbidden_destination" }, { status: 403 });
       }
     }
 
@@ -456,7 +467,14 @@ export async function PATCH(
       : {};
 
     if (memberIds && memberIds.length > 0) {
-      for (const userId of memberIds) {
+      // Assignability is enforced for NEWLY added Members only (against the
+      // Project's effective — possibly new — department). Existing Members
+      // are preserved as-is, including across a Workspace transfer: never
+      // silently removed, never granted any new membership/permission.
+      const currentMemberIds = new Set(
+        (await prisma.project.findUnique({ where: { id }, select: { members: { select: { id: true } } } }))?.members.map((m) => m.id) ?? []
+      );
+      for (const userId of memberIds.filter((m) => !currentMemberIds.has(m))) {
         const assignable = await userHasAssignablePermissionForEntity(userId, "project", effectiveDepartmentId);
         if (!assignable) {
           return NextResponse.json(
@@ -529,7 +547,13 @@ export async function PATCH(
     const departmentChanging = data.departmentId !== undefined && data.departmentId !== existing.departmentId;
     const clearStaleSubDepartment = departmentChanging && rest.subDepartmentId === undefined;
 
-    const project = await prisma.project.update({
+    // A Workspace change moves the Project AND all its linked Activities in
+    // ONE transaction (all-or-nothing) — the canonical transfer mechanism
+    // (lib/services/project-workspace-transfer-service.ts). Without a
+    // department change this is exactly the previous single update.
+    let transferredActivityCount = 0;
+    const project = await prisma.$transaction(async (tx) => {
+      const updated = await tx.project.update({
       where: { id },
       data: {
         ...rest,
@@ -577,7 +601,26 @@ export async function PATCH(
         ...(ownerWrite ?? {}),
       },
       include: PROJECT_INCLUDE,
+      });
+      if (departmentChanging && data.departmentId) {
+        const transfer = await transferProjectActivitiesInTransaction(tx, id, data.departmentId);
+        transferredActivityCount = transfer.transferredActivityIds.length;
+      }
+      return updated;
     });
+
+    if (departmentChanging) {
+      // No persistent Project/Activity audit table exists (only
+      // TicketHistory) — recorded through the existing server logging.
+      console.info("[project-workspace-transfer]", JSON.stringify({
+        projectId: id,
+        actorUserId: session.user.id,
+        sourceDepartmentId: existing.departmentId,
+        destinationDepartmentId: data.departmentId,
+        transferredActivities: transferredActivityCount,
+        at: new Date().toISOString(),
+      }));
+    }
 
     // Publish ONLY after the update has actually committed above — never
     // before. One coalesced publish per request regardless of how many
@@ -603,7 +646,10 @@ export async function PATCH(
     // derived from its parent Project's, so moving a Project between
     // departments doesn't change anything the Activity list itself renders,
     // filters, or scopes on.
-    if (data.title !== undefined && data.title !== existing.title) {
+    // A Workspace transfer moves the Project's Activities too — Activity
+    // lists (scoped by Activity department) must refresh in both the source
+    // and destination Workspaces.
+    if ((data.title !== undefined && data.title !== existing.title) || (departmentChanging && transferredActivityCount > 0)) {
       publishActivityListInvalidation();
     }
 

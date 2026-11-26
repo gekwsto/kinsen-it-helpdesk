@@ -25,6 +25,15 @@ import { mkdirSync } from "node:fs";
 import { prisma } from "@/lib/prisma";
 import { createDepartment } from "@/lib/services/department-service";
 import { ProjectStatus, ProjectRequestStatus } from "@prisma/client";
+import { calculateProjectDurationDays } from "@/lib/project-duration";
+
+// Canonical AUTOMATIC Expected Total Initial Days for the fixture's Expected
+// dates (working days, lib/date-only.ts) — the stored baseline must match
+// its own dates unless it's an explicit manual override. The old fixture
+// stored 59 (a calendar-day count from before the working-days rule).
+const FIXTURE_EXPECTED_START = new Date("2026-01-01");
+const FIXTURE_EXPECTED_FINISH = new Date("2026-03-01");
+const FIXTURE_EXPECTED_TOTAL_DAYS = calculateProjectDurationDays(FIXTURE_EXPECTED_START, FIXTURE_EXPECTED_FINISH)!;
 
 const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const ADMIN_EMAIL = process.env.VERIFY_EMAIL || "admin@kinsen.gr";
@@ -133,9 +142,9 @@ async function main() {
         ownerId: admin.id,
         departmentId: dept.id,
         projectRequestId: pr.id,
-        expectedStartDate: new Date("2026-01-01"),
-        expectedFinishDate: new Date("2026-03-01"),
-        expectedTotalInitialDays: 59,
+        expectedStartDate: FIXTURE_EXPECTED_START,
+        expectedFinishDate: FIXTURE_EXPECTED_FINISH,
+        expectedTotalInitialDays: FIXTURE_EXPECTED_TOTAL_DAYS,
       },
     });
     projectIds.push(requestOriginProject.id);
@@ -191,7 +200,7 @@ async function main() {
 
     await page.goto(`${BASE_URL}/projects/${requestOriginProject.id}/edit`, { waitUntil: "load" });
     check("Project Edit (request-origin) — Expected Start Date field present with existing value", (await page.locator("#expectedStartDate").inputValue()) === "2026-01-01");
-    check("Project Edit (request-origin) — Expected Total Initial Days readonly field shows the baseline", (await page.locator("#expectedTotalInitialDays").inputValue()).includes("59"));
+    check(`Project Edit (request-origin) — Expected Total Initial Days shows the canonical working-day baseline (${FIXTURE_EXPECTED_TOTAL_DAYS})`, (await page.locator("#expectedTotalInitialDays").inputValue()) === String(FIXTURE_EXPECTED_TOTAL_DAYS));
 
     await page.goto(`${BASE_URL}/activities/${standaloneActivity.id}/edit`, { waitUntil: "load" });
     check("Activity Edit — Title field present with existing value", (await page.locator("#title").inputValue()) === standaloneActivity.title);
@@ -199,7 +208,7 @@ async function main() {
 
     await page.goto(`${BASE_URL}/activities/${requestOriginActivity.id}/edit`, { waitUntil: "load" });
     check("Activity Edit (request-origin) — manual Estimated Cost field present with existing snapshot", (await page.locator("#manual-estimated-cost").inputValue()) === "250");
-    check("Activity Edit (request-origin) — Expected Days readonly field shows the derived value", (await page.locator("#expected-days").inputValue()).includes("15"));
+    check("Activity Edit (request-origin) — Expected Days field shows the stored manual value (editable)", (await page.locator("#expected-days").inputValue()) === "15" && (await page.locator("#expected-days").isEditable()));
   } finally {
     await browser.close();
     try {

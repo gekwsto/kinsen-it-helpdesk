@@ -178,7 +178,13 @@ async function main() {
     check("0b. seeded GLOBAL built-in IT_AGENT holds NO X.delete (only ADMIN/DepartmentRole do) — delete is proven via a GLOBAL CustomRole + ADMIN", !(await hasPermission(Role.IT_AGENT, "project.delete", null)) && !(await hasPermission(Role.IT_AGENT, "activity.delete", null)));
     const roleEditorSrc = await fs.readFile("app/api/admin/roles/[id]/permissions/[permId]/route.ts", "utf8");
     const globalOnly = /GLOBAL_ONLY_PERMISSION_KEYS = new Set\(\[([^\]]*)\]\)/.exec(roleEditorSrc)?.[1] ?? "";
-    check("0c. the role editor restricts only admin.access/user.manage/role.manage — no project.* / activity.* key is department-only", !/project\.|activity\./.test(globalOnly) && /admin\.access/.test(globalOnly));
+    // 0c: none of the project/activity CRUD keys this audit covers is
+    // global-only (they stay department-grantable). The dedicated
+    // activity.dependency.manage key (added later, commit b50f4b2) is
+    // DELIBERATELY global-only — dependencies have no department — and is
+    // verified at runtime in R3 below.
+    check("0c. the role editor restricts admin.access/user.manage/role.manage — no project.*/activity.* view/create/edit/delete key is department-only (activity.dependency.manage is deliberately global-only)",
+      !/"(project|activity)\.(view|create|edit|delete)"/.test(globalOnly) && /admin\.access/.test(globalOnly) && /"activity\.dependency\.manage"/.test(globalOnly));
     check("0d. a GLOBAL CustomRole genuinely holds project.delete/activity.delete", (await hasPermission(Role.USER, "project.delete", globalFull.id)) && (await hasPermission(Role.USER, "activity.delete", globalFull.id)));
 
     // ── fixtures factory: a FRESH entity per call so destructive actions can be repeated ──
@@ -320,8 +326,43 @@ async function main() {
       fs.readFile("lib/services/department-scope-service.ts", "utf8"),
     ])).map(strip);
     check("R1. project/activity CREATE still go through resolveDepartmentForCreate (membership standing)", /resolveDepartmentForCreate\([^)]*"project\.create"/.test(projectsCreate) && /resolveDepartmentForCreate\([^)]*"activity\.create"/.test(activitiesCreate));
-    check("R2. department-move target checks still use hasDepartmentPermission(target membership, *.create)", /hasDepartmentPermission\(targetMembership\.role, "project\.create"/.test(projectSrc) && /hasDepartmentPermission\(targetMembership\.role, "activity\.create"/.test(activitySrc));
-    check("R3. dependency POST is still isAdmin-only", /isAdmin\(session\.user\.role\)/.test(depSrc));
+    // R2: the Project move target check now lives in the canonical
+    // Workspace transfer service but keeps the PREVIOUS semantics exactly:
+    // ADMIN exception, otherwise hasDepartmentPermission on the target
+    // membership for project.create (no DIRECTOR / view-all bypass). The
+    // Activity move target check is unchanged.
+    const transferSrc = strip(await fs.readFile("lib/services/project-workspace-transfer-service.ts", "utf8"));
+    const transferCheckBody = transferSrc.slice(transferSrc.indexOf("export async function canTransferProjectToDepartment("), transferSrc.indexOf("export async function getProjectWorkspaceOptions("));
+    check("R2. department-move target checks still use hasDepartmentPermission(target membership, *.create) (Project via canTransferProjectToDepartment, ADMIN-only exception)",
+      /canTransferProjectToDepartment\(session\.user\.id, session\.user\.role, data\.departmentId\)/.test(projectSrc) &&
+      /role === Role\.ADMIN/.test(transferCheckBody) &&
+      /hasDepartmentPermission\(targetMembership\.role, "project\.create"/.test(transferCheckBody) &&
+      !/getAccessibleDepartmentSummaries|canViewAllDepartments|Role\.DIRECTOR/.test(transferCheckBody) &&
+      /hasDepartmentPermission\(targetMembership\.role, "activity\./.test(activitySrc));
+    // R3 (verified at RUNTIME, not just by source): dependency creation is
+    // gated by the dedicated GLOBAL-only activity.dependency.manage
+    // permission (default holder: ADMIN only) — department grants, even full
+    // activity.edit, and global project/activity CRUD grants don't confer it,
+    // and it can't be granted through a department role.
+    {
+      const dependenciesRoute = await import("@/app/api/dependencies/route");
+      const rolePermRoute = await import("@/app/api/admin/roles/[id]/permissions/[permId]/route");
+      const p1 = await freshActivity(deptA.id), p2 = await freshActivity(deptA.id);
+      const depBody = { predecessorId: p1.id, successorId: p2.id, type: "FINISH_TO_START" };
+      as(dA);
+      const deptRes = await dependenciesRoute.POST(jsonReq("POST", depBody));
+      as(gCustom);
+      const globalCrudRes = await dependenciesRoute.POST(jsonReq("POST", depBody));
+      as(admin);
+      const adminRes = await dependenciesRoute.POST(jsonReq("POST", depBody));
+      const created = adminRes.status === 201 ? await adminRes.json() : null;
+      if (created?.id) await prisma.activityDependency.delete({ where: { id: created.id } });
+      const depPerm = await prisma.permission.findUniqueOrThrow({ where: { key: "activity.dependency.manage" } });
+      const grantRes = await rolePermRoute.POST(jsonReq("POST"), { params: Promise.resolve({ id: deptFull.id, permId: depPerm.id }) });
+      check("R3. dependency POST: department activity.edit → 403; global project/activity CRUD without activity.dependency.manage → 403; ADMIN → 201; the permission can't be granted to a department role (400)",
+        deptRes.status === 403 && globalCrudRes.status === 403 && adminRes.status === 201 && grantRes.status === 400 && /hasPermission\(session\.user\.role, "activity\.dependency\.manage"/.test(depSrc),
+        JSON.stringify({ dept: deptRes.status, globalCrud: globalCrudRes.status, admin: adminRes.status, grant: grantRes.status }));
+    }
     check("R4. project.create hint on the Activity GET (canCreateProjectInDept) is still bare canActOnEntity (creation stays department-standing)", /canActOnEntity\([^)]*"project\.create"\)/.test(activitySrc));
     const canActBody = deptScopeSrc.slice(deptScopeSrc.indexOf("export async function canActOnEntity("), deptScopeSrc.indexOf("export async function hasEffectiveEntityPermission("));
     check("R5. canActOnEntity itself is unchanged — no global-permission path added", !/hasPermission\(/.test(canActBody));

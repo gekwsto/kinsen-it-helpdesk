@@ -283,12 +283,20 @@ async function main() {
     for (const f of gateFiles) {
       const src = await fs.readFile(f, "utf8");
       const noComments = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-      if (/canActOnEntity\([^)]*"(project|activity)\.view"\)/.test(noComments) || !/hasEffectiveEntityPermission\([^)]*"(project|activity)\.view"\)/.test(noComments) || /hasEffectiveModulePermission|active_department|getActiveWorkspace/.test(noComments)) {
+      // Project view gates go through the canonical hasProjectViewAccess
+      // (lib/services/project-access-service.ts) since the approved Audience /
+      // request-origin-Owner visibility work — its departmental gate is
+      // exactly hasEffectiveEntityPermission(…, "project.view"), verified below.
+      const usesEffectiveView = /hasEffectiveEntityPermission\([^)]*"(project|activity)\.view"\)/.test(noComments) || (f.includes("projects/[id]") && /hasProjectViewAccess\(/.test(noComments));
+      if (/canActOnEntity\([^)]*"(project|activity)\.view"\)/.test(noComments) || !usesEffectiveView || /hasEffectiveModulePermission|active_department|getActiveWorkspace/.test(noComments)) {
         allOk = false;
         console.error(`     gate check failed in ${f}`);
       }
     }
-    check("10d. every outer view gate uses hasEffectiveEntityPermission (no bare canActOnEntity view, no module/workspace helper)", allOk);
+    const accessSrc = (await fs.readFile("lib/services/project-access-service.ts", "utf8")).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    const accessBody = accessSrc.slice(accessSrc.indexOf("export async function hasProjectViewAccess("));
+    const helperOk = /const departmental = await hasEffectiveEntityPermission\([^)]*"project\.view"\)/.test(accessBody) && !/canActOnEntity\(|hasEffectiveModulePermission|getActiveWorkspace/.test(accessBody);
+    check("10d. every outer view gate uses hasEffectiveEntityPermission — directly, or for Projects via hasProjectViewAccess whose departmental gate is hasEffectiveEntityPermission(project.view) (no bare canActOnEntity view, no module/workspace helper)", allOk && helperOk);
     const editSrc = (await fs.readFile("app/api/activities/[id]/route.ts", "utf8")) + (await fs.readFile("app/api/projects/[id]/route.ts", "utf8"));
     check("10e. edit/delete keys are still enforced on the outer gates (the write union is covered by test-project-activity-write-permission-audit.ts)", /hasEffectiveEntityPermission\([^)]*"activity\.edit"\)/.test(editSrc) && /hasEffectiveEntityPermission\([^)]*"activity\.delete"\)/.test(editSrc) && /hasEffectiveEntityPermission\([^)]*"project\.edit"\)/.test(editSrc) && /hasEffectiveEntityPermission\([^)]*"project\.delete"\)/.test(editSrc));
   } finally {

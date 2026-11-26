@@ -273,9 +273,17 @@ async function main() {
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
     check("...and contributes NOTHING to the Project total — still '2150', not NaN or crashed", projGet.estimatedCost === "2150");
 
+    // Request-origin Expected Days is a manual estimate: an Expected date
+    // change alone changes neither Expected Days nor Estimated Cost; an
+    // explicit expectedDaysOverride does, and the Project rollup follows.
     const extendAct2Res = await activitiesPATCH(jsonReq({ expectedFinishDate: "2026-11-11" }, "PATCH"), { params: Promise.resolve({ id: act2.id }) });
     const extendAct2 = await extendAct2Res.json();
-    check("13. Extending Act2's Expected Finish to Wed 11-11 (4 -> 7 working days) recalculates ITS OWN estimatedCost (200×7=1400)", extendAct2.estimatedCost === "1400");
+    check("13. Extending Act2's Expected Finish to Wed 11-11 keeps its manual Expected Days (4) and estimatedCost (200×4=800)", extendAct2Res.status === 200 && extendAct2.expectedDays === 4 && extendAct2.estimatedCost === "800");
+    projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
+    check("...and the Project total is unchanged by the date-only change: still 2150", projGet.estimatedCost === "2150");
+    const editDaysRes = await activitiesPATCH(jsonReq({ expectedDaysOverride: 7 }, "PATCH"), { params: Promise.resolve({ id: act2.id }) });
+    const editDays = await editDaysRes.json();
+    check("13b. Explicitly setting Act2's Expected Days to 7 recalculates ITS OWN estimatedCost (200×7=1400)", editDaysRes.status === 200 && editDays.expectedDays === 7 && editDays.estimatedCost === "1400");
     projGet = await (await projectsGET(jsonReq(undefined, "GET"), { params: Promise.resolve({ id: project.id }) })).json();
     check("...and the Project total updates automatically with zero extra bookkeeping: 1350 + 1400 = 2750", projGet.estimatedCost === "2750");
 

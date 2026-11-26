@@ -292,8 +292,21 @@ async function main() {
     await prisma.projectActivity.update({ where: { id: forgedDaysActivity.id }, data: { expectedDays: 12 } });
     const resaveSameDates = await (await activitiesPATCH(jsonReq({ title: `${TAG} ForgedDays Renamed`, expectedStartDate: "2026-05-05", expectedFinishDate: "2026-05-17" }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
     check("11b. Re-saving with the SAME Expected dates keeps the stored historical expectedDays (12) — no silent recalculation", resaveSameDates.expectedDays === 12);
+    // Request-origin Expected Days is a MANUAL estimate (same semantics as the
+    // Project-level Expected Total Initial Days): Expected date changes never
+    // recalculate it; only an explicit expectedDaysOverride does.
     const realDateChange = await (await activitiesPATCH(jsonReq({ expectedFinishDate: "2026-05-18" }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
-    check("11b. A REAL Expected Finish change recalculates in working days (Tue 05-05 -> Mon 05-18 = 9)", realDateChange.expectedDays === 9);
+    check("11b. A REAL Expected Finish change on a request-origin Activity keeps its manual Expected Days (12) — never recalculated from dates", realDateChange.expectedDays === 12 && realDateChange.expectedFinishDate === "2026-05-18T00:00:00.000Z");
+    const startChange = await (await activitiesPATCH(jsonReq({ expectedStartDate: "2026-05-04" }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
+    check("11b. ...nor does an Expected Start change (still 12)", startChange.expectedDays === 12);
+    const manualEdit = await (await activitiesPATCH(jsonReq({ expectedDaysOverride: 7 }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
+    check("11c. An explicit expectedDaysOverride sets it (7), dates untouched", manualEdit.expectedDays === 7 && manualEdit.expectedStartDate === "2026-05-04T00:00:00.000Z" && manualEdit.expectedFinishDate === "2026-05-18T00:00:00.000Z");
+    const afterMoreDates = await (await activitiesPATCH(jsonReq({ expectedStartDate: "2026-05-11", expectedFinishDate: "2026-05-25" }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
+    check("11c. ...and survives a later move of both Expected dates (still 7)", afterMoreDates.expectedDays === 7);
+    const resetRes = await (await activitiesPATCH(jsonReq({ expectedDaysOverride: null }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) })).json();
+    check("11c. An explicit reset (expectedDaysOverride: null) recalculates once from the current dates (Mon 05-11 -> Mon 05-25 = 10)", resetRes.expectedDays === 10);
+    const badOverride = await activitiesPATCH(jsonReq({ expectedDaysOverride: -3 }, "PATCH"), { params: Promise.resolve({ id: forgedDaysActivity.id }) });
+    check("11c. A negative override is rejected by validation (422), value unchanged", badOverride.status === 422 && (await prisma.projectActivity.findUniqueOrThrow({ where: { id: forgedDaysActivity.id } })).expectedDays === 10);
 
     // 12: DST/timezone safety — reuses the exact same workingDaysBetween
     // helper already proven DST-safe for Project.expectedTotalInitialDays
@@ -439,13 +452,23 @@ async function main() {
     check("53. ...and editable (unrelated field) without requiring any of the new fields to be backfilled first", legacyEditRes.status === 200);
     check("54. ...a legacy REQUEST-ORIGIN Activity (legacyActivity, completed above) transitioned status successfully too", legacyCompleteRes.status === 200);
 
-    // ══════════════════════ 60. Gantt semantics untouched ══════════════════════
-    console.log("\n=== 60. Gantt still reads startDate/dueDate, never Expected Start/Finish ═══\n");
+    // Manual (non-request-origin) Activities keep the previous behaviour.
+    const manualDated = await (await activitiesPATCH(jsonReq({ expectedStartDate: "2026-05-05", expectedFinishDate: "2026-05-12" }, "PATCH"), { params: Promise.resolve({ id: legacyManual.id }) })).json();
+    check("55. Manual-project Activity: Expected dates still derive Expected Days (Tue 05-05 -> Tue 05-12 = 5)", manualDated.expectedDays === 5);
+    const manualOverride = await activitiesPATCH(jsonReq({ expectedDaysOverride: 3 }, "PATCH"), { params: Promise.resolve({ id: legacyManual.id }) });
+    check("55. ...and Expected Days is NOT manually editable there (400 expected_days_not_editable)", manualOverride.status === 400 && (await manualOverride.json()).code === "expected_days_not_editable");
+
+    // ══════════════════════ 60. Gantt date contract ══════════════════════
+    // Updated for the approved Actual / Expected timeline modes: Actual mode
+    // still reads startDate/dueDate; Expected fields are read ONLY through
+    // the shared lib/timeline-mode.ts resolvers (never mixed), and Expected
+    // Days is never touched by the Gantt.
+    console.log("\n=== 60. Gantt: Actual reads startDate/dueDate; Expected only via lib/timeline-mode.ts ═══\n");
     const fs = await import("fs/promises");
     const ganttSrc = await fs.readFile("components/gantt/gantt-chart.tsx", "utf8");
-    check("60. gantt-chart.tsx has NO reference to expectedStartDate/expectedFinishDate/expectedDays", !/expectedStartDate|expectedFinishDate|expectedDays/.test(ganttSrc));
-    const projectGanttPageSrc = await fs.readFile("app/(main)/projects/gantt/page.tsx", "utf8");
-    check("60. Project Gantt page still maps startDate/dueDate only", /a\.startDate/.test(projectGanttPageSrc) && /a\.dueDate/.test(projectGanttPageSrc) && !/expectedStartDate/.test(projectGanttPageSrc));
+    check("60. gantt-chart.tsx never reads or writes expectedDays", !/expectedDays/.test(ganttSrc));
+    const timelineModeSrc = await fs.readFile("lib/timeline-mode.ts", "utf8");
+    check("60. Actual mode maps startDate/dueDate; Expected maps expectedStartDate/expectedFinishDate (lib/timeline-mode.ts)", /mode === "expected" \? a\.expectedStartDate : a\.startDate/.test(timelineModeSrc) && /mode === "expected" \? a\.expectedFinishDate : a\.dueDate/.test(timelineModeSrc));
   } finally {
     console.log("\nCleaning up test data...\n");
     try {

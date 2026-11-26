@@ -85,9 +85,11 @@ interface ProjectFormProps {
    * in the first place), and success calls `onCreated` instead of
    * navigating away.
    * "fromRequest" — the request-origin Project setup page
-   * (/projects/new?projectRequestId=...): department is FIXED to
-   * `fixedDepartmentId` (the approved Project Request's own, same
-   * enforcement rationale as inline), posts to the dedicated
+   * (/projects/new?projectRequestId=...): department DEFAULTS to
+   * `fixedDepartmentId` (the approved Project Request's own) and may be
+   * changed to another of `departments` (the request's Workspace + those
+   * where the user may create Projects — re-enforced server-side by
+   * createProjectFromApprovedRequest), posts to the dedicated
    * POST /api/project-requests/[id]/project mutation instead of
    * POST /api/projects, and additionally collects Project Owner + the
    * request-origin-only fields (Expected Start/Finish, Expense Type,
@@ -95,7 +97,7 @@ interface ProjectFormProps {
    * other mode. Success redirects to /projects/{id}, same as standalone.
    */
   mode?: "standalone" | "inline" | "fromRequest";
-  /** Required when mode="inline" or mode="fromRequest" — the department this project MUST belong to. */
+  /** Required when mode="inline" (the department this project MUST belong to) or mode="fromRequest" (the request's department — the default Workspace). */
   fixedDepartmentId?: string;
   fixedDepartmentName?: string;
   /**
@@ -325,7 +327,9 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
     },
   });
 
-  const departmentId = inline || fromRequest ? fixedDepartmentId : watch("departmentId");
+  // fromRequest: a real, editable Workspace choice defaulting to the
+  // request's department (fixedDepartmentId) — see the Workspace field below.
+  const departmentId = inline ? fixedDepartmentId : watch("departmentId");
   const [subDepartments, setSubDepartments] = useState<SubDepartmentOption[]>([]);
 
   // Inline mode's own caller chain (the ticket-linking create dialog) is
@@ -456,7 +460,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
   // inline/fromRequest, whose departmentId is fixed for the form's whole
   // lifetime anyway.
   useEffect(() => {
-    if (inline || fromRequest) return;
+    if (inline) return;
     setSelectedMemberIds(new Set());
     setValue("memberIds", []);
   }, [departmentId, inline, fromRequest, setValue]);
@@ -497,7 +501,7 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
     // In inline/fromRequest mode the department is never user-editable, so
     // this can only trip if the caller forgot to pass fixedDepartmentId — a
     // real programming error, not a user-facing validation case.
-    const effectiveDepartmentId = inline || fromRequest ? fixedDepartmentId : data.departmentId;
+    const effectiveDepartmentId = inline ? fixedDepartmentId : data.departmentId;
     if (!effectiveDepartmentId) {
       toast.error("Choose a workspace for this project.");
       return;
@@ -601,6 +605,9 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
               // audienceBusinessUnitIds deliberately never sent — not
               // accepted for request-origin creation.
               responsiblePeopleIds: Array.from(selectedResponsiblePeopleIds),
+              // Destination Workspace (defaults to the request's own);
+              // authorized server-side, the request itself is never changed.
+              departmentId: effectiveDepartmentId,
               expectedStartDate,
               expectedFinishDate,
               // Omitted while automatic — the server calculates it.
@@ -750,16 +757,35 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             />
           </div>
 
-          {inline || fromRequest ? (
+          {inline ? (
             // Fixed, never a Select — this IS the enforcement point that an
             // inline-created project can never end up in a different
-            // department than the ticket (or, in fromRequest mode, the
-            // approved Project Request) it's being created from.
+            // department than the ticket it's being created from.
             <div className="space-y-2">
               <Label>Workspace</Label>
               <div className="flex h-9 items-center rounded-md border bg-muted/40 px-3 text-sm">
-                {fixedDepartmentName ?? (fromRequest ? "This request's department" : "This ticket's department")}
+                {fixedDepartmentName ?? "This ticket's department"}
               </div>
+            </div>
+          ) : fromRequest ? (
+            // Defaults to the approved request's Workspace; the person doing
+            // the setup may correct it (e.g. the request was filed under the
+            // wrong department). Options = request's Workspace + Workspaces
+            // where they may create Projects; re-checked server-side.
+            <div className="space-y-2">
+              <Label>
+                Workspace <span className="text-destructive">*</span>
+              </Label>
+              <WorkspaceCombobox
+                workspaces={departments}
+                value={departmentId ?? ""}
+                onChange={(id) => setValue("departmentId", id, { shouldValidate: true })}
+              />
+              <p className="text-xs text-muted-foreground">
+                {departmentId && departmentId !== fixedDepartmentId
+                  ? `Changed from the request's Workspace (${fixedDepartmentName}). The Project Request itself is not changed.`
+                  : "Defaults to the Project Request's Workspace. Change it if the request was submitted under the wrong department."}
+              </p>
             </div>
           ) : (
           <div className="space-y-2">
@@ -1268,54 +1294,6 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             )}
           </div>
 
-          {/* Responsible People (Phase 2) — a PERMANENT, independent
-              relationship, deliberately separate from Owner(s)/Members/
-              Audience above (never written into any of those). Same
-              system-wide "any active user in the system" eligibility,
-              available in EVERY mode, read-only visibility identical to
-              Audience — see buildProjectAudienceWhere in
-              lib/services/project-access-service.ts. */}
-          <div className="space-y-2">
-            <Label htmlFor="project-responsible-people">Responsible People</Label>
-            <p id="project-responsible-people-helper" className="text-xs text-muted-foreground">
-              Optional — users responsible for this Project, independent of Owner(s), Members and Audience. Any active user in the system.
-            </p>
-            <Input
-              placeholder="Search by name or email…"
-              value={responsiblePeopleSearch}
-              onChange={(e) => setResponsiblePeopleSearch(e.target.value)}
-              className="h-8 text-sm"
-            />
-            {systemWideUsers.length > 0 ? (
-              <div
-                id="project-responsible-people"
-                role="group"
-                aria-describedby="project-responsible-people-helper"
-                className="border rounded-md divide-y max-h-48 overflow-y-auto"
-              >
-                {responsiblePeopleSearchResults.map((u) => (
-                  <label
-                    key={u.id}
-                    className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
-                  >
-                    <input
-                      type="checkbox"
-                      className="h-4 w-4 rounded"
-                      checked={selectedResponsiblePeopleIds.has(u.id)}
-                      onChange={() => toggleResponsiblePerson(u.id)}
-                    />
-                    <span className="text-sm">{u.name ?? u.email}</span>
-                  </label>
-                ))}
-                {responsiblePeopleSearchResults.length === 0 && (
-                  <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{responsiblePeopleSearch}&quot;.</p>
-                )}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
-            )}
-          </div>
-
           {/* Organizational Audience (Phase 1) — available in EVERY mode,
               same as Audience — Users above. Two independent, searchable
               multi-select groups; selecting a Department/Business Unit
@@ -1385,6 +1363,54 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
             )}
           </div>
           )}
+
+          {/* Responsible People (Phase 2) — a PERMANENT, independent
+              relationship, deliberately separate from Owner(s)/Members/
+              Audience above (never written into any of those). Same
+              system-wide "any active user in the system" eligibility,
+              available in EVERY mode, read-only visibility identical to
+              Audience — see buildProjectAudienceWhere in
+              lib/services/project-access-service.ts. */}
+          <div className="space-y-2">
+            <Label htmlFor="project-responsible-people">Responsible People</Label>
+            <p id="project-responsible-people-helper" className="text-xs text-muted-foreground">
+              Optional — users responsible for this Project, independent of Owner(s), Members and Audience. Any active user in the system.
+            </p>
+            <Input
+              placeholder="Search by name or email…"
+              value={responsiblePeopleSearch}
+              onChange={(e) => setResponsiblePeopleSearch(e.target.value)}
+              className="h-8 text-sm"
+            />
+            {systemWideUsers.length > 0 ? (
+              <div
+                id="project-responsible-people"
+                role="group"
+                aria-describedby="project-responsible-people-helper"
+                className="border rounded-md divide-y max-h-48 overflow-y-auto"
+              >
+                {responsiblePeopleSearchResults.map((u) => (
+                  <label
+                    key={u.id}
+                    className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      className="h-4 w-4 rounded"
+                      checked={selectedResponsiblePeopleIds.has(u.id)}
+                      onChange={() => toggleResponsiblePerson(u.id)}
+                    />
+                    <span className="text-sm">{u.name ?? u.email}</span>
+                  </label>
+                ))}
+                {responsiblePeopleSearchResults.length === 0 && (
+                  <p className="text-xs text-muted-foreground px-3 py-2">No users match &quot;{responsiblePeopleSearch}&quot;.</p>
+                )}
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground border rounded-md px-3 py-2">No active users exist yet.</p>
+            )}
+          </div>
 
           <PendingAttachmentsField
             files={attachments.files}

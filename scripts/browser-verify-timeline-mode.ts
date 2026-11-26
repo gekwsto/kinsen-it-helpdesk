@@ -28,7 +28,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import { format } from "date-fns";
-import { shiftDateOnly, workingDaysBetween } from "@/lib/date-only";
+import { shiftDateOnly } from "@/lib/date-only";
 import { prisma } from "@/lib/prisma";
 import { createDepartment } from "@/lib/services/department-service";
 import { ActivityPriority, ActivityStatus, AuthProvider, DepartmentRole, MembershipSource, ProjectStatus, Role } from "@prisma/client";
@@ -136,6 +136,7 @@ async function dragBy(page: Page, bar: Locator, dx: number) {
 async function main() {
   await fs.mkdir(SHOT_DIR, { recursive: true });
   const ids = { users: [] as string[], projects: [] as string[], activities: [] as string[], depts: [] as string[], requests: [] as string[], roleIds: [] as string[], roleKeys: [] as string[] };
+  const subTypeIds: string[] = [];
   const browser = await chromium.launch();
   try {
     const dept = await createDepartment({ name: `TL BV ${RUN_ID}`, slug: `tl-bv-${RUN_ID}` });
@@ -177,6 +178,11 @@ async function main() {
     // Drag-stability fixtures (Expected dates in February 2027, clear of the other checks).
     const r1 = await mk("TLBV-R1", { expectedStartDate: D("2027-02-08"), expectedFinishDate: D("2027-02-10") });
     const r2 = await mk("TLBV-R2", { expectedStartDate: D("2027-02-09"), expectedFinishDate: D("2027-02-11") });
+    // Manual Expected Days fixture (request-origin Project P1): 11 days at €250/day.
+    // A realistic request-origin Activity: a real Task Sub Type (€250/day, snapshotted) and an assignable assignee — the edit form resends both on save.
+    const subType = await prisma.taskSubType.create({ data: { name: `TLBV SubType ${RUN_ID}`, cost: "250.00" } });
+    subTypeIds.push(subType.id);
+    const e1 = await mk("TLBV-E1", { expectedStartDate: D("2027-02-15"), expectedFinishDate: D("2027-02-19"), expectedDays: 11, taskSubTypeId: subType.id, taskSubTypeCost: "250.00", ownerId: admin.id, assignedUsers: { connect: [{ id: admin.id }] } });
     // Time-zone matrix fixtures: Expected ranges ending just before each zone's
     // 2027 spring-forward (Athens 2027-03-28, New York 2027-03-14) so the
     // drags cross DST; Actual dates Mon–Tue of the current UTC week.
@@ -190,7 +196,7 @@ async function main() {
     ];
     const tzActivities = new Map<string, string>();
     for (const c of TZ_CASES) {
-      const a = await mk(`TLBV-TZ-${c.tz.replace(/\W/g, "")}`, { startDate: mondayUtc, dueDate: plusDays(mondayUtc, 1), expectedStartDate: D(c.expStart), expectedFinishDate: D(c.expEnd) });
+      const a = await mk(`TLBV-TZ-${c.tz.replace(/\W/g, "")}`, { startDate: mondayUtc, dueDate: plusDays(mondayUtc, 1), expectedStartDate: D(c.expStart), expectedFinishDate: D(c.expEnd), expectedDays: 9 });
       tzActivities.set(c.tz, a.id);
     }
 
@@ -387,6 +393,63 @@ async function main() {
     const a1RpAfter = await prisma.projectActivity.findUniqueOrThrow({ where: { id: a1.id } });
     check("RP Actual drag sends startDate/dueDate only, moves Actual +1 day, leaves Expected unchanged", res.ok() && JSON.stringify(Object.keys(res.request().postDataJSON()).sort()) === JSON.stringify(["dueDate", "startDate"]) && a1RpAfter.startDate!.toISOString() === shiftDateOnly(a1RpBefore.startDate!, 1) && isCanonical(a1RpAfter.dueDate) && same(a1RpAfter.expectedStartDate, a1RpBefore.expectedStartDate) && same(a1RpAfter.expectedFinishDate, a1RpBefore.expectedFinishDate), JSON.stringify(res.request().postDataJSON()));
 
+    console.log("\n=== Manual Expected Days survive date-only operations (request-origin Activity) ===\n");
+    {
+      const e1Row = () => prisma.projectActivity.findUniqueOrThrow({ where: { id: e1.id } });
+      // Project Gantt, Expected, +2 days.
+      await page.goto(ganttUrl("&timeline=expected"));
+      await toggle.waitFor();
+      await page.getByRole("button", { name: "day", exact: true }).click();
+      const e1Bar = barIn(`TLBV-E1 ${RUN_ID}`);
+      await centerBar(e1Bar);
+      let r = await dragSaved(page, e1Bar, 80, `/api/activities/${e1.id}`);
+      let row = await e1Row();
+      check("Gantt Expected drag: dates moved (Feb 17–21), Expected Days still 11", r.ok() && same(row.expectedStartDate, D("2027-02-17")) && same(row.expectedFinishDate, D("2027-02-21")) && row.expectedDays === 11);
+      // Resource Planning, Expected, +1 day.
+      await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2027-02-01&timeline=expected`);
+      await toggle.waitFor();
+      const e1Rp = page.locator("div.cursor-grab").filter({ hasText: `TLBV P1 ${RUN_ID} — TLBV-E1 ${RUN_ID}` }).first();
+      await e1Rp.hover({ trial: true });
+      const col = (await page.locator("div.flex-shrink-0.border-r.px-1\\.5").first().boundingBox())!.width;
+      r = await dragSaved(page, e1Rp, col, `/api/activities/${e1.id}`);
+      row = await e1Row();
+      check("Resource Planning Expected drag: dates moved (Feb 18–22), Expected Days still 11", r.ok() && same(row.expectedStartDate, D("2027-02-18")) && row.expectedDays === 11);
+      // Activity detail: inline Expected Finish edit.
+      await page.goto(`${BASE_URL}/activities/${e1.id}`);
+      await page.getByText("Expected Finish").first().waitFor({ timeout: 60000 });
+      await page.locator("p", { hasText: /^Expected Finish$/ }).locator("xpath=..").getByRole("button").first().click();
+      const dateInput = page.locator('input[type="date"]').first();
+      await dateInput.waitFor({ state: "visible" });
+      const [inl] = await Promise.all([waitPatch(`/api/activities/${e1.id}`), dateInput.fill("2027-02-26")]);
+      row = await e1Row();
+      check("Inline Expected Finish edit: saved (Feb 26), Expected Days still 11", inl.ok() && same(row.expectedFinishDate, D("2027-02-26")) && row.expectedDays === 11);
+      await page.reload();
+      await page.getByText("Expected Days").first().waitFor({ timeout: 60000 });
+      let detail = await page.locator("main").innerText();
+      check("After reload: detail shows 11 working day(s) and Estimated Cost 2750.00 EUR (250 × 11, unchanged by every date move)", detail.includes("11 working day(s)") && detail.includes("2750.00 EUR"));
+      // Edit form: explicit Expected Days edit.
+      await page.goto(`${BASE_URL}/activities/${e1.id}/edit`);
+      const daysInput = page.locator("#expected-days");
+      await daysInput.waitFor({ timeout: 60000 });
+      check("Edit form: Expected Days is editable and shows the stored manual value (11)", (await daysInput.isEditable()) && (await daysInput.inputValue()) === "11");
+      await daysInput.fill("6");
+      const [save] = await Promise.all([waitPatch(`/api/activities/${e1.id}`), page.getByRole("button", { name: "Save Changes" }).click()]);
+      const saveBody = save.request().postDataJSON();
+      row = await e1Row();
+      check("Edit form save sends expectedDaysOverride: 6 → persisted 6, Expected dates unchanged", save.ok() && saveBody.expectedDaysOverride === 6 && row.expectedDays === 6 && same(row.expectedFinishDate, D("2027-02-26")), `status=${save.status()} body=${JSON.stringify(saveBody)} resp=${save.ok() ? "" : (await save.text()).slice(0, 200)} days=${row.expectedDays}`);
+      await page.waitForURL(new RegExp(`/activities/${e1.id}$`), { timeout: 30000 });
+      await page.getByText("Expected Days").first().waitFor({ timeout: 60000 });
+      detail = await page.locator("main").innerText();
+      check("Detail after explicit edit: 6 working day(s), Estimated Cost recalculated to 1500.00 EUR", detail.includes("6 working day(s)") && detail.includes("1500.00 EUR"));
+      // A save that only changes a date keeps it.
+      await page.goto(`${BASE_URL}/activities/${e1.id}/edit`);
+      await daysInput.waitFor({ timeout: 60000 });
+      await page.locator("#expected-finish").fill("2027-03-03");
+      const [save2] = await Promise.all([waitPatch(`/api/activities/${e1.id}`), page.getByRole("button", { name: "Save Changes" }).click()]);
+      row = await e1Row();
+      check("Edit form save changing only Expected Finish: no override sent, Expected Days stays 6", save2.ok() && !("expectedDaysOverride" in save2.request().postDataJSON()) && row.expectedDays === 6 && same(row.expectedFinishDate, D("2027-03-03")));
+    }
+
     console.log("\n=== Detail pages reflect the Expected changes ===\n");
     await page.goto(`${BASE_URL}/activities/${a3.id}`);
     await page.getByText("Expected Start").first().waitFor({ timeout: 60000 });
@@ -426,7 +489,7 @@ async function main() {
       r = await dragSaved(tp, rBar, col, `/api/activities/${id}`);
       row = await prisma.projectActivity.findUniqueOrThrow({ where: { id } });
       check(`[${c.tz}] Resource Planning Expected +1d → ${c.afterRp.join(" – ")} at exact UTC midnight (same convention as the Gantt)`, r.ok() && row.expectedStartDate!.toISOString() === `${c.afterRp[0]}T00:00:00.000Z` && row.expectedFinishDate!.toISOString() === `${c.afterRp[1]}T00:00:00.000Z`, `${row.expectedStartDate?.toISOString()}`);
-      check(`[${c.tz}] ...Expected Days recalculated canonically, Actual dates untouched`, row.expectedDays === workingDaysBetween(D(c.afterRp[0]), D(c.afterRp[1])) && same(row.startDate, mondayUtc) && same(row.dueDate, plusDays(mondayUtc, 1)));
+      check(`[${c.tz}] ...manual Expected Days kept (9 — request-origin, never recalculated from dates), Actual dates untouched`, row.expectedDays === 9 && same(row.startDate, mondayUtc) && same(row.dueDate, plusDays(mondayUtc, 1)));
       // Resource Planning, Actual, +1 day in the current UTC week.
       await tp.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&from=${ymd(mondayUtc)}`);
       await tToggle.waitFor({ timeout: 60000 });
@@ -518,6 +581,7 @@ async function main() {
     const steps: [string, () => Promise<unknown>][] = [
       ["activities", () => prisma.projectActivity.deleteMany({ where: { id: { in: ids.activities } } })],
       ["projects", () => prisma.project.deleteMany({ where: { id: { in: ids.projects } } })],
+      ["task sub types", () => prisma.taskSubType.deleteMany({ where: { id: { in: subTypeIds } } })],
       ["requests", () => prisma.projectRequest.deleteMany({ where: { id: { in: ids.requests } } })],
       ["notifications", () => prisma.notification.deleteMany({ where: { userId: { in: ids.users } } })],
       ["memberships", () => prisma.departmentMembership.deleteMany({ where: { userId: { in: ids.users } } })],

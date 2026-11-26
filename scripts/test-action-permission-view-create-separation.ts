@@ -147,10 +147,15 @@ async function main() {
     return r;
   }
 
+  const fixtureTaskTypeIds: string[] = [];
   try {
     // ══════════════ 1/2. DB-level proof + effective-permission baseline (real reported combination) ══════════════
     console.log("\n=== 1-2. Exact reported combination: global custom role (project.view only) + department custom role (ticket.view+activity.view only) ===\n");
     const dept = await makeDept("ActionPermDept");
+    // Task Type is required for every NEW Activity (createActivitySchema) —
+    // a valid fixture, so these POSTs reach the authorization checks under test.
+    const taskType = await prisma.taskType.create({ data: { name: `ActionPerm Task Type ${RUN_ID}` } });
+    fixtureTaskTypeIds.push(taskType.id);
     const globalRole = await makeCustomRole("GLOBAL_PROJECT_VIEW_ONLY", RoleScope.GLOBAL, ["project.view"]);
     const deptRole = await makeCustomRole("DEPT_TICKET_ACTIVITY_VIEW_ONLY", RoleScope.DEPARTMENT, ["ticket.view", "activity.view"]);
     const user = await makeUser("core", Role.USER, globalRole.id);
@@ -185,7 +190,7 @@ async function main() {
     currentSession = { user: { id: user.id, role: Role.USER, customRoleId: globalRole.id } };
 
     const activityCountBefore = await prisma.projectActivity.count({ where: { departmentId: dept.id } });
-    const activityRes = await activitiesPOST(jsonReq("http://localhost/api/activities", { title: `Should never exist ${RUN_ID}`, departmentId: dept.id }));
+    const activityRes = await activitiesPOST(jsonReq("http://localhost/api/activities", { title: `Should never exist ${RUN_ID}`, departmentId: dept.id, taskTypeId: taskType.id }));
     check("13.2/13.3 POST /api/activities with only activity.view -> 403", activityRes.status === 403);
     const activityCountAfterDenied = await prisma.projectActivity.count({ where: { departmentId: dept.id } });
     check("13.3 Zero Activity rows created after the denied POST", activityCountAfterDenied === activityCountBefore);
@@ -219,7 +224,7 @@ async function main() {
     check("14. canCreateProjects STILL false (module independence — activity grant doesn't leak into projects)", flags.canCreateProjects === false);
     check("14. canCreateTickets STILL false (module independence)", flags.canCreateTickets === false);
 
-    const activityRes2 = await activitiesPOST(jsonReq("http://localhost/api/activities", { title: `Real activity ${RUN_ID}`, departmentId: dept.id }));
+    const activityRes2 = await activitiesPOST(jsonReq("http://localhost/api/activities", { title: `Real activity ${RUN_ID}`, departmentId: dept.id, taskTypeId: taskType.id }));
     check("14. POST /api/activities now succeeds (201) once activity.create is granted", activityRes2.status === 201);
     if (activityRes2.status === 201) {
       const created = await activityRes2.json();
@@ -296,12 +301,13 @@ async function main() {
     // ══════════════ Extra: "unauthenticated" and department-leakage sanity on the API layer ══════════════
     console.log("\n=== Extra: cross-department leakage — create in a department the user has NO membership in must still 403 ═══\n");
     const otherDept = await makeDept("OtherDeptNoMembership");
-    const activityLeakRes = await activitiesPOST(jsonReq("http://localhost/api/activities", { title: `Leak test ${RUN_ID}`, departmentId: otherDept.id }));
+    const activityLeakRes = await activitiesPOST(jsonReq("http://localhost/api/activities", { title: `Leak test ${RUN_ID}`, departmentId: otherDept.id, taskTypeId: taskType.id }));
     check("Extra. POST /api/activities into an unrelated department (no membership there) -> 403 even though activity.create IS granted in the user's OWN department", activityLeakRes.status === 403);
     const otherDeptActivityCount = await prisma.projectActivity.count({ where: { departmentId: otherDept.id } });
     check("Extra. Zero Activity rows created in the unrelated department", otherDeptActivityCount === 0);
   } finally {
     await prisma.projectActivity.deleteMany({ where: { id: { in: activityIds } } });
+    await prisma.taskType.deleteMany({ where: { id: { in: fixtureTaskTypeIds } } }).catch(() => undefined);
     await prisma.project.deleteMany({ where: { id: { in: projectIds } } });
     await prisma.ticket.deleteMany({ where: { id: { in: ticketIds } } });
     await prisma.ticketStatus.deleteMany({ where: { id: { in: ticketStatusIds } } });

@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { hasPermission, hasDepartmentPermission } from "@/lib/permissions";
-import { hasEffectiveEntityPermission } from "@/lib/services/department-scope-service";
+import { hasEffectiveEntityPermission, getAccessibleDepartmentSummaries } from "@/lib/services/department-scope-service";
 import { userHasAssignablePermissionForEntity } from "@/lib/services/assignment-eligibility-service";
 import { validateSubDepartmentInDepartment } from "@/lib/services/sub-department-service";
 import { listAccessibleWorkspaces, isAccessibleDepartment } from "@/lib/services/workspace-service";
@@ -634,6 +634,9 @@ export async function decideApproval(
 export type CreateProjectFromRequestError =
   | { code: "not_found" }
   | { code: "forbidden" }
+  // The chosen destination Workspace isn't one where the user may create
+  // Projects (see the destination check in createProjectFromApprovedRequest).
+  | { code: "forbidden_destination" }
   | { code: "invalid_status"; currentStatus: ProjectRequestStatus }
   // Phase 3 — same explicit, independent invariant check as
   // ApprovalActionError's own "not_standard_request" (see its doc
@@ -727,6 +730,21 @@ export async function createProjectFromApprovedRequest(
   const allowed = await hasEffectiveEntityPermission(userId, role, customRoleId, existing.departmentId, APPROVE_PERMISSION_KEY);
   if (!allowed) return { ok: false, error: { code: "forbidden" } };
 
+  // Destination Workspace. SOURCE authority is unchanged: projectRequest.approve
+  // in the request's own department (checked just above). The request's own
+  // department is always a valid destination (the previous behaviour, which
+  // deliberately never required a separate project.create there). A
+  // DIFFERENT destination additionally requires the standard Project-creation
+  // right there — exactly the Workspaces the New Project picker offers
+  // (getAccessibleDepartmentSummaries(…, "project.create"): active
+  // departments; ADMIN all). The Project Request itself is never modified,
+  // and no approval step is repeated.
+  const destinationDepartmentId = data.departmentId ?? existing.departmentId;
+  if (destinationDepartmentId !== existing.departmentId) {
+    const eligible = await getAccessibleDepartmentSummaries(userId, role, "project.create");
+    if (!eligible.some((d) => d.id === destinationDepartmentId)) return { ok: false, error: { code: "forbidden_destination" } };
+  }
+
   if (existing.project) {
     return { ok: true, projectId: existing.project.id, alreadyExisted: true };
   }
@@ -737,7 +755,7 @@ export async function createProjectFromApprovedRequest(
   // department identity (never display-name matching), same as every
   // other creation path.
   const facilitiesServicesDepartmentId = await getFacilitiesServicesDepartmentId();
-  const isFacilitiesWorkspace = !!facilitiesServicesDepartmentId && existing.departmentId === facilitiesServicesDepartmentId;
+  const isFacilitiesWorkspace = !!facilitiesServicesDepartmentId && destinationDepartmentId === facilitiesServicesDepartmentId;
   if (!isFacilitiesWorkspace && hasFacilitiesFieldsPresent(data as Record<string, unknown>)) {
     return { ok: false, error: { code: "facilities_fields_not_allowed" } };
   }
@@ -800,13 +818,13 @@ export async function createProjectFromApprovedRequest(
   if (!expenseType || !expenseType.isActive) return { ok: false, error: { code: "invalid_expense_type" } };
 
   if (data.subDepartmentId) {
-    const valid = await validateSubDepartmentInDepartment(data.subDepartmentId, existing.departmentId);
+    const valid = await validateSubDepartmentInDepartment(data.subDepartmentId, destinationDepartmentId);
     if (!valid) return { ok: false, error: { code: "invalid_sub_department" } };
   }
 
   if (data.memberIds.length > 0) {
     for (const memberId of data.memberIds) {
-      const assignable = await userHasAssignablePermissionForEntity(memberId, "project", existing.departmentId);
+      const assignable = await userHasAssignablePermissionForEntity(memberId, "project", destinationDepartmentId);
       if (!assignable) return { ok: false, error: { code: "invalid_member" } };
     }
   }
@@ -847,7 +865,7 @@ export async function createProjectFromApprovedRequest(
         description: data.description,
         status: data.status,
         priority: data.priority,
-        departmentId: existing.departmentId,
+        departmentId: destinationDepartmentId,
         subDepartmentId: data.subDepartmentId ?? undefined,
         businessUnitId: data.businessUnitId,
         // The canonical/primary owner — the FIRST of the creator's

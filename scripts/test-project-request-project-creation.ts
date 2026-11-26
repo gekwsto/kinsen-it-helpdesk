@@ -122,7 +122,11 @@ async function main() {
   check("29. A payload that still forges budget/estimatedCost/actualCost validates fine (unknown keys silently stripped, never an error)", createProjectFromRequestSchema.safeParse({ ...basePayload, budget: 1000, estimatedCost: 900, actualCost: 500 } as any).success);
   check("31. external is OPTIONAL and defaults to false when omitted", (createProjectFromRequestSchema.safeParse({ ...basePayload }) as any).data.external === false);
   check("31. ...and an explicit true is honored", (createProjectFromRequestSchema.safeParse({ ...basePayload, external: true }) as any).data.external === true);
-  check("...departmentId is not even a field on this schema — always server-resolved from the request, never client input", !("departmentId" in createProjectFromRequestSchema.innerType().shape));
+  // Editable destination Workspace (Project Setup): departmentId is now an
+  // OPTIONAL field — omitted means the request's own department; a
+  // different value is authorized server-side (see
+  // scripts/test-project-setup-workspace.ts).
+  check("...departmentId is an OPTIONAL destination-Workspace field (omitted → the request's own department)", "departmentId" in createProjectFromRequestSchema.innerType().shape && createProjectFromRequestSchema.safeParse({ ...basePayload }).success);
 
   // UI/editability pass — Project edit must accept exactly these 4
   // request-origin fields (and no more) — Budget was removed entirely and
@@ -523,11 +527,15 @@ async function main() {
     const mappingRequest = await submitThrough(`PR Creation Mapping ${RUN_ID}`, "approve", finalApprover);
     currentSession = { user: { id: finalApprover.id, role: Role.USER, customRoleId: null } };
 
-    // Forged departmentId in the raw body — not even a field on the schema,
-    // so it's silently stripped; the server never reads it from the client
-    // at all.
+    // A destination departmentId the approver may NOT create Projects in is
+    // refused server-side (never silently honoured, never silently ignored).
+    const forbiddenDestRes = await setupPOST(
+      jsonReq({ ...validSetupPayload(), title: mappingRequest.title, departmentId: otherDept.id } as any),
+      { params: Promise.resolve({ id: mappingRequest.id }) }
+    );
+    check("Setup with a destination Workspace the approver can't create Projects in -> 403, nothing created", forbiddenDestRes.status === 403 && (await prisma.project.count({ where: { projectRequestId: mappingRequest.id } })) === 0);
     const mappingRes = await setupPOST(
-      jsonReq({ ...validSetupPayload(), title: mappingRequest.title, description: mappingRequest.description, priority: mappingRequest.importance, departmentId: otherDept.id } as any),
+      jsonReq({ ...validSetupPayload(), title: mappingRequest.title, description: mappingRequest.description, priority: mappingRequest.importance }),
       { params: Promise.resolve({ id: mappingRequest.id }) }
     );
     check("Valid setup (title/description matching the request's own pre-fill) -> 201", mappingRes.status === 201);
@@ -537,7 +545,7 @@ async function main() {
     check("17. title pre-fills/persists correctly", mappingProject.title === mappingRequest.title);
     check("18. description pre-fills/persists correctly", mappingProject.description === mappingRequest.description);
     check("19. importance maps to priority correctly (same 1/2/3 scale)", mappingProject.priority === mappingRequest.importance);
-    check("20. Department is the REQUEST's own — the forged departmentId in the body was completely ignored", mappingProject.departmentId === dept.id && mappingProject.departmentId !== otherDept.id);
+    check("20. With no destination chosen, the Department is the REQUEST's own", mappingProject.departmentId === dept.id && mappingProject.departmentId !== otherDept.id);
 
     console.log("\n-- Title/description ARE still ordinary, editable fields (only the department is immutable) --\n");
     const editableRequest = await submitThrough(`PR Creation Editable ${RUN_ID}`, "approve", finalApprover);
