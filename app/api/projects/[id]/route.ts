@@ -11,7 +11,7 @@ import { publishActivityListInvalidation } from "@/lib/realtime/activity-list-in
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
 import { resolveProjectDuration } from "@/lib/project-duration";
 import { isSameDateOnly } from "@/lib/date-only";
-import { notifyOwnerOfProjectCompletion } from "@/lib/services/project-feedback-service";
+import { notifyNewProjectFeedbackObligations, recordProjectFeedbackObligationsInTransaction } from "@/lib/services/project-feedback-service";
 import {
   getFacilitiesServicesDepartmentId,
   hasFacilitiesFieldsPresent,
@@ -68,7 +68,7 @@ const PROJECT_INCLUDE = {
   audienceBusinessUnits: { select: { id: true, name: true } },
   // Responsible People (Phase 2) — its own, separate relation (never
   // Audience), needed here for the same Edit-page pre-population reason.
-  responsiblePeople: { select: { id: true, name: true, email: true, image: true } },
+  responsiblePeople: { select: { id: true, name: true, email: true, image: true, isActive: true } },
   // Included unconditionally (even for a Project with no expenseTypeId at
   // all — Prisma simply returns null) so a now-INACTIVE type a
   // request-origin Project already references still displays by name
@@ -366,14 +366,23 @@ export async function PATCH(
     }
 
     // Responsible People (Phase 2) — same independent omit-vs-replace
-    // semantics, same system-wide validation, own separate relation.
+    // semantics, own separate relation. Same retention semantics as Members:
+    // EXISTING Responsible People are preserved even if they have since
+    // become inactive (never silently removed; removing them is allowed);
+    // system-wide active-user eligibility is enforced only for NEWLY added
+    // ones — so adding or re-adding (after a saved removal) an inactive
+    // user is rejected.
     let resolvedResponsiblePeopleIds: string[] | undefined;
     if (responsiblePeopleIds !== undefined) {
-      const resolved = await resolveSystemWideActiveUserIds(responsiblePeopleIds);
-      if (resolved === null) {
+      const requested = Array.from(new Set(responsiblePeopleIds.map((rid) => rid.trim()).filter((rid) => rid.length > 0)));
+      const currentResponsibleIds = new Set(
+        (await prisma.project.findUnique({ where: { id }, select: { responsiblePeople: { select: { id: true } } } }))?.responsiblePeople.map((r) => r.id) ?? []
+      );
+      const newlyAdded = requested.filter((rid) => !currentResponsibleIds.has(rid));
+      if ((await resolveSystemWideActiveUserIds(newlyAdded)) === null) {
         return NextResponse.json({ error: "One or more selected Responsible People are not real, active users.", code: "invalid_responsible_people" }, { status: 400 });
       }
-      resolvedResponsiblePeopleIds = resolved;
+      resolvedResponsiblePeopleIds = requested;
     }
 
     // Facilities Services-only metadata — rejected outright (requirement:
@@ -552,7 +561,12 @@ export async function PATCH(
     // (lib/services/project-workspace-transfer-service.ts). Without a
     // department change this is exactly the previous single update.
     let transferredActivityCount = 0;
+    let feedbackNotifyUserIds: string[] = [];
     const project = await prisma.$transaction(async (tx) => {
+      // The Project's status as of THIS transaction, read under a row lock:
+      // concurrent PATCHes serialize here, so exactly one of them observes
+      // the genuine non-COMPLETED -> COMPLETED transition below.
+      const [locked] = await tx.$queryRaw<{ status: string }[]>`SELECT status::text AS status FROM "Project" WHERE id = ${id} FOR UPDATE`;
       const updated = await tx.project.update({
       where: { id },
       data: {
@@ -606,6 +620,11 @@ export async function PATCH(
         const transfer = await transferProjectActivitiesInTransaction(tx, id, data.departmentId);
         transferredActivityCount = transfer.transferredActivityIds.length;
       }
+      // Persisted Feedback obligations — atomic with the completion itself
+      // (request-origin Projects only; see recordProjectFeedbackObligationsInTransaction).
+      if (locked?.status !== "COMPLETED" && updated.status === "COMPLETED" && updated.projectRequestId) {
+        feedbackNotifyUserIds = (await recordProjectFeedbackObligationsInTransaction(tx, id)).notifyUserIds;
+      }
       return updated;
     });
 
@@ -653,19 +672,15 @@ export async function PATCH(
       publishActivityListInvalidation();
     }
 
-    // Notify + email the Project's primary Owner the moment THIS save is
-    // what just completed a request-origin Project — never on an
-    // unrelated edit of an already-COMPLETED Project, never for a manual
-    // one (no projectRequestId). This is the ONE canonical genuine
-    // non-COMPLETED -> COMPLETED transition check (never re-derived
-    // elsewhere) — a reopen + later re-complete cycle legitimately fires
-    // this again, a repeated PATCH while already COMPLETED never does.
-    // notifyOwnerOfProjectCompletion never throws (both the in-app
-    // notification and the email send are independently caught/logged
-    // inside it), so this can never turn an otherwise-successful PATCH
-    // into an error response or roll back the completion itself.
-    if (existing.status !== "COMPLETED" && project.status === "COMPLETED" && existing.projectRequestId) {
-      await notifyOwnerOfProjectCompletion({ id: project.id, title: project.title, projectRequestId: existing.projectRequestId, owner: project.owner });
+    // Notify + email ONLY the Feedback obligations this save just created
+    // (in the transaction above, on the genuine non-COMPLETED -> COMPLETED
+    // transition of a request-origin Project) — and only after commit. An
+    // unrelated edit, a repeated/concurrent COMPLETED PATCH, or a
+    // re-completion for already-requested users notifies nobody new.
+    // notifyNewProjectFeedbackObligations never throws (in-app + email
+    // failures are caught/logged inside it).
+    if (feedbackNotifyUserIds.length > 0) {
+      await notifyNewProjectFeedbackObligations({ id: project.id, title: project.title }, feedbackNotifyUserIds);
     }
 
     // Recomputed from the just-committed row, same as GET — a Save always

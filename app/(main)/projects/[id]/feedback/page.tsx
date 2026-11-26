@@ -15,9 +15,13 @@ import { ProjectFeedbackCard } from "@/components/projects/project-feedback-card
  * Authorization is fully independent of the Project detail page's own
  * view-access rule — holding project.view, being a Member, Audience, an
  * additional entry in the `owners` multi-owner set, the original Project
- * Request requester, or ADMIN grants NOTHING here. Only Project.ownerId
- * (the single canonical primary Owner) may ever view or submit/update
- * feedback — see getProjectFeedbackEligibility/upsertProjectFeedback in
+ * Request requester, or ADMIN grants NOTHING here. Only a Feedback
+ * recipient (a persisted ProjectFeedbackRequest obligation on tracked
+ * Projects — kept even if their Project relationship later changes; the
+ * live Responsible People / primary Owner rule on historical untracked
+ * ones) may view or submit/update their OWN feedback. This page shows only
+ * the Project's title/Workspace/dates/Owners, never anything else of the
+ * Project — see getProjectFeedbackEligibility/upsertProjectFeedback in
  * lib/services/project-feedback-service.ts, the single authoritative
  * source for this rule (POST /api/projects/[id]/feedback re-verifies the
  * identical check independently; this page's own gating below is for
@@ -46,7 +50,10 @@ export default async function ProjectFeedbackPage({ params }: { params: Promise<
   if (!project) notFound();
 
   const eligibility = await getProjectFeedbackEligibility(id, session.user.id);
-  if (!eligibility.isRequestOriginTarget || !eligibility.isPrimaryOwner) {
+  // Feedback-specific access: only the Project's current Feedback
+  // recipients (Responsible People, else the primary Owner) — no Project
+  // or Workspace permission is required or granted by this page.
+  if (!eligibility.isRequestOriginTarget || !eligibility.isRecipient) {
     redirect(`/projects/${id}`);
   }
 

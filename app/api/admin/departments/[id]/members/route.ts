@@ -43,7 +43,7 @@ export async function POST(
     if (!department) return NextResponse.json({ error: "Not found" }, { status: 404 });
     if (!department.isActive) {
       return NextResponse.json(
-        { error: "Cannot assign members to an inactive department." },
+        { error: "Cannot assign members to an inactive department.", code: "inactive_department" },
         { status: 409 }
       );
     }

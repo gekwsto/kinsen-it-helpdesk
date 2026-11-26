@@ -83,7 +83,7 @@ interface User {
   globalRoleMicrosoftMapping?: { microsoftValue: string; department: { name: string } } | null;
 }
 
-interface Department { id: string; name: string; slug: string }
+interface Department { id: string; name: string; slug: string; isActive?: boolean }
 interface BusinessUnit { id: string; name: string }
 
 interface UserManagementProps {
@@ -1042,7 +1042,11 @@ export function UserManagement({
                 <UserDepartmentMemberships
                   userId={editUser.id}
                   memberships={editMemberships}
-                  departments={departments}
+                  // Add Department Membership offers ACTIVE departments only
+                  // (the server rejects inactive ones too). Existing
+                  // memberships in inactive departments are listed and kept
+                  // as-is — they come from `memberships`, not this list.
+                  departments={departments.filter((d) => d.isActive !== false)}
                   onChange={(updated) => {
                     setEditMemberships(updated);
                     setUsers((prev) =>

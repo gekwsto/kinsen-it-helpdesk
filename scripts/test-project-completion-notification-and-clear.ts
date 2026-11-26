@@ -7,7 +7,8 @@
  *      Request requester) the moment their request-origin Project
  *      transitions to COMPLETED
  *      (lib/services/project-feedback-service.ts's
- *      notifyOwnerOfProjectCompletion, wired into PATCH
+ *      notifyFeedbackRecipientsOfProjectCompletion (recipients: Responsible
+ *      People when present, else the primary Owner), wired into PATCH
  *      /api/projects/[id]) — the discoverability prompt for the dedicated
  *      /projects/[id]/feedback page. Both the notification and the email
  *      CTA link straight there, never to the Project detail page.
@@ -15,8 +16,8 @@
  *      transition (never on a repeated PATCH while already COMPLETED, or
  *      an unrelated edit) — inherited entirely from the existing
  *      transition-guard at the PATCH route's own call site, no separate
- *      ledger. A genuine reopen -> re-complete cycle fires a fresh,
- *      second notification+email.
+ *      ledger. A reopen -> re-complete cycle notifies only NEWLY created
+ *      Feedback obligations — never an already-requested recipient (check 11).
  *   3. Email-failure tolerance: a Microsoft Graph outage during the
  *      completion email never rolls back the Project's own COMPLETED
  *      transition, and never turns the PATCH response into an error.
@@ -237,11 +238,12 @@ async function main() {
     await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
     check("...repeating status=COMPLETED while already COMPLETED (no real transition) still doesn't duplicate", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 1 && sentCalls.length === 1);
 
-    // 11: reopen -> re-complete is a GENUINE new transition -> a second, real notification AND email.
+    // 11 (approved persistent-obligation rule): reopen -> re-complete keeps the ORIGINAL obligation set
+    // and never re-sends a Feedback request to someone who already has an obligation.
     await projectsPATCH(jsonReq({ status: "IN_PROGRESS" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
     await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: proj1 }) });
-    check("11. Reopening then re-completing (a genuine new transition) fires a SECOND real notification", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 2);
-    check("...and a SECOND real email", sentCalls.length === 2);
+    check("11. Reopening then re-completing does NOT re-send the request to the already-requested Owner (still exactly 1 notification)", (await prisma.notification.count({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } })) === 1);
+    check("...nor a second email", sentCalls.length === 1);
     const allNotifsForProj1 = await prisma.notification.findMany({ where: { userId: adminUser.id, link: `/projects/${proj1}/feedback` } });
     for (const n of allNotifsForProj1) notificationIds.push(n.id);
 
@@ -268,6 +270,51 @@ async function main() {
     check("...the in-app notification was still created despite the email failure (independent try/catch)", proj9Notif !== null);
     if (proj9Notif) notificationIds.push(proj9Notif.id);
     sendShouldFail = false;
+
+    // ══════════════════════ SECTION B2 — Responsible People take priority as recipients ══════════════════════
+    console.log("\n=== B2. Responsible People receive the completion notification + email; the Owner only as fallback ===\n");
+    const rp1 = await makeUser(`${TAG}-rp1@kinsen.gr`);
+    const rp2 = await makeUser(`${TAG}-rp2@kinsen.gr`);
+    const fbLink = (pid: string) => `/projects/${pid}/feedback`;
+    const projRp = await makeRequestOriginProject("projRP-responsible");
+    await prisma.project.update({ where: { id: projRp }, data: { responsiblePeople: { set: [{ id: rp1.id }, { id: rp2.id }] } } });
+    currentSession = { user: { id: adminUser.id, role: Role.ADMIN, customRoleId: null } };
+    resetMock();
+    const rpCompleteRes = await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: projRp }) });
+    const [nRp1, nRp2, nOwnerRp] = await Promise.all([rp1.id, rp2.id, adminUser.id].map((u) => prisma.notification.count({ where: { userId: u, link: fbLink(projRp) } })));
+    check("B2.1 Completing a Project WITH Responsible People notifies EACH of them exactly once", rpCompleteRes.status === 200 && nRp1 === 1 && nRp2 === 1);
+    check("B2.2 ...and NOT the primary Owner (who isn't a Responsible Person)", nOwnerRp === 0);
+    const rpEmails = sentCalls.map((c) => c.to).sort();
+    check("B2.3 ...completion emails go to exactly the two Responsible People, none to the Owner", JSON.stringify(rpEmails) === JSON.stringify([rp1.email, rp2.email].sort()), JSON.stringify(rpEmails));
+
+    const projBoth = await makeRequestOriginProject("projBoth-owner-and-rp");
+    await prisma.project.update({ where: { id: projBoth }, data: { responsiblePeople: { set: [{ id: adminUser.id }, { id: rp1.id }] } } });
+    resetMock();
+    await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: projBoth }) });
+    const [nOwnerBoth, nRp1Both] = await Promise.all([adminUser.id, rp1.id].map((u) => prisma.notification.count({ where: { userId: u, link: fbLink(projBoth) } })));
+    check("B2.4 Owner who is ALSO a Responsible Person: exactly ONE notification (no duplicate), plus one for the other Responsible Person", nOwnerBoth === 1 && nRp1Both === 1);
+    check("B2.5 ...and exactly one email each (2 total, no duplicate)", sentCalls.length === 2 && new Set(sentCalls.map((c) => c.to)).size === 2);
+    // Inactive recipients: only ACTIVE Responsible People are notified; the
+    // Owner fallback applies ONLY when NO Responsible People are configured —
+    // never when they exist but are all inactive.
+    const rpInactive = await makeUser(`${TAG}-rp-inactive@kinsen.gr`);
+    await prisma.user.update({ where: { id: rpInactive.id }, data: { isActive: false } });
+    const projMixed = await makeRequestOriginProject("projMixed-active-inactive-rp");
+    await prisma.project.update({ where: { id: projMixed }, data: { responsiblePeople: { set: [{ id: rp2.id }, { id: rpInactive.id }] } } });
+    resetMock();
+    await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: projMixed }) });
+    const [nRp2Mixed, nInactiveMixed, nOwnerMixed] = await Promise.all([rp2.id, rpInactive.id, adminUser.id].map((u) => prisma.notification.count({ where: { userId: u, link: fbLink(projMixed) } })));
+    check("B2.6 Active + inactive Responsible People: only the ACTIVE one is notified (inactive and Owner get nothing)", nRp2Mixed === 1 && nInactiveMixed === 0 && nOwnerMixed === 0);
+    check("B2.7 ...and only the active one is emailed", sentCalls.length === 1 && sentCalls[0]?.to === rp2.email, JSON.stringify(sentCalls.map((c) => c.to)));
+    const projAllInactive = await makeRequestOriginProject("projAllInactive-rp");
+    await prisma.project.update({ where: { id: projAllInactive }, data: { responsiblePeople: { set: [{ id: rpInactive.id }] } } });
+    resetMock();
+    const allInactiveRes = await projectsPATCH(jsonReq({ status: "COMPLETED" }, "PATCH"), { params: Promise.resolve({ id: projAllInactive }) });
+    check("B2.8 ALL Responsible People inactive: completion still succeeds (200) but NOBODY is notified — no Owner fallback", allInactiveRes.status === 200 && (await prisma.notification.count({ where: { link: fbLink(projAllInactive) } })) === 0);
+    check("B2.9 ...and no email is sent to anyone", sentCalls.length === 0, JSON.stringify(sentCalls.map((c) => c.to)));
+    for (const pid of [projRp, projBoth, projMixed, projAllInactive]) {
+      for (const n of await prisma.notification.findMany({ where: { link: fbLink(pid) }, select: { id: true } })) notificationIds.push(n.id);
+    }
 
     // ══════════════════════ SECTION C — DELETE /api/notifications/[id] ══════════════════════
     console.log("\n=== SECTION C — dismissing a single notification ===\n");

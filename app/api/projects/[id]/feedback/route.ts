@@ -36,7 +36,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
           );
         case "forbidden":
           return NextResponse.json(
-            apiError("forbidden", "Only this Project's primary Owner can submit Feedback."),
+            apiError("forbidden", "Only this Project's Feedback recipients can submit Feedback."),
             { status: 403 }
           );
         case "not_completed":

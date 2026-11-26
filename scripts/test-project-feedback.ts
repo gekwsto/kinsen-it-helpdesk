@@ -284,8 +284,8 @@ async function main() {
 
     const eligibilityOwner = await getProjectFeedbackEligibility(proj2, ownerUser.id);
     const eligibilitySecondOwner = await getProjectFeedbackEligibility(proj2, secondOwner.id);
-    check("10. getProjectFeedbackEligibility resolves isPrimaryOwner from Project.ownerId directly — true for the real owner", eligibilityOwner.isPrimaryOwner === true);
-    check("...false for an additional `owners`-set member who isn't ownerId", eligibilitySecondOwner.isPrimaryOwner === false);
+    check("10. With NO Responsible People, the Feedback recipient is the primary Owner (ownerId) — isRecipient true for the real owner", eligibilityOwner.isRecipient === true);
+    check("...false for an additional `owners`-set member who isn't ownerId", eligibilitySecondOwner.isRecipient === false);
 
     // ══════════════════════ 11-19. VALIDATION ══════════════════════
     console.log("\n=== 11-19. Five ratings 1-5 integer (required, each independently), requirementsDelivered required boolean, Comments optional/bounded ===\n");
@@ -362,13 +362,13 @@ async function main() {
     currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
     const editWhileReopenedRes = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, requirementsDelivered: true, comments: "Should be rejected" }), { params: Promise.resolve({ id: proj1 }) });
     check("24. Attempting to update existing feedback while the Project is NOT currently COMPLETED -> 409 not_completed", editWhileReopenedRes.status === 409 && (await editWhileReopenedRes.json()).code === "not_completed");
-    const unchangedRow = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId: proj1 } });
+    const unchangedRow = await prisma.projectFeedback.findFirstOrThrow({ where: { projectId: proj1 } });
     check("...the existing row's comments remain the LAST successfully-saved value ('Final update'), untouched by the rejected attempt", unchangedRow.comments === "Final update");
     await completeProject(proj1); // restore COMPLETED for any later checks reusing proj1
 
     // ══════════════════════ 25-27. PROVENANCE (including legacy preservation across an update) ══════════════════════
     console.log("\n=== 25-27. submittedByUserId always server-set, never forgeable, and NEVER rewritten to the current Owner on update ===\n");
-    const proj1Row = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId: proj1 } });
+    const proj1Row = await prisma.projectFeedback.findFirstOrThrow({ where: { projectId: proj1 } });
     check("25. submittedByUserId on the real DB row is the authenticated Owner's own id (this row was created fresh under the NEW rule)", proj1Row.submittedByUserId === ownerUser.id);
 
     const proj6 = await makeRequestOriginProject("proj6-forged-id");
@@ -376,15 +376,14 @@ async function main() {
     currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
     const forgedIdRes = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, requirementsDelivered: true, submittedByUserId: adminUser.id } as any), { params: Promise.resolve({ id: proj6 }) });
     check("26. A forged submittedByUserId in the body is silently ignored (not even a schema field) -> still 201", forgedIdRes.status === 201);
-    const proj6Row = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId: proj6 } });
+    const proj6Row = await prisma.projectFeedback.findFirstOrThrow({ where: { projectId: proj6 } });
     check("...the REAL stored submittedByUserId is still the authenticated Owner, never the forged adminUser.id", proj6Row.submittedByUserId === ownerUser.id && proj6Row.submittedByUserId !== adminUser.id);
 
-    // 27: simulate a LEGACY row — one that genuinely exists because the
-    // OLD requester-based rule created it (submittedByUserId = requester,
-    // a different person than the CURRENT primary Owner). The Owner
-    // updating it must change the ratings/comments but NEVER rewrite
-    // submittedByUserId to themselves — see this feature's own explicit
-    // "preserve truthful provenance, never fabricate history" requirement.
+    // 27: a LEGACY row — created under the OLD requester-based rule
+    // (submittedByUserId = requester, not the current primary Owner). With
+    // per-recipient Feedback, the current recipient (the Owner here — no
+    // Responsible People) submits THEIR OWN row; the legacy row is never
+    // modified ("do not retroactively modify existing submitted Feedback").
     const proj7Legacy = await makeRequestOriginProject("proj7-legacy-provenance");
     await completeProject(proj7Legacy);
     await prisma.projectFeedback.create({
@@ -398,11 +397,65 @@ async function main() {
       },
     });
     currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
-    const ownerUpdateOfLegacyRes = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, overallRating: 2, requirementsDelivered: false, comments: "Owner's update" }), { params: Promise.resolve({ id: proj7Legacy }) });
-    check("27. The Owner CAN update a pre-existing legacy row (created under the old rule) -> 200", ownerUpdateOfLegacyRes.status === 200);
-    const proj7LegacyRowAfter = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId: proj7Legacy } });
-    check("...the ratings/comments are genuinely updated", proj7LegacyRowAfter.overallRating === 2 && proj7LegacyRowAfter.requirementsDelivered === false && proj7LegacyRowAfter.comments === "Owner's update");
-    check("...but submittedByUserId is STILL the original requester — truthful historical provenance, NEVER fabricated to the current Owner", proj7LegacyRowAfter.submittedByUserId === requester.id && proj7LegacyRowAfter.submittedByUserId !== ownerUser.id);
+    const ownerSubmitOnLegacyRes = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, overallRating: 2, requirementsDelivered: false, comments: "Owner's own submission" }), { params: Promise.resolve({ id: proj7Legacy }) });
+    check("27. The current recipient (Owner) submits their OWN Feedback alongside a legacy row -> 201", ownerSubmitOnLegacyRes.status === 201);
+    const legacyRowAfter = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId_submittedByUserId: { projectId: proj7Legacy, submittedByUserId: requester.id } } });
+    const ownerRowAfter = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId_submittedByUserId: { projectId: proj7Legacy, submittedByUserId: ownerUser.id } } });
+    check("...the legacy row is completely untouched (ratings, comments, original submitter)", legacyRowAfter.comments === "Original legacy submission by the old requester" && legacyRowAfter.requirementsDelivered === true && legacyRowAfter.submittedByUserId === requester.id);
+    check("...and the Owner's answers live in their own row", ownerRowAfter.overallRating === 2 && ownerRowAfter.comments === "Owner's own submission" && (await prisma.projectFeedback.count({ where: { projectId: proj7Legacy } })) === 2);
+
+    // ══════════════════════ RP. Responsible People take priority as Feedback recipients ══════════════════════
+    console.log("\n=== RP. Responsible People are the exclusive Feedback recipients when present ===\n");
+    const rp1 = await makeUser(`${TAG}-rp1@kinsen.gr`); // no memberships, not an Owner/Member
+    const rp2 = await makeUser(`${TAG}-rp2@kinsen.gr`);
+    const outsiderUser = await makeUser(`${TAG}-outsider@kinsen.gr`);
+    const projRp = await makeRequestOriginProject("projRP-responsible");
+    await prisma.project.update({ where: { id: projRp }, data: { responsiblePeople: { set: [{ id: rp1.id }, { id: rp2.id }] } } });
+    await completeProject(projRp);
+    const [eRp1, eRp2, eOwnerRp, eOutsider] = await Promise.all([rp1.id, rp2.id, ownerUser.id, outsiderUser.id].map((u) => getProjectFeedbackEligibility(projRp, u)));
+    check("RP1. With Responsible People, ONLY they are recipients — RP1/RP2 yes, the primary Owner NO, an unrelated user NO", eRp1.isRecipient && eRp2.isRecipient && !eOwnerRp.isRecipient && !eOutsider.isRecipient);
+    currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
+    const ownerRpRes = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, requirementsDelivered: true }), { params: Promise.resolve({ id: projRp }) });
+    check("RP2. The primary Owner (not a Responsible Person) can NOT submit when Responsible People exist -> 403", ownerRpRes.status === 403);
+    currentSession = { user: { id: outsiderUser.id, role: Role.USER, customRoleId: null } };
+    const outsiderRpRes = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, requirementsDelivered: true }), { params: Promise.resolve({ id: projRp }) });
+    check("RP3. An unrelated user can NOT submit -> 403", outsiderRpRes.status === 403);
+    currentSession = { user: { id: rp1.id, role: Role.USER, customRoleId: null } };
+    const rp1Res = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, overallRating: 5, requirementsDelivered: true, comments: "RP1 view" }), { params: Promise.resolve({ id: projRp }) });
+    currentSession = { user: { id: rp2.id, role: Role.USER, customRoleId: null } };
+    const rp2Res = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, overallRating: 2, requirementsDelivered: false, comments: "RP2 view" }), { params: Promise.resolve({ id: projRp }) });
+    const rpRows = await prisma.projectFeedback.findMany({ where: { projectId: projRp }, orderBy: { createdAt: "asc" } });
+    check("RP4. Each Responsible Person submits their OWN Feedback (201 / 201) — two separate rows, each attributed to its submitter", rp1Res.status === 201 && rp2Res.status === 201 && rpRows.length === 2 && rpRows.some((r) => r.submittedByUserId === rp1.id && r.comments === "RP1 view") && rpRows.some((r) => r.submittedByUserId === rp2.id && r.comments === "RP2 view"));
+    currentSession = { user: { id: rp1.id, role: Role.USER, customRoleId: null } };
+    const rp1Update = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, overallRating: 4, requirementsDelivered: true, comments: "RP1 updated" }), { params: Promise.resolve({ id: projRp }) });
+    const rp2RowAfter = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId_submittedByUserId: { projectId: projRp, submittedByUserId: rp2.id } } });
+    check("RP5. RP1 re-submitting updates ONLY RP1's row (200); RP2's row is untouched", rp1Update.status === 200 && rp2RowAfter.comments === "RP2 view" && (await prisma.projectFeedback.count({ where: { projectId: projRp } })) === 2);
+    const eRp2After = await getProjectFeedbackEligibility(projRp, rp2.id);
+    check("RP6. A recipient only ever sees their OWN Feedback (RP2 gets RP2's answers, never RP1's)", eRp2After.feedback?.comments === "RP2 view");
+    const rp1Page = await ProjectFeedbackPage({ params: Promise.resolve({ id: projRp }) } as any);
+    check("RP7. A Responsible Person with NO memberships (not an Owner/Member) can open the Feedback page with the form", findElementsByType(rp1Page, ProjectFeedbackCard).length === 1);
+    const rp1Detail = await ProjectDetailPage({ params: Promise.resolve({ id: projRp }) } as any);
+    check("...and sees their Feedback prompt on the Project page (read-only Responsible People visibility)", findElementsByType(rp1Detail, ProjectFeedbackCtaCard).length === 1);
+    const { hasEffectiveEntityPermission } = await import("@/lib/services/department-scope-service");
+    const projRpRow = await prisma.project.findUniqueOrThrow({ where: { id: projRp }, select: { departmentId: true } });
+    check("RP8. Being a Feedback recipient grants no Project/Workspace permission (no project.edit / project.view in the department, no membership)", !(await hasEffectiveEntityPermission(rp1.id, Role.USER, null, projRpRow.departmentId, "project.edit")) && !(await hasEffectiveEntityPermission(rp1.id, Role.USER, null, projRpRow.departmentId, "project.view")) && (await prisma.departmentMembership.count({ where: { userId: rp1.id } })) === 0);
+    currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
+    let ownerPageRedirect = "";
+    try { await ProjectFeedbackPage({ params: Promise.resolve({ id: projRp }) } as any); } catch (e: any) { ownerPageRedirect = String(e?.digest ?? e?.message ?? e); }
+    check("RP9. The Owner (not a recipient here) is redirected away from the Feedback page", /NEXT_REDIRECT|REDIRECT/.test(ownerPageRedirect), ownerPageRedirect.slice(0, 80));
+
+    // Owner who is ALSO a Responsible Person: one recipient, one row.
+    const projBoth = await makeRequestOriginProject("projBoth-owner-and-rp");
+    await prisma.project.update({ where: { id: projBoth }, data: { responsiblePeople: { set: [{ id: ownerUser.id }, { id: rp2.id }] } } });
+    await completeProject(projBoth);
+    const { resolveProjectFeedbackRecipientIds } = await import("@/lib/services/project-feedback-service");
+    const bothRow = await prisma.project.findUniqueOrThrow({ where: { id: projBoth }, select: { ownerId: true, responsiblePeople: { select: { id: true } } } });
+    const bothRecipients = resolveProjectFeedbackRecipientIds(bothRow);
+    check("RP10. Owner who is also a Responsible Person → recipients [Owner, RP2], no duplicate", bothRecipients.length === 2 && new Set(bothRecipients).size === 2 && bothRecipients.includes(ownerUser.id) && bothRecipients.includes(rp2.id));
+    currentSession = { user: { id: ownerUser.id, role: Role.USER, customRoleId: null } };
+    const bothA = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, requirementsDelivered: true }), { params: Promise.resolve({ id: projBoth }) });
+    const bothB = await feedbackPOST(jsonReq({ ...FULL_FEEDBACK, requirementsDelivered: false }), { params: Promise.resolve({ id: projBoth }) });
+    check("...as a Responsible Person the Owner submits (201) and re-submits (200) into ONE row", bothA.status === 201 && bothB.status === 200 && (await prisma.projectFeedback.count({ where: { projectId: projBoth, submittedByUserId: ownerUser.id } })) === 1);
 
     // ══════════════════════ 28-34. Dedicated feedback page: independent authorization + render-time gating ══════════════════════
     console.log("\n=== 28-34. /projects/[id]/feedback: independent authorization, Project detail shows only a CTA ===\n");

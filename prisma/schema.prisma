@@ -1061,6 +1061,7 @@ model User {
   projectRequestsApproved             ProjectRequest[]                     @relation("ProjectRequestApprover")
   projectRequestsFinalApprovalSkipped  ProjectRequest[]                     @relation("ProjectRequestFinalApprovalSkippedBy")
   submittedProjectFeedback            ProjectFeedback[]                    @relation("ProjectFeedbackSubmitter")
+  projectFeedbackRequests              ProjectFeedbackRequest[]             @relation("ProjectFeedbackRequestRecipient")
   projectRequestIntermediateApprovals ProjectRequestIntermediateApprover[] @relation("ProjectRequestIntermediateApprover")
   assignedActivities                  ProjectActivity[]                    @relation("ActivityAssignee")
   activityAssignments                 ProjectActivity[]                    @relation("ActivityAssignees")
@@ -1820,11 +1821,20 @@ model Project {
   notes        ProjectNote[]
   relatedLinks RelatedLink[]
   attachments  ProjectAttachment[]
-  // At most one — see ProjectFeedback's own doc comment for the full
-  // eligibility/uniqueness rule (request-origin Projects only, one
-  // editable-by-its-original-requester row per Project, enforced via
-  // @unique on ProjectFeedback.projectId).
-  feedback     ProjectFeedback?
+  // See ProjectFeedback's own doc comment for the full eligibility/
+  // uniqueness rule (request-origin Projects only; one editable row per
+  // Project per recipient, enforced via
+  // @@unique([projectId, submittedByUserId]) on ProjectFeedback).
+  feedback              ProjectFeedback[]
+  // Persisted Feedback obligations (see ProjectFeedbackRequest).
+  feedbackRequests      ProjectFeedbackRequest[]
+  // Feedback tracking-initialization marker: set ONCE, in the same
+  // transaction as the first tracked non-COMPLETED -> COMPLETED transition
+  // of a request-origin Project (even when zero recipients were eligible).
+  // NULL = never processed by Feedback tracking — a historical Project
+  // completed before tracking existed ("Not tracked"), or one not yet
+  // completed. Never backfilled.
+  feedbackRequestedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1840,14 +1850,42 @@ model Project {
   @@index([createdAt])
 }
 
-// Feedback the ORIGINAL Project Request requester submits evaluating a
+// A persisted Feedback obligation: `userId` was asked to submit Feedback
+// for `projectId`. Created ONLY when a request-origin Project transitions
+// to COMPLETED (lib/services/project-feedback-service.ts,
+// recordProjectFeedbackObligationsInTransaction), atomically with that
+// transition, for the then-eligible ACTIVE recipients (active Responsible
+// People; the primary Owner only when NO Responsible People are
+// configured). Never rewritten when Responsible People / Owners change
+// later, never deleted on reopen; a re-completion only ADDS newly eligible
+// active recipients (@@unique makes that idempotent). For tracked Projects
+// (Project.feedbackRequestedAt set) these rows are THE canonical source of
+// Feedback authorization, pending indicators and completion tracking.
+// Never backfilled for historical Projects.
+model ProjectFeedbackRequest {
+  id String @id @default(cuid())
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  projectId String
+
+  user   User   @relation("ProjectFeedbackRequestRecipient", fields: [userId], references: [id])
+  userId String
+
+  requestedAt DateTime @default(now())
+
+  @@unique([projectId, userId])
+  @@index([userId])
+}
+
+// Feedback a Project's Feedback recipient submits evaluating a
 // delivered, request-origin Project — applies ONLY to a Project where
 // Project.projectRequestId != null (enforced at the application boundary,
 // POST /api/projects/[id]/feedback — never trusted from this schema
-// alone). At most one row per Project (@unique below) — the original
-// requester may UPDATE their own existing row rather than ever creating a
-// second one (see upsertProjectFeedback in
-// lib/services/project-feedback-service.ts); reopening the Project later
+// alone). At most one row per Project PER RECIPIENT
+// (@@unique([projectId, submittedByUserId]) below) — a recipient UPDATES
+// their own existing row rather than ever creating a second one (see
+// upsertProjectFeedback in lib/services/project-feedback-service.ts);
+// reopening the Project later
 // never deletes an already-submitted row, it only blocks further edits
 // until the Project is COMPLETED again.
 //
@@ -1860,26 +1898,33 @@ model Project {
 model ProjectFeedback {
   id String @id @default(cuid())
 
+  // One row per (Project, recipient) — see @@unique([projectId,
+  // submittedByUserId]) below. Recipients are resolved by
+  // resolveProjectFeedbackRecipientIds (lib/services/project-feedback-service.ts):
+  // the Project's Responsible People when it has any, otherwise its
+  // primary Owner. Rows submitted before this per-recipient change stay
+  // exactly as they were (at most one per Project, attributed to their
+  // original submitter).
   project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  projectId String  @unique
+  projectId String
 
   // Denormalized from Project.projectRequestId at submission time — lets
   // the Administration review list (app/(main)/admin/project-feedback)
   // join straight to the originating request without going through
   // Project first. Set ONCE, by the same server check that verifies
   // eligibility (upsertProjectFeedback) — never re-derived afterward.
-  // @unique here too (not just on projectId) because it's transitively
-  // true anyway (Project.projectRequestId is itself @unique, so one
-  // Project Request has at most one Project, which has at most one
-  // ProjectFeedback) — declaring it explicitly lets ProjectRequest's own
-  // `feedback ProjectFeedback?` back-relation be a real one-to-one.
+  // Not unique: with per-recipient Feedback one Project Request (→ one
+  // Project) can have several rows, one per recipient.
   projectRequest   ProjectRequest @relation(fields: [projectRequestId], references: [id])
-  projectRequestId String         @unique
+  projectRequestId String
 
-  // The original Project Request's own requesterId — the ONLY identity
-  // ever allowed to create OR update this row. Never client-supplied: set
-  // from the authenticated session only after the server has independently
-  // confirmed session.user.id === projectRequest.requesterId.
+  // The recipient who submitted this row — always the authenticated
+  // session's own user id, never client-supplied, set only after
+  // upsertProjectFeedback has verified the user may submit (a persisted
+  // ProjectFeedbackRequest obligation for tracked Projects; the live
+  // recipient rule for historical untracked ones). Never rewritten on
+  // update: historical rows keep their original submitter (e.g. the
+  // original requester under the earliest rule).
   submittedByUser   User   @relation("ProjectFeedbackSubmitter", fields: [submittedByUserId], references: [id])
   submittedByUserId String
 
@@ -1922,6 +1967,9 @@ model ProjectFeedback {
   // permanently immutable one-shot answer.
   updatedAt DateTime @updatedAt
 
+  @@unique([projectId, submittedByUserId])
+  @@index([projectId])
+  @@index([projectRequestId])
   @@index([submittedByUserId])
 }
 
@@ -2524,9 +2572,9 @@ model ProjectRequest {
 
   // The ONE feedback row the original requester (above) may submit once
   // this request's Project is completed — see ProjectFeedback's own doc
-  // comment. Null until submitted; null forever for a request whose
-  // Project was never completed, or that has no Project yet.
-  feedback ProjectFeedback?
+  // comment. Empty until submitted; one row per recipient who submitted
+  // (see ProjectFeedback's @@unique([projectId, submittedByUserId])).
+  feedback ProjectFeedback[]
 
   // The ONE delayed reminder scheduled when this request is approved — see
   // ProjectRequestSetupReminder's own doc comment. Null for a request never

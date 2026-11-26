@@ -64,7 +64,7 @@ export default async function UsersAdminPage({
   const [users, totalCount, departments, businessUnits] = await prisma.$transaction([
     prisma.user.findMany(queryArgs),
     prisma.user.count({ where: userWhere }),
-    prisma.department.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true, slug: true } }),
+    prisma.department.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true, slug: true, isActive: true } }),
     prisma.businessUnit.findMany({ orderBy: { name: "asc" }, select: { id: true, name: true } }),
   ]);
 

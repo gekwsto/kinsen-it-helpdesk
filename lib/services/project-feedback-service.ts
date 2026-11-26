@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/prisma";
-import { ProjectStatus } from "@prisma/client";
+import { ProjectStatus, type Prisma } from "@prisma/client";
 import type { ProjectFeedbackInput } from "@/lib/validations";
 import { createInAppNotification } from "@/lib/notifications/create-notification";
 import { microsoftGraph } from "@/lib/microsoft-graph";
@@ -26,9 +26,37 @@ import { microsoftGraph } from "@/lib/microsoft-graph";
  * provenance even though the CURRENTLY authorized submitter is now a
  * different identity (the owner).
  *
- * Editable, not immutable: the Owner may UPDATE their own existing row
+ * RECIPIENTS (resolveProjectFeedbackRecipientIds below): the Project's
+ * Responsible People when it has any (exclusively — an Owner is never a
+ * recipient merely for being an Owner then), otherwise the existing
+ * primary Owner (Project.ownerId). Deduplicated. Each recipient has their
+ * OWN Feedback row (@@unique([projectId, submittedByUserId])); rows
+ * submitted before this rule stay exactly as they were.
+ *
+ * PERSISTED OBLIGATIONS (ProjectFeedbackRequest): when a request-origin
+ * Project transitions to COMPLETED, recordProjectFeedbackObligationsInTransaction
+ * persists one obligation per then-eligible ACTIVE recipient (active
+ * Responsible People; the Owner only when NO Responsible People are
+ * configured — never as a fallback for all-inactive Responsible People),
+ * atomically with the transition, and stamps Project.feedbackRequestedAt
+ * (the tracking marker) even when nobody was eligible. Only NEWLY created
+ * obligations are notified. Re-completion only adds newly eligible
+ * recipients. Later Responsible People / Owner changes never rewrite them.
+ *
+ * AUTHORIZATION (isFeedbackRecipient below):
+ *  - TRACKED Project (feedbackRequestedAt set): exactly the users holding
+ *    an obligation, while active — independent of their CURRENT Project
+ *    relationship (a requested user later removed from Responsible People
+ *    keeps the right to submit their own Feedback). This grants access to
+ *    the Feedback page/API ONLY, never to the Project itself or its
+ *    Workspace (those keep their own, unchanged checks).
+ *  - UNTRACKED (historical) Project: the live recipient rule above,
+ *    unchanged — historical access is preserved, but no obligation is
+ *    created and the Project counts as "Not tracked" in Administration.
+ *
+ * Editable, not immutable: a recipient may UPDATE their own existing row
  * (upsertProjectFeedback below) rather than ever creating a second one —
- * @unique(projectId) remains the structural backstop. Both create AND
+ * @@unique([projectId, submittedByUserId]) is the structural backstop. Both create AND
  * update require the Project to be CURRENTLY COMPLETED (the same
  * canonical ProjectStatus.COMPLETED check as before) — if the Project is
  * later reopened, an already-submitted row remains fully visible
@@ -90,17 +118,45 @@ function isCompleteFiveRatingRecord(row: {
   );
 }
 
+/**
+ * THE canonical Feedback recipient resolution: the Project's Responsible
+ * People when it has any (exclusively), otherwise its primary Owner
+ * (Project.ownerId — the pre-existing behaviour). Deduplicated, stable order.
+ */
+export function resolveProjectFeedbackRecipientIds(project: { ownerId: string; responsiblePeople: { id: string }[] }): string[] {
+  if (project.responsiblePeople.length > 0) return Array.from(new Set(project.responsiblePeople.map((p) => p.id)));
+  return [project.ownerId];
+}
+
+// Only the given user's obligation row is ever needed for authorization.
+function recipientSelect(userId: string) {
+  return {
+    ownerId: true,
+    feedbackRequestedAt: true,
+    responsiblePeople: { select: { id: true } },
+    feedbackRequests: { where: { userId }, select: { user: { select: { isActive: true } } } },
+  } as const;
+}
+
+/** See this module's AUTHORIZATION doc. `feedbackRequests` must be pre-filtered to `userId` (recipientSelect). */
+function isFeedbackRecipient(
+  project: { feedbackRequestedAt: Date | null; ownerId: string; responsiblePeople: { id: string }[]; feedbackRequests: { user: { isActive: boolean } }[] },
+  userId: string
+): boolean {
+  if (project.feedbackRequestedAt) return project.feedbackRequests.some((r) => r.user.isActive);
+  return resolveProjectFeedbackRecipientIds(project).includes(userId);
+}
+
 export type ProjectFeedbackEligibility = {
   // Project.projectRequestId != null — a manual Project is never a
   // feedback target at all, regardless of who's asking or what status
   // it's in. Unchanged by this feature's eligibility-identity swap.
   isRequestOriginTarget: boolean;
-  // The authenticated user IS Project.ownerId — the single canonical
-  // primary Owner, resolved directly from the Project row, never from the
-  // full `owners` multi-owner set, Audience, Members, the original
-  // Project Request requester (unless that same person happens to also be
-  // ownerId), or an implicit ADMIN-role bypass.
-  isPrimaryOwner: boolean;
+  // The authenticated user may submit/view their own Feedback
+  // (isFeedbackRecipient: a persisted obligation on tracked Projects, the
+  // live recipient rule on historical untracked ones) — never Audience/
+  // Members/other Owners as such, never an implicit ADMIN bypass.
+  isRecipient: boolean;
   // Project.status === ProjectStatus.COMPLETED — the canonical, existing
   // Project completion state (see prisma/schema.prisma's ProjectStatus
   // enum). Deliberately NOT Activity completion, and NOT the
@@ -110,8 +166,9 @@ export type ProjectFeedbackEligibility = {
   // which is never genuine completion. Also gates whether an existing row
   // may be EDITED, not only whether a first submission may be created.
   isProjectCompleted: boolean;
-  // Null until submitted, OR if only a legacy (pre-five-rating) row
-  // exists for this Project — see isCompleteFiveRatingRecord above.
+  // The authenticated user's OWN Feedback row for this Project. Null until
+  // they submit, OR if only a legacy (pre-five-rating) row exists — see
+  // isCompleteFiveRatingRecord above. Never another recipient's row.
   // Present regardless of isProjectCompleted — reopening a Project after
   // feedback was submitted must never hide that historical record (see
   // this module's doc comment); it only blocks further edits.
@@ -134,20 +191,21 @@ export async function getProjectFeedbackEligibility(
     select: {
       status: true,
       projectRequestId: true,
-      ownerId: true,
-      feedback: { select: FEEDBACK_SELECT },
+      ...recipientSelect(userId),
+      feedback: { where: { submittedByUserId: userId }, select: FEEDBACK_SELECT, take: 1 },
     },
   });
 
   if (!project || !project.projectRequestId) {
-    return { isRequestOriginTarget: false, isPrimaryOwner: false, isProjectCompleted: false, feedback: null };
+    return { isRequestOriginTarget: false, isRecipient: false, isProjectCompleted: false, feedback: null };
   }
 
+  const own = project.feedback[0] ?? null;
   return {
     isRequestOriginTarget: true,
-    isPrimaryOwner: project.ownerId === userId,
+    isRecipient: isFeedbackRecipient(project, userId),
     isProjectCompleted: project.status === ProjectStatus.COMPLETED,
-    feedback: project.feedback && isCompleteFiveRatingRecord(project.feedback) ? (project.feedback as ProjectFeedbackRecord) : null,
+    feedback: own && isCompleteFiveRatingRecord(own) ? (own as ProjectFeedbackRecord) : null,
   };
 }
 
@@ -190,18 +248,17 @@ export async function upsertProjectFeedback(
 ): Promise<SubmitProjectFeedbackResult> {
   const project = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { status: true, projectRequestId: true, ownerId: true },
+    select: { status: true, projectRequestId: true, ...recipientSelect(userId) },
   });
   if (!project) return { ok: false, error: { code: "not_found" } };
   if (!project.projectRequestId) return { ok: false, error: { code: "not_request_origin" } };
   const projectRequestId = project.projectRequestId;
-  // Project.ownerId — the single canonical primary Owner — is the ONLY
-  // identity ever allowed through, re-derived from the DB on every call.
-  // Never the full `owners` set, never Audience/Members, and ADMIN holds
-  // no implicit bypass here (unlike most of this app's other permission
-  // checks) — this is a deliberate, identity-based exception, the same
-  // kind the old requester-only rule already was.
-  if (project.ownerId !== userId) return { ok: false, error: { code: "forbidden" } };
+  // Only a recipient (isFeedbackRecipient: persisted obligation on tracked
+  // Projects, the live rule on historical untracked ones — re-read from the
+  // DB on every call) may create/update, and only their OWN row. Never the
+  // full `owners` set as such, never Audience/Members, and ADMIN holds no
+  // implicit bypass here — a deliberate, identity-based exception.
+  if (!isFeedbackRecipient(project, userId)) return { ok: false, error: { code: "forbidden" } };
   // Gates BOTH create and update — a Project reopened after feedback was
   // already submitted keeps that row fully visible (see
   // getProjectFeedbackEligibility above) but may not be edited again until
@@ -224,7 +281,9 @@ export async function upsertProjectFeedback(
   await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT id FROM "Project" WHERE id = ${projectId} FOR UPDATE`;
 
-    const existing = await tx.projectFeedback.findUnique({ where: { projectId }, select: { id: true } });
+    // The caller's OWN row only — one row per (Project, recipient).
+    const ownKey = { projectId_submittedByUserId: { projectId, submittedByUserId: userId } };
+    const existing = await tx.projectFeedback.findUnique({ where: ownKey, select: { id: true } });
     if (existing) {
       // writeData's ratings/requirementsDelivered are all real, Zod-
       // validated non-null values (ProjectFeedbackInput) — the column
@@ -233,7 +292,7 @@ export async function upsertProjectFeedback(
       // function itself just wrote. submittedByUserId is deliberately
       // ABSENT from writeData — see this function's own doc comment on
       // legacy provenance preservation.
-      result = (await tx.projectFeedback.update({ where: { projectId }, data: writeData, select: FEEDBACK_SELECT })) as ProjectFeedbackRecord;
+      result = (await tx.projectFeedback.update({ where: ownKey, data: writeData, select: FEEDBACK_SELECT })) as ProjectFeedbackRecord;
       created = false;
       return;
     }
@@ -246,6 +305,158 @@ export async function upsertProjectFeedback(
   });
 
   return { ok: true, feedback: result!, created };
+}
+
+// ─── Persisted obligations ──────────────────────────────────────────────────
+
+/**
+ * Called INSIDE the transaction that performs a genuine non-COMPLETED ->
+ * COMPLETED transition of a Project (PATCH /api/projects/[id]), so the
+ * obligations commit or roll back together with the completion itself.
+ *
+ *  - Request-origin Projects only (manual Projects: no-op).
+ *  - Stamps Project.feedbackRequestedAt the FIRST time (tracking marker),
+ *    even when zero recipients are eligible.
+ *  - Eligible = ACTIVE Responsible People; the primary Owner (if active)
+ *    ONLY when no Responsible People are configured at all.
+ *  - Adds only obligations that don't exist yet: existing ones (and their
+ *    responses) are never touched, so re-completion just adds newly
+ *    eligible recipients. Idempotent: the Project row is locked FOR UPDATE
+ *    (concurrent completions serialize here) and @@unique([projectId,
+ *    userId]) + skipDuplicates are the structural backstop.
+ *
+ * Returns the users to notify: the NEWLY created obligations, minus anyone
+ * who already has a Feedback row for this Project (e.g. submitted while the
+ * Project was historical/untracked) — never anyone who already had an
+ * obligation.
+ */
+export async function recordProjectFeedbackObligationsInTransaction(
+  tx: Prisma.TransactionClient,
+  projectId: string
+): Promise<{ notifyUserIds: string[] }> {
+  await tx.$queryRaw`SELECT id FROM "Project" WHERE id = ${projectId} FOR UPDATE`;
+  const project = await tx.project.findUnique({
+    where: { id: projectId },
+    select: {
+      projectRequestId: true,
+      feedbackRequestedAt: true,
+      ownerId: true,
+      owner: { select: { isActive: true } },
+      responsiblePeople: { select: { id: true, isActive: true } },
+      feedbackRequests: { select: { userId: true } },
+      feedback: { select: { submittedByUserId: true } },
+    },
+  });
+  if (!project || !project.projectRequestId) return { notifyUserIds: [] };
+
+  if (!project.feedbackRequestedAt) {
+    await tx.project.update({ where: { id: projectId }, data: { feedbackRequestedAt: new Date() } });
+  }
+
+  const eligible =
+    project.responsiblePeople.length > 0
+      ? Array.from(new Set(project.responsiblePeople.filter((p) => p.isActive).map((p) => p.id)))
+      : project.owner.isActive
+        ? [project.ownerId]
+        : [];
+  const alreadyRequested = new Set(project.feedbackRequests.map((r) => r.userId));
+  const newUserIds = eligible.filter((u) => !alreadyRequested.has(u));
+  if (newUserIds.length === 0) return { notifyUserIds: [] };
+
+  await tx.projectFeedbackRequest.createMany({ data: newUserIds.map((userId) => ({ projectId, userId })), skipDuplicates: true });
+  const alreadySubmitted = new Set(project.feedback.map((f) => f.submittedByUserId));
+  return { notifyUserIds: newUserIds.filter((u) => !alreadySubmitted.has(u)) };
+}
+
+// ─── Administration completion tracking ────────────────────────────────────
+
+export type ProjectFeedbackTrackingStatus = "COMPLETE" | "IN_PROGRESS" | "NO_ELIGIBLE_RECIPIENTS" | "NOT_TRACKED";
+
+export type ProjectFeedbackTracking = {
+  status: ProjectFeedbackTrackingStatus;
+  required: string[];
+  submitted: string[];
+  pending: string[];
+  // Requested but now inactive: shown for history, never required, never blocking.
+  inactiveRequested: string[];
+};
+
+/**
+ * THE canonical completion computation (pure):
+ *  - NOT_TRACKED: feedbackRequestedAt is null — historical, never processed
+ *    by Feedback tracking (decided by the marker, never by "no rows").
+ *  - required  = obligations whose user is still ACTIVE;
+ *    submitted = required users with a Feedback row; pending = the rest.
+ *  - NO_ELIGIBLE_RECIPIENTS: tracked but nothing required (nobody was
+ *    eligible at completion, or every requested user is now inactive).
+ *  - COMPLETE when nothing is pending, otherwise IN_PROGRESS.
+ */
+export function computeProjectFeedbackTracking(input: {
+  feedbackRequestedAt: Date | null;
+  requests: { userId: string; isActive: boolean }[];
+  submittedUserIds: string[];
+}): ProjectFeedbackTracking {
+  const submittedSet = new Set(input.submittedUserIds);
+  if (!input.feedbackRequestedAt) {
+    return { status: "NOT_TRACKED", required: [], submitted: [], pending: [], inactiveRequested: [] };
+  }
+  const required = input.requests.filter((r) => r.isActive).map((r) => r.userId);
+  const inactiveRequested = input.requests.filter((r) => !r.isActive).map((r) => r.userId);
+  const submitted = required.filter((u) => submittedSet.has(u));
+  const pending = required.filter((u) => !submittedSet.has(u));
+  const status: ProjectFeedbackTrackingStatus = required.length === 0 ? "NO_ELIGIBLE_RECIPIENTS" : pending.length === 0 ? "COMPLETE" : "IN_PROGRESS";
+  return { status, required, submitted, pending, inactiveRequested };
+}
+
+type TrackingUser = { id: string; name: string | null; email: string; isActive: boolean };
+
+export type ProjectFeedbackTrackingRow = {
+  project: { id: string; title: string; status: ProjectStatus; feedbackRequestedAt: Date | null; department: { id: string; name: string } | null };
+  tracking: ProjectFeedbackTracking;
+  users: Record<string, TrackingUser>;
+  // Every user with a Feedback row on this Project (responses are never hidden).
+  allSubmittedUserIds: string[];
+  // Rows not tied to a current obligation (historical/legacy submissions).
+  otherSubmissionUserIds: string[];
+};
+
+/** Project-level overview for Administration -> Project Feedback (read-only). */
+export async function getProjectFeedbackTrackingOverview(filter: { departmentId?: string }): Promise<ProjectFeedbackTrackingRow[]> {
+  const userSelect = { select: { id: true, name: true, email: true, isActive: true } } as const;
+  const projects = await prisma.project.findMany({
+    where: {
+      projectRequestId: { not: null },
+      ...(filter.departmentId ? { departmentId: filter.departmentId } : {}),
+      OR: [{ feedbackRequestedAt: { not: null } }, { status: ProjectStatus.COMPLETED }, { feedback: { some: {} } }],
+    },
+    orderBy: [{ feedbackRequestedAt: { sort: "desc", nulls: "last" } }, { updatedAt: "desc" }],
+    select: {
+      id: true,
+      title: true,
+      status: true,
+      feedbackRequestedAt: true,
+      department: { select: { id: true, name: true } },
+      feedbackRequests: { orderBy: { requestedAt: "asc" }, select: { userId: true, user: userSelect } },
+      feedback: { select: { submittedByUserId: true, submittedByUser: userSelect } },
+    },
+  });
+  return projects.map((p) => {
+    const users: Record<string, TrackingUser> = {};
+    for (const r of p.feedbackRequests) users[r.userId] = r.user;
+    for (const f of p.feedback) users[f.submittedByUserId] = f.submittedByUser;
+    const requested = new Set(p.feedbackRequests.map((r) => r.userId));
+    return {
+      project: { id: p.id, title: p.title, status: p.status, feedbackRequestedAt: p.feedbackRequestedAt, department: p.department },
+      tracking: computeProjectFeedbackTracking({
+        feedbackRequestedAt: p.feedbackRequestedAt,
+        requests: p.feedbackRequests.map((r) => ({ userId: r.userId, isActive: r.user.isActive })),
+        submittedUserIds: p.feedback.map((f) => f.submittedByUserId),
+      }),
+      users,
+      allSubmittedUserIds: p.feedback.map((f) => f.submittedByUserId),
+      otherSubmissionUserIds: p.feedback.map((f) => f.submittedByUserId).filter((u) => !requested.has(u)),
+    };
+  });
 }
 
 // ─── Completion notification + email ────────────────────────────────────────
@@ -295,65 +506,49 @@ function buildProjectFeedbackCompletionEmailHtml(params: { projectTitle: string;
 }
 
 /**
- * Best-effort in-app notification + email to the Project's PRIMARY Owner
- * the moment their request-origin Project becomes COMPLETED — the prompt
- * this feature surfaces so the Owner actually discovers the dedicated
- * feedback page, rather than needing to stumble onto it on their own.
- * Clicking either lands directly on /projects/[id]/feedback (NOT the
- * Project detail page — the full evaluation form no longer lives there).
- *
- * Deliberately NOT a generic "Project status changed" notification — only
- * fired for the specific COMPLETED transition, and only when
- * projectRequestId is set (a manual Project never notifies anyone this
- * way, consistent with feedback eligibility itself being request-origin-
- * only — see getProjectFeedbackEligibility). Call this ONLY once the
- * Project.update that caused the transition has actually committed (see
- * PATCH /api/projects/[id]'s own call site, which already guards this
- * exact genuine non-COMPLETED -> COMPLETED transition and calls this
- * function at most once per real transition) — never speculatively.
- *
- * Idempotency: entirely inherited from the call site's own transition
- * guard (`existing.status !== COMPLETED && project.status === COMPLETED`)
- * — no separate ledger/outbox is introduced here. A repeated PATCH while
- * already COMPLETED, or an unrelated edit, never re-enters this function
- * at all. A genuine reopen -> re-complete cycle DOES call it again — a
- * fresh, real transition deserves a fresh prompt, the same policy the
- * pre-existing (now-replaced) requester notification already had.
+ * Best-effort in-app notification + email for NEWLY created Feedback
+ * obligations only (the `notifyUserIds` returned by
+ * recordProjectFeedbackObligationsInTransaction) — called by PATCH
+ * /api/projects/[id] only AFTER the completion transaction has committed.
+ * Users who already had an obligation are never passed in, so a reopen ->
+ * re-complete cycle never re-sends a request to them. Clicking either
+ * lands directly on /projects/[id]/feedback.
  *
  * Reliability: createInAppNotification already swallows its own failures
- * (logged, never thrown). The email send below is wrapped in its own
- * try/catch for the identical reason — a Microsoft Graph outage must
- * never turn an already-successful Project completion into an error
- * response, and must never roll back the completion itself.
+ * (logged, never thrown); the email send is wrapped in its own try/catch —
+ * a Microsoft Graph outage never turns an already-successful completion
+ * into an error response, and never rolls back the completion or the
+ * persisted obligations.
  */
-export async function notifyOwnerOfProjectCompletion(project: {
-  id: string;
-  title: string;
-  projectRequestId: string | null;
-  owner: { id: string; name: string | null; email: string };
-}): Promise<void> {
-  if (!project.projectRequestId) return;
-
-  const feedbackUrl = `/projects/${project.id}/feedback`;
-  await createInAppNotification({
-    userId: project.owner.id,
-    title: "Το έργο ολοκληρώθηκε",
-    body: `Το έργο "${project.title}" ολοκληρώθηκε. Παρακαλούμε υποβάλετε την αξιολόγησή σας.`,
-    link: feedbackUrl,
+export async function notifyNewProjectFeedbackObligations(project: { id: string; title: string }, userIds: string[]): Promise<void> {
+  if (userIds.length === 0) return;
+  const recipients = await prisma.user.findMany({
+    where: { id: { in: userIds }, isActive: true },
+    select: { id: true, name: true, email: true },
   });
 
-  try {
-    await microsoftGraph.sendMail({
-      message: {
-        subject: `Αξιολόγηση ολοκληρωμένου έργου: ${project.title}`,
-        body: {
-          contentType: "HTML",
-          content: buildProjectFeedbackCompletionEmailHtml({ projectTitle: project.title, feedbackUrl: `${APP_URL}${feedbackUrl}` }),
-        },
-        toRecipients: [{ emailAddress: { address: project.owner.email, name: project.owner.name ?? undefined } }],
-      },
+  const feedbackUrl = `/projects/${project.id}/feedback`;
+  for (const recipient of recipients) {
+    await createInAppNotification({
+      userId: recipient.id,
+      title: "Το έργο ολοκληρώθηκε",
+      body: `Το έργο "${project.title}" ολοκληρώθηκε. Παρακαλούμε υποβάλετε την αξιολόγησή σας.`,
+      link: feedbackUrl,
     });
-  } catch (err) {
-    console.error("[project-feedback] Failed to send completion email to Project Owner:", err);
+
+    try {
+      await microsoftGraph.sendMail({
+        message: {
+          subject: `Αξιολόγηση ολοκληρωμένου έργου: ${project.title}`,
+          body: {
+            contentType: "HTML",
+            content: buildProjectFeedbackCompletionEmailHtml({ projectTitle: project.title, feedbackUrl: `${APP_URL}${feedbackUrl}` }),
+          },
+          toRecipients: [{ emailAddress: { address: recipient.email, name: recipient.name ?? undefined } }],
+        },
+      });
+    } catch (err) {
+      console.error("[project-feedback] Failed to send completion email to a Feedback recipient:", err);
+    }
   }
 }

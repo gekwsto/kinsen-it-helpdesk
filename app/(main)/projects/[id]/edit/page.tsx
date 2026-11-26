@@ -84,6 +84,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
   // systemWideUsers list (no separate fetch).
   const [selectedResponsiblePeopleIds, setSelectedResponsiblePeopleIds] = useState<Set<string>>(new Set());
   const [responsiblePeopleSearch, setResponsiblePeopleSearch] = useState("");
+  // Existing Responsible People who have since become INACTIVE — kept
+  // (visible, selected, labelled "(inactive)") so saving never silently
+  // drops them; they can be unticked to remove them. New additions come
+  // only from the active systemWideUsers list (the server enforces the same).
+  const [inactiveExistingResponsiblePeople, setInactiveExistingResponsiblePeople] = useState<AssignableUser[]>([]);
   // Organizational Audience (Phase 1) — editable here for EVERY Project
   // (manual or request-origin). Owner(s) stays request-origin-creation-only
   // and has no edit surface here — unchanged, out of scope for Phase 1.1.
@@ -231,6 +236,11 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           setSelectedMemberIds(existingIds);
           setSelectedAudienceIds(new Set((p.audience ?? []).map((a: { id: string }) => a.id)));
           setSelectedResponsiblePeopleIds(new Set((p.responsiblePeople ?? []).map((r: { id: string }) => r.id)));
+          setInactiveExistingResponsiblePeople(
+            (p.responsiblePeople ?? [])
+              .filter((r: { isActive?: boolean }) => r.isActive === false)
+              .map((r: AssignableUser) => ({ id: r.id, name: r.name, email: r.email }))
+          );
           setSelectedAudienceDepartmentIds(new Set((p.audienceDepartments ?? []).map((d: { id: string }) => d.id)));
           setSelectedAudienceBusinessUnitIds(new Set((p.audienceBusinessUnits ?? []).map((b: { id: string }) => b.id)));
 
@@ -327,10 +337,14 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
       return next;
     });
   };
+  const responsiblePeopleOptions: (AssignableUser & { inactive?: boolean })[] = [
+    ...systemWideUsers,
+    ...inactiveExistingResponsiblePeople.filter((r) => !systemWideUsers.some((u) => u.id === r.id)).map((r) => ({ ...r, inactive: true })),
+  ];
   const responsiblePeopleSearchResults = (() => {
     const q = responsiblePeopleSearch.trim().toLowerCase();
-    if (!q) return systemWideUsers;
-    return systemWideUsers.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
+    if (!q) return responsiblePeopleOptions;
+    return responsiblePeopleOptions.filter((u) => (u.name ?? "").toLowerCase().includes(q) || u.email.toLowerCase().includes(q));
   })();
 
   const toggleAudienceDepartment = (deptId: string) => {
@@ -1152,12 +1166,15 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
               <Label htmlFor="project-responsible-people">Responsible People</Label>
               <p className="text-xs text-muted-foreground">Optional — users responsible for this Project, independent of Owner(s), Members and Audience. Any active user in the system.</p>
               <Input placeholder="Search by name or email…" value={responsiblePeopleSearch} onChange={(e) => setResponsiblePeopleSearch(e.target.value)} className="h-8 text-sm" />
-              {systemWideUsers.length > 0 ? (
+              {responsiblePeopleOptions.length > 0 ? (
                 <div id="project-responsible-people" className="border rounded-md divide-y max-h-48 overflow-y-auto">
                   {responsiblePeopleSearchResults.map((u) => (
-                    <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer">
+                    <label key={u.id} className="flex items-center gap-3 px-3 py-2 hover:bg-muted/50 cursor-pointer" data-inactive={u.inactive ? "true" : undefined}>
                       <input type="checkbox" className="h-4 w-4 rounded" checked={selectedResponsiblePeopleIds.has(u.id)} onChange={() => toggleResponsiblePerson(u.id)} />
-                      <span className="text-sm">{u.name ?? u.email}</span>
+                      <span className={u.inactive ? "text-sm text-muted-foreground" : "text-sm"}>
+                        {u.name ?? u.email}
+                        {u.inactive && " (inactive)"}
+                      </span>
                     </label>
                   ))}
                   {responsiblePeopleSearchResults.length === 0 && (

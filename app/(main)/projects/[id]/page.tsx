@@ -1040,13 +1040,15 @@ export default async function ProjectDetailPage({
           (/projects/[id]/feedback). This is only a small CTA, ONLY ever
           rendered for a request-origin Project (feedbackEligibility is
           null for a manual one), and even then only once the viewer is
-          confirmed to be the Project's own primary Owner (Project.ownerId
-          — never the full `owners` set, Audience, Members, the original
-          requester, or ADMIN merely by role; see this feature's own
-          eligibility rule in lib/services/project-feedback-service.ts).
+          confirmed to be a Feedback recipient (a persisted obligation on
+          tracked Projects; the live Responsible People / primary Owner
+          rule on historical untracked ones — never the full `owners` set
+          as such, Audience, Members, or ADMIN merely by role; see
+          isFeedbackRecipient in lib/services/project-feedback-service.ts). The prompt reflects the
+          viewer's OWN Feedback (submitted or not).
           Before completion AND with no existing feedback (Case A),
           nothing is rendered — never an empty/disabled placeholder card. */}
-      {feedbackEligibility?.isPrimaryOwner && (feedbackEligibility.isProjectCompleted || feedbackEligibility.feedback) && (
+      {feedbackEligibility?.isRecipient && (feedbackEligibility.isProjectCompleted || feedbackEligibility.feedback) && (
         <ProjectFeedbackCtaCard projectId={project.id} hasExistingFeedback={feedbackEligibility.feedback !== null} />
       )}
 

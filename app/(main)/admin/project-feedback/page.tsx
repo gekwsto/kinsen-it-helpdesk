@@ -5,7 +5,16 @@ import { hasPermission } from "@/lib/permissions";
 import Link from "next/link";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Badge } from "@/components/ui/badge";
 import { formatDate } from "@/lib/utils";
+import { getProjectFeedbackTrackingOverview, type ProjectFeedbackTrackingStatus } from "@/lib/services/project-feedback-service";
+
+const TRACKING_STATUS: Record<ProjectFeedbackTrackingStatus, { label: string; variant: "default" | "secondary" | "outline" | "destructive" }> = {
+  COMPLETE: { label: "Complete", variant: "default" },
+  IN_PROGRESS: { label: "In progress", variant: "secondary" },
+  NO_ELIGIBLE_RECIPIENTS: { label: "No eligible active recipients", variant: "destructive" },
+  NOT_TRACKED: { label: "Not tracked (historical)", variant: "outline" },
+};
 
 interface SearchParams {
   departmentId?: string;
@@ -32,6 +41,14 @@ interface SearchParams {
  * each rating column, with its own historical score shown in the Legacy
  * Score column instead, never fabricated into the new five-rating shape.
  *
+ * Feedback Tracking (top table): one row per request-origin Project with
+ * Required / Submitted / Pending recipients and the overall status, all
+ * computed by computeProjectFeedbackTracking from the PERSISTED obligations
+ * (ProjectFeedbackRequest) — inactive requested users are listed but never
+ * required/blocking; Projects never processed by tracking are "Not tracked
+ * (historical)", decided by Project.feedbackRequestedAt, never by the
+ * absence of rows.
+ *
  * Gated on its OWN dedicated permission (projectFeedback.view), never bare
  * admin.access and never a hardcoded role === "ADMIN" check — see
  * components/layout/sidebar.tsx's matching nav-visibility gate
@@ -53,7 +70,8 @@ export default async function ProjectFeedbackAdminPage({
   const { departmentId, minRating } = await searchParams;
   const minRatingNum = minRating ? Number(minRating) : undefined;
 
-  const [feedbacks, departments] = await Promise.all([
+  const [tracking, feedbacks, departments] = await Promise.all([
+    getProjectFeedbackTrackingOverview({ departmentId }),
     prisma.projectFeedback.findMany({
       where: {
         ...(departmentId ? { project: { departmentId } } : {}),
@@ -78,7 +96,7 @@ export default async function ProjectFeedbackAdminPage({
       <div>
         <h1 className="text-2xl font-bold">Project Feedback</h1>
         <p className="text-muted-foreground mt-1">
-          Feedback submitted by the Project's primary Owner on delivered, request-origin Projects. Read-only.
+          Feedback requested from each Project's recipients on delivered, request-origin Projects. Read-only.
         </p>
       </div>
 
@@ -133,6 +151,75 @@ export default async function ProjectFeedbackAdminPage({
         )}
       </form>
 
+      <div className="space-y-2">
+        <h2 className="text-lg font-semibold">Feedback Tracking</h2>
+        <Card>
+          <CardContent className="p-0">
+            {tracking.length === 0 ? (
+              <p className="text-sm text-muted-foreground p-6">No completed request-origin Projects yet.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <Table data-testid="feedback-tracking-table">
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Project</TableHead>
+                      <TableHead>Department</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Submitted / Required</TableHead>
+                      <TableHead>Required Recipients</TableHead>
+                      <TableHead>Submitted</TableHead>
+                      <TableHead>Pending</TableHead>
+                      <TableHead>Requested</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {tracking.map(({ project, tracking: t, users, allSubmittedUserIds, otherSubmissionUserIds }) => {
+                      const name = (id: string) => users[id]?.name ?? users[id]?.email ?? "—";
+                      const list = (ids: string[]) => (ids.length ? ids.map(name).join(", ") : <span className="text-muted-foreground">—</span>);
+                      const meta = TRACKING_STATUS[t.status];
+                      return (
+                        <TableRow key={project.id} data-project-id={project.id}>
+                          <TableCell>
+                            <Link href={`/projects/${project.id}`} className="text-primary hover:underline">
+                              {project.title}
+                            </Link>
+                            {project.status !== "COMPLETED" && <div className="text-xs text-muted-foreground">Project reopened ({project.status})</div>}
+                          </TableCell>
+                          <TableCell>{project.department?.name ?? "—"}</TableCell>
+                          <TableCell>
+                            <Badge variant={meta.variant} className="whitespace-nowrap" data-testid="tracking-status">{meta.label}</Badge>
+                          </TableCell>
+                          <TableCell className="font-medium" data-testid="tracking-counts">
+                            {t.status === "NOT_TRACKED" ? "—" : `${t.submitted.length} / ${t.required.length}`}
+                          </TableCell>
+                          <TableCell data-testid="tracking-required">
+                            {list(t.required)}
+                            {t.inactiveRequested.length > 0 && (
+                              <div className="text-xs text-muted-foreground">Inactive (not required): {t.inactiveRequested.map((u) => `${name(u)}${allSubmittedUserIds.includes(u) ? " (submitted)" : ""}`).join(", ")}</div>
+                            )}
+                          </TableCell>
+                          <TableCell data-testid="tracking-submitted">
+                            {list(t.submitted)}
+                            {otherSubmissionUserIds.length > 0 && (
+                              <div className="text-xs text-muted-foreground">
+                                {t.status === "NOT_TRACKED" ? "Historical submissions" : "Other submissions"}: {otherSubmissionUserIds.map(name).join(", ")}
+                              </div>
+                            )}
+                          </TableCell>
+                          <TableCell data-testid="tracking-pending">{list(t.pending)}</TableCell>
+                          <TableCell className="whitespace-nowrap">{project.feedbackRequestedAt ? formatDate(project.feedbackRequestedAt) : "—"}</TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <h2 className="text-lg font-semibold">Submitted Feedback</h2>
       <Card>
         <CardContent className="p-0">
           {feedbacks.length === 0 ? (

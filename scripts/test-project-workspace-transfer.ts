@@ -161,7 +161,7 @@ async function main() {
     };
     const act1 = await mkAct("A1 completed", { status: ActivityStatus.COMPLETED, isCompleted: true, completedAt: D("2027-01-20"), subDepartmentId: subA.id, assignedUsers: { connect: [{ id: assigneeA.id }] }, startDate: D("2027-01-04"), dueDate: D("2027-01-15"), expectedStartDate: D("2027-01-04"), expectedFinishDate: D("2027-01-14"), expectedDays: 8, actualDays: 11, taskSubTypeCost: "120.00" });
     const act2 = await mkAct("A2 legacy null dept", { departmentId: null, startDate: D("2027-01-18"), dueDate: D("2027-01-22"), expectedDays: 3, taskSubTypeCost: "100.00" });
-    const act3 = await mkAct("A3 dest subdept", { subDepartmentId: subB.id, assignedUsers: { connect: [{ id: assigneeA.id }] }, startDate: D("2027-02-01"), dueDate: D("2027-02-05") });
+    const act3 = await mkAct("A3 dest subdept", { ownerId: assigneeA.id, subDepartmentId: subB.id, assignedUsers: { connect: [{ id: assigneeA.id }] }, startDate: D("2027-02-01"), dueDate: D("2027-02-05") });
     await prisma.activityDependency.create({ data: { predecessorId: act1.id, successorId: act2.id, type: "FINISH_TO_START" } });
     await prisma.projectNote.create({ data: { projectId: project.id, authorId: owner.id, body: "Project note" } });
     await prisma.activityNote.create({ data: { activityId: act1.id, authorId: owner.id, body: "Activity note" } });
@@ -274,6 +274,15 @@ async function main() {
     const readdMember = await patchProject(project.id, { memberIds: [memberA.id, memberB.id] });
     const membersNow = (await projectState(project.id)).members.map((m) => m.id);
     check("Project: removing the retained ineligible member → 200; re-adding them → 400 assignee_not_assignable (stays removed)", removeMember.status === 200 && readdMember.status === 400 && (await readdMember.json()).code === "assignee_not_assignable" && membersNow.length === 1 && membersNow[0] === memberB.id);
+    // Activity Owner: same retention rule — the existing Owner (eligible in A
+    // only) is kept across the transfer; only a CHANGE to a new Owner is checked.
+    const keepOwner = await activityRoute.PATCH(req("PATCH", { title: `A3 dest subdept ${RUN_ID}`, ownerId: assigneeA.id }), { params: Promise.resolve({ id: act3.id }) });
+    check("Activity Owner retained after transfer: a save re-sending the unchanged (now ineligible) Owner → 200", keepOwner.status === 200 && (await prisma.projectActivity.findUniqueOrThrow({ where: { id: act3.id } })).ownerId === assigneeA.id, String(keepOwner.status));
+    const changeOwner = await activityRoute.PATCH(req("PATCH", { ownerId: outsider.id }), { params: Promise.resolve({ id: act3.id }) });
+    check("...changing the Owner to a user not eligible in B → 400 invalid_owner (Owner unchanged)", changeOwner.status === 400 && (await changeOwner.json()).code === "invalid_owner" && (await prisma.projectActivity.findUniqueOrThrow({ where: { id: act3.id } })).ownerId === assigneeA.id);
+    const clearOwner = await activityRoute.PATCH(req("PATCH", { ownerId: null }), { params: Promise.resolve({ id: act3.id }) });
+    const resetOwner = await activityRoute.PATCH(req("PATCH", { ownerId: assigneeA.id }), { params: Promise.resolve({ id: act3.id }) });
+    check("...clearing the Owner → 200; setting the ineligible user back → 400 invalid_owner (stays cleared)", clearOwner.status === 200 && resetOwner.status === 400 && (await resetOwner.json()).code === "invalid_owner" && (await prisma.projectActivity.findUniqueOrThrow({ where: { id: act3.id } })).ownerId === null);
     // Restore the member snapshot the later "unchanged save" check sends.
     await prisma.project.update({ where: { id: project.id }, data: { members: { connect: [{ id: memberA.id }] } } });
 

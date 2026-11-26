@@ -316,9 +316,12 @@ export async function PATCH(
       }
     }
 
-    // Owner — same eligibility rule as assignedUsers above, validated
-    // whenever a NEW (non-null) value is actually supplied.
-    if (ownerId) {
+    // Owner — same eligibility rule as assignedUsers above, enforced only
+    // when the Owner actually CHANGES to a new user. The existing Owner is
+    // preserved as-is (same retention rule as existing assignees/Members —
+    // e.g. after a Project Workspace transfer, or a role change), so the
+    // edit form re-sending the unchanged Owner never blocks a save.
+    if (ownerId && ownerId !== existing.ownerId) {
       const ownerAssignable = await userHasAssignablePermissionForEntity(ownerId, "activity", effectiveDepartmentId);
       if (!ownerAssignable) {
         return NextResponse.json(

@@ -94,6 +94,8 @@ async function main() {
   const requestIds: string[] = [];
   const projectIds: string[] = [];
   const browser = await chromium.launch();
+  const fixtureUserIds: string[] = [];
+  const fixtureIdentityUserIds: string[] = [];
 
   try {
     const dept = await createDepartment({ name: `${TAG}-dept`, slug: `${TAG}-dept` });
@@ -110,6 +112,29 @@ async function main() {
     await prisma.departmentMembership.create({
       data: { userId: admin.id, departmentId: dept.id, role: DepartmentRole.DEPARTMENT_ADMIN, source: MembershipSource.MANUAL, isPrimary: false, isActive: true },
     });
+
+    // Isolated, valid SQLGeneral identity fixture (no identity validation
+    // bypassed): a dedicated fixture manager is the seeded requester's
+    // verified manager; only the SQLGeneral API client is stubbed, and only
+    // for this run's two fixture usernames. The requester's identity record
+    // exists only for this run and is removed in cleanup (refusing to touch
+    // a pre-existing real one).
+    const realSql = await import("@/lib/sqlgeneral-api-client");
+    const sqlRows = new Map<string, Record<string, unknown>>();
+    const sqlRow = (username: string, manager: string | null) => ({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName: manager, manager2AMAccountName: null, manager3AMAccountName: null });
+    mock.module("@/lib/sqlgeneral-api-client", {
+      namedExports: { ...realSql, findSqlGeneralUserByUsername: async (u: string) => (sqlRows.has(u) ? { outcome: "unique" as const, user: sqlRows.get(u) } : realSql.findSqlGeneralUserByUsername(u)) },
+    });
+    if (await prisma.sqlGeneralUserSyncAttempt.findUnique({ where: { userId: requester.id } })) {
+      throw new Error(`${REQUESTER_EMAIL} already has a SQLGeneral identity record — not overwriting shared data.`);
+    }
+    const manager = await prisma.user.create({ data: { email: `${TAG}-manager@kinsen.gr`, name: `${TAG} Manager`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    fixtureUserIds.push(manager.id);
+    sqlRows.set(`${TAG}-mgr`, sqlRow(`${TAG}-mgr`, null));
+    sqlRows.set(`${TAG}-req`, sqlRow(`${TAG}-req`, `${TAG}-mgr`));
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester.id, sqlGeneralUsername: `${TAG}-req`, status: "SUCCEEDED" } });
+    fixtureIdentityUserIds.push(manager.id, requester.id);
 
     const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
     const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
@@ -133,15 +158,17 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [admin.id],
+        intermediateApproverIds: [manager.id],
         departmentId: dept.id,
       })
     );
     if (submitRes.status !== 201) throw new Error(`Fixture submit failed: ${submitRes.status}: ${JSON.stringify(await submitRes.json())}`);
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
+    fixtureSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
+    const intermediateRes = await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    if (intermediateRes.status !== 200) throw new Error(`Fixture intermediate approval failed: ${intermediateRes.status}: ${JSON.stringify(await intermediateRes.json())}`);
     fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
-    await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
       jsonReq({
@@ -179,7 +206,9 @@ async function main() {
     console.log("\n=== B. Completing the Project through the real Edit page Status control ===\n");
     await adminPage.goto(`${BASE_URL}/projects/${project.id}/edit`, { waitUntil: "load" });
     await adminPage.getByText("Edit Project", { exact: true }).waitFor({ state: "visible", timeout: 10000 });
-    const statusSelect = adminPage.getByRole("combobox").first();
+    // Targeted by its "Status" label — the Edit page's first combobox is
+    // now the Workspace selector (Project Workspace transfer).
+    const statusSelect = adminPage.locator("label", { hasText: /^Status$/ }).locator("xpath=..").getByRole("combobox");
     await statusSelect.click();
     await adminPage.getByRole("option", { name: "COMPLETED", exact: true }).click();
     await Promise.all([
@@ -257,7 +286,7 @@ async function main() {
       adminPage.getByRole("button", { name: "Ενημέρωση Αξιολόγησης", exact: true }).click(),
     ]);
     await adminPage.waitForTimeout(600);
-    const updatedRow = await prisma.projectFeedback.findUniqueOrThrow({ where: { projectId: project.id } });
+    const updatedRow = await prisma.projectFeedback.findFirstOrThrow({ where: { projectId: project.id } });
     check("E. The DB row's deliverySpeedRating is now 2 (the update), not the original 4", updatedRow.deliverySpeedRating === 2);
     check("E. Still exactly ONE ProjectFeedback row for this Project", (await prisma.projectFeedback.count({ where: { projectId: project.id } })) === 1);
 
@@ -299,6 +328,9 @@ async function main() {
       await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: fixtureIdentityUserIds } } }).catch(() => {});
+      await prisma.notification.deleteMany({ where: { userId: { in: fixtureUserIds } } }).catch(() => {});
+      await prisma.user.deleteMany({ where: { id: { in: fixtureUserIds } } }).catch(() => {});
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: deptIds } } });
