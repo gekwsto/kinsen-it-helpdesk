@@ -5,6 +5,8 @@ import { requireAuth } from "@/lib/permissions";
 import { canActOnEntity, validateTicketConfigOwnership } from "@/lib/services/department-scope-service";
 import { getDefaultLegacyDepartmentId } from "@/lib/services/department-service";
 import { changeStatusSchema } from "@/lib/validations";
+import { isResolutionStatus } from "@/lib/resolution-time";
+import { setTicketResolutionTimeInTransaction } from "@/lib/services/ticket-resolution-time-service";
 import { publishTicketEvent } from "@/lib/realtime/publisher";
 import { notifyRequesterClosed, notifyTicketRequesterTerminalTransition } from "@/lib/ticket-notification-service";
 
@@ -32,7 +34,7 @@ export async function PATCH(
     if (!canChange) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
     const body = await req.json();
-    const { statusId, cancelReasonId } = changeStatusSchema.parse(body);
+    const { statusId, cancelReasonId, resolutionTimeMinutes } = changeStatusSchema.parse(body);
 
     // A submitted statusId must belong to THIS ticket's own department —
     // never silently accepted from a different one (see
@@ -54,33 +56,60 @@ export async function PATCH(
       prisma.ticketStatus.findUnique({ where: { id: statusId } }),
     ]);
 
-    const updated = await prisma.ticket.update({
-      where: { id: id },
-      data: {
-        statusId,
-        cancelReasonId: cancelReasonId ?? null,
-        closedAt: newStatus?.isClosed ? new Date() : null,
-      },
-      include: {
-        status: true,
-        cancelReason: true,
-      },
-    });
+    // An optional manual Resolution Time may only accompany a RESOLUTION
+    // (lib/resolution-time.ts). Omitted -> the stored value is untouched
+    // (never cleared by an ordinary status change, a reopen, or a resolve
+    // without the field); explicit null -> cleared.
+    const submitsResolutionTime = resolutionTimeMinutes !== undefined;
+    if (submitsResolutionTime && !isResolutionStatus(newStatus)) {
+      return NextResponse.json(
+        { error: "Resolution time can only be submitted when resolving the ticket.", code: "resolution_time_requires_resolution" },
+        { status: 400 }
+      );
+    }
 
-    await prisma.ticketHistory.create({
-      data: {
-        ticketId: id,
-        changedById: session.user.id,
-        type: newStatus?.isClosed ? "CLOSED" : "STATUS_CHANGE",
-        oldValue: oldStatus?.name,
-        newValue: newStatus?.name,
-        description: `Status changed from "${oldStatus?.name}" to "${newStatus?.name}"`,
-      },
+    // Status change, its history entry and (if submitted) the resolution
+    // time + its own audit entry commit atomically.
+    const updated = await prisma.$transaction(async (tx) => {
+      const result = await tx.ticket.update({
+        where: { id: id },
+        data: {
+          statusId,
+          cancelReasonId: cancelReasonId ?? null,
+          closedAt: newStatus?.isClosed ? new Date() : null,
+        },
+        include: {
+          status: true,
+          cancelReason: true,
+        },
+      });
+
+      await tx.ticketHistory.create({
+        data: {
+          ticketId: id,
+          changedById: session.user.id,
+          type: newStatus?.isClosed ? "CLOSED" : "STATUS_CHANGE",
+          oldValue: oldStatus?.name,
+          newValue: newStatus?.name,
+          description: `Status changed from "${oldStatus?.name}" to "${newStatus?.name}"`,
+        },
+      });
+
+      if (submitsResolutionTime) {
+        const change = await setTicketResolutionTimeInTransaction(tx, {
+          ticketId: id,
+          actorId: session.user.id,
+          minutes: resolutionTimeMinutes,
+        });
+        return { ...result, resolutionTimeMinutes: change.current };
+      }
+      return result;
     });
 
     publishTicketEvent("TICKET_STATUS_CHANGED", id, session.user.id, {
       status: updated.status,
       closedAt: updated.closedAt?.toISOString() ?? null,
+      resolutionTimeMinutes: updated.resolutionTimeMinutes,
     });
 
     // Only a REAL open->closed transition, never merely "the new status

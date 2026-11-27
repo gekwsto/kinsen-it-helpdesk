@@ -23,7 +23,9 @@ import {
 import { Label } from "@/components/ui/label";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { getInitials } from "@/lib/utils";
-import { UserCheck, GitBranch, Tag, Layers, Loader2, FolderKanban, Plus } from "lucide-react";
+import { UserCheck, GitBranch, Tag, Layers, Loader2, FolderKanban, Plus, Clock } from "lucide-react";
+import { ResolutionTimeDialog } from "@/components/tickets/resolution-time-dialog";
+import { formatResolutionTime, isResolutionStatus } from "@/lib/resolution-time";
 import { ProjectCreateDialog } from "@/components/projects/project-create-dialog";
 import { ActivityCreateDialog } from "@/components/activities/activity-create-dialog";
 
@@ -68,6 +70,11 @@ interface TicketActionsProps {
   canEditProjectInDept: boolean;
   /** Same, for activity.edit / the inline "+ New Activity" dialog. */
   canEditActivityInDept: boolean;
+  /** Current manual Resolution Time (total minutes; NULL = not recorded) — prefills both the resolve and the edit dialog. */
+  resolutionTimeMinutes: number | null;
+  onResolutionTimeChange: (minutes: number | null) => void;
+  /** ticket.resolutionTime.edit for this ticket's department. */
+  canEditResolutionTime: boolean;
 }
 
 export function TicketActions({
@@ -84,6 +91,9 @@ export function TicketActions({
   canCreateActivityInDept,
   canEditProjectInDept,
   canEditActivityInDept,
+  resolutionTimeMinutes,
+  onResolutionTimeChange,
+  canEditResolutionTime,
 }: TicketActionsProps) {
   const router = useRouter();
   const [loading, setLoading] = useState<string | null>(null);
@@ -95,6 +105,12 @@ export function TicketActions({
   const [linkOpen, setLinkOpen] = useState(false);
   const [projectDialogOpen, setProjectDialogOpen] = useState(false);
   const [activityDialogOpen, setActivityDialogOpen] = useState(false);
+  // Change Status -> "Resolved" goes through the same optional-duration
+  // dialog as the Resolve action (dialog swap, never two Radix Dialogs open).
+  // The target "Resolved" status id is captured here: closing the Change
+  // Status dialog resets `selectedStatus` (see the sync effect below).
+  const [statusResolveTargetId, setStatusResolveTargetId] = useState<string | null>(null);
+  const [resolutionTimeOpen, setResolutionTimeOpen] = useState(false);
 
   const [projects, setProjects] = useState<LinkableProject[]>([]);
   const [activities, setActivities] = useState<LinkableActivity[]>([]);
@@ -191,12 +207,61 @@ export function TicketActions({
   };
 
   const handleStatusChange = async () => {
+    const target = statuses.find((s) => s.id === selectedStatus);
+    if (isResolutionStatus(target) && selectedStatus !== ticket.statusId) {
+      setStatusResolveTargetId(selectedStatus);
+      setStatusOpen(false);
+      return;
+    }
     await patch(
       `/api/tickets/${ticket.id}/status`,
       { statusId: selectedStatus },
       "Status"
     );
     setStatusOpen(false);
+  };
+
+  // Same request as the Admin Actions "Resolve" button: status + optional
+  // duration saved atomically by the status route.
+  const handleStatusResolve = async (minutes: number | null): Promise<boolean> => {
+    if (!statusResolveTargetId) return false;
+    setLoading("Status");
+    try {
+      const res = await fetch(`/api/tickets/${ticket.id}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ statusId: statusResolveTargetId, resolutionTimeMinutes: minutes }),
+      });
+      if (!res.ok) throw new Error("Request failed");
+      const data = await res.json().catch(() => null);
+      if (data && data.resolutionTimeMinutes !== undefined) onResolutionTimeChange(data.resolutionTimeMinutes);
+      toast.success("Status updated");
+      return true;
+    } catch {
+      toast.error("Failed to update status");
+      return false;
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  // Standalone add/edit/clear — never changes status, closedAt or SLA data.
+  const handleResolutionTimeSave = async (minutes: number | null): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/tickets/${ticket.id}/resolution-time`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ resolutionTimeMinutes: minutes }),
+      });
+      if (!res.ok) throw new Error("Request failed");
+      const data = await res.json();
+      onResolutionTimeChange(data.resolutionTimeMinutes ?? null);
+      toast.success("Resolution time updated");
+      return true;
+    } catch {
+      toast.error("Failed to update resolution time");
+      return false;
+    }
   };
 
   const handleAssign = async () => {
@@ -634,7 +699,48 @@ export function TicketActions({
             </DialogContent>
           </Dialog>
         )}
+
+        {/* Edit Resolution Time — manual effort, editable on any status
+            (including resolved/closed) for holders of ticket.resolutionTime.edit. */}
+        {canEditResolutionTime && (
+          <div className="space-y-1">
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full justify-start gap-2"
+              onClick={() => setResolutionTimeOpen(true)}
+            >
+              <Clock className="h-3.5 w-3.5" />
+              Edit Resolution Time
+            </Button>
+            <p className="px-1 text-xs text-muted-foreground" data-testid="resolution-time-value">
+              Resolution time:{" "}
+              <span className={resolutionTimeMinutes === null ? "" : "font-medium text-foreground"}>
+                {formatResolutionTime(resolutionTimeMinutes)}
+              </span>
+            </p>
+          </div>
+        )}
       </CardContent>
+
+      {canEditResolutionTime && (
+        <ResolutionTimeDialog
+          open={resolutionTimeOpen}
+          onOpenChange={setResolutionTimeOpen}
+          mode="edit"
+          initialMinutes={resolutionTimeMinutes}
+          onSubmit={handleResolutionTimeSave}
+        />
+      )}
+      {canChangeStatus && (
+        <ResolutionTimeDialog
+          open={statusResolveTargetId !== null}
+          onOpenChange={(o) => !o && setStatusResolveTargetId(null)}
+          mode="resolve"
+          initialMinutes={resolutionTimeMinutes}
+          onSubmit={handleStatusResolve}
+        />
+      )}
 
       {canLinkProjectActivity && effectiveDepartmentId && (
         <>

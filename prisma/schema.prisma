@@ -48,6 +48,9 @@ enum TicketHistoryType {
   COMMENT_ADDED
   ATTACHMENT_ADDED
   CANCEL_REASON_SET
+  // Manual Resolution Time edits (Ticket.resolutionTimeMinutes) — oldValue/
+  // newValue hold the raw total minutes as text, NULL = "not recorded".
+  RESOLUTION_TIME_CHANGE
 }
 
 enum AuthProvider {
@@ -1295,6 +1298,12 @@ model Ticket {
   // enforced at write time (see the endpoint's validation); rendered as a
   // compact key/value list in the UI, never dumped as raw HTML.
   externalMetadata    Json?
+
+  // Manual resolution EFFORT in total minutes (1 day = 8 working hours =
+  // 480 minutes — see lib/resolution-time.ts). Optional and never derived:
+  // NULL = not recorded, 0 = explicitly recorded zero. Independent of SLA,
+  // createdAt/closedAt and any elapsed-time calculation.
+  resolutionTimeMinutes Int?
 
   closedAt  DateTime?
   createdAt DateTime  @default(now())

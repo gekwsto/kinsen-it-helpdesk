@@ -142,6 +142,17 @@ export default async function TicketDetailPage({
     ticket.departmentId,
     "ticket.linkProjectActivity"
   );
+  // Standalone Resolution Time edits — dedicated permission, department-
+  // scoped exactly like the PATCH /api/tickets/[id]/resolution-time route
+  // (which re-checks it server-side). Resolving WITH a duration only needs
+  // canChangeStatus.
+  const canEditResolutionTime = await hasEffectiveEntityPermission(
+    session.user.id,
+    role,
+    customRoleId,
+    ticket.departmentId,
+    "ticket.resolutionTime.edit"
+  );
   const [canCreateProjectInDept, canCreateActivityInDept] = await Promise.all([
     canLinkProjectActivity && effectiveDeptId
       ? canActOnEntity(session.user.id, role, effectiveDeptId, "project.create")
@@ -344,6 +355,8 @@ export default async function TicketDetailPage({
     canChangeStatus,
     canAssign,
     canViewHistory,
+    initialResolutionTimeMinutes: ticket.resolutionTimeMinutes,
+    canEditResolutionTime,
     statuses: statuses.map((s) => ({ id: s.id, name: s.name, color: s.color })),
     priorities: priorities.map((p) => ({
       id: p.id,
