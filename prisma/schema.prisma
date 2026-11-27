@@ -1598,6 +1598,21 @@ model TicketHistory {
 
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
+// Global grouping of Projects under a common business initiative — not a
+// Project itself, no nesting, Projects from any Workspace. `name` is stored
+// trimmed; `normalizedName` (lower(btrim(name))) carries the case-insensitive
+// UNIQUE guarantee, and DB CHECK constraints keep both in sync even for raw
+// writes (migration 20261201090000_project_parents).
+model ProjectParent {
+  id             String    @id @default(cuid())
+  name           String
+  normalizedName String    @unique
+  description    String?   @db.Text
+  projects       Project[]
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
 model Project {
   id               String          @id @default(cuid())
   title            String
@@ -1850,9 +1865,17 @@ model Project {
   // completed. Never backfilled.
   feedbackRequestedAt   DateTime?
 
+  // Optional organizational grouping (lib/services/project-parent-service.ts).
+  // Purely a label: never read by any visibility/permission rule, and never
+  // propagates dates, statuses, permissions or financials. A Parent with
+  // linked Projects cannot be deleted (onDelete: Restrict).
+  parent   ProjectParent? @relation(fields: [parentId], references: [id], onDelete: Restrict)
+  parentId String?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([parentId])
   @@index([ownerId])
   @@index([status])
   @@index([statusDefinitionId])
