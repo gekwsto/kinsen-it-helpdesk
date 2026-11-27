@@ -167,6 +167,12 @@ const PERMISSIONS = [
   // behavior-preserving no-op today; an administrator can grant it to any
   // other role via /admin/roles going forward.
   { key: "ticket.linkProjectActivity", description: "Link a ticket to a Project or Activity", module: "tickets" },
+  // Standalone edits of the manual Resolution Time (Ticket.
+  // resolutionTimeMinutes) — department-scoped (hasEffectiveEntityPermission
+  // against the ticket's own department). Submitting a duration as part of
+  // resolving only needs ticket.changeStatus. Also created by migration
+  // 20261130090000_ticket_resolution_time.
+  { key: "ticket.resolutionTime.edit", description: "Edit a ticket's recorded resolution time", module: "tickets" },
   // Distinct from ticket.view: ticket.view alone only ever grants a user
   // their OWN tickets (requested/assigned/shared-with) — this key is what
   // additionally grants the full department ticket list ("All Tickets").
@@ -350,7 +356,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "project.view", "project.create", "project.edit", "resourcePlanning.view", "gantt.view",
     "goal.view",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
-    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable", "ticket.resolutionTime.edit",
     "ticket.share.department", "ticket.share.subdepartment",
     "ticket.pending.view", "ticket.pending.accept",
   ],
@@ -397,7 +403,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "project.view", "project.create", "project.edit", "project.delete", "project.assignable", "resourcePlanning.view", "gantt.view",
     "goal.view", "goal.create", "goal.edit", "goal.delete",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
-    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable", "ticket.resolutionTime.edit",
     "ticket.department.change", "ticket.share.department", "ticket.share.subdepartment",
     "department.view", "department.manageSettings", "department.manageMembers", "department.email.manage",
     "department.user.assign", "department.user.unassign",
@@ -423,7 +429,7 @@ const ROLE_PERMISSIONS: Record<string, string[]> = {
     "activity.view", "activity.edit", "activity.assignable",
     "project.view", "resourcePlanning.view", "gantt.view",
     "ticket.view", "ticket.view.all", "ticket.create", "ticket.reply",
-    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable",
+    "ticket.internalNote", "ticket.assign", "ticket.changeStatus", "ticket.assignable", "ticket.resolutionTime.edit",
     "ticket.share.department", "ticket.share.subdepartment",
     "ticket.pending.view", "ticket.pending.accept",
   ],
@@ -677,7 +683,7 @@ async function main() {
   // database this is a no-op (the bootstrap-once loop above already created
   // these same pairs via ROLE_PERMISSIONS).
   const NEW_PERMISSION_DEFAULT_GRANTS: Record<string, string[]> = {
-    DEPARTMENT_ADMIN: [...TICKET_CONFIG_PERMISSION_KEYS, "gantt.view"],
+    DEPARTMENT_ADMIN: [...TICKET_CONFIG_PERMISSION_KEYS, "gantt.view", "ticket.resolutionTime.edit"],
     DEPARTMENT_MANAGER: [...TICKET_CONFIG_PERMISSION_KEYS, "gantt.view"],
     // ADMIN already bypasses hasPermission() unconditionally (see
     // lib/permissions.ts), so this grant is cosmetic-only — it just keeps the
@@ -705,6 +711,7 @@ async function main() {
       "category.create",
       "projectRequest.approve",
       "projectRequest.intermediateApprove",
+      "ticket.resolutionTime.edit",
     ],
     DIRECTOR: ["organization.tree.view", "gantt.view"],
     // gantt.view backfill for every OTHER role that already had implicit
@@ -712,10 +719,10 @@ async function main() {
     // doc comment in the PERMISSIONS array above) — behavior-preserving on
     // an already-seeded database, exactly like every other entry in this
     // map.
-    IT_AGENT: ["gantt.view"],
+    IT_AGENT: ["gantt.view", "ticket.resolutionTime.edit"],
     USER: ["gantt.view"],
     PROJECT_MANAGER: ["gantt.view"],
-    AGENT_ASSIGNEE: ["gantt.view"],
+    AGENT_ASSIGNEE: ["gantt.view", "ticket.resolutionTime.edit"],
     REQUESTER: ["gantt.view"],
     VIEWER: ["gantt.view"],
   };

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { resolutionTimeMinutesSchema } from "@/lib/resolution-time";
 import { MAX_PROJECT_DURATION_DAYS } from "@/lib/project-duration";
 import {
   MessageDirection,
@@ -178,6 +179,16 @@ export const assignTicketSchema = z.object({
 export const changeStatusSchema = z.object({
   statusId: z.string(),
   cancelReasonId: z.string().optional(),
+  // Optional manual Resolution Time submitted WITH a resolution (target
+  // status "Resolved" only). Omitted = leave the stored value untouched;
+  // explicit null = clear it. See lib/resolution-time.ts.
+  resolutionTimeMinutes: resolutionTimeMinutesSchema.optional(),
+});
+
+// Standalone Resolution Time edit — the key is REQUIRED (null clears), so a
+// body that simply omits it can never be mistaken for "clear".
+export const updateResolutionTimeSchema = z.object({
+  resolutionTimeMinutes: resolutionTimeMinutesSchema,
 });
 
 // ─── Project Schemas ───────────────────────────────────────────────────────────

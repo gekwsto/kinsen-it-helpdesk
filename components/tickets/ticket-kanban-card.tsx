@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import Link from "next/link";
 import { useDraggable } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
@@ -17,6 +18,8 @@ export interface KanbanTicket {
   requester: { id: string; name: string | null; email: string; image: string | null };
   assignedAgent: { id: string; name: string | null; email: string; image: string | null } | null;
   _count: { messages: number; attachments: number };
+  /** Manual Resolution Time — prefills the resolve dialog on a drop onto "Resolved". */
+  resolutionTimeMinutes?: number | null;
 }
 
 interface TicketKanbanCardProps {
@@ -40,12 +43,32 @@ export function TicketKanbanCard({ ticket, draggable }: TicketKanbanCardProps) {
   });
   const style = transform ? { transform: CSS.Translate.toString(transform) } : undefined;
 
+  // A drop that leaves the card in place (e.g. the "Resolved" column's
+  // resolution-time dialog was opened and the move is still pending) ends
+  // with the pointer over this same card, so the browser fires a click on
+  // its link — swallow exactly that one post-drag click. Reset on the next
+  // pointerdown so a drag that ended without a click never eats a real one.
+  const wasDragging = useRef(false);
+  useEffect(() => {
+    if (isDragging) wasDragging.current = true;
+  }, [isDragging]);
+
   return (
     <div
       ref={setNodeRef}
       style={style}
       {...(draggable ? attributes : {})}
       {...(draggable ? listeners : {})}
+      onPointerDownCapture={() => {
+        wasDragging.current = false;
+      }}
+      onClickCapture={(e) => {
+        if (wasDragging.current) {
+          wasDragging.current = false;
+          e.preventDefault();
+          e.stopPropagation();
+        }
+      }}
       className={`rounded-lg border bg-card transition-colors ${
         isDragging ? "opacity-60 shadow-lg z-10 relative" : "hover:bg-muted/50"
       } ${draggable ? "cursor-grab active:cursor-grabbing touch-none" : ""}`}

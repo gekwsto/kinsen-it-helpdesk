@@ -16,7 +16,6 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Select,
@@ -38,6 +37,8 @@ import { TicketHistory } from "@/components/tickets/ticket-history";
 import { TicketActions } from "@/components/tickets/ticket-actions";
 import { TicketDepartmentEditor } from "@/components/tickets/ticket-department-editor";
 import { TicketShareToggles } from "@/components/tickets/ticket-share-toggles";
+import { ResolutionTimeDialog } from "@/components/tickets/resolution-time-dialog";
+import { isResolutionStatus } from "@/lib/resolution-time";
 import { useTicketRealtime } from "@/hooks/use-ticket-realtime";
 import type { TicketRealtimeEvent } from "@/lib/realtime/types";
 
@@ -140,6 +141,10 @@ export interface TicketDetailClientProps {
   canChangeStatus: boolean;
   canAssign: boolean;
   canViewHistory: boolean;
+  /** Manual Resolution Time (total minutes, 1 day = 480) — NULL = not recorded. */
+  initialResolutionTimeMinutes: number | null;
+  /** ticket.resolutionTime.edit for THIS ticket's department (standalone edits). */
+  canEditResolutionTime: boolean;
   statuses: Array<{ id: string; name: string; color: string }>;
   priorities: Array<{ id: string; name: string; color: string; level: number }>;
   categories: Array<{ id: string; name: string }>;
@@ -193,13 +198,15 @@ export function TicketDetailClient({
   canChangeStatus,
   canAssign,
   canViewHistory,
+  initialResolutionTimeMinutes,
+  canEditResolutionTime,
   statuses,
   priorities,
   categories,
   agents,
 }: TicketDetailClientProps) {
   const router = useRouter();
-  const canManageAny = canChangeStatus || canAssign || canLinkProjectActivity;
+  const canManageAny = canChangeStatus || canAssign || canLinkProjectActivity || canEditResolutionTime;
   const [messages, setMessages] = useState<ThreadMessage[]>(initialMessages);
   const [status, setStatus] = useState<TicketStatus>(initialStatus);
   const [priority, setPriority] = useState<TicketPriority | null>(initialPriority);
@@ -207,6 +214,7 @@ export function TicketDetailClient({
   const [assignedAgent, setAssignedAgent] = useState<TicketAgent | null>(initialAssignedAgent);
   const [closedAt, setClosedAt] = useState<string | null>(initialClosedAt);
   const [cancelReasonId, setCancelReasonId] = useState<string | null>(initialCancelReasonId);
+  const [resolutionTimeMinutes, setResolutionTimeMinutes] = useState<number | null>(initialResolutionTimeMinutes);
 
   // Delete ticket dialog
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -244,12 +252,19 @@ export function TicketDetailClient({
           break;
         }
         case "TICKET_STATUS_CHANGED": {
-          const { status: s, closedAt: ca } = event.payload as {
+          const { status: s, closedAt: ca, resolutionTimeMinutes: rt } = event.payload as {
             status: TicketStatus;
             closedAt: string | null;
+            resolutionTimeMinutes?: number | null;
           };
           setStatus(s);
           setClosedAt(ca);
+          if (rt !== undefined) setResolutionTimeMinutes(rt);
+          break;
+        }
+        case "TICKET_RESOLUTION_TIME_CHANGED": {
+          const { resolutionTimeMinutes: rt } = event.payload as { resolutionTimeMinutes: number | null };
+          setResolutionTimeMinutes(rt);
           break;
         }
         case "TICKET_PRIORITY_CHANGED": {
@@ -333,7 +348,7 @@ export function TicketDetailClient({
   // same lookup convention already used elsewhere (e.g. the dashboard
   // route). Gracefully absent (button hidden) if a department renamed or
   // never created a status literally named "Resolved".
-  const resolvedStatus = statuses.find((s) => s.name === "Resolved") ?? null;
+  const resolvedStatus = statuses.find((s) => isResolutionStatus(s)) ?? null;
   const isAssignedToMe = assignedAgent?.id === currentUserId;
   // Mirrors the Assign Agent dialog's own `agents` option list (the
   // department-scoped, eligible-assignee set already resolved
@@ -363,21 +378,28 @@ export function TicketDetailClient({
     }
   };
 
-  const handleResolve = async () => {
-    if (!resolvedStatus) return;
+  // Resolution + optional manual Resolution Time in ONE request (the status
+  // route saves both atomically). The dialog always sends the field: NULL
+  // when every input was left empty, so clearing a prefilled duration
+  // really clears it.
+  const handleResolve = async (minutes: number | null): Promise<boolean> => {
+    if (!resolvedStatus) return false;
     setResolving(true);
     try {
       const res = await fetch(`/api/tickets/${ticketId}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ statusId: resolvedStatus.id }),
+        body: JSON.stringify({ statusId: resolvedStatus.id, resolutionTimeMinutes: minutes }),
       });
       if (!res.ok) throw new Error("Request failed");
+      const data = await res.json().catch(() => null);
+      if (data && data.resolutionTimeMinutes !== undefined) setResolutionTimeMinutes(data.resolutionTimeMinutes);
       toast.success("Status updated");
-      setResolveConfirmOpen(false);
       // Real-time SSE event (TICKET_STATUS_CHANGED) updates `status` — no router.refresh() needed
+      return true;
     } catch {
       toast.error("Failed to update status");
+      return false;
     } finally {
       setResolving(false);
     }
@@ -589,6 +611,9 @@ export function TicketDetailClient({
             canCreateActivityInDept={canCreateActivityInDept}
             canEditProjectInDept={canEditProjectInDept}
             canEditActivityInDept={canEditActivityInDept}
+            resolutionTimeMinutes={resolutionTimeMinutes}
+            onResolutionTimeChange={setResolutionTimeMinutes}
+            canEditResolutionTime={canEditResolutionTime}
           />
         )}
 
@@ -659,31 +684,25 @@ export function TicketDetailClient({
                     </Button>
                   )}
                   {canResolveNow && (
-                    <Dialog open={resolveConfirmOpen} onOpenChange={setResolveConfirmOpen}>
-                      <DialogTrigger asChild>
-                        <Button variant="outline" size="sm" className="flex-1 justify-start gap-2">
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          Resolve
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent>
-                        <DialogHeader>
-                          <DialogTitle>Resolve this ticket?</DialogTitle>
-                        </DialogHeader>
-                        <p className="text-sm text-muted-foreground py-2">
-                          This sets the status to <span className="font-medium text-foreground">Resolved</span>. The ticket stays open and can still be updated afterward.
-                        </p>
-                        <DialogFooter>
-                          <Button variant="outline" onClick={() => setResolveConfirmOpen(false)} disabled={resolving}>
-                            Cancel
-                          </Button>
-                          <Button onClick={handleResolve} disabled={resolving}>
-                            {resolving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-                            Resolve
-                          </Button>
-                        </DialogFooter>
-                      </DialogContent>
-                    </Dialog>
+                    <>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="flex-1 justify-start gap-2"
+                        onClick={() => setResolveConfirmOpen(true)}
+                        disabled={resolving}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        Resolve
+                      </Button>
+                      <ResolutionTimeDialog
+                        open={resolveConfirmOpen}
+                        onOpenChange={setResolveConfirmOpen}
+                        mode="resolve"
+                        initialMinutes={resolutionTimeMinutes}
+                        onSubmit={handleResolve}
+                      />
+                    </>
                   )}
                 </div>
               )}

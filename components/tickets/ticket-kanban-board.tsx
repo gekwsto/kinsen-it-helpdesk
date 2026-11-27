@@ -6,6 +6,8 @@ import { toast } from "sonner";
 import { DndContext, type DragEndEvent, PointerSensor, pointerWithin, useSensor, useSensors } from "@dnd-kit/core";
 import { TicketKanbanColumn } from "@/components/tickets/ticket-kanban-column";
 import { type KanbanTicket } from "@/components/tickets/ticket-kanban-card";
+import { ResolutionTimeDialog } from "@/components/tickets/resolution-time-dialog";
+import { isResolutionStatus } from "@/lib/resolution-time";
 
 interface KanbanStatus {
   /** Real statusId(s) this column represents — always exactly one entry here, since the board is only ever rendered for a single selected department (see app/(main)/tickets/page.tsx's boardDisabled). */
@@ -66,6 +68,10 @@ export function TicketKanbanBoard({ columns, statuses, departmentId, canChangeSt
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const canDrag = (ticket: KanbanTicket) => canChangeStatusBase || ticket.requester.id === currentUserId;
+
+  // A drop onto the "Resolved" column is a resolution: it waits for the
+  // optional-duration dialog (Cancel = the card stays where it was).
+  const [pendingResolve, setPendingResolve] = useState<{ ticketId: string; newStatusId: string; initialMinutes: number | null } | null>(null);
 
   const loadMore = async (statusId: string) => {
     const current = columnState.get(statusId);
@@ -134,16 +140,45 @@ export function TicketKanbanBoard({ columns, statuses, departmentId, canChangeSt
       }
     }
     if (!movedTicket || !fromStatusId || fromStatusId === newStatusId) return;
+    if (!columnState.get(newStatusId)) return;
+
+    const target = statuses.find((s) => s.ids.includes(newStatusId));
+    if (isResolutionStatus(target)) {
+      setPendingResolve({ ticketId, newStatusId, initialMinutes: movedTicket.resolutionTimeMinutes ?? null });
+      return;
+    }
+    await moveTicket(ticketId, newStatusId, {});
+  };
+
+  const moveTicket = async (ticketId: string, newStatusId: string, extraBody: Record<string, unknown>): Promise<boolean> => {
+    let movedTicket: KanbanTicket | undefined;
+    let fromStatusId: string | undefined;
+    for (const [statusId, col] of columnState) {
+      const found = col.tickets.find((t) => t.id === ticketId);
+      if (found) {
+        movedTicket = found;
+        fromStatusId = statusId;
+        break;
+      }
+    }
+    if (!movedTicket || !fromStatusId || fromStatusId === newStatusId) return false;
 
     const previousState = columnState;
     const nextState = new Map(columnState);
     const fromCol = nextState.get(fromStatusId)!;
     const toCol = nextState.get(newStatusId);
-    if (!toCol) return;
+    if (!toCol) return false;
     nextState.set(fromStatusId, { ...fromCol, tickets: fromCol.tickets.filter((t) => t.id !== ticketId), total: Math.max(0, fromCol.total - 1) });
     nextState.set(newStatusId, {
       ...toCol,
-      tickets: [{ ...movedTicket, status: { ...movedTicket.status, id: newStatusId } }, ...toCol.tickets],
+      tickets: [
+        {
+          ...movedTicket,
+          status: { ...movedTicket.status, id: newStatusId },
+          ...("resolutionTimeMinutes" in extraBody ? { resolutionTimeMinutes: extraBody.resolutionTimeMinutes as number | null } : {}),
+        },
+        ...toCol.tickets,
+      ],
       total: toCol.total + 1,
     });
     setColumnState(nextState);
@@ -152,15 +187,17 @@ export function TicketKanbanBoard({ columns, statuses, departmentId, canChangeSt
       const res = await fetch(`/api/tickets/${ticketId}/status`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ statusId: newStatusId }),
+        body: JSON.stringify({ statusId: newStatusId, ...extraBody }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error ?? "Failed to update ticket status");
       }
+      return true;
     } catch (error: any) {
       setColumnState(previousState);
       toast.error(error.message ?? "Failed to update ticket status");
+      return false;
     }
   };
 
@@ -185,6 +222,15 @@ export function TicketKanbanBoard({ columns, statuses, departmentId, canChangeSt
           );
         })}
       </div>
+      <ResolutionTimeDialog
+        open={pendingResolve !== null}
+        onOpenChange={(o) => !o && setPendingResolve(null)}
+        mode="resolve"
+        initialMinutes={pendingResolve?.initialMinutes ?? null}
+        onSubmit={(minutes) =>
+          pendingResolve ? moveTicket(pendingResolve.ticketId, pendingResolve.newStatusId, { resolutionTimeMinutes: minutes }) : Promise.resolve(false)
+        }
+      />
     </DndContext>
   );
 }

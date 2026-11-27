@@ -12,7 +12,9 @@ import {
   MessageSquare,
   Paperclip,
   Plus,
+  Clock,
 } from "lucide-react";
+import { formatResolutionTime } from "@/lib/resolution-time";
 
 interface HistoryEntry {
   id: string;
@@ -40,6 +42,7 @@ const HISTORY_ICONS: Record<TicketHistoryType, React.ElementType> = {
   COMMENT_ADDED: MessageSquare,
   ATTACHMENT_ADDED: Paperclip,
   CANCEL_REASON_SET: XCircle,
+  RESOLUTION_TIME_CHANGE: Clock,
 };
 
 const HISTORY_COLORS: Record<TicketHistoryType, string> = {
@@ -54,7 +57,15 @@ const HISTORY_COLORS: Record<TicketHistoryType, string> = {
   COMMENT_ADDED: "bg-slate-100 dark:bg-gray-800 text-slate-700 dark:text-gray-300",
   ATTACHMENT_ADDED: "bg-slate-100 dark:bg-gray-800 text-slate-700 dark:text-gray-300",
   CANCEL_REASON_SET: "bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-400",
+  RESOLUTION_TIME_CHANGE: "bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-400",
 };
+
+/** RESOLUTION_TIME_CHANGE stores raw minutes (NULL = not recorded) — shown formatted, including the NULL side. */
+function displayValues(entry: HistoryEntry): { oldValue?: string | null; newValue?: string | null } {
+  if (entry.type !== "RESOLUTION_TIME_CHANGE") return entry;
+  const toText = (v?: string | null) => formatResolutionTime(v === null || v === undefined || v === "" ? null : Number(v));
+  return { oldValue: toText(entry.oldValue), newValue: toText(entry.newValue) };
+}
 
 interface TicketHistoryProps {
   history: HistoryEntry[];
@@ -74,6 +85,7 @@ export function TicketHistory({ history }: TicketHistoryProps) {
       {history.map((entry) => {
         const Icon = HISTORY_ICONS[entry.type] ?? GitBranch;
         const colorClass = HISTORY_COLORS[entry.type] ?? "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300";
+        const { oldValue, newValue } = displayValues(entry);
 
         return (
           <div key={entry.id} className="flex items-start gap-3 text-sm">
@@ -89,11 +101,11 @@ export function TicketHistory({ history }: TicketHistoryProps) {
                   {entry.description}
                 </span>
               </div>
-              {entry.oldValue && entry.newValue && (
+              {oldValue && newValue && (
                 <div className="flex items-center gap-1 mt-0.5 text-xs text-muted-foreground">
-                  <span className="line-through">{entry.oldValue}</span>
+                  <span className="line-through">{oldValue}</span>
                   <ArrowRight className="h-3 w-3" />
-                  <span className="font-medium text-foreground">{entry.newValue}</span>
+                  <span className="font-medium text-foreground">{newValue}</span>
                 </div>
               )}
               <p className="text-xs text-muted-foreground mt-0.5">
