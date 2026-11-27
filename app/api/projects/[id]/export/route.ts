@@ -25,6 +25,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
     where: { id },
     include: {
       owner: { select: { id: true, name: true } },
+      statusDefinition: { select: { label: true } },
       owners: { select: { id: true, name: true } },
       audience: { select: { id: true, name: true } },
       department: { select: { id: true, name: true } },
@@ -67,7 +68,8 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
   const data: ProjectDetailExportData = {
     title: project.title,
     description: project.description,
-    status: project.status,
+    // The configured Project Status label (what every screen shows).
+    status: project.statusDefinition.label,
     priority: project.priority,
     origin: project.projectRequestId ? "From Request" : "Manual",
     projectRequestTitle: project.projectRequest?.title ?? null,

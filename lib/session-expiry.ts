@@ -107,6 +107,23 @@ export function computeSessionExpiryUiState(expiresAt: number, nowMs: number = D
   return { action: "none", remainingMs };
 }
 
+/** A warning dismissed with ✕ (never a renewal) is shown once more when this little time remains. */
+export const SESSION_FINAL_NOTICE_BEFORE_MS = 60 * 1000;
+
+/**
+ * Whether a session re-read from the server after a renewal is a GENUINE
+ * renewal: a finite absolute expiry that is LATER than the previous one and
+ * still outside the warning window (so the old expiry can never re-trigger
+ * the warning). Pure — used by the client controller, unit-tested directly.
+ * It only validates the server's value; nothing here computes or extends an
+ * expiry.
+ */
+export function isValidSessionRenewal(previousExpiresAt: number | null | undefined, renewedExpiresAt: number | null | undefined, nowMs: number = Date.now()): boolean {
+  if (typeof renewedExpiresAt !== "number" || !Number.isFinite(renewedExpiresAt)) return false;
+  if (typeof previousExpiresAt === "number" && renewedExpiresAt <= previousExpiresAt) return false;
+  return computeSessionExpiryUiState(renewedExpiresAt, nowMs).action === "none";
+}
+
 export interface RawSessionExpiryState {
   /** A session cookie was present and successfully decrypted at all. */
   hasToken: boolean;

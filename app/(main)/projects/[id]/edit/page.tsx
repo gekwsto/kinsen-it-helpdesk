@@ -17,7 +17,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ChevronRight, Loader2, Building2, Briefcase } from "lucide-react";
-import { ProjectStatus } from "@prisma/client";
 import { FacilitiesDateField, facilitiesBoundaryPreview } from "@/components/projects/facilities-date-field";
 import { ProjectOwnersPicker } from "@/components/projects/project-owners-picker";
 import { WorkspaceCombobox } from "@/components/projects/workspace-combobox";
@@ -101,7 +100,10 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
 
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [status, setStatus] = useState<ProjectStatus>(ProjectStatus.PLANNING);
+  // The configured Project Status (definition id) — options are the global
+  // ACTIVE definitions plus the Project's current one (kept even if inactive).
+  const [statusDefinitionId, setStatusDefinitionId] = useState<string>("");
+  const [statusDefinitions, setStatusDefinitions] = useState<{ id: string; label: string; color: string; isActive: boolean }[]>([]);
   const [priority, setPriority] = useState("2");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -190,7 +192,7 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
         if (p?.title) {
           setTitle(p.title);
           setDescription(p.description ?? "");
-          setStatus(p.status);
+          setStatusDefinitionId(p.statusDefinition?.id ?? "");
           // Clamp to max priority 3 (High) in case legacy value of 4 exists
           setPriority(String(Math.min(p.priority ?? 2, 3)));
           setStartDate(p.startDate ? p.startDate.split("T")[0] : "");
@@ -291,6 +293,13 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
       })
       .finally(() => setLoading(false));
   }, [id]);
+
+  useEffect(() => {
+    fetch("/api/project-statuses")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((defs) => setStatusDefinitions(Array.isArray(defs) ? defs : []))
+      .catch(() => setStatusDefinitions([]));
+  }, []);
 
   // Audience — Users options — fetched once, independent of the Project's
   // own department (unlike Members above), same "any active user in the
@@ -465,7 +474,8 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
           // Only sent when it actually changes — an unchanged Workspace
           // keeps the exact previous PATCH payload.
           ...(workspaceChanged ? { departmentId: selectedDepartmentId } : {}),
-          status,
+          // Re-sending the current (possibly inactive) status is a no-op server-side.
+          ...(statusDefinitionId ? { statusDefinitionId } : {}),
           priority: parseInt(priority),
           // Facilities Services: Start/End are driven by the precision
           // toggle below (an exact date still flows through this SAME
@@ -644,16 +654,22 @@ export default function EditProjectPage({ params }: { params: Promise<{ id: stri
 
               <div className="space-y-2">
                 <Label>Status</Label>
-                <Select value={status} onValueChange={(v) => setStatus(v as ProjectStatus)}>
-                  <SelectTrigger>
-                    <SelectValue />
+                <Select value={statusDefinitionId} onValueChange={(v) => { if (v) setStatusDefinitionId(v); }}>
+                  <SelectTrigger aria-label="Status">
+                    <SelectValue placeholder="Select a status" />
                   </SelectTrigger>
                   <SelectContent>
-                    {Object.values(ProjectStatus).map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s.replace(/_/g, " ")}
-                      </SelectItem>
-                    ))}
+                    {statusDefinitions
+                      .filter((d) => d.isActive || d.id === statusDefinitionId)
+                      .map((d) => (
+                        <SelectItem key={d.id} value={d.id}>
+                          <span className="inline-flex items-center gap-1.5">
+                            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: d.color }} aria-hidden="true" />
+                            {d.label}
+                            {!d.isActive && <span className="text-muted-foreground">(inactive)</span>}
+                          </span>
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
               </div>

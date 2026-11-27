@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { ChevronRight, Target, FolderKanban, Pencil } from "lucide-react";
-import { GoalStatus, ProjectStatus } from "@prisma/client";
+import { GoalStatus } from "@prisma/client";
+import { ProjectStatusBadge } from "@/components/projects/project-status-badge";
 
 const GOAL_STATUS_COLORS: Record<GoalStatus, string> = {
   NOT_STARTED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
@@ -16,14 +17,6 @@ const GOAL_STATUS_COLORS: Record<GoalStatus, string> = {
   AT_RISK: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
   COMPLETED: "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400",
   CANCELLED: "bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400",
-};
-
-const PROJECT_STATUS_COLORS: Record<ProjectStatus, string> = {
-  PLANNING: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
-  IN_PROGRESS: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400",
-  ON_HOLD: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
-  COMPLETED: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
-  CANCELLED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
 };
 
 export default async function GoalDetailPage({
@@ -48,6 +41,7 @@ export default async function GoalDetailPage({
           id: true,
           title: true,
           status: true,
+          statusDefinition: { select: { id: true, label: true, color: true, isActive: true } },
           _count: { select: { activities: true } },
         },
       },
@@ -122,11 +116,7 @@ export default async function GoalDetailPage({
                           {project._count.activities} activities
                         </p>
                       </div>
-                      <span
-                        className={`text-xs font-medium px-2 py-0.5 rounded-full ${PROJECT_STATUS_COLORS[project.status]}`}
-                      >
-                        {project.status.replace(/_/g, " ")}
-                      </span>
+                      <ProjectStatusBadge status={project.statusDefinition} />
                     </Link>
                   ))}
                 </div>

@@ -223,9 +223,10 @@ async function main() {
     await page.locator("#owner").click();
     await page.getByRole("option", { name: "System Administrator" }).first().click();
 
-    // Check at least one Related User checkbox.
-    const firstUserCheckbox = page.locator('input[type="checkbox"]').first();
-    await firstUserCheckbox.check();
+    // Related Users are OPTIONAL — none is ticked; the Activity is created without any.
+    const relatedLabel = page.locator("label", { hasText: /^Related Users/ }).first();
+    check("Related Users label carries NO required asterisk", (await relatedLabel.innerText()).trim() === "Related Users", await relatedLabel.innerText());
+    check("No Related User checkbox is ticked before submit", (await page.locator('input[type="checkbox"]:checked').count()) === 0);
 
     await page.getByRole("button", { name: /create activity/i }).click();
     // Excludes "new" explicitly — the CURRENT url (before the click even
@@ -236,7 +237,45 @@ async function main() {
     await page.waitForURL((url) => /\/activities\/[a-z0-9]+$/.test(url.pathname) && !url.pathname.endsWith("/activities/new"), { timeout: 10000 });
     const newActivityId = page.url().split("/").pop()!;
     activityIds.push(newActivityId);
-    check("Submitting the fully-filled request-origin form succeeds and navigates to the new Activity", true);
+    check("Submitting the request-origin form WITHOUT any Related User succeeds and navigates to the new Activity", true);
+    const created = await prisma.projectActivity.findUniqueOrThrow({ where: { id: newActivityId }, select: { ownerId: true, taskSubTypeId: true, expectedStartDate: true, _count: { select: { assignedUsers: true } } } });
+    check("...persisted with zero Related Users and all other request-origin fields set", created._count.assignedUsers === 0 && !!created.ownerId && !!created.taskSubTypeId && !!created.expectedStartDate);
+    await page.getByText(`${TAG} RO Activity`, { exact: false }).first().waitFor({ timeout: 30000 });
+    check("Activity Details renders the Activity with no Related Users", (await page.getByText(`${TAG} RO Activity`, { exact: false }).count()) > 0);
+
+    console.log("\n=== Zero Related Users across Project Details, Gantt, Resource Planning ===\n");
+    await page.goto(`${BASE_URL}/projects/${requestOriginProject.id}`, { waitUntil: "load" });
+    await page.getByText(`${TAG} RO Activity`, { exact: false }).first().waitFor({ timeout: 30000 }).catch(() => undefined);
+    check("Project Details lists the Activity", (await page.getByText(`${TAG} RO Activity`, { exact: false }).count()) > 0);
+    await page.goto(`${BASE_URL}/activities/gantt?departmentId=${dept.id}&projectId=${requestOriginProject.id}`, { waitUntil: "load" });
+    await page.getByText(`${TAG} RO Activity`, { exact: false }).first().waitFor({ timeout: 30000 }).catch(() => undefined);
+    check("Activity Gantt renders the Activity", (await page.getByText(`${TAG} RO Activity`, { exact: false }).count()) > 0);
+    await page.goto(`${BASE_URL}/projects/gantt?departmentId=${dept.id}`, { waitUntil: "load" });
+    await page.getByText(`${TAG} request`, { exact: false }).first().waitFor({ timeout: 30000 }).catch(() => undefined);
+    check("Project Gantt renders the Project (no error with a zero-Related-Users Activity)", (await page.getByText(`${TAG} request`, { exact: false }).count()) > 0 && (await page.getByText(/application error|something went wrong/i).count()) === 0);
+    await page.goto(`${BASE_URL}/projects/resource-planning?departmentId=${dept.id}&view=month&from=2026-06-01&timeline=expected`, { waitUntil: "load" });
+    await page.getByText(`${TAG} RO Activity`, { exact: false }).first().waitFor({ timeout: 30000 }).catch(() => undefined);
+    check("Resource Planning surfaces the Activity (Unscheduled — no assignee, existing behaviour)", (await page.getByText(`${TAG} RO Activity`, { exact: false }).count()) > 0);
+
+    console.log("\n=== Related Users added and removed after creation (Edit page) ===\n");
+    const editAndSave = async (toggle: () => Promise<void>) => {
+      await page.goto(`${BASE_URL}/activities/${newActivityId}/edit`, { waitUntil: "load" });
+      const relSection = page.locator("div.space-y-2", { has: page.locator("label", { hasText: /^Related Users$/ }) }).last();
+      await relSection.locator('input[type="checkbox"]').first().waitFor({ timeout: 30000 });
+      await toggle();
+      const [res] = await Promise.all([
+        page.waitForResponse((r) => r.url().includes(`/api/activities/${newActivityId}`) && r.request().method() === "PATCH"),
+        page.getByRole("button", { name: /save changes/i }).click(),
+      ]);
+      return { res, relSection };
+    };
+    const relCheckbox = () => page.locator("div.space-y-2", { has: page.locator("label", { hasText: /^Related Users$/ }) }).last().locator('input[type="checkbox"]').first();
+    const addRes = (await editAndSave(async () => { await relCheckbox().check(); })).res;
+    check("Adding a Related User via the Edit page saves (200) and persists", addRes.status() === 200 && (await prisma.projectActivity.findUniqueOrThrow({ where: { id: newActivityId }, select: { _count: { select: { assignedUsers: true } } } }))._count.assignedUsers === 1);
+    await page.waitForURL((u) => u.pathname === `/activities/${newActivityId}`, { timeout: 30000 }).catch(() => undefined);
+    const removeRes = (await editAndSave(async () => { await relCheckbox().uncheck(); })).res;
+    check("Removing it again saves (200) — back to zero Related Users", removeRes.status() === 200 && (await prisma.projectActivity.findUniqueOrThrow({ where: { id: newActivityId }, select: { _count: { select: { assignedUsers: true } } } }))._count.assignedUsers === 0);
+    await page.waitForURL((u) => u.pathname === `/activities/${newActivityId}`, { timeout: 30000 }).catch(() => undefined);
 
     // ══════════════════════ 2. Manual Project create UI (regression guard) ══════════════════════
     console.log("\n=== Manual Project Activity creation UI (regression guard) ===\n");

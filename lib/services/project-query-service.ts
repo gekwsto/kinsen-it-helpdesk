@@ -196,7 +196,8 @@ export const PROJECT_SORT_KEYS: Record<string, SortKeyDef> = {
   // department is a nullable relation, so this relies on Postgres's own
   // deterministic default null ordering instead.
   department: (order) => ({ department: { name: order } }),
-  status: (order) => ({ status: order }),
+  // Configured display order of the Project Status (not the enum order).
+  status: (order) => ({ statusDefinition: { sortOrder: order } }),
   priority: (order) => ({ priority: order }),
   startDate: (order) => ({ startDate: { sort: order, nulls: "last" } }),
   // Never null, so no `nulls` modifier needed — same as title/status/priority.
@@ -226,6 +227,7 @@ export interface ProjectListFilterParams {
   sortOrder?: string;
   search?: string;
   status?: string;
+  statusId?: string;
   statusGroup?: string;
   overdue?: string;
   priority?: string;
@@ -282,8 +284,12 @@ export async function buildProjectListQuery(
   if (params.subDepartmentId) andConditions.push({ subDepartmentId: params.subDepartmentId });
   if (params.search) andConditions.push(buildProjectSearchCondition(params.search));
 
+  // `status` = CANONICAL lifecycle state (unchanged; legacy links/drill-
+  // downs); `statusId` = a configured Project Status definition (the list
+  // filter dropdown).
   const exactStatus = params.status && PROJECT_STATUS_VALUES.has(params.status) ? (params.status as ProjectStatus) : undefined;
   if (exactStatus) andConditions.push({ status: exactStatus });
+  if (params.statusId) andConditions.push({ statusDefinitionId: params.statusId });
 
   const priority = parseStrictIntIn(params.priority, [1, 2, 3]);
   if (priority !== undefined) andConditions.push({ priority });

@@ -244,6 +244,7 @@ export function Sidebar({ userRole, navFlags }: SidebarProps) {
         { label: "Categories", href: "/admin/categories", roles: ["ADMIN"] as Role[] },
         { label: "Priorities", href: "/admin/priorities", roles: ["ADMIN"] as Role[] },
         { label: "Statuses", href: "/admin/statuses", roles: ["ADMIN"] as Role[] },
+        { label: "Project Statuses", href: "/admin/project-statuses", roles: ["ADMIN"] as Role[] },
         { label: "Cancel Reasons", href: "/admin/cancel-reasons", roles: ["ADMIN"] as Role[] },
         { label: "SLA", href: "/admin/sla", roles: ["ADMIN"] as Role[] },
         { label: "Activity Progress", href: "/admin/activity-progress", roles: ["ADMIN"] as Role[] },

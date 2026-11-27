@@ -80,14 +80,14 @@ async function main() {
 
     const projectStatusTrigger = page.getByRole("button", { name: "Change project status" });
     await projectStatusTrigger.waitFor({ state: "visible" });
-    check("Quick-status trigger shows the current status label", (await projectStatusTrigger.textContent())?.includes("PLANNING") ?? false);
+    check("Quick-status trigger shows the current status label", (await projectStatusTrigger.textContent())?.includes("Planning") ?? false);
     await projectStatusTrigger.click();
     await page.waitForSelector('[role="menuitem"]', { timeout: 5000 });
     check("Dropdown offers 'ON HOLD' (a valid ProjectStatus)", (await page.locator('[role="menuitem"]:has-text("ON HOLD")').count()) > 0);
 
     await page.locator('[role="menuitem"]:has-text("ON HOLD")').click();
     await page.waitForSelector('button[aria-label="Change project status"]:has-text("ON HOLD")', { timeout: 10000 });
-    check("Status badge in the header updated to ON HOLD immediately (no reload)", (await page.locator("h1").locator("xpath=following-sibling::span[1]").textContent())?.trim() === "ON HOLD");
+    check("Status badge in the header updated to ON HOLD immediately (no reload)", (await page.locator("h1").locator("xpath=following-sibling::span[1]").textContent())?.trim() === "On Hold");
 
     await page.reload();
     await page.waitForSelector('button[aria-label="Change project status"]:has-text("ON HOLD")', { timeout: 10000 });

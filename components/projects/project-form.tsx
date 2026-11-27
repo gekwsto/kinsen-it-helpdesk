@@ -20,7 +20,6 @@ import {
 } from "@/components/ui/select";
 import { Loader2, ChevronLeft, ShieldOff, Building2, Briefcase } from "lucide-react";
 import Link from "next/link";
-import { ProjectStatus } from "@prisma/client";
 import { useCreateWithAttachments } from "@/hooks/use-create-with-attachments";
 import { PendingAttachmentsField } from "@/components/attachments/pending-attachments-field";
 import { PostCreateUploadPanel } from "@/components/attachments/post-create-upload-panel";
@@ -319,13 +318,27 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
     defaultValues: {
       title: fromRequestPrefill?.title,
       description: fromRequestPrefill?.description ?? undefined,
-      status: ProjectStatus.PLANNING,
       priority: fromRequestPrefill?.priority ?? 2,
       memberIds: [],
       isGoal: false,
       departmentId: inline || fromRequest ? fixedDepartmentId : defaultDepartmentId,
     },
   });
+
+  // Configured Project Statuses (global) — default the selection to the
+  // system PLANNING status once loaded.
+  const [statusDefinitions, setStatusDefinitions] = useState<{ id: string; label: string; color: string; isActive: boolean; isSystem: boolean; canonicalStatus: string }[]>([]);
+  useEffect(() => {
+    fetch("/api/project-statuses")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((defs) => {
+        const list = Array.isArray(defs) ? defs : [];
+        setStatusDefinitions(list);
+        const planning = list.find((d: { isSystem: boolean; canonicalStatus: string }) => d.isSystem && d.canonicalStatus === "PLANNING");
+        if (planning) setValue("statusDefinitionId", planning.id);
+      })
+      .catch(() => setStatusDefinitions([]));
+  }, [setValue]);
 
   // fromRequest: a real, editable Workspace choice defaulting to the
   // request's department (fixedDepartmentId) — see the Workspace field below.
@@ -828,19 +841,29 @@ export function ProjectForm({ departments, editableDepartmentIds, defaultDepartm
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label>Status</Label>
+              {/* Configured Project Statuses (ACTIVE only); defaults to the
+                  system PLANNING status — the same default the server applies
+                  when none is sent. */}
               <Select
-                defaultValue={ProjectStatus.PLANNING}
-                onValueChange={(v) => setValue("status", v as ProjectStatus)}
+                value={watch("statusDefinitionId") ?? ""}
+                // Radix can emit "" (hidden native select) — never let that
+                // clobber the chosen/default status.
+                onValueChange={(v) => { if (v) setValue("statusDefinitionId", v); }}
               >
-                <SelectTrigger>
-                  <SelectValue />
+                <SelectTrigger aria-label="Status">
+                  <SelectValue placeholder="Planning" />
                 </SelectTrigger>
                 <SelectContent>
-                  {Object.values(ProjectStatus).map((s) => (
-                    <SelectItem key={s} value={s}>
-                      {s.replace("_", " ")}
-                    </SelectItem>
-                  ))}
+                  {statusDefinitions
+                    .filter((d) => d.isActive)
+                    .map((d) => (
+                      <SelectItem key={d.id} value={d.id}>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-2 w-2 rounded-full" style={{ backgroundColor: d.color }} aria-hidden="true" />
+                          {d.label}
+                        </span>
+                      </SelectItem>
+                    ))}
                 </SelectContent>
               </Select>
             </div>

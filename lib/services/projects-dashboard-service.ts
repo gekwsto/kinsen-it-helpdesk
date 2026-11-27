@@ -9,24 +9,9 @@ import {
 } from "@/lib/status-terminal";
 import { startOfTodayUtc, isOverdue } from "@/lib/overdue";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
+import { listProjectStatusDefinitions } from "@/lib/services/project-status-service";
 
 const DUE_SOON_DAYS = 7;
-
-const PROJECT_STATUS_COLOR: Record<ProjectStatus, string> = {
-  PLANNING: "#3b82f6",
-  IN_PROGRESS: "#f59e0b",
-  ON_HOLD: "#fb923c",
-  COMPLETED: "#10b981",
-  CANCELLED: "#d1d5db",
-};
-
-const PROJECT_STATUS_LABEL: Record<ProjectStatus, string> = {
-  PLANNING: "Planning",
-  IN_PROGRESS: "In Progress",
-  ON_HOLD: "On Hold",
-  COMPLETED: "Completed",
-  CANCELLED: "Cancelled",
-};
 
 const PROJECT_PRIORITY_COLOR: Record<number, string> = {
   1: "#22c55e",
@@ -121,7 +106,9 @@ export async function getProjectsDashboardData(
   ] = await Promise.all([
     prisma.project.count({ where: projectWhere }),
     prisma.project.groupBy({ by: ["departmentId", "status"], where: projectWhere, _count: { _all: true } }),
-    prisma.project.groupBy({ by: ["status"], where: projectWhere, _count: { _all: true } }),
+    // Breakdown by CONFIGURED Project Status (display); lifecycle KPIs
+    // (active/completed/overdue) stay canonical + terminal-config based.
+    prisma.project.groupBy({ by: ["statusDefinitionId"], where: projectWhere, _count: { _all: true } }),
     prisma.project.groupBy({ by: ["priority"], where: projectWhere, _count: { _all: true } }),
     // Ownership per project: primary owner + every co-owner (canonical
     // Project.owners) — tallied below so a co-owner counts too.
@@ -174,11 +161,11 @@ export async function getProjectsDashboardData(
   const completedActivities = sumWhereTerminal(activityStatusByDept, activityTerminalConfigs, resolveActivityTerminal, true);
   const overdueActivities = sumWhereTerminal(overdueActivityEligibleByDept, activityTerminalConfigs, resolveActivityTerminal, false);
 
-  const byStatus = statusChartGroups.map((g) => ({
-    name: PROJECT_STATUS_LABEL[g.status],
-    value: g._count._all,
-    color: PROJECT_STATUS_COLOR[g.status],
-  }));
+  const statusDefinitions = await listProjectStatusDefinitions();
+  const countByDefinition = new Map(statusChartGroups.map((g) => [g.statusDefinitionId, g._count._all]));
+  const byStatus = statusDefinitions
+    .filter((d) => countByDefinition.has(d.id))
+    .map((d) => ({ name: d.label, value: countByDefinition.get(d.id)!, color: d.color }));
 
   const byPriority = priorityChartGroups
     .slice()

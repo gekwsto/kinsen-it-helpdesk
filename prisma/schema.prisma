@@ -1602,7 +1602,21 @@ model Project {
   id               String          @id @default(cuid())
   title            String
   description      String?         @db.Text
+  // The CANONICAL business lifecycle state — every lifecycle rule
+  // (completion/reopen, Feedback obligations, overdue/terminal via
+  // ProjectStatusConfig, Actual dates, financials) reads ONLY this column.
+  // Always equal to statusDefinition.canonicalStatus (enforced by
+  // lib/services/project-status-service.ts AND the DB trigger
+  // project_status_definition_sync — see the migrations
+  // 20261129090000_project_status_definitions and
+  // 20261129100000_project_status_trigger_consistency, documented in
+  // lib/services/project-status-service.ts).
   status           ProjectStatus   @default(PLANNING)
+  // The configured (display) status — label/color/order come from here.
+  // DB-managed default: the trigger fills it with the system definition of
+  // `status` when a writer supplies only the canonical value.
+  statusDefinition   ProjectStatusDefinition @relation(fields: [statusDefinitionId], references: [id])
+  statusDefinitionId String                  @default(dbgenerated())
   priority         Int             @default(2)
   progress         Int             @default(0)
   // The single CANONICAL/PRIMARY owner — kept for every pre-existing
@@ -1841,6 +1855,7 @@ model Project {
 
   @@index([ownerId])
   @@index([status])
+  @@index([statusDefinitionId])
   @@index([departmentId])
   @@index([subDepartmentId])
   @@index([expenseTypeId])
@@ -2736,6 +2751,34 @@ model ActivityProgressConfig {
 // all 6"): an absent row just means "use the default", which is exactly
 // today's implicit (hardcoded) behavior — so this migration changes
 // nothing observable for any existing department until an admin opts in.
+// Configurable Project Status definitions — ONE global set shared by every
+// Workspace, managed by ADMIN (Administration -> Project Statuses). Each
+// definition has a stable identity (id + immutable `key`) and an explicit
+// mapping to a canonical lifecycle state (`canonicalStatus`); several
+// definitions may map to the same canonical state. Label/color/sortOrder are
+// display-only and never drive business behaviour. The five `isSystem`
+// rows (keys PLANNING, IN_PROGRESS, ON_HOLD, COMPLETED, CANCELLED) can't be
+// deleted or remapped; PLANNING's system row is the always-active default.
+// Inactive definitions stay on the Projects that already use them but can't
+// be newly selected. A definition referenced by any Project can't be deleted
+// or remapped (also enforced by the DB trigger
+// project_status_definition_guard).
+model ProjectStatusDefinition {
+  id              String        @id @default(cuid())
+  key             String        @unique
+  label           String
+  color           String        @default("#94a3b8")
+  sortOrder       Int           @default(0)
+  isActive        Boolean       @default(true)
+  canonicalStatus ProjectStatus
+  isSystem        Boolean       @default(false)
+  projects        Project[]
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([canonicalStatus])
+}
+
 model ProjectStatusConfig {
   id           String        @id @default(cuid())
   department   Department    @relation(fields: [departmentId], references: [id], onDelete: Cascade)

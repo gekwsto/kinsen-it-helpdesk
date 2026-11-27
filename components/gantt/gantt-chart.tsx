@@ -131,6 +131,10 @@ export interface GanttGroup {
   ownerName?: string | null;
   ownerImage?: string | null;
   type: "project" | "standalone";
+  /** Project groups only: the configured Project Status (lib/services/project-status-service.ts) — display label/color, and the value the in-chart status filter matches on (`project-status:<definitionId>`). `status` itself stays the CANONICAL lifecycle state. */
+  statusLabel?: string;
+  statusColor?: string;
+  statusFilterValue?: string;
   children: GanttItem[];
   /** Record version (updatedAt ISO) — see GanttItem.updatedAt. */
   updatedAt?: string | null;
@@ -344,7 +348,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
       } else if (scheduledKids.length > 0) {
         scheduled.push({ ...g, startDate: null, endDate: null, children: scheduledKids });
       } else {
-        unscheduled.push({ id: g.id, title: g.title, href: g.href, status: g.status, isGroup: true, isMilestone: false });
+        unscheduled.push({ id: g.id, title: g.title, href: g.href, status: g.status, statusColor: g.statusColor, isGroup: true, isMilestone: false });
       }
 
       for (const c of unscheduledKids) {
@@ -516,14 +520,20 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
 
   const allStatuses = useMemo(() => {
     const s = new Set<string>();
-    for (const g of localGroups) { s.add(g.status); for (const c of g.children) s.add(c.status); }
+    for (const g of localGroups) { s.add(g.statusFilterValue ?? g.status); for (const c of g.children) s.add(c.status); }
     return [...s].sort();
+  }, [localGroups]);
+  // Configured Project Status labels for project-group filter values.
+  const groupStatusLabels = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const g of localGroups) if (g.statusFilterValue && g.statusLabel) m.set(g.statusFilterValue, g.statusLabel);
+    return m;
   }, [localGroups]);
 
   // Same department-scoped label source as the legend — falls back to the
   // static enum label only when unresolvable (e.g. a Project-status value,
   // or "All Workspaces" with no single department to resolve against).
-  const statusLabelFor = (s: string) => activityStatusLegendEntries?.find((e) => e.key === s)?.label ?? STATUS_LABEL[s] ?? s;
+  const statusLabelFor = (s: string) => groupStatusLabels.get(s) ?? activityStatusLegendEntries?.find((e) => e.key === s)?.label ?? STATUS_LABEL[s] ?? s;
 
   // ── Dependency arrow geometry ──────────────────────────────────────────────
 
@@ -1142,7 +1152,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                 <button onClick={() => toggleCollapse(group.id)} className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors" aria-label={isCollapsed ? "Expand" : "Collapse"}>
                                   {isCollapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
                                 </button>
-                                <span className={cn("h-2 w-2 rounded-full flex-shrink-0", STATUS_BAR[group.status] ?? "bg-slate-400")} />
+                                <span className={cn("h-2 w-2 rounded-full flex-shrink-0", !group.statusColor && (STATUS_BAR[group.status] ?? "bg-slate-400"))} style={group.statusColor ? { backgroundColor: group.statusColor } : undefined} />
                                 {group.ownerImage !== undefined && (
                                   <Avatar className="h-5 w-5 flex-shrink-0">
                                     <AvatarImage src={group.ownerImage ?? undefined} />
@@ -1174,7 +1184,7 @@ export function GanttChart({ groups, canEdit = false, dependencies, priorityOpti
                                   pointer capture. As a call, the returned elements
                                   keep a stable identity across re-renders. */}
                               {Bar({
-                                item: { id: group.id, title: group.title, status: group.status, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue, facilitiesStartLabel: group.facilitiesStartLabel, facilitiesEndLabel: group.facilitiesEndLabel },
+                                item: { id: group.id, title: group.title, status: group.status, statusLabel: group.statusLabel, statusColor: group.statusColor, startDate: group.startDate, endDate: group.endDate, progress: group.progress, href: group.href, ownerName: group.ownerName, ownerImage: group.ownerImage, overdue: group.overdue, facilitiesStartLabel: group.facilitiesStartLabel, facilitiesEndLabel: group.facilitiesEndLabel },
                                 barH: 24,
                                 isGroup: true,
                               })}

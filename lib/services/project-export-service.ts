@@ -228,7 +228,8 @@ export async function buildProjectsListWorkbook(rows: ProjectExportRow[]): Promi
     sheet.addRow(
       sanitizeRow({
         title: r.title,
-        status: humanizeEnum(r.status),
+        // Already the configured Project Status label — never re-humanized.
+        status: r.status,
         priority: PROJECT_PRIORITY_LABEL[r.priority] ?? r.priority,
         origin: r.origin,
         departmentName: r.departmentName ?? "—",
@@ -356,7 +357,7 @@ export async function buildProjectDetailWorkbook(data: ProjectDetailExportData):
   detailsSheet.getRow(1).font = { bold: true };
   detailsSheet.getRow(1).fill = HEADER_FILL;
   addKeyValueRow(detailsSheet, "Title", data.title);
-  addKeyValueRow(detailsSheet, "Status", humanizeEnum(data.status));
+  addKeyValueRow(detailsSheet, "Status", data.status);
   addKeyValueRow(detailsSheet, "Priority", PROJECT_PRIORITY_LABEL[data.priority] ?? data.priority);
   addKeyValueRow(detailsSheet, "Origin", data.origin);
   if (data.projectRequestTitle) addKeyValueRow(detailsSheet, "Project Request", data.projectRequestTitle);

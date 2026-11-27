@@ -6,6 +6,7 @@ import { NoWorkspaceState, ChooseWorkspaceState } from "@/components/workspace/w
 import { ViewToggle } from "@/components/ui/view-toggle";
 import { ProjectList } from "@/components/projects/project-list";
 import { ProjectFilters } from "@/components/projects/project-filters";
+import { listProjectStatusDefinitions } from "@/lib/services/project-status-service";
 import { ProjectPaginationBar } from "@/components/projects/project-pagination-bar";
 import { ProjectListLiveRefresh } from "@/components/projects/project-list-live-refresh";
 import { redirect } from "next/navigation";
@@ -119,7 +120,7 @@ export default async function ProjectsPage({
   // parallel, but NOT inside the array-form $transaction, which requires
   // every element to be a raw PrismaPromise (getAccessibleDepartmentSummaries
   // is a composed service call, not one, and would break at runtime there).
-  const [[projects, totalCount], departments, owners, members] = await Promise.all([
+  const [[projects, totalCount], departments, owners, members, projectStatuses] = await Promise.all([
     prisma.$transaction([
       prisma.project.findMany({
         where,
@@ -135,6 +136,7 @@ export default async function ProjectsPage({
         take: pageSize,
         include: {
           owner: { select: { id: true, name: true, image: true } },
+          statusDefinition: { select: { id: true, label: true, color: true, isActive: true } },
           // Authoritative full Owner set (always contains `owner` above —
           // see Project.owners' own schema doc comment) and Audience — both
           // small, bounded relations (same cost profile as `members`
@@ -164,6 +166,7 @@ export default async function ProjectsPage({
     // OTHER filters change — only Department narrows them, per spec.
     getProjectOwnerOptions(scope),
     getProjectMemberOptions(scope),
+    listProjectStatusDefinitions(),
   ]);
 
   const pagination = computePagination(totalCount, requestedPage, pageSize);
@@ -243,7 +246,7 @@ export default async function ProjectsPage({
         </div>
       </div>
 
-      <ProjectFilters options={{ departments, owners, members }} />
+      <ProjectFilters options={{ departments, owners, members, statuses: projectStatuses }} />
 
       {projects.length === 0 ? (
         <div className="text-center py-20">

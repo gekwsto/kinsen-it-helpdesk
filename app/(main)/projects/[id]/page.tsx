@@ -24,6 +24,7 @@ import { ProjectDetailHeader } from "@/components/projects/project-detail-header
 import { formatEUR } from "@/lib/currency";
 import { computeProjectFinancials } from "@/lib/services/project-financials-service";
 import { getProjectFeedbackEligibility } from "@/lib/services/project-feedback-service";
+import { listProjectStatusDefinitions } from "@/lib/services/project-status-service";
 import { ProjectFeedbackCtaCard } from "@/components/projects/project-feedback-cta-card";
 import { getFacilitiesServicesDepartmentId, formatFacilitiesQuarterLabel } from "@/lib/services/project-facilities-service";
 import { getFacilitiesImportanceGroupCounts, computeFacilitiesScorePercent } from "@/lib/services/project-scoring-service";
@@ -45,6 +46,7 @@ export default async function ProjectDetailPage({
     where: { id },
     include: {
       owner: { select: { id: true, name: true, email: true, image: true } },
+      statusDefinition: { select: { id: true, label: true, color: true, isActive: true } },
       // Request-origin Projects only (always empty for a manual one except
       // `owners`, which always mirrors the single `owner` above — see both
       // relations' own schema doc comments) — rendered in the Project
@@ -242,6 +244,7 @@ export default async function ProjectDetailPage({
   // authorization by itself. Skipped entirely for a manual Project
   // (project.projectRequest is null) — the feature never even queries for
   // one, let alone shows it.
+  const projectStatusDefinitions = await listProjectStatusDefinitions();
   const feedbackEligibility = project.projectRequest
     ? await getProjectFeedbackEligibility(project.id, session.user.id)
     : null;
@@ -383,7 +386,8 @@ export default async function ProjectDetailPage({
         projectId={project.id}
         title={project.title}
         description={project.description}
-        initialStatus={project.status}
+        initialStatus={project.statusDefinition}
+        statusDefinitions={projectStatusDefinitions}
         isGoal={project.isGoal}
         canEditProject={canEditProject}
         canDeleteProject={canDeleteProject}

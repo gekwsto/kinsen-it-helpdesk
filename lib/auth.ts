@@ -11,6 +11,7 @@ import { handleMicrosoftJwtSignIn, SYNC_ELIGIBLE_USER_SELECT } from "@/lib/servi
 import { normalizeEmail } from "@/lib/services/email-identity";
 import { isAbsoluteSessionExpired, stampAbsoluteSessionExpiryIfAbsent } from "@/lib/session-expiry";
 import { isAllowedOrganizationEmail } from "@/lib/allowed-email-domains";
+import { checkSessionRenewalIdentity, clearSessionRenewal } from "@/lib/session-renewal";
 
 /**
  * PrismaAdapter's own createUser/getUserByEmail do an exact-match lookup
@@ -106,8 +107,24 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     }),
   ],
 
+  events: {
+    // A pending session-renewal marker never outlives the session it was
+    // started from (lib/session-renewal.ts).
+    async signOut() {
+      await clearSessionRenewal();
+    },
+  },
+
   callbacks: {
     async signIn({ user, account }) {
+      // Session renewal (lib/session-renewal.ts): during a renewal only the
+      // SAME user may sign in — rejected before Auth.js links accounts or
+      // issues a cookie, so the current session stays intact.
+      const renewal = await checkSessionRenewalIdentity(user);
+      if (renewal.renewing && !renewal.sameUser) {
+        return `/auth/session-renewed?error=${renewal.expired ? "renewal_expired" : "different_account"}`;
+      }
+
       if (account?.provider === "credentials") return true;
 
       // Microsoft SSO: domain check

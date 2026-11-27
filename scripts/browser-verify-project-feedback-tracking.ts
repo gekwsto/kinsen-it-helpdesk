@@ -44,7 +44,7 @@ async function completeViaEditPage(page: Page, projectId: string) {
   await page.goto(`${BASE_URL}/projects/${projectId}/edit`, { waitUntil: "load" });
   await page.getByText("Edit Project", { exact: true }).waitFor({ state: "visible", timeout: 60000 });
   await page.locator("label", { hasText: /^Status$/ }).locator("xpath=..").getByRole("combobox").click();
-  await page.getByRole("option", { name: "COMPLETED", exact: true }).click();
+  await page.getByRole("option", { name: "Completed", exact: true }).click();
   await Promise.all([
     page.waitForURL((u) => u.pathname === `/projects/${projectId}`, { timeout: 60000 }),
     page.getByRole("button", { name: /save changes/i }).click(),

@@ -38,6 +38,7 @@ export async function GET(request: NextRequest) {
     sortOrder: searchParams.get("sortOrder") ?? undefined,
     search: searchParams.get("search") ?? undefined,
     status: searchParams.get("status") ?? undefined,
+    statusId: searchParams.get("statusId") ?? undefined,
     statusGroup: searchParams.get("statusGroup") ?? undefined,
     overdue: searchParams.get("overdue") ?? undefined,
     priority: searchParams.get("priority") ?? undefined,
@@ -74,6 +75,7 @@ export async function GET(request: NextRequest) {
     orderBy,
     include: {
       owner: { select: { id: true, name: true } },
+      statusDefinition: { select: { label: true } },
       owners: { select: { id: true, name: true } },
       department: { select: { id: true, name: true } },
       members: { select: { id: true, name: true } },
@@ -98,7 +100,8 @@ export async function GET(request: NextRequest) {
     return {
       title: p.title,
       description: p.description,
-      status: p.status,
+      // The configured Project Status label (what every screen shows).
+      status: p.statusDefinition.label,
       priority: p.priority,
       origin: p.projectRequestId ? "From Request" : "Manual",
       departmentName: p.department?.name ?? null,

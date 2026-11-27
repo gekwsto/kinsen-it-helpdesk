@@ -1,3 +1,4 @@
+import { resolveProjectStatusWrite, type ProjectStatusWriteError } from "@/lib/services/project-status-service";
 import { prisma } from "@/lib/prisma";
 import { getUserDepartmentMemberships } from "@/lib/services/department-membership-service";
 import { hasPermission, hasDepartmentPermission } from "@/lib/permissions";
@@ -652,6 +653,7 @@ export type CreateProjectFromRequestError =
   | { code: "audience_business_units_not_allowed" }
   | { code: "invalid_responsible_people" }
   | { code: "invalid_expense_type" }
+  | { code: "invalid_project_status"; reason: ProjectStatusWriteError["code"]; message: string }
   | { code: "invalid_sub_department" }
   | { code: "invalid_member" }
   | { code: "facilities_fields_not_allowed" }
@@ -816,6 +818,11 @@ export async function createProjectFromApprovedRequest(
 
   const expenseType = await prisma.projectExpenseType.findUnique({ where: { id: data.expenseTypeId }, select: { id: true, isActive: true } });
   if (!expenseType || !expenseType.isActive) return { ok: false, error: { code: "invalid_expense_type" } };
+  // Project Status: the shared resolver (default SYSTEM PLANNING when none
+  // is chosen; contradictory/inactive selections rejected).
+  const statusResolution = await resolveProjectStatusWrite({ status: data.status, statusDefinitionId: data.statusDefinitionId }, null);
+  if (!statusResolution.ok) return { ok: false, error: { code: "invalid_project_status", reason: statusResolution.error.code, message: statusResolution.error.message } };
+  const statusWrite = statusResolution.write!;
 
   if (data.subDepartmentId) {
     const valid = await validateSubDepartmentInDepartment(data.subDepartmentId, destinationDepartmentId);
@@ -863,7 +870,8 @@ export async function createProjectFromApprovedRequest(
       data: {
         title: data.title,
         description: data.description,
-        status: data.status,
+        status: statusWrite.status,
+        statusDefinitionId: statusWrite.statusDefinitionId,
         priority: data.priority,
         departmentId: destinationDepartmentId,
         subDepartmentId: data.subDepartmentId ?? undefined,

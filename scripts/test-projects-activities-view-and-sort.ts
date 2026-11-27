@@ -149,11 +149,13 @@ async function main() {
   const activitiesPageForWhitelist = await import("@/app/(main)/activities/page");
   void projectsPageForWhitelist;
   void activitiesPageForWhitelist;
-  check("21a. Sort keys are declared as a source-level whitelist object (PROJECT_SORT_KEYS), not read from the URL into Prisma directly", /const PROJECT_SORT_KEYS: Record<string, SortKeyDef>/.test(projectsPageSrc));
+  // PROJECT_SORT_KEYS lives in lib/services/project-query-service.ts (shared by the page and the export).
+  const projectQuerySrc = await fs.readFile("lib/services/project-query-service.ts", "utf8");
+  check("21a. Sort keys are declared as a source-level whitelist object (PROJECT_SORT_KEYS), not read from the URL into Prisma directly", /const PROJECT_SORT_KEYS: Record<string, SortKeyDef>/.test(projectQuerySrc));
   check("21b. ...same for Activities (ACTIVITY_SORT_KEYS)", /const ACTIVITY_SORT_KEYS: Record<string, SortKeyDef>/.test(activitiesPageSrc));
   const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
   check("Neither page ever builds a dynamic `{ [sortBy]: ... }` Prisma key (the exact anti-pattern this task explicitly avoided) — checked outside comments", !/\{\s*\[sortBy\]/.test(stripComments(projectsPageSrc)) && !/\{\s*\[sortBy\]/.test(stripComments(activitiesPageSrc)));
-  check("Projects: status/priority sort on the raw enum column (reuses the existing Postgres-enum declaration order, not an invented one)", /status: \(order\) => \(\{ status: order \}\)/.test(projectsPageSrc) && /priority: \(order\) => \(\{ priority: order \}\)/.test(projectsPageSrc));
+  check("Projects: status sorts by the CONFIGURED Project Status display order; priority on the raw column", /status: \(order\) => \(\{ statusDefinition: \{ sortOrder: order \} \}\)/.test(projectQuerySrc) && /priority: \(order\) => \(\{ priority: order \}\)/.test(projectQuerySrc));
   check("Activities: same for status/priority", /status: \(order\) => \(\{ status: order \}\)/.test(activitiesPageSrc) && /priority: \(order\) => \(\{ priority: order \}\)/.test(activitiesPageSrc));
 
   console.log("\n=== SortableTableHead: accessible toggle wiring, page reset (client-only logic — source-verified, same convention as other client-only checks this session) ===\n");

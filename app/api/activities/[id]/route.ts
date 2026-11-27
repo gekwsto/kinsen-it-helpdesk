@@ -272,20 +272,16 @@ export async function PATCH(
       // missing metadata in one go is allowed) and the Activity's current
       // stored values otherwise.
       if (targetProject.projectRequestId !== null) {
-        const currentAssigneeCount = await prisma.projectActivity
-          .findUnique({ where: { id }, select: { _count: { select: { assignedUsers: true } } } })
-          .then((row) => row?._count.assignedUsers ?? 0);
         const missing = requestOriginActivityMissingFields({
           expectedStartDate: expectedStartDate !== undefined ? expectedStartDate : existing.expectedStartDate?.toISOString(),
           expectedFinishDate: expectedFinishDate !== undefined ? expectedFinishDate : existing.expectedFinishDate?.toISOString(),
           taskSubTypeId: taskSubTypeId !== undefined ? taskSubTypeId : existing.taskSubTypeId,
           ownerId: ownerId !== undefined ? ownerId : existing.ownerId,
-          assignedUserIds: assignedUserIds !== undefined ? assignedUserIds : currentAssigneeCount > 0 ? ["__existing__"] : [],
         });
         if (missing.length > 0) {
           return NextResponse.json(
             {
-              error: "This Project originates from a Project Request — moving this Activity into it requires Expected Start, Expected Finish, Task Sub Type, Owner, and at least one Related User. Supply the missing fields in the same request, or complete them first.",
+              error: "This Project originates from a Project Request — moving this Activity into it requires Expected Start, Expected Finish, Task Sub Type and Owner. Supply the missing fields in the same request, or complete them first.",
               code: "request_origin_fields_required",
               missingFields: missing,
             },

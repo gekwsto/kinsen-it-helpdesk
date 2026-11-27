@@ -58,6 +58,7 @@ async function main() {
   const typeIds: string[] = [];
   const requestIds: string[] = [];
   const projectIds: string[] = [];
+  const fixtureUserIds: string[] = [];
   const activityIds: string[] = [];
   const taskTypeIds: string[] = [];
   const browser = await chromium.launch();
@@ -76,6 +77,28 @@ async function main() {
       data: { userId: admin.id, departmentId: dept.id, role: DepartmentRole.DEPARTMENT_ADMIN, source: MembershipSource.MANUAL, isPrimary: false, isActive: true },
     });
 
+    // Project Request submission requires the intermediate approver to be the
+    // requester's VERIFIED SQLGeneral direct manager — isolated temporary
+    // requester + manager (never the seeded admin's identity), mocked the same
+    // way the sibling request-origin tests do, registered before the routes load.
+    const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+    const sqlRows = new Map<string, any>();
+    const sqlRow = (username: string, managerAMAccountName: string | null) => ({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+    mock.module("@/lib/sqlgeneral-api-client", {
+      namedExports: {
+        ...realSqlGeneralClient,
+        findSqlGeneralUserByUsername: async (username: string) => (sqlRows.has(username) ? { outcome: "unique" as const, user: sqlRows.get(username) } : { outcome: "not_found" as const }),
+      },
+    });
+    const requester = await prisma.user.create({ data: { email: `${TAG}-requester@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    const manager = await prisma.user.create({ data: { email: `${TAG}-manager@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    fixtureUserIds.push(requester.id, manager.id);
+    sqlRows.set(`${TAG}-mgr`, sqlRow(`${TAG}-mgr`, null));
+    sqlRows.set(`${TAG}-req`, sqlRow(`${TAG}-req`, `${TAG}-mgr`));
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester.id, sqlGeneralUsername: `${TAG}-req`, status: "SUCCEEDED" } });
+    await prisma.departmentMembership.create({ data: { userId: requester.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true } });
+
     const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
     const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
     const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
@@ -83,7 +106,7 @@ async function main() {
     const { NextRequest } = await import("next/server");
     const jsonReq = (body: unknown) => new NextRequest("http://localhost/x", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
-    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    fixtureSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
     const submitRes = await requestsPOST(
       jsonReq({
         title: `${TAG} request`,
@@ -93,14 +116,16 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [admin.id],
+        intermediateApproverIds: [manager.id],
         departmentId: dept.id,
       })
     );
     if (submitRes.status !== 201) throw new Error(`Fixture submit failed: ${submitRes.status}: ${JSON.stringify(await submitRes.json())}`);
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
+    fixtureSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
     await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
       jsonReq({
@@ -191,7 +216,8 @@ async function main() {
     const roProjectLink = page.getByRole("link", { name: `${TAG} request`, exact: true }).first();
     await roProjectLink.waitFor({ state: "visible", timeout: 10000 });
     check("B4. Submitting creates the Activity under the SAME request-origin Project it opened from", (await roProjectLink.count()) > 0);
-    check("B5. Project Request Setup card appears on the new Activity's own detail page", (await page.getByText("Project Request Setup", { exact: true }).count()) > 0);
+    // The detail page's old "Project Request Setup" card is now the request-origin-only "Financial Information" section.
+    check("B5. Request-origin Financial Information section appears on the new Activity's own detail page", (await page.getByText("Financial Information", { exact: false }).count()) > 0);
 
     // ══════════════════════ Direct /activities/new unaffected ══════════════════════
     console.log("\n=== Direct /activities/new (regression guard — not via a Project) ===\n");
@@ -211,6 +237,9 @@ async function main() {
       await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } });
+      await prisma.notification.deleteMany({ where: { userId: { in: fixtureUserIds } } });
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: fixtureUserIds } } });
+      await prisma.user.deleteMany({ where: { id: { in: fixtureUserIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: deptIds } } });

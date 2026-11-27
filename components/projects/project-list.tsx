@@ -27,6 +27,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Calendar, Users, Eye, FolderKanban, FileText } from "lucide-react";
 import { formatDate, getInitials } from "@/lib/utils";
 import { ProjectStatus } from "@prisma/client";
+import { ProjectStatusBadge, type ProjectStatusDisplay } from "@/components/projects/project-status-badge";
 import { resolveViewMode, type ViewMode } from "@/components/ui/view-toggle";
 import { PROJECT_PRIORITY_LABEL as PRIORITY_LABELS, projectPriorityKey } from "@/lib/project-priority";
 import { OverdueBadge } from "@/components/shared/overdue-badge";
@@ -34,19 +35,15 @@ import { MemberPreview } from "@/components/shared/member-preview";
 import { PriorityBadge } from "@/components/shared/priority-badge";
 import { PreviewField } from "@/components/shared/preview-field";
 
-const STATUS_COLORS: Record<ProjectStatus, string> = {
-  PLANNING: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
-  IN_PROGRESS: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400",
-  ON_HOLD: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
-  COMPLETED: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
-  CANCELLED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
-};
 
 export interface ProjectListItem {
   id: string;
   title: string;
   description: string | null;
+  /** Canonical lifecycle state — business logic only, never displayed. */
   status: ProjectStatus;
+  /** The configured Project Status — what the list displays. */
+  statusDefinition: ProjectStatusDisplay;
   priority: number;
   startDate: Date | null;
   endDate: Date | null;
@@ -152,9 +149,7 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                   {project.department?.name ?? "—"}
                 </TableCell>
                 <TableCell>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_COLORS[project.status]}`}>
-                    {project.status.replace("_", " ")}
-                  </span>
+                  <ProjectStatusBadge status={project.statusDefinition} />
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1.5 flex-wrap">
@@ -248,11 +243,7 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
                   </CardTitle>
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     {project.overdue && <OverdueBadge />}
-                    <span
-                      className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_COLORS[project.status]}`}
-                    >
-                      {project.status.replace("_", " ")}
-                    </span>
+                    <ProjectStatusBadge status={project.statusDefinition} />
                     {/* Preview trigger — stops the click reaching the
                         enclosing <Link>, same convention already used by
                         ActivityCompleteCheckbox nested inside a row Link. */}
@@ -332,9 +323,7 @@ export function ProjectList({ projects, defaultView = "grid" }: ProjectListProps
               <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm border rounded-md p-3 bg-muted/30 flex-shrink-0">
                 <div>
                   <span className="text-muted-foreground">Status: </span>
-                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full whitespace-nowrap ${STATUS_COLORS[previewTarget.status]}`}>
-                    {previewTarget.status.replace("_", " ")}
-                  </span>
+                  <ProjectStatusBadge status={previewTarget.statusDefinition} />
                 </div>
                 <div>
                   <span className="text-muted-foreground">Workspace: </span>

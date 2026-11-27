@@ -21,17 +21,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
-import { ProjectStatus } from "@prisma/client";
 import { PROJECT_PRIORITY_LABEL } from "@/lib/project-priority";
-
-const PROJECT_STATUS_LABEL: Record<ProjectStatus, string> = {
-  PLANNING: "Planning",
-  IN_PROGRESS: "In Progress",
-  ON_HOLD: "On Hold",
-  COMPLETED: "Completed",
-  CANCELLED: "Cancelled",
-};
-const PROJECT_STATUS_VALUES = Object.values(ProjectStatus);
 
 export interface ProjectFilterOptions {
   departments: { id: string; name: string }[];
@@ -39,6 +29,8 @@ export interface ProjectFilterOptions {
   owners: { id: string; name: string | null }[];
   /** Distinct Project.members across the same scope — see getProjectMemberOptions. */
   members: { id: string; name: string | null }[];
+  /** Configured Project Statuses (global, display order; inactive ones included — Projects may still use them). Filters via `?statusId=`. */
+  statuses: { id: string; label: string; color: string; isActive: boolean }[];
 }
 
 interface ProjectFiltersProps {
@@ -64,6 +56,7 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
   const [showAdvanced, setShowAdvanced] = useState(() =>
     !!(
       searchParams.get("status") ||
+      searchParams.get("statusId") ||
       searchParams.get("priority") ||
       searchParams.get("ownerId") ||
       searchParams.get("memberId") ||
@@ -146,6 +139,7 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
 
   const activeFilterCount = [
     get("status"),
+    get("statusId"),
     get("statusGroup"),
     get("overdue") === "true" ? "1" : "",
     get("priority"),
@@ -270,14 +264,20 @@ export function ProjectFilters({ options }: ProjectFiltersProps) {
             {/* Exact status */}
             <div className="space-y-1">
               <Label className="text-xs text-muted-foreground">Status</Label>
-              <Select value={get("status") || "all"} onValueChange={(v) => handleSelect("status", v)}>
-                <SelectTrigger className="h-8 text-xs">
+              <Select value={get("statusId") || "all"} onValueChange={(v) => handleSelect("statusId", v)}>
+                <SelectTrigger className="h-8 text-xs" aria-label="Project status filter">
                   <SelectValue placeholder="Any status" />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Any status</SelectItem>
-                  {PROJECT_STATUS_VALUES.map((s) => (
-                    <SelectItem key={s} value={s}>{PROJECT_STATUS_LABEL[s]}</SelectItem>
+                  {options.statuses.map((s) => (
+                    <SelectItem key={s.id} value={s.id}>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2 w-2 rounded-full" style={{ backgroundColor: s.color }} aria-hidden="true" />
+                        {s.label}
+                        {!s.isActive && <span className="text-muted-foreground">(inactive)</span>}
+                      </span>
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>

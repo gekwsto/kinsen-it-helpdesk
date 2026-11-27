@@ -65,6 +65,22 @@ async function main() {
     return;
   }
 
+  // Project Request submission requires the intermediate approver to be the
+  // requester's VERIFIED SQLGeneral direct manager — mocked the same way the
+  // sibling request-origin tests do (registered before the routes load).
+  const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+  const sqlGeneralRowsByUsername = new Map<string, any[]>();
+  mock.module("@/lib/sqlgeneral-api-client", {
+    namedExports: {
+      ...realSqlGeneralClient,
+      findSqlGeneralUserByUsername: async (username: string) => {
+        const rows = sqlGeneralRowsByUsername.get(username) ?? [];
+        return rows.length === 1 ? { outcome: "unique" as const, user: rows[0] } : { outcome: "not_found" as const };
+      },
+    },
+  });
+  const registerSqlGeneralUser = (username: string, managerAMAccountName: string | null) =>
+    sqlGeneralRowsByUsername.set(username, [{ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null }]);
   const { default: NewActivityPage } = await import("@/app/(main)/activities/new/page");
   const { NextRequest } = await import("next/server");
   const jsonReq = (body?: unknown, method = "POST") =>
@@ -113,6 +129,12 @@ async function main() {
     projectIds.push(manualProject.id);
 
     // ══════════════════════ Fixture: one real request-origin Project ══════════════════════
+    const manager = await prisma.user.create({ data: { email: `${TAG}-manager@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    userIds.push(manager.id);
+    registerSqlGeneralUser(`${TAG}-mgr`, null);
+    registerSqlGeneralUser(`${TAG}-wrk`, `${TAG}-mgr`);
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: worker.id, sqlGeneralUsername: `${TAG}-wrk`, status: "SUCCEEDED" } });
     currentSession = { user: { id: worker.id, role: Role.USER, customRoleId: null } };
     const submitRes = await requestsPOST(
       jsonReq({
@@ -123,13 +145,15 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [admin.id],
+        intermediateApproverIds: [manager.id],
       })
     );
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
-    currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    if (submitRes.status !== 201) throw new Error(`Fixture submit failed: ${submitRes.status}: ${JSON.stringify(submitted)}`);
+    currentSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
     await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    currentSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
       jsonReq({
@@ -244,6 +268,7 @@ async function main() {
       console.warn("Cleanup step failed (non-fatal): project requests", err instanceof Error ? err.message : err);
     }
     try {
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
     } catch (err) {

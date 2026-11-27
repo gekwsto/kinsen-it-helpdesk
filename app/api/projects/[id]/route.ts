@@ -1,3 +1,4 @@
+import { resolveProjectStatusWrite } from "@/lib/services/project-status-service";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
@@ -40,6 +41,7 @@ const PROJECT_LIST_RELEVANT_FIELDS = [
   "title",
   "description",
   "status",
+  "statusDefinitionId",
   "priority",
   "departmentId",
   "subDepartmentId",
@@ -53,6 +55,9 @@ const PROJECT_LIST_RELEVANT_FIELDS = [
 
 const PROJECT_INCLUDE = {
   owner: { select: { id: true, name: true, email: true, image: true } },
+  // The configured Project Status (label/color/active) — the canonical
+  // lifecycle state is the scalar `status`.
+  statusDefinition: { select: { id: true, key: true, label: true, color: true, isActive: true, canonicalStatus: true, isSystem: true } },
   // The full Owner set — needed by the Edit page's Owner(s) picker for a
   // Request-origin Project.
   owners: { select: { id: true, name: true, email: true, image: true } },
@@ -95,6 +100,16 @@ function withProjectFinancials<T extends { activities: { taskSubTypeCost: any; e
 ): T & { estimatedCost: string; actualCost: string } {
   const { estimatedCost, actualCost } = computeProjectFinancials(project.activities);
   return { ...project, estimatedCost: estimatedCost.toString(), actualCost: actualCost.toString() };
+}
+
+// The DB integrity trigger (project_status_definition_sync) rejected a
+// status write — only reachable on a race with a concurrent status remap /
+// deactivation (the shared resolver validates everything first).
+function projectStatusTriggerRejection(error: any) {
+  const msg = String(error?.message ?? "");
+  if (msg.includes("project_status_mismatch")) return NextResponse.json({ error: "The selected Project Status changed meanwhile — reload and try again.", code: "status_conflict" }, { status: 409 });
+  if (msg.includes("project_status_no_active_definition")) return NextResponse.json({ error: "No active Project Status represents the requested state.", code: "inactive_status" }, { status: 409 });
+  return null;
 }
 
 export async function GET(
@@ -167,6 +182,7 @@ export async function PATCH(
       select: {
         departmentId: true,
         status: true,
+        statusDefinitionId: true,
         title: true,
         ownerId: true,
         expectedStartDate: true,
@@ -269,6 +285,8 @@ export async function PATCH(
       expectedTotalInitialDaysOverride,
       actualTotalDaysOverride,
       ownerIds,
+      status: requestedStatus,
+      statusDefinitionId: requestedStatusDefinitionId,
       facilitiesCompany,
       facilitiesLocation,
       facilitiesStartPrecision,
@@ -560,6 +578,19 @@ export async function PATCH(
     // ONE transaction (all-or-nothing) — the canonical transfer mechanism
     // (lib/services/project-workspace-transfer-service.ts). Without a
     // department change this is exactly the previous single update.
+    // Project Status — the shared resolver against the CURRENT (definition,
+    // canonical) pair: contradictory values / newly selected inactive
+    // statuses are rejected; a legacy enum `status` equal to the current
+    // canonical state never replaces a custom (or inactive) definition.
+    const statusResolution = await resolveProjectStatusWrite(
+      { status: requestedStatus, statusDefinitionId: requestedStatusDefinitionId },
+      { status: existing.status, statusDefinitionId: existing.statusDefinitionId }
+    );
+    if (!statusResolution.ok) {
+      return NextResponse.json({ error: statusResolution.error.message, code: statusResolution.error.code }, { status: statusResolution.error.code === "invalid_status_definition" ? 400 : 409 });
+    }
+    const statusWrite = statusResolution.write;
+
     let transferredActivityCount = 0;
     let feedbackNotifyUserIds: string[] = [];
     const project = await prisma.$transaction(async (tx) => {
@@ -571,6 +602,7 @@ export async function PATCH(
       where: { id },
       data: {
         ...rest,
+        ...(statusWrite ? { status: statusWrite.status, statusDefinitionId: statusWrite.statusDefinitionId } : {}),
         subDepartmentId: clearStaleSubDepartment ? null : rest.subDepartmentId,
         // Facilities Services, and this request actually touched a
         // relevant field: the resolved write wins (already derived
@@ -693,6 +725,8 @@ export async function PATCH(
 
     return NextResponse.json({ ...withProjectFinancials(project), isFacilitiesServicesWorkspace: isFacilitiesWorkspace, facilitiesScorePercent });
   } catch (error: any) {
+    const statusRejection = projectStatusTriggerRejection(error);
+    if (statusRejection) return statusRejection;
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
     }

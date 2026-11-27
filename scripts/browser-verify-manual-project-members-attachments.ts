@@ -150,50 +150,59 @@ async function main() {
     console.log("\n=== 1. Open /projects/new with no Workspace selected ===\n");
     await page.goto(`${BASE_URL}/projects/new`);
     await page.waitForTimeout(800);
+    // Member-name assertions are scoped to the MEMBERS picker: the same users
+    // legitimately also appear in the system-wide Audience/Responsible People
+    // pickers (any active user) — those lists are a different rule.
+    const membersSection = page.locator("label").filter({ hasText: /^Members$/ }).locator("xpath=..");
+    const membersText = async () => (await membersSection.count()) > 0 ? await membersSection.innerText() : "";
     let bodyText = await page.locator("body").innerText();
+    let memberText = await membersText();
     check("No Workspace selected yet (admin is not this Workspace's member) -> Members shows the 'select a workspace' helper, not a list", bodyText.includes("Select a workspace to see its members."));
-    check("Neither fixture member's name is rendered (no system-wide dump)", !bodyText.includes(`${TAG} Viewer A`) && !bodyText.includes(`${TAG} Manager A`) && !bodyText.includes(`${TAG} Viewer B`));
+    check("Members picker exists (scoping sanity)", (await membersSection.count()) === 1);
+    check("Neither fixture member's name is rendered in Members (no system-wide dump)", !memberText.includes(`${TAG} Viewer A`) && !memberText.includes(`${TAG} Manager A`) && !memberText.includes(`${TAG} Viewer B`));
     check("No false attachment-permission-denied message before a Workspace is selected", !bodyText.includes("You don't have permission to attach files to a Project in the selected workspace."));
     check("Neutral attachment message shown instead", bodyText.includes("Select a workspace to enable project attachments."));
 
     console.log(`\n=== 2. Select Workspace A ("${deptA.name}") ===\n`);
     await selectFormWorkspace(page, deptA.name);
-    await page.waitForTimeout(600);
+    await membersSection.getByText(`${TAG} Viewer A`).waitFor({ timeout: 15000 }).catch(() => undefined);
     bodyText = await page.locator("body").innerText();
-    check("Viewer A (plain VIEWER, membership-only) now appears", bodyText.includes(`${TAG} Viewer A`));
-    check("Manager A (DEPARTMENT_MANAGER, already project.assignable) still appears", bodyText.includes(`${TAG} Manager A`));
-    check("Viewer B (member of Workspace B only) does NOT appear", !bodyText.includes(`${TAG} Viewer B`));
+    memberText = await membersText();
+    check("Viewer A (plain VIEWER, membership-only) now appears in Members", memberText.includes(`${TAG} Viewer A`));
+    check("Manager A (DEPARTMENT_MANAGER, already project.assignable) still appears in Members", memberText.includes(`${TAG} Manager A`));
+    check("Viewer B (member of Workspace B only) does NOT appear in Members", !memberText.includes(`${TAG} Viewer B`));
     check("The 'select a workspace' helper is gone now that one is selected", !bodyText.includes("Select a workspace to see its members."));
     check("Neutral attachment message is gone now that a Workspace is selected", !bodyText.includes("Select a workspace to enable project attachments."));
     check("Admin has project.edit everywhere (global bypass) -> Attachments picker is enabled, not a denial message", (await page.locator("text=Attachments").count()) > 0 && !bodyText.includes("You don't have permission to attach files"));
 
     console.log("\n=== 3. Search filters the visible Workspace A member list without widening it ===\n");
-    const memberSearchInput = page.locator('input[placeholder="Search members by name or email…"]');
+    const memberSearchInput = membersSection.locator('input[placeholder="Search members by name or email…"]');
     check("Member search input is present", (await memberSearchInput.count()) > 0);
     await memberSearchInput.fill("Viewer A");
     await page.waitForTimeout(300);
-    bodyText = await page.locator("body").innerText();
-    check("Searching 'Viewer A' shows Viewer A", bodyText.includes(`${TAG} Viewer A`));
-    check("...and hides Manager A", !bodyText.includes(`${TAG} Manager A`));
-    check("...and still never shows Viewer B (search never widens eligibility)", !bodyText.includes(`${TAG} Viewer B`));
+    memberText = await membersText();
+    check("Searching 'Viewer A' shows Viewer A", memberText.includes(`${TAG} Viewer A`));
+    check("...and hides Manager A", !memberText.includes(`${TAG} Manager A`));
+    check("...and still never shows Viewer B (search never widens eligibility)", !memberText.includes(`${TAG} Viewer B`));
 
     // Select Viewer A while filtered, to prove the clear-on-switch below.
-    await page.locator("label", { hasText: `${TAG} Viewer A` }).locator('input[type="checkbox"]').check();
-    check("Viewer A's checkbox is checked", await page.locator("label", { hasText: `${TAG} Viewer A` }).locator('input[type="checkbox"]').isChecked());
+    const viewerACheckbox = membersSection.locator("label", { hasText: `${TAG} Viewer A` }).locator('input[type="checkbox"]');
+    await viewerACheckbox.check();
+    check("Viewer A's checkbox is checked", await viewerACheckbox.isChecked());
 
     await memberSearchInput.fill("");
     await page.waitForTimeout(300);
-    bodyText = await page.locator("body").innerText();
-    check("Clearing the search restores the full Workspace A member list (Manager A visible again)", bodyText.includes(`${TAG} Manager A`));
-    check("Viewer A's checkbox remains checked after clearing search", await page.locator("label", { hasText: `${TAG} Viewer A` }).locator('input[type="checkbox"]').isChecked());
+    memberText = await membersText();
+    check("Clearing the search restores the full Workspace A member list (Manager A visible again)", memberText.includes(`${TAG} Manager A`));
+    check("Viewer A's checkbox remains checked after clearing search", await viewerACheckbox.isChecked());
 
     console.log(`\n=== 4. Switch to Workspace B ("${deptB.name}") ===\n`);
     await selectFormWorkspace(page, deptB.name);
-    await page.waitForTimeout(600);
-    bodyText = await page.locator("body").innerText();
-    check("Members refreshed to Workspace B only — Viewer B appears", bodyText.includes(`${TAG} Viewer B`));
-    check("...and Viewer A/Manager A (Workspace A) no longer appear", !bodyText.includes(`${TAG} Viewer A`) && !bodyText.includes(`${TAG} Manager A`));
-    const viewerBCheckbox = page.locator("label", { hasText: `${TAG} Viewer B` }).locator('input[type="checkbox"]');
+    await membersSection.getByText(`${TAG} Viewer B`).waitFor({ timeout: 15000 }).catch(() => undefined);
+    memberText = await membersText();
+    check("Members refreshed to Workspace B only — Viewer B appears", memberText.includes(`${TAG} Viewer B`));
+    check("...and Viewer A/Manager A (Workspace A) no longer appear in Members", !memberText.includes(`${TAG} Viewer A`) && !memberText.includes(`${TAG} Manager A`));
+    const viewerBCheckbox = membersSection.locator("label", { hasText: `${TAG} Viewer B` }).locator('input[type="checkbox"]');
     check("The stale Viewer-A selection was cleared — Viewer B starts unchecked", !(await viewerBCheckbox.isChecked()));
 
     console.log("\n=== No console errors throughout ===\n");

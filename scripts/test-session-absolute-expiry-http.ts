@@ -63,8 +63,12 @@ async function main() {
     process.exit(0);
   }
 
+  // An active user whose email is in an ALLOWED organization domain — the
+  // middleware (correctly) rejects any session for other domains, so an
+  // arbitrary leftover fixture (e.g. @example.com) would never be "valid".
   const realUser = await prisma.user.findFirst({
-    where: { isActive: true },
+    where: { isActive: true, email: { endsWith: "@kinsen.gr" }, mustChangePassword: false },
+    orderBy: { createdAt: "asc" },
     select: { id: true, email: true, name: true, role: true, mustChangePassword: true, departmentId: true, businessUnitId: true, customRoleId: true, microsoftUserId: true, globalRoleSource: true },
   });
   if (!realUser) {

@@ -7,13 +7,17 @@ import { QuickStatusSelect, type QuickStatusOption } from "@/components/status/q
 
 interface ProjectQuickStatusProps {
   projectId: string;
+  /** The CURRENT configured Project Status (definition id) — options are definition ids too, never canonical enum values or labels. */
   currentStatus: string;
   /** Authoritative current-status label — same value the header's own status badge renders, passed explicitly rather than looked up in `statuses` (kept symmetric with ActivityQuickStatus; see QuickStatusSelect's doc comment). */
   currentStatusLabel: string;
+  currentStatusColor?: string;
+  /** Active configured Project Statuses (plus the current one if it's inactive). */
   statuses: QuickStatusOption[];
   /** Whether the current user holds project.edit in this Project's department — PATCH /api/projects/[id] independently re-checks this; this only governs whether the control is interactive. */
   canEdit: boolean;
-  onChanged: (newStatus: string) => void;
+  /** Receives the saved configured status (from the PATCH response). */
+  onChanged: (newStatus: { id: string; label: string; color: string; isActive: boolean }) => void;
 }
 
 /**
@@ -30,18 +34,18 @@ interface ProjectQuickStatusProps {
  * the server responds successfully, so a failed request never needs an
  * explicit rollback — the UI simply never displayed the unpersisted value.
  */
-export function ProjectQuickStatus({ projectId, currentStatus, currentStatusLabel, statuses, canEdit, onChanged }: ProjectQuickStatusProps) {
+export function ProjectQuickStatus({ projectId, currentStatus, currentStatusLabel, currentStatusColor, statuses, canEdit, onChanged }: ProjectQuickStatusProps) {
   const [loading, setLoading] = useState(false);
   const router = useRouter();
 
   const handleSelect = async (statusId: string) => {
-    if (loading) return;
+    if (loading || statusId === currentStatus) return;
     setLoading(true);
     try {
       const res = await fetch(`/api/projects/${projectId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: statusId }),
+        body: JSON.stringify({ statusDefinitionId: statusId }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -63,7 +67,7 @@ export function ProjectQuickStatus({ projectId, currentStatus, currentStatusLabe
       // updated client state across the refresh — it only re-renders the
       // Server Component tree with fresh data, never a visible flicker of
       // the dropdown/badge reverting.
-      onChanged(updated.status);
+      onChanged(updated.statusDefinition);
       router.refresh();
       toast.success("Project status updated");
     } catch (error: any) {
@@ -77,6 +81,7 @@ export function ProjectQuickStatus({ projectId, currentStatus, currentStatusLabe
     <QuickStatusSelect
       currentStatusId={currentStatus}
       currentLabel={currentStatusLabel}
+      currentColor={currentStatusColor}
       options={statuses}
       disabled={!canEdit}
       loading={loading}

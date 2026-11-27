@@ -123,6 +123,7 @@ export default async function ProjectGanttPage({
     orderBy: { [projectFields.start]: "asc" },
     include: {
       owner: { select: { id: true, name: true, image: true } },
+      statusDefinition: { select: { id: true, label: true, color: true } },
       activities: {
         orderBy: { [activityFields.start]: "asc" },
         include: {
@@ -213,6 +214,10 @@ export default async function ProjectGanttPage({
       title: p.title,
       href: `/projects/${p.id}`,
       status: p.status,
+      // Configured Project Status (display + in-chart filter); `status` stays canonical.
+      statusLabel: p.statusDefinition.label,
+      statusColor: p.statusDefinition.color,
+      statusFilterValue: `project-status:${p.statusDefinition.id}`,
       priority: projectPriorityKey(p.priority),
       startDate: projectDates.start?.toISOString() ?? null,
       facilitiesStartLabel: isFacilitiesServicesWorkspace ? formatFacilitiesQuarterLabel(p.facilitiesStartQuarter, p.facilitiesStartYear) : null,

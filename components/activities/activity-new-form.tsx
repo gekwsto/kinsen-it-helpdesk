@@ -324,7 +324,6 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
         }
       }
       if (!ownerId) return toast.error("Select an Owner.");
-      if (selectedUserIds.length === 0) return toast.error("Select at least one Related User.");
     }
     setSaving(true);
     try {
@@ -738,9 +737,9 @@ export function ActivityNewForm({ departmentId, mode = "standalone", preselected
             )}
 
             <div className="space-y-2">
-              <Label>{isRequestOrigin ? <>Related Users <span className="text-destructive">*</span></> : "Assigned Users"}</Label>
+              <Label>{isRequestOrigin ? "Related Users" : "Assigned Users"}</Label>
               <p className="text-xs text-muted-foreground">
-                {isRequestOrigin ? "At least one is required for an Activity under a request-origin Project." : "Only users eligible for this workspace are listed."}
+                {isRequestOrigin ? "Optional — Related Users can also be added or changed later. Only users eligible for this workspace are listed." : "Only users eligible for this workspace are listed."}
               </p>
               {assignableUsers.length > 0 ? (
                 <div className="border rounded-md divide-y max-h-40 overflow-y-auto">

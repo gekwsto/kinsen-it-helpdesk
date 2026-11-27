@@ -1,3 +1,4 @@
+import { resolveProjectStatusWrite } from "@/lib/services/project-status-service";
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { requireAuth } from "@/lib/permissions";
@@ -22,6 +23,16 @@ import {
   facilitiesResolutionErrorMessage,
   type ResolvedFacilitiesWrite,
 } from "@/lib/services/project-facilities-service";
+
+// The DB integrity trigger (project_status_definition_sync) rejected a
+// status write — only reachable on a race with a concurrent status remap /
+// deactivation (the shared resolver validates everything first).
+function projectStatusTriggerRejection(error: any) {
+  const msg = String(error?.message ?? "");
+  if (msg.includes("project_status_mismatch")) return NextResponse.json({ error: "The selected Project Status changed meanwhile — reload and try again.", code: "status_conflict" }, { status: 409 });
+  if (msg.includes("project_status_no_active_definition")) return NextResponse.json({ error: "No active Project Status represents the requested state.", code: "inactive_status" }, { status: 409 });
+  return null;
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -141,8 +152,18 @@ export async function POST(req: NextRequest) {
       audienceDepartmentIds,
       audienceBusinessUnitIds,
       responsiblePeopleIds,
+      status: requestedStatus,
+      statusDefinitionId: requestedStatusDefinitionId,
       ...rest
     } = data;
+
+    // Project Status — the shared resolver (default SYSTEM PLANNING;
+    // contradictory canonical/definition values and inactive selections rejected).
+    const statusResolution = await resolveProjectStatusWrite({ status: requestedStatus, statusDefinitionId: requestedStatusDefinitionId }, null);
+    if (!statusResolution.ok) {
+      return NextResponse.json({ error: statusResolution.error.message, code: statusResolution.error.code }, { status: statusResolution.error.code === "invalid_status_definition" ? 400 : 409 });
+    }
+    const statusWrite = statusResolution.write!;
 
     // Organizational Audience — available on every Project, manual or
     // request-origin. Every id re-verified against real, existing (and for
@@ -258,6 +279,8 @@ export async function POST(req: NextRequest) {
     const project = await prisma.project.create({
       data: {
         ...rest,
+        status: statusWrite.status,
+        statusDefinitionId: statusWrite.statusDefinitionId,
         actualTotalDays: actualDuration.value,
         actualTotalDaysOverridden: actualDuration.overridden,
         departmentId: deptResolution.departmentId,
@@ -320,6 +343,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(project, { status: 201 });
   } catch (error: any) {
+    const statusRejection = projectStatusTriggerRejection(error);
+    if (statusRejection) return statusRejection;
     if (error.name === "ZodError") {
       return NextResponse.json({ error: error.errors }, { status: 422 });
     }

@@ -2,15 +2,17 @@
  * Live browser verification for the Project Request Setup UI/editability
  * pass:
  *
- *   1. Expected Total Initial Days renders as a real readOnly textbox
+ *   1. Expected Total Initial Days is the calculated-with-override field
  *      (create flow AND edit flow), visually consistent with other inputs,
- *      not typable, not disabled-looking.
- *   2. The Project Request Setup card sits beside Project Details as peer
- *      cards on desktop, and stacks safely at narrow widths with no
- *      horizontal overflow.
- *   3. The card's pencil/Edit control navigates to the existing Project
- *      edit page (no second edit flow), and editing Expected Start/Finish
- *      there never changes the displayed Expected Total Initial Days.
+ *      not disabled-looking: it shows the real calculated working days; a
+ *      typed value is an explicit override (Reset returns to the calculation).
+ *   2. The detail page's single Project Overview card carries the
+ *      request-origin content (Project Request link, Expected Timeline,
+ *      Expense Type) — none of it on a manual Project — with no horizontal
+ *      overflow at narrow widths.
+ *   3. The Project's Edit control navigates to the existing Project edit
+ *      page (no second edit flow); there, automatic values follow the
+ *      Expected dates and an explicit override survives date edits.
  *
  * Usage: BASE_URL=http://localhost:3000 node --require ./scripts/test-support-server-only-stub.cjs --experimental-test-module-mocks --import tsx scripts/browser-verify-project-detail-request-setup-ui.ts
  */
@@ -19,6 +21,7 @@ import { chromium, type Page } from "playwright";
 import { prisma } from "@/lib/prisma";
 import { Role, AuthProvider, DepartmentRole, MembershipSource } from "@prisma/client";
 import { createDepartment } from "@/lib/services/department-service";
+import { calculateWorkingDays } from "@/lib/date-only";
 
 let fixtureSession: { user: { id: string; role: Role; customRoleId: string | null } } | null = null;
 mock.module("@/lib/auth", { namedExports: { auth: async () => fixtureSession, handlers: {}, signIn: async () => {}, signOut: async () => {} } });
@@ -84,6 +87,28 @@ async function main() {
     const expenseType = await prisma.projectExpenseType.create({ data: { name: `${TAG}-expense-type` } });
     expenseTypeIds.push(expenseType.id);
 
+    // Project Request submission requires the intermediate approver to be the
+    // requester's VERIFIED SQLGeneral direct manager — isolated temporary
+    // manager (never the seeded admin's identity) for both fixture
+    // requesters, mocked the same way the sibling request-origin tests do,
+    // registered before the routes load.
+    const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+    const sqlRows = new Map<string, any>();
+    const sqlRow = (username: string, managerAMAccountName: string | null) => ({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+    mock.module("@/lib/sqlgeneral-api-client", {
+      namedExports: {
+        ...realSqlGeneralClient,
+        findSqlGeneralUserByUsername: async (username: string) => (sqlRows.has(username) ? { outcome: "unique" as const, user: sqlRows.get(username) } : { outcome: "not_found" as const }),
+      },
+    });
+    const manager = await prisma.user.create({ data: { email: `${TAG}-manager@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    userIds.push(manager.id);
+    sqlRows.set(`${TAG}-mgr`, sqlRow(`${TAG}-mgr`, null));
+    sqlRows.set(`${TAG}-req`, sqlRow(`${TAG}-req`, `${TAG}-mgr`));
+    sqlRows.set(`${TAG}-req2`, sqlRow(`${TAG}-req2`, `${TAG}-mgr`));
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester.id, sqlGeneralUsername: `${TAG}-req`, status: "SUCCEEDED" } });
+
     // ══════════════════════ Fixture: one real request-origin Project (via the real routes, end to end) ══════════════════════
     const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
     const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
@@ -102,15 +127,17 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [admin.id],
+        intermediateApproverIds: [manager.id],
       })
     );
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
 
-    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    if (submitRes.status !== 201) throw new Error(`Fixture setup failed: submit returned ${submitRes.status}: ${JSON.stringify(submitted)}`);
+    fixtureSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
     const clearRes = await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
     if (clearRes.status !== 200) throw new Error(`Fixture setup failed: intermediate approval returned ${clearRes.status}`);
+    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     const approveRes = await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "Project Request Setup UI fixture." }), { params: Promise.resolve({ id: submitted.id }) });
     if (approveRes.status !== 200) throw new Error(`Fixture setup failed: final approval returned ${approveRes.status}`);
 
@@ -155,6 +182,7 @@ async function main() {
     await prisma.departmentMembership.create({
       data: { userId: requester2.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true },
     });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester2.id, sqlGeneralUsername: `${TAG}-req2`, status: "SUCCEEDED" } });
     fixtureSession = { user: { id: requester2.id, role: Role.USER, customRoleId: null } };
     const submit2Res = await requestsPOST(
       jsonReq({
@@ -165,13 +193,15 @@ async function main() {
         teamConcerned: "Engineering",
         expectedBenefits: "Benefits text long enough for validation.",
         replacesExisting: false,
-        intermediateApproverIds: [admin.id],
+        intermediateApproverIds: [manager.id],
       })
     );
     const submitted2 = await submit2Res.json();
     requestIds.push(submitted2.id);
-    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    if (submit2Res.status !== 201) throw new Error(`Fixture setup failed: submit 2 returned ${submit2Res.status}: ${JSON.stringify(submitted2)}`);
+    fixtureSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
     await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted2.id }) });
+    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted2.id }) });
     fixtureSession = null;
 
@@ -180,7 +210,9 @@ async function main() {
 
     const readonlyInput = page.locator("#expected-total-initial-days");
     check("1. The Expected Total Initial Days field is a real <input> element (not a <p> aside)", (await readonlyInput.count()) === 1);
-    check("1. ...and it is readOnly (not editable)", await readonlyInput.evaluate((el) => (el as HTMLInputElement).readOnly));
+    // Current contract (approved Expected Days override): a CALCULATED
+    // preview field that accepts an explicit manual override.
+    check("1. ...and it is the calculated-with-override field (helper explains the calculation + override)", (await page.getByText("Working days (Mon–Fri), calculated from Expected Start/Finish Date. Enter a value to override.").count()) > 0);
     check("1. ...and it is NOT disabled (full visual weight, not greyed out)", !(await readonlyInput.evaluate((el) => (el as HTMLInputElement).disabled)));
     const opacityBefore = await readonlyInput.evaluate((el) => getComputedStyle(el).opacity);
     check("1. ...its opacity is the SAME as a normal (non-disabled) input (1), not faded", opacityBefore === "1");
@@ -189,14 +221,17 @@ async function main() {
     await page.fill("#expected-finish", "2026-05-06");
     await page.waitForTimeout(150);
     const previewValue = await readonlyInput.inputValue();
-    check("1. Once both dates are set, the preview shows the real calculated value", previewValue === "5 days");
+    const expectedPreview = String(calculateWorkingDays("2026-05-01", "2026-05-06"));
+    check(`1. Once both dates are set, the preview shows the real calculated working-day value (${expectedPreview})`, previewValue === expectedPreview, previewValue);
 
-    // 3. Typing directly into the readOnly field must do nothing.
-    await readonlyInput.click();
-    await page.keyboard.type("999");
+    // 3. Typing a value is an explicit manual override — the calculated
+    // value is still shown alongside it, and clearing restores it.
+    await readonlyInput.fill("9");
     await page.waitForTimeout(100);
-    const afterTypeValue = await readonlyInput.inputValue();
-    check("3. Typing into the readOnly field changes nothing — value is still the real calculated preview, not '999'", afterTypeValue === previewValue && !afterTypeValue.includes("999"));
+    check("3. Typing a value sets an explicit override (field shows 9) while still displaying the real calculated value", (await readonlyInput.inputValue()) === "9" && (await page.getByText(`Manually set (working days) — calculated value: ${expectedPreview} day${expectedPreview === "1" ? "" : "s"}.`).count()) > 0);
+    await page.getByRole("button", { name: "Reset to calculated value" }).click();
+    await page.waitForTimeout(100);
+    check("3. ...and 'Reset to calculated value' returns to the real calculated preview", (await readonlyInput.inputValue()) === previewValue);
 
     // ══════════════════════ 2. Manual create flow never shows any of this ══════════════════════
     console.log("\n=== 2. Manual /projects/new create flow (regression guard) ===\n");
@@ -210,53 +245,41 @@ async function main() {
     await page.goto(`${BASE_URL}/projects/${project.id}`, { waitUntil: "load" });
     await page.waitForTimeout(300);
 
-    const detailsCard = page.locator("h3,div").filter({ hasText: /^Project Details$/ }).first();
-    const setupCard = page.locator("h3,div").filter({ hasText: /^Project Request Setup$/ }).first();
-    check("4. The request-origin Project's detail page shows a 'Project Request Setup' card", (await setupCard.count()) > 0);
+    // The former "Project Details" + "Project Request Setup" card pair is now
+    // ONE "Project Overview" card (committed redesign); request-origin-only
+    // content lives inside it.
+    const overviewTitle = page.getByText("Project Overview", { exact: true }).first();
+    await overviewTitle.waitFor({ timeout: 30000 });
+    check("4. The request-origin Project's detail page shows the Project Overview card", (await overviewTitle.count()) > 0);
+    check("4. ...with its request-origin content: the originating Project Request link", (await page.getByText("From Project Request", { exact: true }).count()) > 0 && (await page.getByRole("link", { name: `${TAG} request`, exact: true }).count()) > 0);
+    check("4. ...the Expected Timeline set during Request Setup", (await page.getByText("Expected Timeline", { exact: true }).count()) > 0);
+    check("4. ...and the Expense Type chosen during Request Setup", (await page.getByText("Expense Type", { exact: true }).count()) > 0);
     await page.screenshot({ path: `/tmp/${TAG}-desktop-1440.png` });
-
-    const detailsBox = await detailsCard.boundingBox();
-    const setupBox = await setupCard.boundingBox();
-    check("6. (sanity) Both card headers were found on screen", detailsBox !== null && setupBox !== null);
-    if (detailsBox && setupBox) {
-      // A header with a title + Edit button is taller than a title-only
-      // header, so its title can sit a little lower within its own row
-      // (vertical centering) — 50px is well under a real card's height
-      // (reserved for "this is a genuinely different grid row"), so this
-      // still only passes for true side-by-side placement, not stacking.
-      const sameRow = Math.abs(detailsBox.y - setupBox.y) < 50;
-      const sideBySide = Math.abs(detailsBox.x - setupBox.x) > 50;
-      check("6. On a desktop width (1440px), Project Details and Project Request Setup are peer cards in the SAME row, side by side", sameRow && sideBySide, `detailsBox.y=${detailsBox.y} setupBox.y=${setupBox.y} detailsBox.x=${detailsBox.x} setupBox.x=${setupBox.x}`);
-    }
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.waitForTimeout(300);
     await page.screenshot({ path: `/tmp/${TAG}-narrow-390.png`, fullPage: true });
-    const narrowDetailsBox = await detailsCard.boundingBox();
-    const narrowSetupBox = await setupCard.boundingBox();
-    if (narrowDetailsBox && narrowSetupBox) {
-      const stacked = narrowSetupBox.y - narrowDetailsBox.y > 50;
-      check("7. At a narrow width (390px), the two cards stack vertically instead of staying side by side", stacked, `narrowDetailsBox.y=${narrowDetailsBox.y} narrowSetupBox.y=${narrowSetupBox.y}`);
-    }
+    check("7. At a narrow width (390px), the Project Overview card still renders", await overviewTitle.isVisible());
     const noHorizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);
     check("7. ...and there is no horizontal overflow at that narrow width", noHorizontalOverflow);
     await page.setViewportSize({ width: 1440, height: 900 });
 
-    // ══════════════════════ 5. Manual Project detail page shows neither card content nor the section ══════════════════════
+    // ══════════════════════ 5. Manual Project detail page shows none of the request-origin content ══════════════════════
     console.log("\n=== 5. Manual Project detail page (regression guard) ===\n");
     await page.goto(`${BASE_URL}/projects/${manualProject.id}`, { waitUntil: "load" });
-    await page.waitForTimeout(300);
-    check("5. A manual Project's detail page shows NO 'Project Request Setup' card", (await page.locator("h3,div").filter({ hasText: /^Project Request Setup$/ }).count()) === 0);
-    const manualDetailsCard = page.locator("h3,div").filter({ hasText: /^Project Details$/ }).first();
-    const manualDetailsBox = await manualDetailsCard.boundingBox();
-    check("5. ...and Project Details still renders normally (no empty grid column beside it)", manualDetailsBox !== null);
+    await page.getByText("Project Overview", { exact: true }).first().waitFor({ timeout: 30000 });
+    check("5. A manual Project's Overview shows NO request-origin content (no Project Request link, Expected Timeline or Expense Type)", (await page.getByText("From Project Request", { exact: true }).count()) === 0 && (await page.getByText("Expected Timeline", { exact: true }).count()) === 0 && (await page.getByText("Expense Type", { exact: true }).count()) === 0);
+    check("5. ...and the Project Overview still renders normally", (await page.getByText("Project Overview", { exact: true }).count()) > 0);
 
     // ══════════════════════ 8/10. The pencil/Edit control navigates to the existing edit page ══════════════════════
     console.log("\n=== 8/10. Pencil/Edit control on the Project Request Setup card ===\n");
     await page.goto(`${BASE_URL}/projects/${project.id}`, { waitUntil: "load" });
     await page.waitForTimeout(300);
-    const editControl = page.getByRole("link", { name: /edit project request setup/i });
-    check("8. The admin (authorized) user sees the pencil/Edit control on the Project Request Setup card", (await editControl.count()) === 1);
+    // The card-level pencil went away with the single Project Overview card;
+    // the Project's Edit control is the header's Edit link (same edit route).
+    const editControl = page.getByRole("link", { name: "Edit", exact: true });
+    await editControl.first().waitFor({ timeout: 30000 });
+    check("8. The admin (authorized) user sees the Project's Edit control", (await editControl.count()) === 1);
     await editControl.click();
     await page.waitForURL((url) => url.pathname === `/projects/${project.id}/edit`, { timeout: 10000 });
     check("10. Clicking it navigates to the EXISTING Project edit route — no second edit page", page.url().endsWith(`/projects/${project.id}/edit`));
@@ -277,16 +300,24 @@ async function main() {
 
     const editReadonlyInput = page.locator("#expectedTotalInitialDays");
     check("12. Expected Total Initial Days is VISIBLE on the edit page", (await editReadonlyInput.count()) === 1);
-    check("12. ...and it is readOnly there too", await editReadonlyInput.evaluate((el) => (el as HTMLInputElement).readOnly));
+    // Current contract (approved Expected Days override): automatic values
+    // follow the Expected dates; an explicit override is never overwritten
+    // by later date edits.
+    check("12. ...and it is the calculated-with-override field there too", (await page.getByText("Working days (Mon–Fri), calculated from Expected Start/Finish Date. Enter a value to override.").count()) > 0);
+    const persisted = await prisma.project.findUniqueOrThrow({ where: { id: project.id }, select: { expectedTotalInitialDays: true, expectedTotalInitialDaysOverridden: true } });
     const baselineOnEditPage = await editReadonlyInput.inputValue();
-    check("12. ...and shows the REAL persisted baseline (10 days, from Expected Start/Finish set at creation)", baselineOnEditPage === "10 days");
+    check(`12. ...and shows the REAL persisted value (${persisted.expectedTotalInitialDays} working days from the Setup dates)`, !persisted.expectedTotalInitialDaysOverridden && baselineOnEditPage === String(persisted.expectedTotalInitialDays) && persisted.expectedTotalInitialDays === calculateWorkingDays("2026-03-01", "2026-03-11"), `${baselineOnEditPage} vs ${persisted.expectedTotalInitialDays}`);
 
-    // 13: change Expected Start/Finish in the edit form — the readonly baseline must NOT move.
+    // 13a: automatic mode follows edited Expected dates.
     await page.fill("#expectedStartDate", "2026-01-01");
     await page.fill("#expectedFinishDate", "2026-01-20");
     await page.waitForTimeout(150);
-    const baselineAfterDateChange = await editReadonlyInput.inputValue();
-    check("13. Editing Expected Start/Finish in the form does NOT change the displayed Expected Total Initial Days", baselineAfterDateChange === baselineOnEditPage);
+    check("13. In automatic mode, editing Expected Start/Finish recalculates the value from the new dates", (await editReadonlyInput.inputValue()) === String(calculateWorkingDays("2026-01-01", "2026-01-20")));
+    // 13b: an explicit override survives later date edits.
+    await editReadonlyInput.fill("7");
+    await page.fill("#expectedFinishDate", "2026-01-30");
+    await page.waitForTimeout(150);
+    check("13. ...and an explicit override is NOT overwritten by later date edits", (await editReadonlyInput.inputValue()) === "7");
   } finally {
     await browser.close();
     try {
@@ -296,6 +327,8 @@ async function main() {
       await prisma.projectRequest.deleteMany({ where: { id: { in: requestIds } } });
       await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.departmentMembership.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: userIds } } });
+      await prisma.notification.deleteMany({ where: { userId: { in: userIds } } });
       await prisma.user.deleteMany({ where: { id: { in: userIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { id: { in: expenseTypeIds } } });
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: departmentIds } } });

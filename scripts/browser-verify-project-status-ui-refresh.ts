@@ -85,6 +85,7 @@ async function main() {
   const typeIds: string[] = [];
   const requestIds: string[] = [];
   const projectIds: string[] = [];
+  const fixtureUserIds: string[] = [];
   const browser = await chromium.launch();
 
   try {
@@ -99,6 +100,28 @@ async function main() {
       data: { userId: admin.id, departmentId: dept.id, role: DepartmentRole.DEPARTMENT_ADMIN, source: MembershipSource.MANUAL, isPrimary: false, isActive: true },
     }).catch(() => {});
 
+    // Project Request submission requires the intermediate approver to be the
+    // requester's VERIFIED SQLGeneral direct manager — isolated temporary
+    // requester + manager (never the seeded admin's identity), mocked the same
+    // way the sibling request-origin tests do, registered before the routes load.
+    const realSqlGeneralClient = await import("@/lib/sqlgeneral-api-client");
+    const sqlRows = new Map<string, any>();
+    const sqlRow = (username: string, managerAMAccountName: string | null) => ({ username, mail: null, hrDepartmentId: null, department: null, companyId: null, company: null, active: true, managerAMAccountName, manager2AMAccountName: null, manager3AMAccountName: null });
+    mock.module("@/lib/sqlgeneral-api-client", {
+      namedExports: {
+        ...realSqlGeneralClient,
+        findSqlGeneralUserByUsername: async (username: string) => (sqlRows.has(username) ? { outcome: "unique" as const, user: sqlRows.get(username) } : { outcome: "not_found" as const }),
+      },
+    });
+    const requester = await prisma.user.create({ data: { email: `${TAG}-requester@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    const manager = await prisma.user.create({ data: { email: `${TAG}-manager@kinsen.gr`, role: Role.USER, authProvider: AuthProvider.CREDENTIALS, isActive: true } });
+    fixtureUserIds.push(requester.id, manager.id);
+    sqlRows.set(`${TAG}-mgr`, sqlRow(`${TAG}-mgr`, null));
+    sqlRows.set(`${TAG}-req`, sqlRow(`${TAG}-req`, `${TAG}-mgr`));
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: manager.id, sqlGeneralUsername: `${TAG}-mgr`, status: "SUCCEEDED" } });
+    await prisma.sqlGeneralUserSyncAttempt.create({ data: { userId: requester.id, sqlGeneralUsername: `${TAG}-req`, status: "SUCCEEDED" } });
+    await prisma.departmentMembership.create({ data: { userId: requester.id, departmentId: dept.id, role: DepartmentRole.VIEWER, source: MembershipSource.MANUAL, isPrimary: true, isActive: true } });
+
     const requestsPOST = (await import("@/app/api/project-requests/route")).POST;
     const intermediateApprovalPOST = (await import("@/app/api/project-requests/[id]/intermediate-approval/route")).POST;
     const approvalPOST = (await import("@/app/api/project-requests/[id]/approval/route")).POST;
@@ -111,13 +134,16 @@ async function main() {
     // the status-refresh mechanism (already-established Feedback
     // eligibility rules are their own, separately-tested concern — see
     // scripts/test-project-feedback.ts).
-    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
+    fixtureSession = { user: { id: requester.id, role: Role.USER, customRoleId: null } };
     const submitRes = await requestsPOST(
-      jsonReq({ title: `${TAG} request`, description: "Status refresh UI fixture — description long enough.", importance: 2, projectTypeId: reqType.id, teamConcerned: "Engineering", expectedBenefits: "Benefits text long enough for validation.", replacesExisting: false, intermediateApproverIds: [admin.id], departmentId: dept.id })
+      jsonReq({ title: `${TAG} request`, description: "Status refresh UI fixture — description long enough.", importance: 2, projectTypeId: reqType.id, teamConcerned: "Engineering", expectedBenefits: "Benefits text long enough for validation.", replacesExisting: false, intermediateApproverIds: [manager.id], departmentId: dept.id })
     );
     const submitted = await submitRes.json();
     requestIds.push(submitted.id);
+    if (submitRes.status !== 201) throw new Error(`Fixture submit failed: ${submitRes.status}: ${JSON.stringify(submitted)}`);
+    fixtureSession = { user: { id: manager.id, role: Role.USER, customRoleId: null } };
     await intermediateApprovalPOST(jsonReq({ decision: "approve" }), { params: Promise.resolve({ id: submitted.id }) });
+    fixtureSession = { user: { id: admin.id, role: Role.ADMIN, customRoleId: null } };
     await approvalPOST(jsonReq({ decision: "approve", businessAssessment: "fixture" }), { params: Promise.resolve({ id: submitted.id }) });
     const setupRes = await setupPOST(
       jsonReq({ title: `${TAG} request`, description: "fixture", ownerIds: [admin.id], expectedStartDate: "2026-01-01", expectedFinishDate: "2026-01-05", expenseTypeId: expenseType.id }),
@@ -136,7 +162,7 @@ async function main() {
     await login(page);
     await page.goto(`${BASE_URL}/projects/${project.id}`, { waitUntil: "load" });
     await page.waitForTimeout(800);
-    check("(sanity) Badge shows COMPLETED on initial load", (await page.getByText("COMPLETED", { exact: true }).count()) > 0);
+    check("(sanity) Badge shows COMPLETED on initial load", (await page.locator("[data-project-status-id]").first().innerText()).includes("Completed"));
     check("(sanity) 'Αξιολόγηση Έργου' form is visible (COMPLETED, eligible requester, no feedback yet)", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 1);
 
     // ══════════════════════ 14-19. Real dropdown: COMPLETED -> IN_PROGRESS ══════════════════════
@@ -146,21 +172,21 @@ async function main() {
     const dbAfter1 = await prisma.project.findUnique({ where: { id: project.id }, select: { status: true } });
     check("15. DB status becomes IN_PROGRESS", dbAfter1?.status === "IN_PROGRESS");
     check("16. Dropdown immediately displays IN PROGRESS — no reload", (await page.getByRole("button", { name: /change project status/i }).innerText()).toUpperCase().includes("IN PROGRESS"));
-    check("17. Status badge immediately displays IN PROGRESS", (await page.getByText("IN PROGRESS", { exact: true }).count()) > 0);
+    check("17. Status badge immediately displays IN PROGRESS", (await page.locator("[data-project-status-id]").first().innerText()).includes("In Progress"));
     check("18. No manual page refresh was performed between the click and these checks (by construction of this test)", true);
     check("22. Completion-dependent UI ('Αξιολόγηση Έργου' form) disappears immediately — status is no longer COMPLETED, and no feedback exists yet", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 0);
 
     await page.reload({ waitUntil: "load" });
     await page.waitForTimeout(600);
-    check("19. Reload still shows IN PROGRESS (persisted, not just a client illusion)", (await page.getByText("IN PROGRESS", { exact: true }).count()) > 0);
+    check("19. Reload still shows IN PROGRESS (persisted, not just a client illusion)", (await page.locator("[data-project-status-id]").first().innerText()).includes("In Progress"));
 
     // ══════════════════════ 20. Symmetric: IN_PROGRESS -> COMPLETED ══════════════════════
     console.log("\n=== 20. Symmetric change back: IN_PROGRESS -> COMPLETED ===\n");
-    await changeStatusViaDropdown(page, "COMPLETED");
+    await changeStatusViaDropdown(page, /^Completed$/);
     const dbAfter2 = await prisma.project.findUnique({ where: { id: project.id }, select: { status: true } });
     check("20. DB status becomes COMPLETED again", dbAfter2?.status === "COMPLETED");
     check("...dropdown immediately displays COMPLETED", (await page.getByRole("button", { name: /change project status/i }).innerText()).toUpperCase().includes("COMPLETED"));
-    check("...badge immediately displays COMPLETED", (await page.getByText("COMPLETED", { exact: true }).count()) > 0);
+    check("...badge immediately displays COMPLETED", (await page.locator("[data-project-status-id]").first().innerText()).includes("Completed"));
     check("...'Αξιολόγηση Έργου' form reappears immediately (status is COMPLETED again, still no feedback submitted)", (await page.getByText("Αξιολόγηση Έργου", { exact: true }).count()) === 1);
 
     // ══════════════════════ 21. Failed mutation never leaves false/stale dropdown state ══════════════════════
@@ -174,7 +200,7 @@ async function main() {
     await page.getByRole("menuitem", { name: /in progress/i }).click();
     await page.waitForTimeout(800);
     check("21. After a FAILED mutation, the dropdown still shows the real persisted status (COMPLETED) — confirmed-update, never optimistic", (await page.getByRole("button", { name: /change project status/i }).innerText()).toUpperCase().includes("COMPLETED"));
-    check("...the badge agrees — no desync between the two", (await page.getByText("COMPLETED", { exact: true }).count()) > 0);
+    check("...the badge agrees — no desync between the two", (await page.locator("[data-project-status-id]").first().innerText()).includes("Completed"));
     const dbAfterFailedAttempt = await prisma.project.findUnique({ where: { id: project.id }, select: { status: true } });
     check("...and the DB was genuinely never touched by the failed attempt", dbAfterFailedAttempt?.status === "COMPLETED");
     await page.unroute("**/api/projects/**");
@@ -226,6 +252,9 @@ async function main() {
       await prisma.taskType.deleteMany({ where: { id: { in: typeIds } } });
       await prisma.projectExpenseType.deleteMany({ where: { name: `${TAG}-expensetype` } });
       await prisma.departmentMembership.deleteMany({ where: { departmentId: { in: deptIds } } }).catch(() => {});
+      await prisma.notification.deleteMany({ where: { userId: { in: fixtureUserIds } } }).catch(() => {});
+      await prisma.sqlGeneralUserSyncAttempt.deleteMany({ where: { userId: { in: fixtureUserIds } } }).catch(() => {});
+      await prisma.user.deleteMany({ where: { id: { in: fixtureUserIds } } }).catch((e) => console.warn("fixture user cleanup", String(e.message).split("\n")[0]));
       await prisma.ticketCategory.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketPriority.deleteMany({ where: { departmentId: { in: deptIds } } });
       await prisma.ticketStatus.deleteMany({ where: { departmentId: { in: deptIds } } });

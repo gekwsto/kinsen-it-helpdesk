@@ -8,16 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { formatDate, getInitials } from "@/lib/utils";
 import { FolderKanban, Plus } from "lucide-react";
-import { ProjectStatus } from "@prisma/client";
 import { ProjectListLiveRefresh } from "@/components/projects/project-list-live-refresh";
-
-const STATUS_COLORS: Record<ProjectStatus, string> = {
-  PLANNING: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
-  IN_PROGRESS: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400",
-  ON_HOLD: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
-  COMPLETED: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
-  CANCELLED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
-};
+import { ProjectStatusBadge } from "@/components/projects/project-status-badge";
 
 const PRIORITY_LABELS: Record<number, string> = {
   1: "Low",
@@ -57,6 +49,7 @@ export default async function MyProjectsPage() {
     orderBy: { createdAt: "desc" },
     include: {
       owner: { select: { id: true, name: true, image: true } },
+      statusDefinition: { select: { id: true, label: true, color: true, isActive: true } },
       members: { select: { id: true, name: true, image: true } },
       _count: { select: { activities: true } },
     },
@@ -99,11 +92,7 @@ export default async function MyProjectsPage() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
-                        <span
-                          className={`text-xs font-medium px-2 py-0.5 rounded-full ${STATUS_COLORS[project.status]}`}
-                        >
-                          {project.status.replace(/_/g, " ")}
-                        </span>
+                        <ProjectStatusBadge status={project.statusDefinition} />
                         <span className="text-xs text-muted-foreground">
                           {PRIORITY_LABELS[project.priority] ?? "Medium"} priority
                         </span>

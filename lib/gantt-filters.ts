@@ -5,6 +5,8 @@ export interface GanttFilterableItem {
 }
 
 export interface GanttFilterableGroup<C extends GanttFilterableItem> extends GanttFilterableItem {
+  /** Project groups: the configured Project Status filter value (`project-status:<definitionId>`); falls back to `status`. */
+  statusFilterValue?: string;
   children: C[];
 }
 
@@ -46,7 +48,7 @@ export function filterGanttGroups<C extends GanttFilterableItem, G extends Gantt
     .filter((g) => {
       if (!q && statusFilter === "ALL" && priorityFilter === "ALL") return true;
       const groupMatch = !q || g.title.toLowerCase().includes(q);
-      const statusOk = statusFilter === "ALL" || g.status === statusFilter;
+      const statusOk = statusFilter === "ALL" || (g.statusFilterValue ?? g.status) === statusFilter;
       const priorityOk = priorityFilter === "ALL" || g.priority === priorityFilter;
       return (groupMatch && statusOk && priorityOk) || g.children.length > 0;
     });

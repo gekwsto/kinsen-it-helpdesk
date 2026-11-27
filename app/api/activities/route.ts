@@ -100,16 +100,15 @@ export async function POST(req: NextRequest) {
     // EVERY Activity, manual or request-origin alike — enforced by
     // createActivitySchema itself (a missing/empty taskTypeId already
     // fails .parse() above with a 422, before this line is ever reached).
-    // Task Sub Type/Owner/dates/Related Users remain conditionally
-    // required ONLY for request-origin Activities, via
-    // requestOriginActivityMissingFields below — completely unchanged by
-    // this feature.
+    // Task Sub Type/Owner/dates remain conditionally required ONLY for
+    // request-origin Activities, via requestOriginActivityMissingFields
+    // below. Related Users are optional (may be empty, added later).
     if (isRequestOriginProject) {
       const missing = requestOriginActivityMissingFields(data);
       if (missing.length > 0) {
         return NextResponse.json(
           {
-            error: "This Activity's parent Project originates from a Project Request — Expected Start, Expected Finish, Task Sub Type, Owner, and at least one Related User are required.",
+            error: "This Activity's parent Project originates from a Project Request — Expected Start, Expected Finish, Task Sub Type and Owner are required.",
             code: "request_origin_fields_required",
             missingFields: missing,
           },

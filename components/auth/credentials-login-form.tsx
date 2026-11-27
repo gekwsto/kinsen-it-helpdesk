@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { signIn } from "next-auth/react";
 import { adminLoginSchema } from "@/lib/validations";
@@ -15,10 +15,28 @@ const ERROR_MESSAGES: Record<string, string> = {
   credentials: "Invalid credentials.",
 };
 
-export function CredentialsLoginForm() {
+/**
+ * `successUrl` / `defaultEmail` are used only by the session-renewal popup
+ * (app/auth/session-renew/credentials) — the normal /login page passes
+ * neither and keeps its exact previous behaviour.
+ */
+export function CredentialsLoginForm({ successUrl = "/dashboard", defaultEmail }: { successUrl?: string; defaultEmail?: string } = {}) {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [isPending, setIsPending] = useState(false);
+  // Credentials must NEVER leave the browser before React has attached the
+  // onSubmit handler: a <form> without method/action falls back to a native
+  // GET to the current URL, putting the email/password into the query
+  // string (URL, browser history, server/proxy logs). So the submit button
+  // stays disabled until hydration (which also blocks implicit Enter-key
+  // submission — a form with a disabled default button can't be implicitly
+  // submitted), and the form itself declares secure POST semantics
+  // targeting the existing NextAuth credentials endpoint as a last-resort
+  // fallback: a native submission (no JavaScript) sends the credentials
+  // only in the POST body and NextAuth rejects it for the missing CSRF
+  // token — no parallel authentication path.
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => setHydrated(true), []);
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -43,6 +61,14 @@ export function CredentialsLoginForm() {
       redirect: false,
     });
 
+    // Session renewal only: a sign-in with a DIFFERENT account is rejected
+    // by the renewal identity check (lib/session-renewal.ts) — report it on
+    // the renewal landing page so every waiting tab gets a clear message.
+    if ((result?.error === "different_account" || result?.error === "renewal_expired") && successUrl.startsWith("/auth/session-renewed")) {
+      router.push(`/auth/session-renewed?error=${result.error}`);
+      return;
+    }
+
     if (!result || result.error) {
       const code = result?.code ?? "credentials";
       setError(ERROR_MESSAGES[code] ?? "Invalid credentials.");
@@ -51,11 +77,17 @@ export function CredentialsLoginForm() {
     }
 
     // Middleware handles mustChangePassword → /settings/change-password redirect
-    router.push("/dashboard");
+    router.push(successUrl);
   }
 
   return (
-    <form onSubmit={handleSubmit} className="space-y-3">
+    <form
+      method="post"
+      action="/api/auth/callback/credentials"
+      onSubmit={handleSubmit}
+      className="space-y-3"
+      data-hydrated={hydrated ? "true" : "false"}
+    >
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2.5 text-sm text-destructive">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -70,6 +102,7 @@ export function CredentialsLoginForm() {
         <Input
           id="credentials-email"
           name="email"
+          defaultValue={defaultEmail}
           type="email"
           placeholder="admin@kinsen.gr"
           autoComplete="email"
@@ -99,7 +132,7 @@ export function CredentialsLoginForm() {
         type="submit"
         variant="outline"
         className="w-full h-9 gap-2 border-slate-300 text-sm"
-        disabled={isPending}
+        disabled={isPending || !hydrated}
       >
         {isPending ? (
           <Loader2 className="h-4 w-4 animate-spin" />

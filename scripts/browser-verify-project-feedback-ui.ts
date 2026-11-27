@@ -210,7 +210,7 @@ async function main() {
     // now the Workspace selector (Project Workspace transfer).
     const statusSelect = adminPage.locator("label", { hasText: /^Status$/ }).locator("xpath=..").getByRole("combobox");
     await statusSelect.click();
-    await adminPage.getByRole("option", { name: "COMPLETED", exact: true }).click();
+    await adminPage.getByRole("option", { name: "Completed", exact: true }).click();
     await Promise.all([
       adminPage.waitForURL((url) => url.pathname === `/projects/${project.id}`, { timeout: 10000 }),
       adminPage.getByRole("button", { name: /save changes/i }).click(),

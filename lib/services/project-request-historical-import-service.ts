@@ -150,6 +150,7 @@
  * "Explicit exclusions") and this function has no field for either.
  */
 import { prisma } from "@/lib/prisma";
+import { resolveProjectStatusWrite } from "@/lib/services/project-status-service";
 import { Prisma, type ProjectStatus } from "@prisma/client";
 import { resolveProjectAudienceOrganizationalIds, resolveSystemWideActiveUserIds } from "@/lib/services/project-audience-service";
 import { resolveProjectDuration } from "@/lib/project-duration";
@@ -423,11 +424,24 @@ export async function createHistoricalProjectRequest(
       select: { id: true },
     });
 
+    // Historical canonical status -> its configured Project Status (shared
+    // resolver: the active system definition of that state, else the first
+    // active one). If NONE is active, the import EXPLICITLY links that
+    // state's SYSTEM definition (a deliberate, documented exception: an
+    // import records a historical fact, not a new user selection) — never
+    // left to the DB trigger, which rejects canonical-only writes when no
+    // active definition exists.
+    const statusResolution = await resolveProjectStatusWrite({ status: input.projectStatus }, null, tx);
+    const importStatusDefinitionId =
+      statusResolution.ok && statusResolution.write
+        ? statusResolution.write.statusDefinitionId
+        : (await tx.projectStatusDefinition.findFirstOrThrow({ where: { isSystem: true, canonicalStatus: input.projectStatus }, select: { id: true } })).id;
     const project = await tx.project.create({
       data: {
         title: input.projectTitle ?? input.title,
         description: input.projectDescription !== undefined ? input.projectDescription : input.description ?? null,
         status: input.projectStatus,
+        statusDefinitionId: importStatusDefinitionId,
         // Omitted (not `null`) when unknown, so Project's OWN column
         // default (2/Medium) applies — see this file's own doc comment on
         // mandatory-field relaxation ("never a fabricated HISTORICAL fact

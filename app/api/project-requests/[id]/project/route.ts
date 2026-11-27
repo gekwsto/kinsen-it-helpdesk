@@ -75,6 +75,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ id:
             apiError("invalid_responsible_people", "One or more selected Responsible People are not real, active users.", { field: "responsiblePeopleIds" }),
             { status: 422 }
           );
+        case "invalid_project_status":
+          return NextResponse.json(apiError(result.error.reason, result.error.message, { field: "statusDefinitionId" }), { status: result.error.reason === "invalid_status_definition" ? 400 : 409 });
         case "invalid_expense_type":
           return NextResponse.json(
             apiError("invalid_expense_type", "Select a real, active Expense Type.", { field: "expenseTypeId" }),

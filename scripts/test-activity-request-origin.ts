@@ -233,7 +233,7 @@ async function main() {
     const missingFieldsRes = await activitiesPOST(jsonReq({ title: `${TAG} RO Missing`, projectId: requestOriginProject.id, departmentId: dept.id, taskTypeId: reqType.id }));
     check("3. Request-origin Project Activity creation WITHOUT the request-origin-only fields -> rejected", missingFieldsRes.status === 400);
     const missingFieldsBody = await missingFieldsRes.json();
-    check("...with code request_origin_fields_required and the real missing list", missingFieldsBody.code === "request_origin_fields_required" && Array.isArray(missingFieldsBody.missingFields) && missingFieldsBody.missingFields.length === 5);
+    check("...with code request_origin_fields_required and the real missing list", missingFieldsBody.code === "request_origin_fields_required" && JSON.stringify(missingFieldsBody.missingFields) === JSON.stringify(["expectedStartDate", "expectedFinishDate", "taskSubTypeId", "ownerId"]), JSON.stringify(missingFieldsBody.missingFields));
 
     // 4: a client-sent fake flag changes nothing — there's no such field on
     // createActivitySchema at all, so this is a no-op, not a bypass.
@@ -400,7 +400,7 @@ async function main() {
     check("29. Leaving Task Sub Type UNCHANGED on an unrelated edit does NOT rewrite the snapshot", Number(unrelatedEditActivity.taskSubTypeCost) === 200);
 
     // ══════════════════════ 30-35. Owner / Related Users ══════════════════════
-    console.log("\n=== 30-35. Owner required; Related Users (reused assignedUsers) require >=1 ═══\n");
+    console.log("\n=== 30-35. Owner required; Related Users (reused assignedUsers) OPTIONAL ═══\n");
     const missingOwnerRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} NoOwner`, ownerId: undefined }));
     check("30. Owner required for request-origin Activity -> rejected when omitted", missingOwnerRes.status === 400);
 
@@ -408,8 +408,49 @@ async function main() {
     check("31. An invalid/non-assignable Owner is rejected server-side", invalidOwnerRes.status === 400);
     check("...with code invalid_owner", (await invalidOwnerRes.json()).code === "invalid_owner");
 
-    const missingRelatedUsersRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} NoRelated`, assignedUserIds: [] }));
-    check("32. At least one Related User required -> rejected when the list is empty", missingRelatedUsersRes.status === 400);
+    const controlRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} WithRelatedControl` }));
+    const control = await controlRes.json();
+    if (control.id) activityIds.push(control.id);
+    const noRelatedRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} NoRelated`, assignedUserIds: [] }));
+    const noRelated = await noRelatedRes.json();
+    if (noRelated.id) activityIds.push(noRelated.id);
+    check("32. Related Users are OPTIONAL: an empty list is accepted -> 201", noRelatedRes.status === 201, JSON.stringify(noRelated));
+    check("32a. ...created with zero Related Users; Owner, Task Sub Type cost snapshot, Expected dates and Expected Days unchanged", noRelated.assignedUsers?.length === 0 && noRelated.ownerId === worker1.id && noRelated.taskSubTypeCost === control.taskSubTypeCost && noRelated.expectedDays === control.expectedDays && noRelated.expectedStartDate === control.expectedStartDate && noRelated.expectedFinishDate === control.expectedFinishDate, JSON.stringify({ a: noRelated.assignedUsers, c: [noRelated.taskSubTypeCost, control.taskSubTypeCost], d: [noRelated.expectedDays, control.expectedDays] }));
+    const { assignedUserIds: _omit, ...payloadWithoutRelated } = validRequestOriginPayload();
+    const omittedRes = await activitiesPOST(jsonReq({ ...payloadWithoutRelated, title: `${TAG} OmittedRelated` }));
+    const omitted = await omittedRes.json();
+    if (omitted.id) activityIds.push(omitted.id);
+    check("32b. assignedUserIds omitted entirely -> also 201, zero Related Users", omittedRes.status === 201 && omitted.assignedUsers?.length === 0);
+    const stillRequiredRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} NoSubType`, assignedUserIds: [], taskSubTypeId: undefined }));
+    const stillRequired = await stillRequiredRes.json();
+    check("32c. Other request-origin fields are STILL required (missing Task Sub Type -> 400, assignedUserIds not listed as missing)", stillRequiredRes.status === 400 && stillRequired.code === "request_origin_fields_required" && JSON.stringify(stillRequired.missingFields) === JSON.stringify(["taskSubTypeId"]));
+    const addRelated = await activitiesPATCH(jsonReq({ assignedUserIds: [worker1.id, worker2.id] }, "PATCH"), { params: Promise.resolve({ id: noRelated.id }) });
+    const added = await addRelated.json();
+    check("32d. Related Users can be ADDED after creation -> 200, 2 Related Users", addRelated.status === 200 && added.assignedUsers?.length === 2);
+    const editRelated = await activitiesPATCH(jsonReq({ assignedUserIds: [worker2.id], title: `${TAG} NoRelated Edited` }, "PATCH"), { params: Promise.resolve({ id: noRelated.id }) });
+    const edited = await editRelated.json();
+    check("32e. ...EDITED (replace set) -> 200, exactly worker2", editRelated.status === 200 && edited.assignedUsers?.length === 1 && edited.assignedUsers[0].id === worker2.id);
+    const removeRelated = await activitiesPATCH(jsonReq({ assignedUserIds: [] }, "PATCH"), { params: Promise.resolve({ id: noRelated.id }) });
+    const removed = await removeRelated.json();
+    check("32f. ...and REMOVED entirely -> 200, zero Related Users; Owner/Expected Days/cost untouched", removeRelated.status === 200 && removed.assignedUsers?.length === 0 && removed.ownerId === worker1.id && removed.expectedDays === control.expectedDays && removed.taskSubTypeCost === control.taskSubTypeCost, JSON.stringify({ d: removed.expectedDays, c: removed.taskSubTypeCost }));
+    const unrelatedEdit = await activitiesPATCH(jsonReq({ priority: "HIGH" }, "PATCH"), { params: Promise.resolve({ id: noRelated.id }) });
+    check("32g. An unrelated edit of a request-origin Activity with zero Related Users -> 200", unrelatedEdit.status === 200);
+    const standaloneRes = await activitiesPOST(jsonReq({ title: `${TAG} StandaloneToMove`, departmentId: dept.id, taskTypeId: reqType.id }));
+    const standalone = await standaloneRes.json();
+    if (standalone.id) activityIds.push(standalone.id);
+    const moveRes = await activitiesPATCH(jsonReq({ projectId: requestOriginProject.id, expectedStartDate: "2026-05-05", expectedFinishDate: "2026-05-17", taskSubTypeId: devTaskType.id, ownerId: worker1.id }, "PATCH"), { params: Promise.resolve({ id: standalone.id }) });
+    const moved = await moveRes.json();
+    check("32h. Moving a Standalone Activity with zero Related Users into a request-origin Project (other fields supplied) -> 200", moveRes.status === 200 && moved.projectId === requestOriginProject.id && moved.assignedUsers?.length === 0, JSON.stringify(moved).slice(0, 300));
+    const moveMissing = await activitiesPOST(jsonReq({ title: `${TAG} StandaloneToMove2`, departmentId: dept.id, taskTypeId: reqType.id }));
+    const moveMissingAct = await moveMissing.json();
+    if (moveMissingAct.id) activityIds.push(moveMissingAct.id);
+    const moveMissingRes = await activitiesPATCH(jsonReq({ projectId: requestOriginProject.id }, "PATCH"), { params: Promise.resolve({ id: moveMissingAct.id }) });
+    const moveMissingBody = await moveMissingRes.json();
+    check("32i. ...but moving without the OTHER required fields is still rejected (400), assignedUserIds never listed", moveMissingRes.status === 400 && !moveMissingBody.missingFields?.includes("assignedUserIds"));
+    const { getResourcePlanningEvents } = await import("@/lib/services/resource-planning-service");
+    const rp = await getResourcePlanningEvents({ departmentId: dept.id, rangeStart: new Date("2026-05-01"), rangeEnd: new Date("2026-05-31"), timelineMode: "EXPECTED" } as any);
+    const rpItem = rp.unscheduled.find((e: any) => e.id === noRelated.id);
+    check("32j. Resource Planning: the zero-Related-Users Activity is surfaced in Unscheduled with reason 'no-assignee' (existing behavior)", rpItem?.unscheduledReason === "no-assignee" && !rp.events.some((e: any) => e.id === noRelated.id));
 
     const invalidRelatedUserRes = await activitiesPOST(jsonReq({ ...validRequestOriginPayload(), title: `${TAG} BadRelated`, assignedUserIds: ["cmx-not-a-real-user-id"] }));
     check("33. An invalid Related User is rejected server-side", invalidRelatedUserRes.status === 400);

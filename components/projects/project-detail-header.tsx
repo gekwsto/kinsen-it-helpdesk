@@ -4,46 +4,23 @@ import { useState } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Pencil, Plus } from "lucide-react";
-import { ProjectStatus } from "@prisma/client";
+import { ProjectStatusBadge, type ProjectStatusDisplay } from "@/components/projects/project-status-badge";
 import { ProjectDeleteButton } from "@/components/projects/project-delete-button";
 import { ExportProjectButton } from "@/components/projects/export-project-button";
 import { ProjectQuickStatus } from "@/components/projects/project-quick-status";
-import type { QuickStatusOption } from "@/components/status/quick-status-select";
 
-// Same fixed mapping the Project detail page has always used for its status
-// pill — there is no per-department color for ProjectStatus (unlike
-// ActivityStatus, which has a real ActivityStatusConfig.color column; see
-// prisma/schema.prisma's ProjectStatusConfig, which only stores
-// `isTerminal`, no label/color/isEnabled). Reused here verbatim, not
-// duplicated with different values, and documented in the final report as
-// a pre-existing architecture gap rather than something newly invented.
-const STATUS_BADGE_COLORS: Record<ProjectStatus, string> = {
-  PLANNING: "bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
-  IN_PROGRESS: "bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400",
-  ON_HOLD: "bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
-  COMPLETED: "bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-400",
-  CANCELLED: "bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300",
-};
-
-function humanizeStatus(status: string): string {
-  return status.replace(/_/g, " ");
-}
-
-// Every ProjectStatus enum value, in declaration order — the SAME
-// canonical source project-form.tsx's own status Select already uses
-// (`Object.values(ProjectStatus)`), never a hand-typed list. Projects have
-// no per-department enable/disable config to filter by (see the doc
-// comment above), so every value is always offered.
-const ALL_PROJECT_STATUSES: QuickStatusOption[] = Object.values(ProjectStatus).map((status) => ({
-  id: status,
-  label: humanizeStatus(status),
-}));
+// Status pill + dropdown show the CONFIGURED Project Status (global
+// ProjectStatusDefinition — label/color/order set in Administration ->
+// Project Statuses); the canonical lifecycle state never drives display.
 
 interface ProjectDetailHeaderProps {
   projectId: string;
   title: string;
   description: string | null;
-  initialStatus: ProjectStatus;
+  /** The Project's configured status (display) — see lib/services/project-status-service.ts. */
+  initialStatus: ProjectStatusDisplay;
+  /** Every configured Project Status (display order); the dropdown offers the ACTIVE ones plus the current one. */
+  statusDefinitions: ProjectStatusDisplay[];
   isGoal: boolean;
   /** Whether the current user holds project.edit in this Project's department. */
   canEditProject: boolean;
@@ -76,20 +53,22 @@ export function ProjectDetailHeader({
   title,
   description,
   initialStatus,
+  statusDefinitions,
   isGoal,
   canEditProject,
   canDeleteProject,
 }: ProjectDetailHeaderProps) {
-  const [status, setStatus] = useState<ProjectStatus>(initialStatus);
+  const [status, setStatus] = useState<ProjectStatusDisplay>(initialStatus);
+  const statusOptions = statusDefinitions
+    .filter((d) => d.isActive !== false || d.id === status.id)
+    .map((d) => ({ id: d.id, label: d.isActive === false ? `${d.label} (inactive)` : d.label, color: d.color }));
 
   return (
     <div className="flex flex-wrap items-start justify-between gap-4">
       <div>
         <div className="mb-2 flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-bold">{title}</h1>
-          <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${STATUS_BADGE_COLORS[status]}`}>
-            {humanizeStatus(status)}
-          </span>
+          <ProjectStatusBadge status={status} className="px-2.5 py-1" />
           {isGoal && (
             <span className="text-xs font-medium px-2.5 py-1 rounded-full bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400">
               Goal
@@ -108,11 +87,12 @@ export function ProjectDetailHeader({
         </Button>
         <ProjectQuickStatus
           projectId={projectId}
-          currentStatus={status}
-          currentStatusLabel={humanizeStatus(status)}
-          statuses={ALL_PROJECT_STATUSES}
+          currentStatus={status.id}
+          currentStatusLabel={status.label}
+          currentStatusColor={status.color}
+          statuses={statusOptions}
           canEdit={canEditProject}
-          onChanged={(newStatus) => setStatus(newStatus as ProjectStatus)}
+          onChanged={(newStatus) => setStatus(newStatus)}
         />
         <Button asChild>
           {/* Straight to the CREATE page with the Project pre-selected —

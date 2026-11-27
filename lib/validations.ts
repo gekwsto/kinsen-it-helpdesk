@@ -199,7 +199,13 @@ function projectDurationOverrideSchema(label: string) {
 export const createProjectSchema = z.object({
   title: z.string().min(3, "Title must be at least 3 characters").max(200),
   description: z.string().optional(),
-  status: z.nativeEnum(ProjectStatus).default(ProjectStatus.PLANNING),
+  // Canonical lifecycle state (legacy enum callers) and/or the configured
+  // Project Status definition. Both optional: resolveProjectStatusWrite
+  // (lib/services/project-status-service.ts) resolves them together —
+  // contradictory values are rejected, and a new Project with neither gets
+  // the default SYSTEM PLANNING status.
+  status: z.nativeEnum(ProjectStatus).optional(),
+  statusDefinitionId: z.string().trim().min(1).optional(),
   priority: z.number().int().min(1).max(3).default(2),
   departmentId: z.string().optional(),
   subDepartmentId: z.string().nullable().optional(),
@@ -607,7 +613,7 @@ export const createActivitySchema = z.object({
   projectId: z.string().nullable().optional(),
   status: z.nativeEnum(ActivityStatus).default(ActivityStatus.TODO),
   priority: z.nativeEnum(ActivityPriority).default(ActivityPriority.MEDIUM),
-  // "Related Users" (request-origin requirement: at least one required) —
+  // "Related Users" (OPTIONAL for every Activity, request-origin included) —
   // this reuses the SAME field/relation every other Activity assignment
   // already uses; see this field's own canonical relation
   // (assignedUsers/"ActivityAssignees") in prisma/schema.prisma. No
@@ -687,6 +693,7 @@ export const updateActivitySchema = createActivitySchema.partial().extend({
 
 // The exact set of request-origin-only fields required at INITIAL Activity
 // creation when the parent Project itself originates from a Project Request
+// (Related Users / assignedUserIds are deliberately NOT among them — optional)
 // — re-checked in the route against the ALREADY-PARSED createActivitySchema
 // output (not a separate schema merge) because, unlike Project's two
 // distinct create endpoints, Activity has only ONE — see this schema's own
@@ -696,14 +703,12 @@ export function requestOriginActivityMissingFields(data: {
   expectedFinishDate?: string | null;
   taskSubTypeId?: string | null;
   ownerId?: string | null;
-  assignedUserIds?: string[];
 }): string[] {
   const missing: string[] = [];
   if (!data.expectedStartDate) missing.push("expectedStartDate");
   if (!data.expectedFinishDate) missing.push("expectedFinishDate");
   if (!data.taskSubTypeId) missing.push("taskSubTypeId");
   if (!data.ownerId) missing.push("ownerId");
-  if (!data.assignedUserIds || data.assignedUserIds.length === 0) missing.push("assignedUserIds");
   return missing;
 }
 
